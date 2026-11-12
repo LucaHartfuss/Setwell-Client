@@ -418,6 +418,14 @@ def test_stdin_anhaengen_reicht_die_eigene_id_und_lokal_abmelden_an(geraet_env):
     assert device.aufgaben == [geraet.lokal_abmelden]
 
 
+def test_stdin_anhaengen_reicht_entfernen_mit_freigeben_als_lokal_freigeben_an(geraet_env):
+    device = FakeDevice()
+    geraet, _ = _verdrahtet(geraet_env, device)
+    quelle = io.BytesIO(f"entfernen {DEVICE_ID} freigeben\nentfernen shg-bbbbbbbbbbbbbbbb freigeben\n".encode())
+    main_module.stdin_anhaengen(geraet, device, quelle, geraet_env.ha).join(timeout=2)
+    assert device.aufgaben == [geraet.lokal_freigeben]
+
+
 def test_main_haengt_stdin_vor_laufen_an(geraet_env, monkeypatch):
     order = []
     _main_ohne_supervisor(geraet_env, monkeypatch, order)

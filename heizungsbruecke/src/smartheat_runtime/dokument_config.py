@@ -240,11 +240,33 @@ def abgemeldet(pfad: Path, konfiguration) -> bool:
     return isinstance(marker, dict) and anlage is not None and marker.get("anlage") == anlage
 
 
-def abmelden(pfad: Path, anlage: str) -> bool:
-    """Markierung setzen (Modus 0600); True, wenn sie neu ist (dann startet die Laufzeit neu). Die Laufzeit
-    importiert den Geraetekern nicht, die atomaren Datei-Helfer stehen in smartheat_core.dateien."""
+def abmelden(pfad: Path, anlage: str, freigeben: bool = False) -> bool:
+    """Markierung setzen (Modus 0600); True, wenn sie neu ist (dann startet die Laufzeit neu). Mit freigeben traegt
+    sie zusaetzlich den Wunsch, das Geraet nach der Abmeldung aus dem Konto zu loesen; der Wunsch bleibt, bis er
+    zugestellt ist (entfernen_erledigt), und eine einfache Zeile nimmt ihn nicht zurueck. Die Laufzeit importiert den
+    Geraetekern nicht, die atomaren Datei-Helfer stehen in smartheat_core.dateien."""
     marker = dateien.lesen_json(pfad)
     if isinstance(marker, dict) and marker.get("anlage") == anlage:
+        if freigeben and marker.get("freigeben") is not True:
+            dateien.schreiben_json(pfad, {"anlage": anlage, "freigeben": True}, modus=dateien.PRIVAT)
+        return False
+    dateien.schreiben_json(pfad, {"anlage": anlage, "freigeben": True} if freigeben else {"anlage": anlage},
+                           modus=dateien.PRIVAT)
+    return True
+
+
+def entfernen_gewuenscht(pfad: Path, konfiguration) -> bool:
+    """Steht in der Abmelde-Markierung der aktuellen Anlage der Wunsch, das Geraet aus dem Konto zu loesen?"""
+    marker = dateien.lesen_json(pfad)
+    anlage = konfiguration.get("anlage") if isinstance(konfiguration, Mapping) else None
+    return (isinstance(marker, dict) and anlage is not None and marker.get("anlage") == anlage
+            and marker.get("freigeben") is True)
+
+
+def entfernen_erledigt(pfad: Path, anlage: str) -> bool:
+    """Wunsch nach der Zustellung loeschen, die Abmelde-Markierung bleibt. True, wenn ein Wunsch der Anlage stand."""
+    marker = dateien.lesen_json(pfad)
+    if not (isinstance(marker, dict) and marker.get("anlage") == anlage and marker.get("freigeben") is True):
         return False
     dateien.schreiben_json(pfad, {"anlage": anlage}, modus=dateien.PRIVAT)
     return True

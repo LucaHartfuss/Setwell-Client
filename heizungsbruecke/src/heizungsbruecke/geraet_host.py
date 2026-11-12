@@ -182,27 +182,33 @@ class HaDeviceHost(GeraetHostBasis):
 
         return Waiting(check, frist)
 
-    def _abmelden(self) -> tuple[str, bool] | None:
+    def _abmelden(self, freigeben: bool = False) -> tuple[str, bool] | None:
         """Gemeinsamer Schritt von sign_off und lokal_abmelden: Abmelde-Markierung fuer die Anlage setzen und bei einer
-        neuen Markierung neu starten (dieselbe Quelle wie konfiguration_uebernommen). Liefert (Anlage, neu) mit neu =
-        Markierung eben gesetzt, None, wenn das Geraet nicht eingerichtet ist (dann geschieht nichts). OSError der
-        Markierung geht an den Aufrufer."""
+        neuen Markierung neu starten (dieselbe Quelle wie konfiguration_uebernommen). Mit freigeben traegt die
+        Markierung die Wahl, das Geraet aus dem Konto zu loesen. Liefert (Anlage, neu) mit neu = Markierung eben
+        gesetzt, None, wenn das Geraet nicht eingerichtet ist (dann geschieht nichts). OSError der Markierung geht an
+        den Aufrufer."""
         konfiguration = self.konfiguration()
         if not dokument_config.eingerichtet(konfiguration):
             return None
         assert konfiguration is not None
         anlage = konfiguration["anlage"]
-        neu = dokument_config.abmelden(self.abgemeldet_pfad(), anlage)
+        neu = dokument_config.abmelden(self.abgemeldet_pfad(), anlage, freigeben)
         if neu:
             self.neustart_anfordern()
         return anlage, neu
 
-    def lokal_abmelden(self) -> None:
+    def lokal_freigeben(self) -> None:
+        """Wie lokal_abmelden, und das Geraet verlaesst nach der Abmeldung das Konto (Wahl des Nutzers beim Entfernen
+        des HA-Eintrags)."""
+        self.lokal_abmelden(freigeben=True)
+
+    def lokal_abmelden(self, freigeben: bool = False) -> None:
         """Der HA-Eintrag wurde geloescht (stdin-Befehl der Integration): wie sign_off ohne
         Befehls-Ergebnis. Geraete-Thread (Device.im_geraete_thread); nicht eingerichtet: nichts zu tun. Ein OSError der
         Markierung wird zu einer WARNING mit der Fehlerart; jeden anderen Fehler faengt Device._sicher als ERROR."""
         try:
-            ergebnis = self._abmelden()
+            ergebnis = self._abmelden(freigeben)
         except OSError as error:
             logger.warning("Lokales Abmelden gescheitert (%s)", type(error).__name__)
             return

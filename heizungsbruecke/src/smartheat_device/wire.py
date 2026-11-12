@@ -55,7 +55,8 @@ MAX_MESSAGE_BYTES = 120 * 1024  # AN-10: 120 KB zugestellt, 130 KB abgelehnt
 SESSION_EXPIRY_SECONDS = 3600  # AN-9: Hoechstwert von IoT Core
 DEVICE_SUBSCRIPTION = "down/#"  # AN-6: die Policy erlaubt nur diesen Filter
 UP_TOPICS = (
-    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "telemetry",
+    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "up/entfernt",
+    "telemetry",
 )
 DOWN_TOPICS = ("down/config", "down/operation", "down/display", "down/command", "down/setpoints")
 
@@ -102,6 +103,10 @@ ERROR_FIELDS = ("grund", "details")
 WISH_FIELDS = ("schema", "wish_id", "kreis", "basis_version", "ts", "uhr_synchron", "werte")
 WISH_OPTIONAL = ("roh", "herkunft", "durch")  # fehlt = nicht begrenzt bzw. unbekannt
 WISH_WERTE = ("raum_soll",)
+#: Das Geraet verlaesst das Konto (nach der lokalen Abmeldung): die Wahl des Nutzers beim Entfernen der Verbindung. `freigeben`
+#: bittet den Server, das Geraet aus dem Konto zu loesen; `behalten` laesst es dort (der Server fuehrt es weiter als abgemeldet).
+ENTFERNT_FIELDS = ("schema", "wahl", "ts")
+ENTFERNT_WAHLEN = ("behalten", "freigeben")
 HERKUNFT = ("thermostat", "soll_entity", "ha")
 DURCH = ("nutzer", "automation")
 

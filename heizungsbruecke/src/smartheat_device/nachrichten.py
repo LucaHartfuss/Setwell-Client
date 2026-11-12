@@ -90,6 +90,14 @@ def meldung(*, key: str, kategorie: str, stufe: str, text: str, offen: bool, ts:
     return body
 
 
+def entfernt(*, wahl: str, ts: str) -> dict:
+    """up/entfernt: der Nutzer hat den Eintrag des Geraets entfernt und waehlt, ob es das Konto verlaesst."""
+    body = pruefen("entfernt", {"schema": wire.SCHEMA, "wahl": wahl, "ts": ts}, wire.ENTFERNT_FIELDS)
+    if wahl not in wire.ENTFERNT_WAHLEN:
+        raise Vertragsfehler("entfernt: wahl steht nicht in ENTFERNT_WAHLEN")
+    return body
+
+
 def notifications(items: list[dict]) -> dict:
     return pruefen("notifications", {"schema": wire.SCHEMA, "items": items}, wire.NOTIFICATIONS_FIELDS)
 

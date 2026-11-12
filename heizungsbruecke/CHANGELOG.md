@@ -5,6 +5,10 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Wählt der Nutzer beim Entfernen des Eintrags „Gerät aus dem Konto lösen“, trägt die stdin-Zeile
+  `entfernen <Geräte-ID> freigeben` die Wahl in die Abmelde-Markierung. Nach der Abmeldung meldet das Gerät dem Server
+  einmalig `up/entfernt` mit der Wahl (`behalten` oder `freigeben`) und wiederholt es nach 60 Sekunden, bis der Broker
+  es bestätigt. Ohne die Wahl bleibt das Gerät im Konto, wie bisher.
 - Lehnt der Server einen Snapshot ab, liest das Add-on nur noch den kurzen Code der Antwort (Feld `code`, Kleinbuchstaben,
   Ziffern, Unterstrich) und zeigt ihn in der Meldung als „Code …“; Freitext und Werte aus der Serverantwort gelangen
   weder in die Meldung noch in den Speicher oder das Log. Ist der Code unleserlich, steht `grund_fehlt`. Für unbrauchbare

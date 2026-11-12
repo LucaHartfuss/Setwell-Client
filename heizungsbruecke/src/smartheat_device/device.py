@@ -47,6 +47,8 @@ MELDUNGEN_MIN_SECONDS = 10
 MELDUNGEN_JE_NACHRICHT = 50
 SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
+#: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
+ENTFERNT_WIEDERHOLUNG_SECONDS = 60
 #: Lokaler Hinweis bei einer abgelehnten Konfiguration (Entscheidung des Nutzers): den Text der Ablehnung
 #: bildet der Server, das Geraet nennt nur den Code.
 ABLEHNUNG_ANZEIGE = "Die Einrichtung wurde abgelehnt (Code {grund}). Die Begründung zeigt der Einrichtungsassistent."
@@ -151,6 +153,8 @@ class Device:
         self._meldungen_at: float | None = None
         self._status: dict | None = None
         self._status_at: float | None = None
+        self._entfernt_mid: int | None = None  # mid des gesendeten up/entfernt, solange das PUBACK aussteht
+        self._entfernt_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung von up/entfernt
         #: Nach hello muss ein Status hinaus; gescheitert der Rueckruf dabei, bleibt der Merker, bis
         #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
         self._status_erzwingen = False
@@ -318,6 +322,7 @@ class Device:
                 self._verbunden()
             elif art == GETRENNT:
                 self._bereit = False
+                self._entfernt_mid = None  # ein neuer Client zaehlt mids wieder ab 1
                 self.wunsch_puffer.verbindung_verloren()
             elif art == ANMELDUNG_SCHEITERT:
                 self._rettung = True
@@ -326,6 +331,9 @@ class Device:
             elif art == GESENDET:
                 mid, client_nr, ok = daten
                 if self.link is not None and client_nr == self.link.client_nr:  # nie das PUBACK eines alten Clients
+                    if ok and mid == self._entfernt_mid:
+                        self._entfernt_mid = None
+                        self._host_wert("entfernen_erledigt", self.host.entfernen_erledigt)
                     if ok:
                         self.wunsch_puffer.bestaetigt(mid)
                         self.befehle.inventur_bestaetigt(mid)
@@ -360,6 +368,7 @@ class Device:
         self.befehle.pruefen()
         self._wunsch_senden()
         self._status_senden(now, force=self._status_erzwingen)
+        self._entfernt_senden(now)
         self._meldungen_senden(now)
         self._host_wert("anzeigen", self.host.anzeigen, self.anzeige())  # gescheitert: diese Anzeige entfaellt
 
@@ -677,6 +686,29 @@ class Device:
                 return
             self._wunsch_fehler = None
             self.wunsch_puffer.gesendet(kreis, self._publish("up/wish", body))
+
+    def _entfernt_senden(self, now: float) -> None:
+        """Hat der Nutzer beim Entfernen gewaehlt, das Geraet aus dem Konto zu loesen, geht die Wahl erst nach hello und
+        nachdem der Status "abgemeldet" hinaus ist (der Server wirkt nur auf ein abgemeldetes Geraet). Der Host loescht
+        die Wahl erst auf das PUBACK; ohne PUBACK geht sie nach ENTFERNT_WIEDERHOLUNG_SECONDS erneut hinaus."""
+        if not self._bereit or now < self._entfernt_frei_ab:
+            return
+        if ((self._status or {}).get("runtime_status") or {}).get("status") != "abgemeldet":
+            return
+        wahl, gescheitert = self._host_wert("entfernen_wahl", self.host.entfernen_wahl)
+        if gescheitert or wahl is None:
+            return
+        try:
+            body = nachrichten.entfernt(wahl=wahl, ts=_iso(self._wall()))
+        except nachrichten.Vertragsfehler as error:
+            # Programmierfehler (nur Feldnamen im Text); je Text einmal loggen, der Takt ruft das jede Sekunde
+            if self._publish_fehler.get("up/entfernt") != str(error):
+                self._publish_fehler["up/entfernt"] = str(error)
+                logger.error("up/entfernt nicht gebaut: %s", error)
+            return
+        self._entfernt_mid = self._publish("up/entfernt", body)
+        if self._entfernt_mid is not None:
+            self._entfernt_frei_ab = now + ENTFERNT_WIEDERHOLUNG_SECONDS
 
     def _eigene_meldung(self, key: str, text: str | None) -> None:
         if key not in wire.MELDUNGEN:

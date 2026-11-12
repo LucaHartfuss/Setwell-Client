@@ -194,6 +194,19 @@ class GeraetHostBasis:
             assert alt is not None
             aufraeumen.markieren(self.aufraeumen_pfad(), alt)  # vor dem Speichern
 
+    def entfernen_wahl(self) -> str | None:
+        """"freigeben", solange die Abmelde-Markierung der aktuellen Anlage den Wunsch traegt, das Geraet aus dem Konto zu
+        loesen und der Server ihn noch nicht bestaetigt hat; sonst None."""
+        if dokument_config.entfernen_gewuenscht(self.abgemeldet_pfad(), self.konfiguration()):
+            return "freigeben"
+        return None
+
+    def entfernen_erledigt(self) -> None:
+        """Der Server hat die Wahl bestaetigt: nur den Wunsch loeschen, die Abmelde-Markierung bleibt."""
+        anlage = (self.konfiguration() or {}).get("anlage")
+        if anlage is not None:
+            dokument_config.entfernen_erledigt(self.abgemeldet_pfad(), anlage)
+
     def konfiguration_uebernommen(self, alt: dict | None, neu: dict) -> None:
         """Neustart bei laufzeitrelevanter Aenderung und wenn eine neue, nicht leere Konfiguration derselben Anlage die
         Abmelde-Markierung aufhebt (das Geraet folgt dem Server und verlaesst "abgemeldet"). Eine leere

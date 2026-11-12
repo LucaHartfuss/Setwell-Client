@@ -468,11 +468,45 @@ def test_die_stdin_zeile_meldet_ab_und_startet_einmal_neu(tmp_path, monkeypatch)
     worker.register(EV_RELOAD, lambda event: reloads.append(event.kind))
     host.worker_binden(worker)
     zeile = f"entfernen {EIGEN}\n".encode()
-    stdin_befehl.lesen(io.BytesIO(zeile + zeile), EIGEN, host.lokal_abmelden, lambda: None)
+    stdin_befehl.lesen(io.BytesIO(zeile + zeile), EIGEN, host.lokal_abmelden, lambda: None, lambda: None)
     assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"]}
     assert stat.S_IMODE(config.ABGEMELDET_PATH.stat().st_mode) == 0o600
     worker.run_pending()
     assert reloads == [EV_RELOAD]
+
+
+def test_die_stdin_zeile_mit_freigeben_traegt_die_wahl_in_die_markierung(tmp_path, monkeypatch):
+    konf = konfiguration_aus_optionen(OPTIONS)
+    host, _, clock = _host(tmp_path, monkeypatch, device=Device(konf))
+    worker = RegulationWorker(clock)
+    reloads = []
+    worker.register(EV_RELOAD, lambda event: reloads.append(event.kind))
+    host.worker_binden(worker)
+    zeile = f"entfernen {EIGEN} freigeben\n".encode()
+    stdin_befehl.lesen(io.BytesIO(zeile), EIGEN, host.lokal_abmelden, lambda: None, host.lokal_freigeben)
+    assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"], "freigeben": True}
+    assert stat.S_IMODE(config.ABGEMELDET_PATH.stat().st_mode) == 0o600
+    worker.run_pending()
+    assert reloads == [EV_RELOAD]
+    assert host.entfernen_wahl() == "freigeben"
+
+
+def test_freigeben_nach_einfachem_abmelden_ergaenzt_die_wahl_ohne_neustart(tmp_path, monkeypatch, caplog):
+    konf = konfiguration_aus_optionen(OPTIONS)
+    host, _, _ = _host(tmp_path, monkeypatch, device=Device(konf))
+    host.lokal_abmelden()
+    host._neustart = False
+    with caplog.at_level(logging.INFO, logger=geraet_host.logger.name):
+        host.lokal_freigeben()
+    assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"], "freigeben": True}
+    assert not host._neustart
+    assert "schon abgemeldet" in caplog.text
+
+
+def test_freigeben_ohne_einrichtung_tut_nichts(tmp_path, monkeypatch):
+    host, _, _ = _host(tmp_path, monkeypatch, device=Device(None))
+    host.lokal_freigeben()
+    assert not config.ABGEMELDET_PATH.exists() and not host._neustart
 
 
 def test_lokal_abmelden_ohne_einrichtung_tut_nichts(tmp_path, monkeypatch, caplog):

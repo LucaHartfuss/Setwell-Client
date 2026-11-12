@@ -111,6 +111,15 @@ class DeviceHost(Protocol):
 
     def runtime_status(self) -> dict | None: ...
 
+    def entfernen_wahl(self) -> str | None:
+        """Wahl des Nutzers beim Entfernen, solange sie dem Server noch nicht zugestellt ist: "freigeben" (das Geraet
+        verlaesst das Konto) oder None. Der Host liest sie aus der Abmelde-Markierung."""
+        ...
+
+    def entfernen_erledigt(self) -> None:
+        """Der Server hat die Wahl bestaetigt (PUBACK): der Host loescht sie."""
+        ...
+
     def raum(self, kreis: int = 1) -> dict | None:
         """{ist, soll, soll_quelle, ts} des Kreises `kreis` fuer up/status; None, solange er noch nichts veroeffentlicht hat."""
         ...

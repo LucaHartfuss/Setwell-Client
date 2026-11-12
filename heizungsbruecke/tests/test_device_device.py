@@ -851,6 +851,109 @@ def test_a_puback_with_an_error_code_does_not_confirm_the_wish(tmp_path):
     assert world.device.wunsch_puffer.wunsch(1) is None
 
 
+# --- Entfernen: das Geraet verlaesst das Konto ---
+
+def _abgemeldet_mit_wahl(tmp_path):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+    world.host.entfernen = "freigeben"
+    world.verbinden()
+    return world
+
+
+def test_the_release_choice_goes_out_after_hello_and_the_signed_off_status(tmp_path):
+    world = World(tmp_path)
+    world.host.entfernen = "freigeben"
+    world.verbinden()
+    assert "up/entfernt" not in world.link.topics()  # die Laufzeit regelt noch: nichts wird gemeldet
+    world.host.status = {"status": "abgemeldet"}
+    world.clock.now += device.STATUS_MIN_SECONDS
+    world.device.schritt()
+    names = world.link.topics()
+    assert names.index("up/hello") < names.index("up/status") < names.index("up/entfernt")
+    assert world.link.of("up/status")[-1]["runtime_status"] == {"status": "abgemeldet"}
+    (sent,) = world.link.of("up/entfernt")
+    assert set(sent) == set(wire.ENTFERNT_FIELDS) and sent["wahl"] == "freigeben" and sent["schema"] == wire.SCHEMA
+
+
+def test_without_a_release_choice_nothing_leaves_the_account(tmp_path):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+    world.verbinden()
+    world.clock.now += 3600
+    world.device.schritt()
+    assert "up/entfernt" not in world.link.topics() and world.host.entfernen_zugestellt == 0
+
+
+def test_the_release_choice_is_delivered_with_the_puback_and_never_sent_again(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    mid = world.link.topics().index("up/entfernt") + 1
+    assert world.host.entfernen == "freigeben" and world.host.entfernen_zugestellt == 0  # noch nicht bestaetigt
+    world.link.gesendet(mid)
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 1 and world.host.entfernen is None
+    world.clock.now += 3600
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 1
+
+
+def test_a_puback_of_an_old_client_or_for_another_message_does_not_deliver_the_release_choice(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    mid = world.link.topics().index("up/entfernt") + 1
+    world.link.gesendet(mid, client_nr=world.link.client_nr + 1)
+    world.link.gesendet(mid + 5)
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 0 and world.host.entfernen == "freigeben"
+
+
+def test_an_unconfirmed_release_choice_is_resent_after_the_retry_period_only(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    world.link.gesendet(world.link.topics().index("up/entfernt") + 1, ok=False)  # Fehler-PUBACK
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 0
+    world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS - 1
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 1  # gesperrt, kein Sekundentakt
+    world.clock.now += 1
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 2
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 1
+    world.clock.now += 3600
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 2
+
+
+def test_the_release_choice_waits_for_the_connection_and_hello_again(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    world.link.trennen()
+    world.link.sent.clear()
+    world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    assert "up/entfernt" not in world.link.topics()  # getrennt: nichts geht hinaus
+    world.link.verbinden()
+    world.device.schritt()
+    names = world.link.topics()
+    assert names[0] == "up/hello" and "up/entfernt" in names
+
+
+def test_a_failing_release_callback_sends_nothing_and_logs_only_the_error_kind(tmp_path, caplog):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+
+    def kaputt():
+        raise OSError("/data/geheim")
+
+    world.host.entfernen_wahl = kaputt
+    with caplog.at_level("ERROR"):
+        world.verbinden()
+        world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS
+        world.device.schritt()
+    assert "up/entfernt" not in world.link.topics()
+    assert "entfernen_wahl" in caplog.text and "geheim" not in caplog.text
+
+
 def test_losing_wish_takes_the_resent_operation(tmp_path):
     world = World(tmp_path)
     world.verbinden()
