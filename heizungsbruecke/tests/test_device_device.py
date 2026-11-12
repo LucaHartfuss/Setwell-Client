@@ -763,6 +763,16 @@ def test_hello_reports_the_claim_state_the_device_knows(tmp_path):
     assert set(hello) == set(wire.HELLO_FIELDS) | set(wire.HELLO_OPTIONAL)
 
 
+def test_weg_pruefen_is_refused_as_not_supported(tmp_path):
+    """Der Befehl gehoert zum Vertrag, ein Handler fehlt noch: das Geraet lehnt ihn mit einem Grund des Vertrags ab."""
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/command", _command("weg_pruefen", "c1", {"weg": "simulation"}))
+    ergebnis = world.link.of("up/result")[-1]
+    assert ergebnis["ok"] is False and ergebnis["error"]["grund"] == "nicht_unterstuetzt"
+    assert "nicht_unterstuetzt" in wire.command_errors("weg_pruefen")
+
+
 def test_claim_state_hides_the_code_and_waits_for_setup(tmp_path):
     """Nach der Uebernahme ohne Code melden; der Zustand wird wartet_auf_einrichtung."""
     world = World(tmp_path, access=False)

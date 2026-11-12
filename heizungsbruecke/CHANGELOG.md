@@ -5,6 +5,9 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Neuer Befehl `weg_pruefen` im Geräte-Vertrag (Ergebnis `gleiche_anlage`, `abweichung` oder `nicht_lesbar`); das Gerät
+  lehnt ihn vorerst mit `nicht_unterstuetzt` ab. Die Anmeldephase `password` und das Feld `ciphertext` des Befehls
+  `driver_login` entfallen, weil kein Treiber sie nutzt.
 - Wählt der Nutzer beim Entfernen des Eintrags „Gerät aus dem Konto lösen“, trägt die stdin-Zeile
   `entfernen <Geräte-ID> freigeben` die Wahl in die Abmelde-Markierung. Nach der Abmeldung meldet das Gerät dem Server
   einmalig `up/entfernt` mit der Wahl (`behalten` oder `freigeben`) und wiederholt es nach 60 Sekunden, bis der Broker

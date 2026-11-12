@@ -209,7 +209,7 @@ COMMANDS: dict[str, Command] = {
     "zigbee_permit_join": Command(("seconds",), (), 60, ("zigbee_nicht_bereit",)),
     "zigbee_devices": Command((), ("devices",), 60, ("zigbee_nicht_bereit",)),
     "driver_login": Command(
-        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code", "ciphertext"),
+        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code"),
         ("code_challenge", "code_challenge_method"), 120,
         ("treiber_unbekannt", "login_nicht_noetig", "login_fehlgeschlagen", "anlage_nicht_erreichbar"),
     ),
@@ -220,13 +220,16 @@ COMMANDS: dict[str, Command] = {
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
     "claim_state": Command(("device_state",), (), 24 * 3600),
     "diagnostics": Command((), (), 300),
+    # Liest an der Anbindung, ob der gewaehlte Weg dieselbe Anlage meint (Nutzlast: der Weg aus `WEGE`).
+    "weg_pruefen": Command(("weg",), ("ergebnis",), 3600, ("weg_unbekannt", "weg_mehrfach")),
     "hinweis": Command(("key", "stufe", "text"), (), 24 * 3600),
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
     "finish": ("phase", "driver_id", "code", "redirect_uri"),
-    "password": ("phase", "driver_id", "ciphertext"),
 }
+#: Ergebnisse von `weg_pruefen`.
+WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
 # Spec Stufe 3 S5 6.1 (G-6): Fehler tragen Code und details, keine Texte. details nur mit diesen Schluesseln: `feld`
 # aus PRUEF_FELDER, `regel` aus PRUEF_REGELN, die uebrigen endliche Zahlen; freie Texte gibt es darin nicht.
 DETAIL_FIELDS = ("feld", "regel", "min", "max", "wert", "anzahl")

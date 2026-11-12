@@ -2,6 +2,8 @@
 
 ## Unveroeffentlicht
 
+- Neuer Befehl `weg_pruefen` im Geraete-Vertrag (Geraetekern); das Gateway lehnt ihn vorerst mit `nicht_unterstuetzt` ab.
+  Die Anmeldephase `password` und das Feld `ciphertext` des Befehls `driver_login` entfallen, weil kein Treiber sie nutzt.
 - Lehnt der Server einen Snapshot ab, liest das Gateway (gemeinsamer Client-Kern) nur noch den kurzen Code der Antwort und
   zeigt ihn als „Code ...“; Freitext und Werte der Serverantwort gelangen nicht mehr in Meldung, Speicher oder Log.
 - Das Manifest nennt die Art der Aenderung (`art`: `sicherheit`, `funktion` oder `treiberfix`) und ein Ablaufdatum
