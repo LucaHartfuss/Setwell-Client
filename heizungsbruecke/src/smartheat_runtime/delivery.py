@@ -41,7 +41,7 @@ NOTIFY_DATENFEHLER_RESOLVED = "datenfehler_resolved"
 NOTIFY_DATENFEHLER_WRITE = "datenfehler_write"
 NOTIFY_WRITE_RESOLVED = "write_resolved"
 
-_NO_REASON = "ohne Begründung"
+_NO_CODE = "grund_fehlt"
 
 # Phase des offenen Ticks (nur im Speicher): sending -> awaiting_ack -> (querying_entitlement ->)
 # waiting_retry -> sending ...
@@ -125,7 +125,7 @@ class Published:
 class Ack:
     seq: str
     status: str
-    reason: str | None = None
+    code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -354,7 +354,7 @@ def _ack(state, event):
     if not accepts_ack(state, event.seq):
         return state, []
     if event.status == STATUS_REJECTED:
-        fault = DataFault(SOURCE_SERVER, (event.reason or _NO_REASON,))
+        fault = DataFault(SOURCE_SERVER, (event.code or _NO_CODE,))
         return _answered_with_fault(state, fault, NOTIFY_DATENFEHLER_SERVER)
     actions = _notbetrieb_end(state)
     if state.datenfehler is not None:
@@ -499,8 +499,8 @@ def notification_text(
             f"unverändert, bis die Werte wieder verfügbar sind (z. B. Batterie prüfen)."
         )
     if kind == NOTIFY_DATENFEHLER_SERVER:
-        reason = detail[0] if detail else _NO_REASON
-        return f"{prefix}: Server hat die Messwerte abgelehnt ({reason}). Die Heizkurve bleibt unverändert."
+        code = detail[0] if detail else _NO_CODE
+        return f"{prefix}: Server hat die Messwerte abgelehnt (Code {code}). Die Heizkurve bleibt unverändert."
     if kind == NOTIFY_DATENFEHLER_RESOLVED:
         return f"{prefix}: Messwerte wieder gültig, Heizkurve wird wieder angepasst."
     if kind == NOTIFY_DATENFEHLER_WRITE:

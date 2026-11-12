@@ -1957,14 +1957,14 @@
     "ha",
     "notify",
     "notify.mobile_app_handy",
-    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Testgrund). Die Heizkurve bleibt unverändert."
+    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Code testgrund). Die Heizkurve bleibt unverändert."
    ],
    [
     "ha",
     "persistent_notification.create",
     "smartheat_datenfehler",
     "SmartHeat",
-    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Testgrund). Die Heizkurve bleibt unverändert."
+    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Code testgrund). Die Heizkurve bleibt unverändert."
    ],
    [
     "ha",

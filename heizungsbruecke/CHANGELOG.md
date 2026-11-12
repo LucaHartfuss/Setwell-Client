@@ -5,6 +5,10 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Lehnt der Server einen Snapshot ab, liest das Add-on nur noch den kurzen Code der Antwort (Feld `code`, Kleinbuchstaben,
+  Ziffern, Unterstrich) und zeigt ihn in der Meldung als „Code …“; Freitext und Werte aus der Serverantwort gelangen
+  weder in die Meldung noch in den Speicher oder das Log. Ist der Code unleserlich, steht `grund_fehlt`. Für unbrauchbare
+  Antworten nennt das Add-on selbst `antwort_schema_unbekannt`, `antwort_kreis_unpassend` oder `antwort_ungueltig`.
 - Das Add-on liest das Lebenszeichen der Integration (Version, gelesene Status-Schemata; nach 900 Sekunden ohne
   Ereignis gilt die Version als unbekannt) und kann den Schalter „Automatisch aktualisieren“ des Add-ons lesen
   (nur lesen, nie setzen; ist er nicht lesbar, gilt er als unbekannt). Sichtbar wird das erst mit der Meldung an den

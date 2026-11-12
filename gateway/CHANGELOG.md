@@ -2,6 +2,8 @@
 
 ## Unveroeffentlicht
 
+- Lehnt der Server einen Snapshot ab, liest das Gateway (gemeinsamer Client-Kern) nur noch den kurzen Code der Antwort und
+  zeigt ihn als „Code ...“; Freitext und Werte der Serverantwort gelangen nicht mehr in Meldung, Speicher oder Log.
 - Das Manifest nennt die Art der Aenderung (`art`: `sicherheit`, `funktion` oder `treiberfix`) und ein Ablaufdatum
   (`ablauf`, UTC). Der Updater installiert ein abgelaufenes Manifest nicht (Ergebnis `manifest_abgelaufen`, nicht in der
   Liste der abgelehnten Manifeste, eine neu signierte Fassung derselben Version bleibt annehmbar), ebenso keines mit

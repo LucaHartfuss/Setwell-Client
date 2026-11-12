@@ -108,7 +108,7 @@ class Anlage:
         """Gueltige Serverantwort auf den letzten Tick."""
         werte = {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0, "min_flow": 20.5, **hebel}
         self.senden("down/setpoints", {"schema": 5, "kreis": 1, "seq": self.snapshots()[-1]["seq"], "ts": "x", "status": "ok",
-                                       "reason": None, "levers": werte, "learned": None})
+                                       "code": None, "params": None, "levers": werte, "learned": None})
 
     def stand(self) -> dict:
         state = self.bridge.store.state
@@ -350,7 +350,7 @@ def _kaputte_bedienungen() -> list:
 def _kaputte_antworten(seq: str) -> list:
     """Kaputte down/setpoints zum offenen Tick seq."""
     def mit(**aenderung):
-        return {"schema": 5, "kreis": 1, "seq": seq, "ts": "x", "status": "ok", "reason": None,
+        return {"schema": 5, "kreis": 1, "seq": seq, "ts": "x", "status": "ok", "code": None, "params": None,
                 "levers": {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0}, "learned": None, **aenderung}
 
     return [
@@ -362,8 +362,8 @@ def _kaputte_antworten(seq: str) -> list:
         ("falsches Schema", mit(schema=3)),
         ("fremder Kreis", mit(kreis=2)),
         ("Kreis als Text", mit(kreis="1")),
-        ("Surrogat im Grund", mit(reason="a\ud800b")),
-        ("Uebergroesse", mit(reason=_grosser_text())),
+        ("Surrogat im Grund", mit(status="rejected", code="a\ud800b", params={})),
+        ("Uebergroesse", mit(status="rejected", code=_grosser_text(), params={})),
         ("Riesenzahl", mit(levers={"curve": 10**400, "room_setpoint": 23.0, "heat_limit": 16.0})),
         ("unbekannter Status", mit(status="gift")),
         ("gelernte Werte Text", mit(learned={"curve": "x", "heat_limit": float("nan")})),

@@ -226,7 +226,7 @@ def test_write_fault_detail_names_the_lever():
     assert str(error) == "heat_limit (number.hl): weg"
 
 
-# --- Fremdtext aus der Serverantwort ---
+# --- Gruende aus der Serverantwort ---
 
 class _FakeWorker:
     def schedule(self, delay_s, event):
@@ -248,27 +248,25 @@ def _server_grund(rt):
     return rt.store.state.delivery.datenfehler.detail[0]
 
 
-def test_riesige_ungueltige_antwort_gibt_kurzen_grund(make_store, clock):
-    """Der Server liefert ungueltige `levers` von 130 KB; der Grund (Datenfehler, Push, Speicher, spaeter der
-    Stapel an den Server) bleibt bei 200 Zeichen, der Anfang mit dem Schluessel vor dem Doppelpunkt bleibt."""
+def test_riesige_ungueltige_antwort_gibt_nur_einen_code(make_store, clock):
+    """Der Server liefert ungueltige `levers` von 130 KB; Datenfehler, Push und Speicher tragen nur den Code, nie
+    einen Teil der Antwort."""
     rt, sink = _rt_mit_offenem_tick(make_store, clock)
 
     ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "ok", "levers": {"curve": "x" * 130_000}})
 
-    grund = _server_grund(rt)
-    assert len(grund) <= 200
-    assert grund.startswith("ungültige Serverantwort (status='ok', levers=")
+    assert _server_grund(rt) == "antwort_ungueltig"
     (_, meldung) = sink.pushes[-1]
-    assert len(meldung) < 400
+    assert len(meldung) < 400 and "xxxx" not in meldung
     assert len(rt.store.state.notify_messages["datenfehler"]) < 400
 
 
-def test_riesiges_unbekanntes_schema_gibt_kurzen_grund(make_store, clock):
+def test_riesiges_unbekanntes_schema_gibt_nur_einen_code(make_store, clock):
     rt, _ = _rt_mit_offenem_tick(make_store, clock)
 
     ticks.handle_setpoints(rt, {"seq": "s1", "schema": "x" * 130_000})
 
-    assert len(_server_grund(rt)) <= 200
+    assert _server_grund(rt) == "antwort_schema_unbekannt"
 
 
 @pytest.mark.parametrize("kreis", [2, 0, True, "1", 1.0, None, "fehlt"])
@@ -282,46 +280,25 @@ def test_antwort_eines_anderen_oder_unbrauchbaren_kreises_schreibt_nichts_und_is
 
     ticks.handle_setpoints(rt, antwort)
 
-    assert "Kreis" in _server_grund(rt)
+    assert _server_grund(rt) == "antwort_kreis_unpassend"
     assert rt.signals.writes == []
 
 
-def test_langer_ablehnungsgrund_wird_gekuerzt(make_store, clock):
+@pytest.mark.parametrize("code", ["wert_unplausibel", "a", "a" * 64])
+def test_ablehnungscode_mit_der_form_eines_codes_wird_uebernommen(make_store, clock, code):
+    rt, _ = _rt_mit_offenem_tick(make_store, clock)
+
+    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "code": code, "params": {}})
+
+    assert _server_grund(rt) == code
+
+
+@pytest.mark.parametrize("code", ["a" * 65, "Gross", "mit leerzeichen", "1zahl", "x\ny", "unplausibler Wert: 99", 5, None])
+def test_ablehnungscode_ohne_die_form_eines_codes_wird_nicht_uebernommen(make_store, clock, code):
+    """Fremder Text aus der Antwort kommt nie in Datenfehler, Push oder Speicher; Randwert: 64 Zeichen gelten, 65 nicht."""
     rt, sink = _rt_mit_offenem_tick(make_store, clock)
-    reason = "unplausibler Wert für dat: " + "9" * 130_000
 
-    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "reason": reason})
+    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "code": code})
 
-    grund = _server_grund(rt)
-    assert len(grund) <= 200
-    assert grund.startswith("unplausibler Wert für dat: 99")
-    assert len(sink.pushes[-1][1]) < 400
-
-
-def test_kurzer_ablehnungsgrund_bleibt_unveraendert(make_store, clock):
-    rt, _ = _rt_mit_offenem_tick(make_store, clock)
-    reason = "x" * 200
-
-    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "reason": reason})
-
-    assert _server_grund(rt) == reason
-
-
-def test_gekuerzter_ablehnungsgrund_hat_genau_die_grenze_und_endet_auf_auslassung(make_store, clock):
-    """Die Kuerzung nimmt 199 Zeichen vom Anfang und haengt "…" an, zusammen genau 200."""
-    rt, _ = _rt_mit_offenem_tick(make_store, clock)
-    reason = "".join(chr(ord("a") + i % 26) for i in range(1000))
-
-    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "reason": reason})
-
-    grund = _server_grund(rt)
-    assert len(grund) == ticks.FREMDTEXT_MAX_CHARS == 200
-    assert grund == reason[:199] + "…"
-
-
-def test_ablehnungsgrund_mit_201_zeichen_wird_gekuerzt_einer_mit_200_nicht(make_store, clock):
-    rt, _ = _rt_mit_offenem_tick(make_store, clock)
-
-    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "reason": "y" * 201})
-
-    assert _server_grund(rt) == "y" * 199 + "…"
+    assert _server_grund(rt) == "grund_fehlt"
+    assert "grund_fehlt" in sink.pushes[-1][1]

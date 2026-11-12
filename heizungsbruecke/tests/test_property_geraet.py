@@ -492,8 +492,8 @@ def _hebel(erwartet):
 
 def _antwort(erwartet):
     return st.builds(
-        lambda extra, schema, kreis, status, reason, levers, learned: {
-            **extra, "schema": schema, "kreis": kreis, "ts": "x", "status": status, "reason": reason, "levers": levers,
+        lambda extra, schema, kreis, status, code, levers, learned: {
+            **extra, "schema": schema, "kreis": kreis, "ts": "x", "status": status, "code": code, "params": None, "levers": levers,
             "learned": learned},
         st.dictionaries(st.text(max_size=8), JSON_WERT, max_size=3),
         st.sampled_from([5, 5, 5, 5]) | JSON_WERT,

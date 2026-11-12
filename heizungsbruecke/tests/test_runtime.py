@@ -930,7 +930,7 @@ def test_status_follows_notbetrieb_and_a_rejected_answer(env):
     assert _status_states(env)[-1] == "notbetrieb"
     assert _last_event(env)["letzte_serverantwort"] is None
 
-    _answer(env, bridge, seq, status="rejected", reason="unplausibler Wert für dat: 99")
+    _answer(env, bridge, seq, status="rejected", code="wert_unplausibel")
 
     event = _last_event(env)
     assert (event["status"], event["notbetrieb"]) == ("datenfehler", False)
@@ -993,21 +993,21 @@ def test_skipped_answer_is_applied_like_ok(env):
     _connect(env, bridge)
     _ha_verbunden(env, bridge)  # erster Tick (noch kein Soll gemeldet)
     _answer(env, bridge, _mqtt(env).snapshots[0]["seq"], status="skipped", curve=1.0, shift=20.5,
-            reason="zu_wenig_daten")
+            code="zu_wenig_daten")
     assert (env.ha.states["number.curve_current"], env.ha.states["number.shift_current"]) == (1.0, 20.5)
     assert bridge.store.state.delivery.datenfehler is None
 
 
-def test_the_skipped_log_quotes_the_server_reason_encodable_and_on_one_line(env, caplog):
-    """Auch der Grund einer Antwort skipped kommt vom Server und steht mit repr im Log."""
+def test_the_skipped_log_names_the_server_code_and_never_a_foreign_text(env, caplog):
+    """Der Grund einer Antwort skipped steht nur dann im Log, wenn er die Form eines Codes hat."""
     bridge = _start(env)
     _connect(env, bridge)
     _ha_verbunden(env, bridge)
     seq = _mqtt(env).snapshots[0]["seq"]
     with caplog.at_level(logging.INFO, logger="smartheat_runtime.ticks"):
-        _answer(env, bridge, seq, status="skipped", curve=1.0, shift=20.5, reason="\ud800\nzweite")
+        _answer(env, bridge, seq, status="skipped", curve=1.0, shift=20.5, code="\ud800\nzweite")
     (meldung,) = [r.getMessage() for r in caplog.records if "nicht gelernt" in r.getMessage()]
-    assert meldung == f"Server hat fuer seq={seq} nicht gelernt ('\\ud800\\nzweite'), Werte unveraendert uebernommen"
+    assert meldung == f"Server hat fuer seq={seq} nicht gelernt (None), Werte unveraendert uebernommen"
     meldung.encode("utf-8")
 
 
@@ -1140,39 +1140,39 @@ def test_rejected_answer_reports_server_fault_once_and_retries_same_seq(env):
     bridge = _start(env)
     _set_room_target(env, bridge, 20.5)
     seq = _mqtt(env).snapshots[0]["seq"]
-    reason = "unplausibler Wert für dat: 99 (erlaubt -40–45)"
+    code = "wert_unplausibel"
 
-    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, reason=reason)
+    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, code=code)
 
-    assert env.ha.pushes == [f"Heizungsbrücke: Server hat die Messwerte abgelehnt ({reason}). Die Heizkurve bleibt unverändert."]
+    assert env.ha.pushes == [f"Heizungsbrücke: Server hat die Messwerte abgelehnt (Code {code}). Die Heizkurve bleibt unverändert."]
     assert _delivery(bridge).notbetrieb is False
 
     _advance(env, bridge, 30)
-    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, reason=reason)
+    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, code=code)
 
     assert [s["seq"] for s in _mqtt(env).snapshots] == [seq, seq]
     assert len(env.ha.pushes) == 1
-    assert _failsafe_file(env)["datenfehler"] == {"source": "server", "detail": [reason]}
+    assert _failsafe_file(env)["datenfehler"] == {"source": "server", "detail": [code]}
 
 
-@pytest.mark.parametrize("reason", ["\ud800", "a\udfffb", "erste Zeile\nWARNING gefaelscht"],
+@pytest.mark.parametrize("code", ["\ud800", "a\udfffb", "erste Zeile\nWARNING gefaelscht"],
                          ids=["surrogat", "surrogat_im_text", "zeilenumbruch"])
-def test_the_warning_about_a_rejected_answer_quotes_the_server_reason_encodable_and_on_one_line(env, caplog, reason):
-    """Der Grund kommt vom Server. Die Warnung zitiert ihn mit repr: ein
-    einzelnes Surrogat brach sonst die UTF-8-Ausgabe des Logs (Logging error, Zeile verloren; unter xdist INTERNALERROR),
-    ein Zeilenumbruch faelschte eine zweite Logzeile."""
+def test_the_warning_about_a_rejected_answer_drops_a_code_without_the_code_form(env, caplog, code):
+    """Der Grund kommt vom Server. Hat er nicht die Form eines Codes, steht er weder im Log noch im Datenfehler: ein
+    einzelnes Surrogat brach sonst die UTF-8-Ausgabe des Logs, ein Zeilenumbruch faelschte eine zweite Logzeile."""
     _quiet_backup(env)
     bridge = _start(env)
     _set_room_target(env, bridge, 20.5)
     seq = _mqtt(env).snapshots[0]["seq"]
 
     with caplog.at_level(logging.WARNING, logger="smartheat_runtime.ticks"):
-        _answer(env, bridge, seq, status="rejected", curve=None, shift=None, reason=reason)
+        _answer(env, bridge, seq, status="rejected", curve=None, shift=None, code=code)
 
     (meldung,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Server hat Snapshot")]
-    assert meldung == f"Server hat Snapshot (seq={seq}) abgelehnt: {reason!r}"
+    assert meldung == f"Server hat Snapshot (seq={seq}) abgelehnt: None"
     meldung.encode("utf-8")  # wirft bei einem einzelnen Surrogat
     assert "\n" not in meldung
+    assert _delivery(bridge).datenfehler == DataFault("server", ("grund_fehlt",))
 
 
 def test_the_warning_about_unwritable_server_values_has_the_error_text_from_ha_only_escaped(env, caplog):
@@ -1210,7 +1210,7 @@ def test_invalid_answer_counts_as_server_fault_without_writing(env, answer):
     _answer(env, bridge, _mqtt(env).snapshots[0]["seq"], **answer)
 
     assert _regulation_writes(env) == []
-    assert "ungültige Serverantwort" in env.ha.pushes[-1]
+    assert "antwort_ungueltig" in env.ha.pushes[-1]
 
 
 @pytest.mark.parametrize("bad", [_OMIT, None, "16", float("nan"), True, pytest.param(10**400, id="gross")])
@@ -1223,8 +1223,7 @@ def test_answer_without_a_valid_heat_limit_is_invalid_and_writes_nothing(env, ba
     _answer(env, bridge, _mqtt(env).snapshots[0]["seq"], heat_limit=bad)
 
     assert _regulation_writes(env) == []
-    assert "ungültige Serverantwort" in env.ha.pushes[-1]
-    assert "heat_limit" in env.ha.pushes[-1]
+    assert "antwort_ungueltig" in env.ha.pushes[-1]
 
 
 def test_learned_values_of_the_answer_are_stored(env):
@@ -1314,8 +1313,7 @@ def test_answer_with_unknown_schema_counts_as_server_fault_without_writing(env, 
     _answer(env, bridge, _mqtt(env).snapshots[0]["seq"], schema=schema)
 
     assert _regulation_writes(env) == []
-    assert "ungültige Serverantwort" in env.ha.pushes[-1]
-    assert "unbekanntes Schema" in env.ha.pushes[-1]
+    assert "antwort_schema_unbekannt" in env.ha.pushes[-1]
 
 
 @pytest.mark.parametrize("levers", [
@@ -1332,7 +1330,7 @@ def test_answer_with_wrong_levers_is_a_server_fault_without_writing(env, levers)
     _answer(env, bridge, _mqtt(env).snapshots[0]["seq"], levers=levers)
 
     assert _regulation_writes(env) == []
-    assert "ungültige Serverantwort" in env.ha.pushes[-1]
+    assert "antwort_ungueltig" in env.ha.pushes[-1]
 
 
 def test_answer_with_null_levers_is_a_server_fault_without_writing(env):
@@ -1344,7 +1342,7 @@ def test_answer_with_null_levers_is_a_server_fault_without_writing(env):
     bridge.worker.run_pending()
 
     assert _regulation_writes(env) == []
-    assert "ungültige Serverantwort" in env.ha.pushes[-1]
+    assert "antwort_ungueltig" in env.ha.pushes[-1]
 
 
 # (Name, Optionen, Zustand der Fake-HA, Hebel des Satzes): Vaillant ohne `level`, Viessmann mit `level`
@@ -1366,7 +1364,7 @@ def _erster_tick(env, satz):
 
 def _ist_serverfehler_ohne_schreiben(env, bridge, vorher):
     assert env.ha.writes == vorher
-    assert "ungültige Serverantwort" in env.ha.pushes[-1]
+    assert "antwort_ungueltig" in env.ha.pushes[-1]
     assert _delivery(bridge).datenfehler is not None and _delivery(bridge).datenfehler.source == "server"
 
 
@@ -2293,8 +2291,8 @@ def test_duplicate_rejected_answer_does_not_skip_a_retry_stage(env):
     _set_room_target(env, bridge, 20.5)
     seq = _mqtt(env).snapshots[0]["seq"]
 
-    _mqtt(env).answer(seq, status="rejected", curve=None, shift=None, reason="x")
-    _mqtt(env).answer(seq, status="rejected", curve=None, shift=None, reason="x")  # QoS-1-Doppelzustellung
+    _mqtt(env).answer(seq, status="rejected", curve=None, shift=None, code="x")
+    _mqtt(env).answer(seq, status="rejected", curve=None, shift=None, code="x")  # QoS-1-Doppelzustellung
     bridge.worker.run_pending()
     _advance(env, bridge, 30)  # erste Datenfehler-Stufe
 
@@ -2756,7 +2754,7 @@ def test_rejected_answer_keeps_the_pending_manual_override(env):
     bridge = _start(env)
     _set_room_target(env, bridge, 20.5)
 
-    _answer(env, bridge, _mqtt(env).snapshots[-1]["seq"], status="rejected", reason="x")
+    _answer(env, bridge, _mqtt(env).snapshots[-1]["seq"], status="rejected", code="x")
 
     assert _backup(env)["manual_override_pending"] == OVERRIDE
 
@@ -2884,7 +2882,7 @@ def test_server_fault_is_dismissed_after_a_disk_fault_cycle_and_the_ack(env, mon
     bridge = _start(env)
     _set_room_target(env, bridge, 20.5)
     seq = _mqtt(env).snapshots[0]["seq"]
-    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, reason="unplausibel")
+    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, code="unplausibel")
     assert "smartheat_datenfehler" in [entry[0] for entry in env.ha.persistent]
     assert bridge.notifier.state("datenfehler") == "server:unplausibel"
     _advance(env, bridge, 30)
@@ -3262,18 +3260,18 @@ def test_a_second_delivery_of_the_answer_without_an_open_tick_is_ignored(env, ca
     assert _delivery(bridge).pending is None
 
 
-@pytest.mark.parametrize("reason", [5, {"grund": "x"}, ""], ids=["zahl", "objekt", "leer"])
-def test_a_rejection_whose_reason_is_no_text_is_reported_without_reason(env, reason):
+@pytest.mark.parametrize("code", [5, {"grund": "x"}, ""], ids=["zahl", "objekt", "leer"])
+def test_a_rejection_whose_code_is_no_code_is_reported_without_code(env, code):
     _quiet_backup(env)
     bridge = _start(env)
     _set_room_target(env, bridge, 20.5)
     seq = _mqtt(env).snapshots[0]["seq"]
 
-    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, reason=reason)
+    _answer(env, bridge, seq, status="rejected", curve=None, shift=None, code=code)
 
-    assert env.ha.pushes == ["Heizungsbrücke: Server hat die Messwerte abgelehnt (ohne Begründung). Die Heizkurve bleibt "
+    assert env.ha.pushes == ["Heizungsbrücke: Server hat die Messwerte abgelehnt (Code grund_fehlt). Die Heizkurve bleibt "
                              "unverändert."]
-    assert _delivery(bridge).datenfehler == DataFault("server", ("ohne Begründung",))
+    assert _delivery(bridge).datenfehler == DataFault("server", ("grund_fehlt",))
 
 
 def test_a_manual_override_changed_after_the_publish_survives_the_answer_to_the_previous_one(env, monkeypatch):

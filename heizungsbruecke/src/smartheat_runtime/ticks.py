@@ -1,6 +1,7 @@
 """Tick-Zustellung ausfuehren: die Aktionen der Zustandsmaschine `delivery` (Versuch,
 Abo-Abfrage, Zeitplan, Meldungen) und die Server-Antworten."""
 import logging
+import re
 import uuid
 from typing import TypeGuard
 
@@ -19,16 +20,20 @@ logger = logging.getLogger(__name__)
 
 _SETPOINT_STATUSES_WITH_VALUES = (delivery.STATUS_OK, delivery.STATUS_SKIPPED)
 
-# Fremdtext aus der Serverantwort (Grund einer Ablehnung, Beschreibung einer ungueltigen Antwort) geht in Datenfehler,
-# Push, offene Meldung, Speicher und den Statusstapel an den Server: hoechstens so viele Zeichen.
-FREMDTEXT_MAX_CHARS = 200
+# Gruende, die das Geraet selbst nennt, wenn eine Serverantwort nicht brauchbar ist (Datenfehler vom Server).
+CODE_SCHEMA_UNBEKANNT = "antwort_schema_unbekannt"
+CODE_KREIS_UNPASSEND = "antwort_kreis_unpassend"
+CODE_UNGUELTIG = "antwort_ungueltig"
+
+#: Form eines Grundes auf dem Draht (Vertrag der Antwort): kurzer Name aus Kleinbuchstaben, Ziffern und Unterstrich.
+_CODE_FORM = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
-def _kuerzen(text: str) -> str:
-    """`text` auf FREMDTEXT_MAX_CHARS Zeichen (der Anfang bleibt, ein gekuerzter Text endet auf "…")."""
-    if len(text) <= FREMDTEXT_MAX_CHARS:
-        return text
-    return text[:FREMDTEXT_MAX_CHARS - 1] + "…"
+def _code_der_antwort(payload: dict) -> str | None:
+    """Der `code` der Serverantwort, wenn er die Form eines Grundes hat; alles andere (Text, Zahl, zu lang) ist keiner.
+    Fremder Inhalt kommt so nie in Datenfehler, Push, Speicher oder Log."""
+    code = payload.get("code")
+    return code if isinstance(code, str) and _CODE_FORM.fullmatch(code) else None
 
 
 _LEARNED_KEYS = frozenset({"curve", "heat_limit"})
@@ -291,17 +296,15 @@ def handle_setpoints(rt: Runtime, payload: dict) -> None:
         # Nur Schema 5 wird verstanden; alles andere zaehlt wie eine ungueltige Antwort (Datenfehler
         # vom Server, sofort sichtbar) statt still verworfen zu werden und erst ueber den
         # Ack-Timeout im Notbetrieb zu enden.
-        reason = _kuerzen(f"ungültige Serverantwort (unbekanntes Schema {schema!r})")
-        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, reason)
-        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, reason=reason))
+        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, CODE_SCHEMA_UNBEKANNT)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=CODE_SCHEMA_UNBEKANNT))
         return
 
     kreis = payload.get("kreis")
     if type(kreis) is not int or kreis != rt.config.kreis:
         # Die Antwort gilt einem anderen Kreis (oder nennt keinen): ihre Werte gehoeren nicht auf diese Anlage.
-        reason = "ungültige Serverantwort (Kreis passt nicht zu diesem Kreis)"
-        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, reason)
-        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, reason=reason))
+        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, CODE_KREIS_UNPASSEND)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=CODE_KREIS_UNPASSEND))
         return
 
     status = payload.get("status")
@@ -317,7 +320,7 @@ def handle_setpoints(rt: Runtime, payload: dict) -> None:
         _clear_sent_manual_override(rt)
         if status == delivery.STATUS_SKIPPED:
             logger.info(
-                "Server hat fuer seq=%s nicht gelernt (%r), Werte unveraendert uebernommen", seq, payload.get("reason"),
+                "Server hat fuer seq=%s nicht gelernt (%s), Werte unveraendert uebernommen", seq, _code_der_antwort(payload),
             )
         try:
             rt.override.apply_server_values({lever: levers[lever] for lever in expected})
@@ -335,15 +338,9 @@ def handle_setpoints(rt: Runtime, payload: dict) -> None:
         _store_learned(rt, payload.get("learned"))
         deliver(rt, delivery.Ack(seq=seq, status=status))
     elif status == delivery.STATUS_REJECTED:
-        reason = payload.get("reason")
-        reason = _kuerzen(reason) if isinstance(reason, str) and reason else None
-        # Grund vom Server mit repr: ein einzelnes Surrogat braeche die UTF-8-Ausgabe des Logs, ein Zeilenumbruch
-        # faelschte eine zweite Logzeile.
-        logger.warning("Server hat Snapshot (seq=%s) abgelehnt: %r", seq, reason)
-        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, reason=reason))
+        code = _code_der_antwort(payload)
+        logger.warning("Server hat Snapshot (seq=%s) abgelehnt: %s", seq, code)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=code))
     else:
-        reason = _kuerzen(
-            f"ungültige Serverantwort (status={status!r}, levers={levers!r}, erwartet: {', '.join(expected)})"
-        )
-        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, reason)
-        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, reason=reason))
+        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, CODE_UNGUELTIG)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=CODE_UNGUELTIG))
