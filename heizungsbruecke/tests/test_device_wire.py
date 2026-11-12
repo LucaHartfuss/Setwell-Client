@@ -84,6 +84,7 @@ _PIN_PRAEFIX = "_VERTRAG_GEPINNT"
 NUR_SERVER: set[str] = {
     "MAX_CLOCK_SKEW_SECONDS",  # nur der Server prueft das Zeitfenster der Signatur
     "UNAUTHENTICATED_ERROR",  # Text der 401-Antwort; das Geraet wertet nur den Status 401 (immer gleich)
+    "WEG_ERGEBNISSE",  # Ergebnisse von weg_pruefen; der Server prueft sie, das Geraet lehnt den Befehl noch ab
 }
 NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts importieren), nur gepinnt (P4)
     "ABO",  # config_check.ABO_WERTE

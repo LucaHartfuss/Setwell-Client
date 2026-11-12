@@ -26,6 +26,7 @@ _.run_pending  # smartheat_runtime/worker.py RegulationWorker.run_pending: Takt 
 _.MAX_CLOCK_SKEW_SECONDS  # Server: geraete/device_auth.py (Zeitfenster der Signatur); Geraet wertet nur den Status 401
 _.UNAUTHENTICATED_ERROR  # Server: geraete/devices_api.py (Text der 401-Antwort); das Geraet wertet nur den Status 401
 _.ENERGIE_EINHEITEN  # Server: einrichtung/ha_pruefung.py, einrichtung/ha.py, geraete/device_config.py; im Geraet nur gepinnt (bindungsparameter.EINHEITEN)
+_.WEG_ERGEBNISSE  # Server: geraete/device_protocol.py (Ergebnisse von weg_pruefen); das Geraet lehnt den Befehl noch ab
 _.expires_rule  # Feld von wire.Command: Server geraete/device_protocol.py wertet die Regel aus (expires_seconds None)
 
 # --- Soll aus der Bedienung (smartheat_core/plan.py): die Verdrahtung in beide Hosts folgt, bis dahin ruft nur der Test ---

@@ -137,7 +137,7 @@ class Device:
         self.befehle.register("new_claim_code", self._new_claim_code)
         self.befehle.register("claim_state", self._claim_state)
         # Die Wegpruefung liest an der Anbindung der Anlage; bis ein Host sie kann, lehnt das Geraet sie ab.
-        self.befehle.register("weg_pruefen", lambda nutzlast: commands.Failed("nicht_unterstuetzt"))
+        self.befehle.register("weg_pruefen", lambda _nutzlast: commands.Failed("nicht_unterstuetzt"))
         host.befehle_eintragen(self.befehle)
         self.wunsch_puffer = wish.WunschPuffer(self._dir, clock)
         self._bootstrap = bootstrap.Bootstrap(
