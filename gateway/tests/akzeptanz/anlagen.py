@@ -62,16 +62,18 @@ LEERE_KONFIGURATION = {"anlage": None, "anlage_name": None, "weg": None, "kreise
                        "bindungsparameter": None}
 
 
-def konfiguration(satz: str = "viessmann_vicare", verteilsystem: str = "Heizkoerper") -> dict:
-    """Konfigurationsdokument (ohne schema/version) wie der Server es sendet: ein Kreis mit Simulationstreiber."""
+def konfiguration(satz: str = "viessmann_vicare", verteilsystem: str = "Heizkoerper", treiber: dict | None = None) -> dict:
+    """Konfigurationsdokument (ohne schema/version) wie der Server es sendet: ein Kreis, Standard mit
+    Simulationstreiber; `treiber` ersetzt ihn (Treiber-ID und Parameter)."""
     raum = {"raum": 1, "name": "Wohnzimmer", "rolle": "referenz", "fuehler": [f"zigbee:{SENSOR}:temperature"],
             "soll_quelle": False, "versatz_k": 0.0, "ziel_fest": None}
-    bindung = {"treiber": {"id": "simulation", "parameter": {"lever_set": satz, "heizkreis": 0}},
+    bindung = {"treiber": treiber or {"id": "simulation", "parameter": {"lever_set": satz, "heizkreis": 0}},
                "thermostat": THERMOSTAT}
     parameter = copy.deepcopy(_PARAMETER[satz])
     parameter["energie"] = {kanal: "kWh" for kanal in _KANAELE}
     return {
-        "anlage": "akzeptanz", "anlage_name": "Akzeptanzanlage", "weg": "simulation",
+        "anlage": "akzeptanz", "anlage_name": "Akzeptanzanlage",
+        "weg": "simulation" if treiber is None else "viessmann_vicare",  # Weg des Cloud-Treibers: die Viessmann-Cloud
         "kreise": [{"kreis": 1, "name": "Kreis 1", "bindung": bindung, "raeume": [raum],
                     "hebelsatz": satz, "verteilsystem": verteilsystem, "abo": "aktiv"}],
         "tagestick": "12:00", "mindest_software": "0.6.0", "mindest_integration": None,
