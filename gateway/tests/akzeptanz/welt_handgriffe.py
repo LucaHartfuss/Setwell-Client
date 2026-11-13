@@ -42,6 +42,14 @@ class Handgriffe:
         self.vom_server("down/setpoints", {"schema": 5, "kreis": 1, "seq": seq, "ts": self.uhr.wand().isoformat(),
                                            "status": "ok", "reason": None, "levers": hebel, "learned": {}})
 
+    def vergehen(self, sekunden: float, hebel: dict, raum: float, schritt: float = 300) -> None:
+        """Die Zeit in Schritten vorstellen; nach jedem Schritt meldet der Raumfuehler `raum` und der Dienst antwortet
+        mit denselben Hebelwerten (beide schweigen nie, sonst pausiert die Regelung bzw. folgt der Notbetrieb)."""
+        for _ in range(round(sekunden / schritt)):
+            self.raum(raum)
+            self.runde(schritt)
+            self.antworten(hebel)
+
     def bedienung(self, version: int, raum_soll: float) -> None:
         """Der Bewohner stellt den Wunsch ueber die Oberflaeche des Dienstes (down/operation)."""
         self.vom_server("down/operation", {"schema": 2, "version": version, "quelle": "portal",
