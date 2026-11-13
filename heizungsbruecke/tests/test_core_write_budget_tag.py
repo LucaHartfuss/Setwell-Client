@@ -311,6 +311,18 @@ def test_ein_fehler_des_uhrurteils_gilt_als_nicht_vertrauenswuerdig_und_der_tag_
     assert wb.today() == "2026-10-04"
 
 
+def test_ein_fehler_des_uhrurteils_laesst_einen_wanduhrsprung_ohne_wirkung(uhr):
+    assert wb.today() == "2026-10-03"
+    _fortschreiben(False)
+
+    def kaputt() -> bool:
+        raise RuntimeError("kaputt")
+
+    uhr.jetzt = TAG2  # Sprung der Wanduhr, die monotone Uhr steht
+    wb.tag_fortschreiben(kaputt, uhr)
+    assert wb.today() == "2026-10-03"
+
+
 def test_ein_fehler_beim_fortschreiben_laesst_den_handler_laufen(uhr, monkeypatch):
     def kaputt(*_args):
         raise RuntimeError("kaputt")
