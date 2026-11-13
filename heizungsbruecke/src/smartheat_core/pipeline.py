@@ -31,10 +31,11 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 
-from smartheat_core import write_budget
+from smartheat_core import meldungen, write_budget
 from smartheat_core.binding import PlantBinding
 from smartheat_core.clamping import clamp, target_value
 from smartheat_core.logtext import lesbar
+from smartheat_core.meldungen import Meldung
 from smartheat_core.safety import LocalSafety
 from smartheat_core.zahlen import ist_endliche_zahl
 
@@ -68,17 +69,6 @@ _POINT_SAVED = "saved"
 BUDGET_KEY = "schreibbudget"
 LIFETIME_KEY = "schreibzaehler"
 LIFETIME_STEP = 10000
-BUDGET_MESSAGE = (
-    "SmartHeat: Das Tageslimit von {limit} Schreibvorgängen an der Heizung ist erreicht. Neue Werte werden "
-    "gespeichert und morgen geschrieben (Schonung des Gerätespeichers)."
-)
-# Ablehnung eines Boost-Starts am Tageslimit: gleicher Schluessel und Tag wie BUDGET_MESSAGE (nur ein Hinweis je Tag),
-# deshalb nennt dieser Text beide Folgen, egal welche Meldung zuerst kommt.
-START_LIMIT_MESSAGE = BUDGET_MESSAGE + " Ein Boost startet erst morgen wieder."
-LIFETIME_MESSAGE = (
-    "SmartHeat: Bisher wurden {count} Werte in die Heizung geschrieben. Der Hersteller nennt eine Grenze von "
-    "100.000 Schreibvorgängen auf Lebensdauer des Reglers; bitte den Fachbetrieb informieren."
-)
 
 
 class WriteBudgetExhausted(Exception):
@@ -109,7 +99,7 @@ def _row(comfort: bool, emergency: bool) -> str:
 class LeverPipeline:
     def __init__(
         self, store, binding: PlantBinding, safety: LocalSafety, *, clock: Callable[[], float] = time.monotonic,
-        notify: Callable[[str, str, str], None] | None = None,
+        notify: Callable[[str, str, Meldung], None] | None = None,
         server_originals: Callable[[], Mapping[str, object]] | None = None,
     ) -> None:
         self._store = store
@@ -122,7 +112,7 @@ class LeverPipeline:
         self._limits_unreadable: set[str] = set()
         self._overlap_warned: dict[str, tuple[float, float]] = {}
         self._narrowing_logged: dict[str, tuple[float, float]] = {}
-        # Nicht kritischer Hinweis (Schluessel, Zustand, Text); im Add-on Notifier.notify(..., critical=False).
+        # Nicht kritischer Hinweis (Schluessel, Zustand, Meldung); im Add-on Notifier.notify(..., critical=False).
         self._notify = notify
         # Ursprungswerte der Anlage auf dem Server; frisch bei jedem Zuruecksetzen
         # gelesen.
@@ -255,10 +245,13 @@ class LeverPipeline:
         return reason
 
     def _notify_start_limit(self, day: str) -> None:
-        if self._notify is None:
+        limit = self._description.daily_write_limit
+        if self._notify is None or limit is None:  # ohne Tageslimit gibt es keinen Anlass zur Meldung
             return
         try:
-            self._notify(BUDGET_KEY, day, START_LIMIT_MESSAGE.format(limit=self._description.daily_write_limit))
+            # Gleicher Schluessel und Tag wie die Meldung `schreibbudget` (nur ein Hinweis je Tag): dieser Code nennt
+            # beide Folgen, egal welche Meldung zuerst kommt.
+            self._notify(BUDGET_KEY, day, meldungen.neu("meldung.schreibbudget_boost", limit=limit))
         except Exception:
             logger.exception("Hinweis zum Tageslimit fehlgeschlagen")
 
@@ -773,7 +766,7 @@ class LeverPipeline:
             return
         if self._notify is not None:
             try:
-                self._notify(BUDGET_KEY, write_budget.today(), BUDGET_MESSAGE.format(limit=limit))
+                self._notify(BUDGET_KEY, write_budget.today(), meldungen.neu("meldung.schreibbudget", limit=limit))
             except Exception:
                 logger.exception("Hinweis zum Tageslimit fehlgeschlagen")
         raise WriteBudgetExhausted(lever, limit)
@@ -812,8 +805,7 @@ class LeverPipeline:
             reached = (description.lifetime_hint_at
                        + (total - description.lifetime_hint_at) // LIFETIME_STEP * LIFETIME_STEP)
             try:
-                self._notify(LIFETIME_KEY, str(reached),
-                             LIFETIME_MESSAGE.format(count=f"{reached:,}".replace(",", ".")))
+                self._notify(LIFETIME_KEY, str(reached), meldungen.neu("meldung.schreibzaehler", anzahl=reached))
             except Exception:
                 logger.exception("Hinweis zum Lebensdauerzaehler fehlgeschlagen")
 

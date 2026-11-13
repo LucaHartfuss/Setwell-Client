@@ -10,27 +10,32 @@ from runtime_helpers import OPTIONS
 
 from heizungsbruecke import config
 from heizungsbruecke.host import HaHost
+from smartheat_core import meldungen
 from smartheat_device.laufzeit import RuntimeChannel
 from smartheat_runtime import app, entitlement, kreise
 from smartheat_runtime.app import EV_RECHECK, StartFailure
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_TELEMETRY, Runtime
 from smartheat_runtime.worker import Event, WorkerBeendet
 
+_MELDUNG = meldungen.neu("meldung.notbetrieb")
+
 
 class Senke:
     """Status- und Meldesenke in einem."""
 
     def __init__(self):
-        self.ereignisse, self.schluessel = [], []
+        self.ereignisse, self.schluessel, self.meldungen = [], [], []
 
     def publish(self, event):
         self.ereignisse.append(event)
 
-    def push(self, key, message):
+    def push(self, key, meldung):
         self.schluessel.append(key)
+        self.meldungen.append(meldung)
 
-    def show(self, key, message):
+    def show(self, key, meldung):
         self.schluessel.append(key)
+        self.meldungen.append(meldung)
 
     def withdraw(self, key):
         self.schluessel.append(key)
@@ -138,8 +143,8 @@ def test_die_anlage_meldet_ein_ereignis_des_schlechtesten_kreises(env, monkeypat
 def test_die_meldungen_mehrerer_kreise_tragen_den_kreis_im_schluessel(env):
     anlage = Anlage(env)
     laufzeit = _laufzeit(anlage, env)
-    laufzeit.kreise()[2].notifier.notify("probe", "gestoert", "Text", critical=True)
-    laufzeit.kreise()[1].notifier.notify("probe", "gestoert", "Text", critical=True)
+    laufzeit.kreise()[2].notifier.notify("probe", "gestoert", _MELDUNG, critical=True)
+    laufzeit.kreise()[1].notifier.notify("probe", "gestoert", _MELDUNG, critical=True)
 
     schluessel = {k for k in anlage.senke.schluessel}
     assert {"kreis-1:probe", "kreis-2:probe"} <= schluessel
@@ -149,7 +154,7 @@ def test_die_meldungen_mehrerer_kreise_tragen_den_kreis_im_schluessel(env):
 def test_ein_einzelner_kreis_meldet_ohne_praefix(env):
     anlage = Anlage(env, nummern=(1,))
     laufzeit = _laufzeit(anlage, env)
-    laufzeit.kreise()[1].notifier.notify("probe", "gestoert", "Text", critical=True)
+    laufzeit.kreise()[1].notifier.notify("probe", "gestoert", _MELDUNG, critical=True)
     assert "probe" in anlage.senke.schluessel
 
 
@@ -264,10 +269,12 @@ def test_eine_laufzeitrelevante_aenderung_verlangt_den_neustart_des_hosts(env):
 def test_die_meldesenke_eines_kreises_setzt_den_kreis_vor_jeden_schluessel():
     senke = Senke()
     meldesenke = kreise._KreisMeldesenke(senke, 3)
-    meldesenke.push("a", "Text")
-    meldesenke.show("b", "Text")
+    meldung = meldungen.neu("meldung.notbetrieb")
+    meldesenke.push("a", meldung)
+    meldesenke.show("b", meldung)
     meldesenke.withdraw("c")
     assert senke.schluessel == ["kreis-3:a", "kreis-3:b", "kreis-3:c"]
+    assert senke.meldungen == [meldung, meldung]
 
 
 def test_ein_kreis_ruht_im_ruhezustand_oder_waehrend_der_abo_frist(env):

@@ -5,6 +5,22 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Der Befehl `hinweis` trägt `key`, `code`, `params` und `stufe` statt eines fertigen Textes; das Gerät nimmt nur
+  Codes der eigenen Meldungstabelle an. Der Laufzeitstatus nennt den Grund einer Störung als Code mit Parametern
+  (`status.grund_*`) statt als Satz, ein Startfehler trägt dort keinen Fehlertext mehr (die Meldung an den Kunden bleibt).
+  Hinweise im alten Textformat in `hinweise.json` werden verworfen. Im Ereignis `smartheat_status` ist `grund` damit ein
+  Objekt `{code, params}` statt eines Strings.
+- Neuer Befehl `weg_pruefen` im Geräte-Vertrag (Ergebnis `gleiche_anlage`, `abweichung` oder `nicht_lesbar`); das Gerät
+  lehnt ihn vorerst mit `nicht_unterstuetzt` ab. Die Anmeldephase `password` und das Feld `ciphertext` des Befehls
+  `driver_login` entfallen, weil kein Treiber sie nutzt.
+- Wählt der Nutzer beim Entfernen des Eintrags „Gerät aus dem Konto lösen“, trägt die stdin-Zeile
+  `entfernen <Geräte-ID> freigeben` die Wahl in die Abmelde-Markierung. Nach der Abmeldung meldet das Gerät dem Server
+  einmalig `up/entfernt` mit der Wahl (`behalten` oder `freigeben`) und wiederholt es nach 60 Sekunden, bis der Broker
+  es bestätigt. Ohne die Wahl bleibt das Gerät im Konto, wie bisher.
+- Lehnt der Server einen Snapshot ab, liest das Add-on nur noch den kurzen Code der Antwort (Feld `code`, Kleinbuchstaben,
+  Ziffern, Unterstrich) und zeigt ihn in der Meldung als „Code …“; Freitext und Werte aus der Serverantwort gelangen
+  weder in die Meldung noch in den Speicher oder das Log. Ist der Code unleserlich, steht `grund_fehlt`. Für unbrauchbare
+  Antworten nennt das Add-on selbst `antwort_schema_unbekannt`, `antwort_kreis_unpassend` oder `antwort_ungueltig`.
 - Das Add-on liest das Lebenszeichen der Integration (Version, gelesene Status-Schemata; nach 900 Sekunden ohne
   Ereignis gilt die Version als unbekannt) und kann den Schalter „Automatisch aktualisieren“ des Add-ons lesen
   (nur lesen, nie setzen; ist er nicht lesbar, gilt er als unbekannt). Sichtbar wird das erst mit der Meldung an den
@@ -48,6 +64,15 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 - Scheitert beim Abmelden das Zurücksetzen der Heizung, nennt die Meldung jetzt die Werte, die SmartHeat selbst
   geschrieben hätte (Ursprungswert des Servers, auf die lokalen Grenzen gebracht), nicht den lokalen Ursprungswert.
   Geschrieben wird unverändert dasselbe.
+- Meldungen entstehen im Gerätekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der
+  Host zusammen (Wortlaut, Meldetext der Handys und der Hinweise in Home Assistant bleiben gleich). Der Meldungszustand
+  in der `backup.json` jedes Kreises heißt jetzt `notify_meldungen`; die alten Felder `notify_states` und
+  `notify_messages` liest das Gerät nicht mehr. Beim Update einmal im Wartungsfenster
+  `python -m smartheat_device.meldungszustand_migration --device-dir <Ordner> --release <Version>` aufrufen: der Lauf
+  sichert jede betroffene Datei als `backup.json.pre-<Version>` und entfernt die beiden Felder. Danach beginnt der
+  Meldungszustand leer: ein noch bestehender Anlass wird einmal neu gemeldet, der Notbetrieb wird aus dem
+  Failsafe-Zustand wieder gesät. Offene Hinweise in Home Assistant, die vor dem Update gemeldet wurden, räumt das Gerät
+  danach nicht mehr selbst ab. Rückweg: die Sicherung zurückspielen.
 
 ## 1.1.0
 

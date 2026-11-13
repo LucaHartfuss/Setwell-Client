@@ -90,14 +90,32 @@ def test_blocking_states_are_explained_on_the_page(zustand):
     assert ZUSTAND_TEXTE[zustand] in page and lokale_texte.gruppe("en", "zustand")[zustand] not in page
 
 
+def _hinweis(key, **felder):
+    return {"key": key, "code": f"meldung.{key}", "params": {}, "stufe": "rot", **felder}
+
+
 def test_page_lists_hints_own_messages_and_a_rejected_configuration():
     data = {**SNAPSHOT, "eingerichtet": True, "zustand": "regelt", "code": None,
-            "hinweise": [{"key": "wartung", "stufe": "warnung", "text": "Wartung <heute>"}],
+            "hinweise": [_hinweis("geraet_doppelt")],
             "meldungen": [{"key": "wunsch_begrenzt", "text": "Wunsch auf 26 °C begrenzt"}],
-            "konfiguration_abgelehnt": "Raumfühler ungültig"}
-    page = render_html(data)
-    assert "Wartung &lt;heute&gt;" in page and "Wunsch auf 26 °C begrenzt" in page
-    assert "Raumfühler ungültig" in page and "<heute>" not in page
+            "konfiguration_abgelehnt": {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "<heute>"},
+                                        "stufe": "rot"}}
+    page = render_html(data, "de")
+    assert lokale_texte.alle("de")["hinweis.geraet_doppelt"] in page and "Wunsch auf 26 °C begrenzt" in page
+    assert lokale_texte.alle("de")["hinweis.konfiguration_abgelehnt"] in page
+    assert "&lt;heute&gt;" in page and "<heute>" not in page
+    assert lokale_texte.alle("en")["hinweis.geraet_doppelt"] in render_html(data, "en")
+
+
+def test_page_shows_the_code_of_a_hint_without_local_text():
+    page = render_html({**SNAPSHOT, "hinweise": [_hinweis("neu<er>", code="meldung.neu<er>")]}, "de")
+    assert "meldung.neu&lt;er&gt;" in page and "<er>" not in page
+
+
+def test_every_hint_code_of_the_device_has_a_text_in_both_languages():
+    for sprache in ("de", "en"):
+        namen = set(lokale_texte.gruppe(sprache, "hinweis"))
+        assert namen == {*wire.MELDUNGEN, "konfiguration_abgelehnt"}
 
 
 def test_healthz_and_page_over_http():
@@ -611,8 +629,8 @@ def test_a_flood_of_connections_with_huge_headers_keeps_the_memory_of_the_proces
 LANG_RE = re.compile(r'<html lang="(de|en)">')
 VOLL = {**SNAPSHOT, "eingerichtet": True, "zustand": "regelt", "code": None, "seriennummer": "SHG-0001",
         "host": {"netz": True, "dns": False, "zeit_synchron": None}, "laufzeit": "ok",
-        "hinweise": [{"key": "a", "text": "Hinweistext"}], "meldungen": [{"key": "b", "text": "Meldungstext"}],
-        "konfiguration_abgelehnt": "Ablehnungstext"}
+        "hinweise": [_hinweis("gesperrt")], "meldungen": [{"key": "b", "text": "Meldungstext"}],
+        "konfiguration_abgelehnt": {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "g"}, "stufe": "rot"}}
 
 
 @pytest.mark.parametrize(("kopf", "erwartet"), [

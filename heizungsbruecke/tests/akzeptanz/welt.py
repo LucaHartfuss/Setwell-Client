@@ -300,7 +300,7 @@ class Anlage(Handgriffe):
             levers.setdefault("min_flow", 21.0)
         self.link.empfangen("down/setpoints", {
             "schema": 5, "kreis": 1, "seq": self.link.of("up/snapshot")[-1]["seq"], "ts": "x", "status": "ok",
-            "reason": None,
+            "code": None, "params": None,
             "levers": levers, "learned": None})
 
     def runde(self, sekunden: float = 0) -> None:

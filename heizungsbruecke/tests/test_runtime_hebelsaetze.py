@@ -21,8 +21,8 @@ from runtime_helpers import (
 )
 
 from heizungsbruecke import host as host_modul
-from smartheat_core import write_budget
-from smartheat_core.pipeline import BUDGET_KEY, BUDGET_MESSAGE
+from smartheat_core import meldungen, write_budget
+from smartheat_core.pipeline import BUDGET_KEY
 from smartheat_runtime.backup_store import save_backup
 
 
@@ -76,15 +76,14 @@ def test_weishaupt_without_a_comfort_setpoint_is_a_configuration_error(env):
     bridge = _start_bridge(env, **{**WEISHAUPT, "entity_setpoint_comfort": ""})
 
     assert bridge.reason == "konfigurationsfehler"
-    assert "setpoint_comfort" in _last_event(env)["grund"]  # Kundentext nennt die Rolle (dokument.lokal_pruefen)
-    assert "weishaupt_wwp" in _last_event(env)["grund"]
+    assert _last_event(env)["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
     assert env.ha.writes == []
 
 
 def test_an_unknown_lever_set_is_a_configuration_error_not_vaillant(env):
     bridge = _start_bridge(env, lever_set="buderus")
     assert bridge.reason == "konfigurationsfehler"
-    assert "buderus" in _last_event(env)["grund"]
+    assert _last_event(env)["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
     assert env.ha.writes == []
 
 
@@ -157,7 +156,8 @@ def test_daily_limit_notice_goes_through_the_notifier_once_a_day(env):
         bridge.override.apply_server_values({"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
 
     assert env.ha.writes[writes:] == []
-    assert [push for push in env.ha.pushes[pushes:] if "Tageslimit" in push] == [BUDGET_MESSAGE.format(limit=limit)]
+    assert [push for push in env.ha.pushes[pushes:] if "Tageslimit" in push] == [
+        meldungen.text(meldungen.neu("meldung.schreibbudget", limit=limit))]
     assert bridge.store.state.notify_states[BUDGET_KEY] == write_budget.today()
 
 

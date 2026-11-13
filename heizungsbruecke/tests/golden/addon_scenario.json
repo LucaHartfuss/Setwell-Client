@@ -1255,8 +1255,12 @@
     "notify_states": {
      "notbetrieb": "aktiv"
     },
-    "notify_messages": {
-     "notbetrieb": "Heizungsbrücke: Server antwortet nicht, Notbetrieb aktiv. Die Heizung wird bei Bedarf lokal abgesichert."
+    "notify_meldungen": {
+     "notbetrieb": {
+      "code": "meldung.notbetrieb",
+      "params": {},
+      "stufe": "rot"
+     }
     },
     "restore_point": {
      "curve": 1.0,
@@ -1400,8 +1404,12 @@
     "notify_states": {
      "notbetrieb": "aktiv"
     },
-    "notify_messages": {
-     "notbetrieb": "Heizungsbrücke: Server antwortet nicht, Notbetrieb aktiv. Die Heizung wird bei Bedarf lokal abgesichert."
+    "notify_meldungen": {
+     "notbetrieb": {
+      "code": "meldung.notbetrieb",
+      "params": {},
+      "stufe": "rot"
+     }
     },
     "restore_point": {
      "curve": 1.0,
@@ -1957,14 +1965,14 @@
     "ha",
     "notify",
     "notify.mobile_app_handy",
-    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Testgrund). Die Heizkurve bleibt unverändert."
+    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Code testgrund). Die Heizkurve bleibt unverändert."
    ],
    [
     "ha",
     "persistent_notification.create",
     "smartheat_datenfehler",
     "SmartHeat",
-    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Testgrund). Die Heizkurve bleibt unverändert."
+    "Heizungsbrücke: Server hat die Messwerte abgelehnt (Code testgrund). Die Heizkurve bleibt unverändert."
    ],
    [
     "ha",
@@ -4210,8 +4218,14 @@
      "batterie:sensor.thermostat_battery": "niedrig",
      "abo": "inaktiv"
     },
-    "notify_messages": {
-     "abo": "SmartHeat: Abo inaktiv. Die Heizung läuft noch bis 14.02.2026 im Notbetrieb weiter, danach stellt es die ursprünglichen Werte wieder ein und beendet die Steuerung."
+    "notify_meldungen": {
+     "abo": {
+      "code": "meldung.abo_inaktiv",
+      "params": {
+       "ende": "2026-02-14"
+      },
+      "stufe": "rot"
+     }
     },
     "restore_point": {
      "curve": 1.05,
@@ -4358,8 +4372,14 @@
      "batterie:sensor.thermostat_battery": "niedrig",
      "abo": "inaktiv"
     },
-    "notify_messages": {
-     "abo": "SmartHeat: Abo inaktiv. Die Heizung läuft noch bis 14.02.2026 im Notbetrieb weiter, danach stellt es die ursprünglichen Werte wieder ein und beendet die Steuerung."
+    "notify_meldungen": {
+     "abo": {
+      "code": "meldung.abo_inaktiv",
+      "params": {
+       "ende": "2026-02-14"
+      },
+      "stufe": "rot"
+     }
     },
     "restore_point": {
      "curve": 1.05,
@@ -4564,8 +4584,14 @@
      "abo": "inaktiv",
      "notbetrieb": "aktiv"
     },
-    "notify_messages": {
-     "abo": "SmartHeat: Abo inaktiv. Die Heizung läuft noch bis 14.02.2026 im Notbetrieb weiter, danach stellt es die ursprünglichen Werte wieder ein und beendet die Steuerung."
+    "notify_meldungen": {
+     "abo": {
+      "code": "meldung.abo_inaktiv",
+      "params": {
+       "ende": "2026-02-14"
+      },
+      "stufe": "rot"
+     }
     },
     "restore_point": {
      "curve": 1.05,
@@ -4816,8 +4842,12 @@
      "abo": "beendet",
      "notbetrieb": "aktiv"
     },
-    "notify_messages": {
-     "abo": "SmartHeat: Abo seit 30 Tagen inaktiv. Die Heizungssteuerung ist beendet, die ursprünglichen Werte sind wieder eingestellt."
+    "notify_meldungen": {
+     "abo": {
+      "code": "meldung.abo_beendet",
+      "params": {},
+      "stufe": "rot"
+     }
     },
     "restore_point": {
      "curve": 0.9,

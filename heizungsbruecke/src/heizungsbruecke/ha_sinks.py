@@ -6,7 +6,9 @@ import logging
 import re
 
 from smartheat_core.logtext import lesbar
+from smartheat_core.meldungen import Meldung
 from smartheat_device.host import MeldungSink
+from smartheat_runtime.texts import HA_TEXTS
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +26,16 @@ class HaNotifySink:
         self._ha_api = ha_api
         self._services = list(services)
 
-    def push(self, key: str, message: str) -> None:
+    def push(self, key: str, meldung: Meldung) -> None:
+        message = HA_TEXTS.text(meldung)
         for service in self._services:
             try:
                 self._ha_api.send_notification(service, message)
             except Exception:
                 logger.warning("Push-Benachrichtigung '%s' an %s konnte nicht gesendet werden", lesbar(key), service)
 
-    def show(self, key: str, message: str) -> None:
-        self._ha_api.create_persistent_notification(TITLE, message, notification_id(key))
+    def show(self, key: str, meldung: Meldung) -> None:
+        self._ha_api.create_persistent_notification(TITLE, HA_TEXTS.text(meldung), notification_id(key))
 
     def withdraw(self, key: str) -> None:
         self._ha_api.dismiss_persistent_notification(notification_id(key))
@@ -46,13 +49,13 @@ class GeraetUndHaSink:
     def __init__(self, geraet: MeldungSink, ha: HaNotifySink) -> None:
         self._geraet, self._ha = geraet, ha
 
-    def push(self, key: str, message: str) -> None:
-        self._geraet.push(key, message)
-        self._ha.push(key, message)
+    def push(self, key: str, meldung: Meldung) -> None:
+        self._geraet.push(key, meldung)
+        self._ha.push(key, meldung)
 
-    def show(self, key: str, message: str) -> None:
-        self._geraet.show(key, message)
-        self._ha.show(key, message)
+    def show(self, key: str, meldung: Meldung) -> None:
+        self._geraet.show(key, meldung)
+        self._ha.show(key, meldung)
 
     def withdraw(self, key: str) -> None:
         self._geraet.withdraw(key)

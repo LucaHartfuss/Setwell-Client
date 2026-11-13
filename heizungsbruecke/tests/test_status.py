@@ -228,11 +228,29 @@ def test_abo_inactive_carries_the_end_of_the_grace_period():
     assert (event["abo"], event["abo_frist_ende"]) == ("inaktiv", "2026-10-31")
 
 
+START = status.laufzeitgrund("start_fehlgeschlagen")
+SCHEITERT = status.laufzeitgrund("zuruecksetzen_scheitert", sekunden=30)
+WIEDERHERSTELLUNG = status.laufzeitgrund("wiederherstellung_scheitert")
+
+
+def test_laufzeitgrund_ist_ein_code_mit_parametern_und_nur_aus_der_liste():
+    assert SCHEITERT == {"code": "status.grund_zuruecksetzen_scheitert", "params": {"sekunden": 30}}
+    assert START == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
+    assert status.GRUENDE == ("start_fehlgeschlagen", "zustand_nicht_migriert", "andere_anlage",
+                              "konfiguration_ungueltig", "zuruecksetzen_scheitert", "wiederherstellung_scheitert")
+    with pytest.raises(ValueError):
+        status.laufzeitgrund("frei erfunden")
+    with pytest.raises(ValueError):
+        status.laufzeitgrund("start_fehlgeschlagen", sekunden=1)
+    with pytest.raises(ValueError):
+        status.laufzeitgrund("zuruecksetzen_scheitert")
+
+
 @pytest.mark.parametrize("flags,state,expected", [
-    (Flags(konfigurationsfehler=True, grund="Entity fehlt"), BridgeState(), "Entity fehlt"),
-    (Flags(abgemeldet=True, grund="scheitert"), BridgeState(), "scheitert"),
-    (Flags(gestartet=True, grund="alt"), BridgeState(), None),
-    (Flags(abo_beendet=True, grund="Zuruecksetzen scheitert"), BridgeState(), "Zuruecksetzen scheitert"),
+    (Flags(konfigurationsfehler=True, grund=START), BridgeState(), START),
+    (Flags(abgemeldet=True, grund=SCHEITERT), BridgeState(), SCHEITERT),
+    (Flags(gestartet=True, grund=START), BridgeState(), None),
+    (Flags(abo_beendet=True, grund=WIEDERHERSTELLUNG), BridgeState(), WIEDERHERSTELLUNG),
 ])
 def test_reason_is_only_sent_with_a_state_that_has_one(flags, state, expected):
     assert build_event("t", flags, state, VAILLANT, ADDON_VERSION)["grund"] == expected

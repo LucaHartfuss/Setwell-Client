@@ -55,7 +55,8 @@ MAX_MESSAGE_BYTES = 120 * 1024  # AN-10: 120 KB zugestellt, 130 KB abgelehnt
 SESSION_EXPIRY_SECONDS = 3600  # AN-9: Hoechstwert von IoT Core
 DEVICE_SUBSCRIPTION = "down/#"  # AN-6: die Policy erlaubt nur diesen Filter
 UP_TOPICS = (
-    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "telemetry",
+    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "up/entfernt",
+    "telemetry",
 )
 DOWN_TOPICS = ("down/config", "down/operation", "down/display", "down/command", "down/setpoints")
 
@@ -102,6 +103,10 @@ ERROR_FIELDS = ("grund", "details")
 WISH_FIELDS = ("schema", "wish_id", "kreis", "basis_version", "ts", "uhr_synchron", "werte")
 WISH_OPTIONAL = ("roh", "herkunft", "durch")  # fehlt = nicht begrenzt bzw. unbekannt
 WISH_WERTE = ("raum_soll",)
+#: Das Geraet verlaesst das Konto (nach der lokalen Abmeldung): die Wahl des Nutzers beim Entfernen der Verbindung. `freigeben`
+#: bittet den Server, das Geraet aus dem Konto zu loesen; `behalten` laesst es dort (der Server fuehrt es weiter als abgemeldet).
+ENTFERNT_FIELDS = ("schema", "wahl", "ts")
+ENTFERNT_WAHLEN = ("behalten", "freigeben")
 HERKUNFT = ("thermostat", "soll_entity", "ha")
 DURCH = ("nutzer", "automation")
 
@@ -180,7 +185,6 @@ SOFTWARE_ERRORS = (
     "manifest_ungueltig", "signatur_ungueltig", "updater_zu_alt", "version_zu_alt", "start_fehlgeschlagen",
     "ungesund", "server_unerreichbar",
 )
-HINWEIS_STUFEN = ("info", "warnung", "kritisch")
 MELDUNGEN = ("wunsch_begrenzt", "soll_quelle_aus", "geraet_doppelt", "update_noetig", "gesperrt")
 
 COMMAND_FIELDS = ("schema", "command_id", "kind", "payload", "expires_at")
@@ -204,7 +208,7 @@ COMMANDS: dict[str, Command] = {
     "zigbee_permit_join": Command(("seconds",), (), 60, ("zigbee_nicht_bereit",)),
     "zigbee_devices": Command((), ("devices",), 60, ("zigbee_nicht_bereit",)),
     "driver_login": Command(
-        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code", "ciphertext"),
+        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code"),
         ("code_challenge", "code_challenge_method"), 120,
         ("treiber_unbekannt", "login_nicht_noetig", "login_fehlgeschlagen", "anlage_nicht_erreichbar"),
     ),
@@ -215,13 +219,16 @@ COMMANDS: dict[str, Command] = {
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
     "claim_state": Command(("device_state",), (), 24 * 3600),
     "diagnostics": Command((), (), 300),
-    "hinweis": Command(("key", "stufe", "text"), (), 24 * 3600),
+    # Liest an der Anbindung, ob der gewaehlte Weg dieselbe Anlage meint (Nutzlast: der Weg aus `WEGE`).
+    "weg_pruefen": Command(("weg",), ("ergebnis",), 3600, ("weg_unbekannt", "weg_mehrfach")),
+    "hinweis": Command(("key", "code", "params", "stufe"), (), 24 * 3600),
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
     "finish": ("phase", "driver_id", "code", "redirect_uri"),
-    "password": ("phase", "driver_id", "ciphertext"),
 }
+#: Ergebnisse von `weg_pruefen`.
+WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
 # Spec Stufe 3 S5 6.1 (G-6): Fehler tragen Code und details, keine Texte. details nur mit diesen Schluesseln: `feld`
 # aus PRUEF_FELDER, `regel` aus PRUEF_REGELN, die uebrigen endliche Zahlen; freie Texte gibt es darin nicht.
 DETAIL_FIELDS = ("feld", "regel", "min", "max", "wert", "anzahl")

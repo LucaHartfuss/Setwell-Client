@@ -11,7 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from smartheat_core.meldungen import Meldung
 from smartheat_device.commands import CommandRegister
+from smartheat_runtime.texts import HA_TEXTS, HostTexts
 
 
 class MeldungSink:
@@ -19,19 +21,22 @@ class MeldungSink:
     (Gateway allein, HA-Add-on neben HA-Benachrichtigungen). Regeln: show = offene
     kritische Meldung, withdraw = geschlossen, push = Ereignis (offen und kritisch nur, solange der key offen ist).
     `melden(key, text, *, offen, stufe)` ist Device.meldung (oder ein Host-Rueckruf darauf). Stufe rot: offene oder
-    geschlossene Meldung (show, withdraw, push solange der key offen ist); orange: Ereignis ohne offenen key."""
+    geschlossene Meldung (show, withdraw, push solange der key offen ist); orange: Ereignis ohne offenen key.
+    Den Text bildet `texts` des Hosts aus der Meldung; auf dem Draht steht er bis zur Umstellung auf Codes."""
 
-    def __init__(self, melden: Callable[..., None]) -> None:
+    def __init__(self, melden: Callable[..., None], texts: HostTexts = HA_TEXTS) -> None:
         self._melden = melden
+        self._texts = texts
         self._offen: dict[str, str] = {}
         self._lock = threading.Lock()
 
-    def push(self, key: str, message: str) -> None:
+    def push(self, key: str, meldung: Meldung) -> None:
         with self._lock:
             offen = key in self._offen
-        self._melden(key, message, offen=offen, stufe="rot" if offen else "orange")
+        self._melden(key, self._texts.text(meldung), offen=offen, stufe="rot" if offen else "orange")
 
-    def show(self, key: str, message: str) -> None:
+    def show(self, key: str, meldung: Meldung) -> None:
+        message = self._texts.text(meldung)
         with self._lock:
             self._offen[key] = message
         self._melden(key, message, offen=True, stufe="rot")
@@ -49,9 +54,9 @@ class Anzeige:
     server_ok: bool  # Link verbunden
     device_state: str | None  # zuletzt bekannter Uebernahmestatus (Bootstrap)
     eingerichtet: bool
-    hinweise: tuple[dict, ...]  # Befehl hinweis: {key, stufe, text}
+    hinweise: tuple[dict, ...]  # Befehl hinweis: {key, code, params, stufe}
     meldungen: tuple[dict, ...]  # eigene Meldungen des Geraets (wunsch_begrenzt, soll_quelle_aus): {key, text}
-    konfiguration_abgelehnt: str | None  # lokaler Hinweis zur zuletzt abgelehnten Konfiguration (Code)
+    konfiguration_abgelehnt: dict | None  # zuletzt abgelehnte Konfiguration als Meldung {code, params, stufe}
 
     @property
     def code_zeigen(self) -> bool:
@@ -110,6 +115,15 @@ class DeviceHost(Protocol):
         ...
 
     def runtime_status(self) -> dict | None: ...
+
+    def entfernen_wahl(self) -> str | None:
+        """Wahl des Nutzers beim Entfernen, solange sie dem Server noch nicht zugestellt ist: "freigeben" (das Geraet
+        verlaesst das Konto) oder None. Der Host liest sie aus der Abmelde-Markierung."""
+        ...
+
+    def entfernen_erledigt(self) -> None:
+        """Der Server hat die Wahl bestaetigt (PUBACK): der Host loescht sie."""
+        ...
 
     def raum(self, kreis: int = 1) -> dict | None:
         """{ist, soll, soll_quelle, ts} des Kreises `kreis` fuer up/status; None, solange er noch nichts veroeffentlicht hat."""

@@ -4,8 +4,8 @@ Rueckwechsel auf "ok" wieder verschwindet. Gemeldet wird nur bei einem Zustandsw
 in BridgeState.notify_states (backup.json) und uebersteht Neustarts: kein Meldungssturm, wenn das
 Add-on mit demselben Fehler erneut startet.
 
-HA haelt persistent_notifications nur im Speicher. Deshalb bleibt der Text jeder offenen kritischen
-Meldung in BridgeState.notify_messages, und republish_persistent() legt sie nach einem HA-Neustart
+HA haelt persistent_notifications nur im Speicher. Deshalb bleibt die Meldung (Code, Parameter, Stufe) jeder
+offenen kritischen Meldung in BridgeState.notify_meldungen, und republish_persistent() legt sie nach einem HA-Neustart
 neu an -- ohne erneuten Push.
 
 Die sechs Hinweis-Kategorien (config_check.HA_HINWEISE, Feld bindung.hinweise_aus) lassen sich einzeln
@@ -13,7 +13,9 @@ abschalten: der Zustand wird weiter verfolgt und geloggt (Grundlage der Hinweise
 der Push entfaellt. Kritische Meldungen sind nie abschaltbar."""
 import logging
 
+from smartheat_core import meldungen
 from smartheat_core.logtext import lesbar
+from smartheat_core.meldungen import Meldung
 from smartheat_runtime.ports import NotifySink
 
 logger = logging.getLogger(__name__)
@@ -46,67 +48,66 @@ class Notifier:
         except Exception:
             logger.exception("Meldezustand '%s' konnte nicht gespeichert werden", lesbar(key))
 
-    def notify(self, key: str, state: str, message: str, *, critical: bool, silent_ok: bool = False) -> bool:
+    def notify(self, key: str, state: str, meldung: Meldung, *, critical: bool, silent_ok: bool = False) -> bool:
         """True bei einem Zustandswechsel. Jeder Kanal ist best effort; ein Schreibfehler des
         Zustands verhindert die Meldung nicht (sie kaeme sonst nie an). Ohne Push (nur Log):
         abgeschaltete Hinweis-Kategorien und, mit silent_ok, der Wechsel auf "ok"."""
         if state == self.state(key):
             return False
         states = dict(self._store.state.notify_states)
-        messages = dict(self._store.state.notify_messages)
+        ablagen = dict(self._store.state.notify_meldungen)
         if state == STATE_OK:
             states.pop(key, None)
         else:
             states[key] = state
         if critical and state != STATE_OK:
-            messages[key] = message
+            ablagen[key] = meldungen.zu_dict(meldung)
         else:
-            messages.pop(key, None)
+            ablagen.pop(key, None)
         try:
-            self._store.update(notify_states=states, notify_messages=messages)
+            self._store.update(notify_states=states, notify_meldungen=ablagen)
         except Exception:
             logger.exception("Meldezustand '%s' konnte nicht gespeichert werden, Meldung geht trotzdem raus",
                              lesbar(key))
-        # Die Meldung kann Text vom Server tragen (Grund einer Ablehnung): Steuerzeichen und Surrogate stehen in der
-        # Logzeile als Escape (logtext.lesbar). Push und Speicher bekommen den Text unveraendert.
-        zeile = lesbar(message)
+        # Das Log nennt nur den Code: weder Parameter (koennen Namen oder Text vom Server tragen) noch Schluessel.
         if state == STATE_OK:
-            logger.info(zeile)
+            logger.info("Meldung %s", meldung.code)
         else:
-            logger.warning(zeile)
+            logger.warning("Meldung %s", meldung.code)
         muted = (not critical and category(key) in self._hints_off) or (silent_ok and state == STATE_OK)
         if not muted:
             try:
-                self._sink.push(key, message)
+                self._sink.push(key, meldung)
             except Exception:
                 logger.warning("Push-Benachrichtigung '%s' konnte nicht gesendet werden", lesbar(key))
         if critical:
-            self._update_persistent(key, state, message)
+            self._update_persistent(key, state, meldung)
         return True
 
-    def refresh_persistent(self, key: str, message: str) -> None:
+    def refresh_persistent(self, key: str, meldung: Meldung) -> None:
         """Legt die HA-Benachrichtigung eines unveraenderten, nicht-"ok" Zustands mit dem
-        aktuellen Text erneut an (ersetzt die vorige je Schluessel), ohne Push. Fuer einen
+        aktuellen Meldung erneut an (ersetzt die vorige je Schluessel), ohne Push. Fuer einen
         Startfehler, der bei jedem Start erneut auftritt: nach einem Host-Neustart fehlt die
         Benachrichtigung sonst, weil HA sie nicht speichert."""
         state = self.state(key)
         if state == STATE_OK:
             return
-        if self._store.state.notify_messages.get(key) != message:
+        ablage = meldungen.zu_dict(meldung)
+        if self._store.state.notify_meldungen.get(key) != ablage:
             try:
-                self._store.update(notify_messages={**self._store.state.notify_messages, key: message})
+                self._store.update(notify_meldungen={**self._store.state.notify_meldungen, key: ablage})
             except Exception:
-                logger.exception("Meldetext '%s' konnte nicht gespeichert werden", lesbar(key))
-        self._update_persistent(key, state, message)
+                logger.exception("Meldung '%s' konnte nicht gespeichert werden", lesbar(key))
+        self._update_persistent(key, state, meldung)
 
     def republish_persistent(self) -> None:
         """Legt die HA-Benachrichtigungen aller offenen kritischen Meldungen neu an, ohne Push
-        (bei jedem (Wieder-)Verbinden mit HA). Ein Schluessel ohne gespeicherten Text (per seed()
+        (bei jedem (Wieder-)Verbinden mit HA). Ein Schluessel ohne gespeicherte Meldung (per seed()
         uebernommen) wird uebersprungen."""
-        messages = self._store.state.notify_messages
         for key, state in self._store.state.notify_states.items():
-            if state != STATE_OK and key in messages:
-                self._update_persistent(key, state, messages[key])
+            meldung = meldungen.aus_dict(self._store.state.notify_meldungen.get(key))
+            if state != STATE_OK and meldung is not None:
+                self._update_persistent(key, state, meldung)
 
     def clear_all(self, keep=()) -> None:
         """Abmelden: alle offenen HA-Benachrichtigungen ausser `keep` entfernen und
@@ -114,19 +115,19 @@ class Notifier:
         states = self._store.state.notify_states
         for key, state in states.items():
             if state != STATE_OK and key not in keep:
-                self._update_persistent(key, STATE_OK, "")
+                self._update_persistent(key, STATE_OK, None)
         kept_states = {key: state for key, state in states.items() if key in keep}
-        kept_messages = {key: text for key, text in self._store.state.notify_messages.items() if key in keep}
+        kept_meldungen = {key: ablage for key, ablage in self._store.state.notify_meldungen.items() if key in keep}
         try:
-            self._store.update(notify_states=kept_states, notify_messages=kept_messages)
+            self._store.update(notify_states=kept_states, notify_meldungen=kept_meldungen)
         except Exception:
             logger.exception("Meldezustaende konnten beim Abmelden nicht geleert werden")
 
-    def _update_persistent(self, key: str, state: str, message: str) -> None:
+    def _update_persistent(self, key: str, state: str, meldung: Meldung | None) -> None:
         try:
-            if state == STATE_OK:
+            if state == STATE_OK or meldung is None:
                 self._sink.withdraw(key)
             else:
-                self._sink.show(key, message)
+                self._sink.show(key, meldung)
         except Exception:
             logger.warning("Offene Meldung '%s' konnte nicht aktualisiert werden", lesbar(key))

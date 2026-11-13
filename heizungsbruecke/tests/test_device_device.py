@@ -17,6 +17,8 @@ from smartheat_runtime import aufraeumen
 from smartheat_runtime.runtime import EV_MQTT_CONNECTED, EV_SETPOINTS
 from smartheat_runtime.worker import RegulationWorker
 
+HINWEIS = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
+
 SOFTWARE = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
             "signature": "sig"}
 
@@ -164,8 +166,8 @@ def test_a_rejected_configuration_keeps_the_old_one_and_tells_the_display(tmp_pa
     assert result["ok"] is False and result["error"] == {
         "grund": "treiber_parameter", "details": {"feld": "parameter", "regel": "ungueltig"}}
     assert world.host.konfigurationen == []
-    assert world.host.anzeigen_liste[-1].konfiguration_abgelehnt == device.ABLEHNUNG_ANZEIGE.format(
-        grund="treiber_parameter")
+    assert world.host.anzeigen_liste[-1].konfiguration_abgelehnt == {
+        "code": "meldung.konfiguration_abgelehnt", "params": {"grund": "treiber_parameter"}, "stufe": "rot"}
 
 
 def test_a_rejection_from_before_5c_shows_the_local_hint_with_the_code_and_reports_no_text(tmp_path):
@@ -175,7 +177,8 @@ def test_a_rejection_from_before_5c_shows_the_local_hint_with_the_code_and_repor
         {"update_anlass": None, "abgelehnt": {"konfiguration": [3, "ungueltig", "Alter Gerätetext"]}}))
     world = World(tmp_path)
     hinweis = world.device.anzeige().konfiguration_abgelehnt
-    assert hinweis == device.ABLEHNUNG_ANZEIGE.format(grund="ungueltig") and "Alter" not in hinweis
+    assert hinweis == {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "ungueltig"}, "stufe": "rot"}
+    assert "Alter" not in str(hinweis)
     assert world.device.documents.ablehnung("konfiguration") == (3, "ungueltig", None)
 
 
@@ -455,8 +458,7 @@ def test_every_contract_down_topic_reaches_exactly_its_receiver_and_takes_effect
     world.verbinden()
     koerper = {"down/config": _konfiguration(version=1), "down/operation": _bedienung(version=3),
                "down/display": _anzeige(version=2),
-               "down/command": _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                            "text": "Kopie stoppen"}),
+               "down/command": _command("hinweis", payload=HINWEIS),
                "down/setpoints": {"kreis": 1, "seq": "s1"}}
     assert (world.device.konfiguration(), world.device.bedienung(), world.link.of("up/result")) == (None, None, [])
     world.empfangen(name, koerper[name])
@@ -485,8 +487,7 @@ def test_a_foreign_down_topic_reaches_nobody(tmp_path, caplog):
     world = World(tmp_path)
     world.verbinden()
     with caplog.at_level("WARNING", logger=device.logger.name):
-        world.empfangen("down/zukunft", _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                                     "text": "Kopie stoppen"}))
+        world.empfangen("down/zukunft", _command("hinweis", payload=HINWEIS))
         world.link.ereignis("nachricht", "down/zukunft", b"{kaputt")
         world.device.schritt()
     assert world.link.of("up/result") == []
@@ -525,10 +526,8 @@ def test_commands_run_once_across_reconnects(tmp_path):
 def test_a_hint_command_reaches_the_display(tmp_path):
     world = World(tmp_path)
     world.verbinden()
-    world.empfangen("down/command", _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                                 "text": "Kopie stoppen"}))
-    assert world.host.anzeigen_liste[-1].hinweise == (
-        {"key": "geraet_doppelt", "stufe": "kritisch", "text": "Kopie stoppen"},)
+    world.empfangen("down/command", _command("hinweis", payload=HINWEIS))
+    assert world.host.anzeigen_liste[-1].hinweise == (HINWEIS,)
 
 
 def test_inventory_parts_go_up_before_the_result(tmp_path):
@@ -763,6 +762,16 @@ def test_hello_reports_the_claim_state_the_device_knows(tmp_path):
     assert set(hello) == set(wire.HELLO_FIELDS) | set(wire.HELLO_OPTIONAL)
 
 
+def test_weg_pruefen_is_refused_as_not_supported(tmp_path):
+    """Der Befehl gehoert zum Vertrag, ein Handler fehlt noch: das Geraet lehnt ihn mit einem Grund des Vertrags ab."""
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/command", _command("weg_pruefen", "c1", {"weg": "simulation"}))
+    ergebnis = world.link.of("up/result")[-1]
+    assert ergebnis["ok"] is False and ergebnis["error"]["grund"] == "nicht_unterstuetzt"
+    assert "nicht_unterstuetzt" in wire.command_errors("weg_pruefen")
+
+
 def test_claim_state_hides_the_code_and_waits_for_setup(tmp_path):
     """Nach der Uebernahme ohne Code melden; der Zustand wird wartet_auf_einrichtung."""
     world = World(tmp_path, access=False)
@@ -849,6 +858,109 @@ def test_a_puback_with_an_error_code_does_not_confirm_the_wish(tmp_path):
     world.link.gesendet(len(world.link.sent))
     world.device.schritt()
     assert world.device.wunsch_puffer.wunsch(1) is None
+
+
+# --- Entfernen: das Geraet verlaesst das Konto ---
+
+def _abgemeldet_mit_wahl(tmp_path):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+    world.host.entfernen = "freigeben"
+    world.verbinden()
+    return world
+
+
+def test_the_release_choice_goes_out_after_hello_and_the_signed_off_status(tmp_path):
+    world = World(tmp_path)
+    world.host.entfernen = "freigeben"
+    world.verbinden()
+    assert "up/entfernt" not in world.link.topics()  # die Laufzeit regelt noch: nichts wird gemeldet
+    world.host.status = {"status": "abgemeldet"}
+    world.clock.now += device.STATUS_MIN_SECONDS
+    world.device.schritt()
+    names = world.link.topics()
+    assert names.index("up/hello") < names.index("up/status") < names.index("up/entfernt")
+    assert world.link.of("up/status")[-1]["runtime_status"] == {"status": "abgemeldet"}
+    (sent,) = world.link.of("up/entfernt")
+    assert set(sent) == set(wire.ENTFERNT_FIELDS) and sent["wahl"] == "freigeben" and sent["schema"] == wire.SCHEMA
+
+
+def test_without_a_release_choice_nothing_leaves_the_account(tmp_path):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+    world.verbinden()
+    world.clock.now += 3600
+    world.device.schritt()
+    assert "up/entfernt" not in world.link.topics() and world.host.entfernen_zugestellt == 0
+
+
+def test_the_release_choice_is_delivered_with_the_puback_and_never_sent_again(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    mid = world.link.topics().index("up/entfernt") + 1
+    assert world.host.entfernen == "freigeben" and world.host.entfernen_zugestellt == 0  # noch nicht bestaetigt
+    world.link.gesendet(mid)
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 1 and world.host.entfernen is None
+    world.clock.now += 3600
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 1
+
+
+def test_a_puback_of_an_old_client_or_for_another_message_does_not_deliver_the_release_choice(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    mid = world.link.topics().index("up/entfernt") + 1
+    world.link.gesendet(mid, client_nr=world.link.client_nr + 1)
+    world.link.gesendet(mid + 5)
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 0 and world.host.entfernen == "freigeben"
+
+
+def test_an_unconfirmed_release_choice_is_resent_after_the_retry_period_only(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    world.link.gesendet(world.link.topics().index("up/entfernt") + 1, ok=False)  # Fehler-PUBACK
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 0
+    world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS - 1
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 1  # gesperrt, kein Sekundentakt
+    world.clock.now += 1
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 2
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 1
+    world.clock.now += 3600
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 2
+
+
+def test_the_release_choice_waits_for_the_connection_and_hello_again(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    world.link.trennen()
+    world.link.sent.clear()
+    world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    assert "up/entfernt" not in world.link.topics()  # getrennt: nichts geht hinaus
+    world.link.verbinden()
+    world.device.schritt()
+    names = world.link.topics()
+    assert names[0] == "up/hello" and "up/entfernt" in names
+
+
+def test_a_failing_release_callback_sends_nothing_and_logs_only_the_error_kind(tmp_path, caplog):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+
+    def kaputt():
+        raise OSError("/data/geheim")
+
+    world.host.entfernen_wahl = kaputt
+    with caplog.at_level("ERROR"):
+        world.verbinden()
+        world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS
+        world.device.schritt()
+    assert "up/entfernt" not in world.link.topics()
+    assert "entfernen_wahl" in caplog.text and "geheim" not in caplog.text
 
 
 def test_losing_wish_takes_the_resent_operation(tmp_path):

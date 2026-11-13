@@ -418,6 +418,14 @@ def test_stdin_anhaengen_reicht_die_eigene_id_und_lokal_abmelden_an(geraet_env):
     assert device.aufgaben == [geraet.lokal_abmelden]
 
 
+def test_stdin_anhaengen_reicht_entfernen_mit_freigeben_als_lokal_freigeben_an(geraet_env):
+    device = FakeDevice()
+    geraet, _ = _verdrahtet(geraet_env, device)
+    quelle = io.BytesIO(f"entfernen {DEVICE_ID} freigeben\nentfernen shg-bbbbbbbbbbbbbbbb freigeben\n".encode())
+    main_module.stdin_anhaengen(geraet, device, quelle, geraet_env.ha).join(timeout=2)
+    assert device.aufgaben == [geraet.lokal_freigeben]
+
+
 def test_main_haengt_stdin_vor_laufen_an(geraet_env, monkeypatch):
     order = []
     _main_ohne_supervisor(geraet_env, monkeypatch, order)
@@ -792,7 +800,8 @@ def test_a_marker_that_does_not_fit_the_lock_stays_on_reset_and_nothing_is_delet
         geraet_env.clock.advance(3 * 300)
         result.worker.run_pending()  # ein Neustart wuerde hier prozess.Neustart werfen
         events = [data for kind, data in geraet_env.ha.events if kind == "smartheat_status"]
-        assert events[-1]["status"] == "abgemeldet" and events[-1]["grund"] == app.SIGN_OFF_INVALID_CONFIG
+        assert events[-1]["status"] == "abgemeldet"
+        assert events[-1]["grund"] == {"code": "status.grund_konfiguration_ungueltig", "params": {}}
         assert geraet_env.ha.writes == [] and ha.deleted == []
         gelesen = aufraeumen_markierung.lesen(config.AUFRAEUMEN_PATH)
         assert gelesen is not None and gelesen.zurueckgesetzt is False

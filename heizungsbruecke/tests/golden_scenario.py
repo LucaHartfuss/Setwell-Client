@@ -211,11 +211,12 @@ class World:
     def last_seq(self) -> str:
         return self.snapshots()[-1]["seq"]
 
-    def answer(self, status="ok", reason=None, curve=0.95, shift=23.0, heat_limit=16.0) -> None:
+    def answer(self, status="ok", code=None, curve=0.95, shift=23.0, heat_limit=16.0) -> None:
         # Der Server sendet den Mindestvorlauf wie bisher das Geraet ihn abgeleitet hat: das Raum-Soll.
         min_flow = self.state().stable_target
         payload = {
-            "schema": 5, "kreis": 1, "seq": self.last_seq(), "ts": "2026-01-15T00:00:00+01:00", "status": status, "reason": reason,
+            "schema": 5, "kreis": 1, "seq": self.last_seq(), "ts": "2026-01-15T00:00:00+01:00", "status": status, "code": code,
+            "params": None if code is None else {},
             "levers": {"curve": curve, "room_setpoint": shift, "heat_limit": heat_limit, "min_flow": min_flow},
             "learned": {"curve": 1.0, "heat_limit": 16.0},
         }
@@ -305,7 +306,7 @@ def run_scenario(tmp_path, monkeypatch) -> list[dict]:
 
     def datenfehler_server():
         w.set_room_target(21.5)
-        w.answer(status="rejected", reason="Testgrund")
+        w.answer(status="rejected", code="testgrund")
         fault = w.state().delivery.datenfehler
         _expect(fault is not None and fault.source == "server", "Datenfehler vom Server")
         w.set_room_target(21.0)

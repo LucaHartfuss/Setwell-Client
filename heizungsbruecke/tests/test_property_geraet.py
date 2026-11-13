@@ -41,6 +41,7 @@ from runtime_helpers import (
 )
 from strategien import JSON_WERT, SURROGATTEXT, WEG, ersetze, pfade
 
+from smartheat_core import meldungen
 from smartheat_core.safety import LOCAL_SAFETY
 from smartheat_device import bootstrap, wire
 from smartheat_device import commands as cmd
@@ -348,7 +349,7 @@ def test_text_mit_einzelnem_surrogat_wird_abgelehnt_oder_ist_speicherbar(stelle,
 
 COMMAND_FELDER = ("schema", "command_id", "kind", "payload", "expires_at")  # Namen aus dem Vertrag als Literal, nicht der Konstante
 BEFEHLE = [
-    ("diagnostics", {}), ("hinweis", {"key": "k", "stufe": "info", "text": "t"}), ("sign_off", {}),
+    ("diagnostics", {}), ("hinweis", {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}), ("sign_off", {}),
     ("zigbee_permit_join", {"seconds": 30}), ("claim_state", {"device_state": "uebernommen"}),
     ("inventory", {"stunden": 1}), ("inventory", {"stunden": 1, "filter": {}}),
 ]
@@ -451,22 +452,24 @@ def test_command_id_beliebigen_textes_wird_abgelehnt_oder_ausgefuehrt_ohne_ausna
         _ergebnisse_sind_wohlgeformt(sent)
 
 
-@given(JSON_WERT, JSON_WERT, JSON_WERT | st.just(WEG), st.sampled_from(["key", "stufe", "text"]))
-def test_hinweis_mit_beliebigen_werten_speichert_nur_gueltige_hinweise(schluessel, stufe, text, feld):
+@given(JSON_WERT, JSON_WERT, JSON_WERT | st.just(WEG), JSON_WERT, st.sampled_from(["key", "code", "params", "stufe"]))
+def test_hinweis_mit_beliebigen_werten_speichert_nur_gueltige_hinweise(schluessel, code, params, stufe, feld):
     """Der eingebaute Befehl hinweis (jedes Geraet): was ankommt, ist ein Hinweis aus dem Vertrag oder abgelehnt."""
     with tempfile.TemporaryDirectory() as verzeichnis:
         sent = Sent()
         register = cmd.CommandRegister(Path(verzeichnis), sent)
         hinweise = cmd.Hinweise(Path(verzeichnis))
         register.register("hinweis", hinweise.handler)
-        payload = {"key": schluessel, "stufe": stufe, **({} if text is WEG else {"text": text})}
-        payload[feld] = {"key": schluessel, "stufe": stufe, "text": None if text is WEG else text}[feld]
+        gueltig = {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}
+        wert = {"key": schluessel, "code": code, "params": None if params is WEG else params, "stufe": stufe}
+        payload = {**gueltig, feld: wert[feld]}
         register.empfangen(_command("hinweis", payload=payload))
         _ergebnisse_sind_wohlgeformt(sent)
         for eintrag in hinweise.alle():
-            assert isinstance(eintrag["key"], str) and 0 < len(eintrag["key"]) <= 64
-            assert eintrag["stufe"] in wire.HINWEIS_STUFEN
-            assert isinstance(eintrag["text"], str) and 0 < len(eintrag["text"]) <= 1000
+            assert eintrag["key"] in wire.MELDUNGEN
+            assert eintrag["code"] == "meldung." + eintrag["key"]
+            assert eintrag["stufe"] == meldungen.TABELLE[eintrag["code"]].stufe
+            assert isinstance(eintrag["params"], dict)
         assert cmd.Hinweise(Path(verzeichnis)).alle() == hinweise.alle()  # was angenommen ist, ist auch gespeichert
 
 
@@ -492,8 +495,8 @@ def _hebel(erwartet):
 
 def _antwort(erwartet):
     return st.builds(
-        lambda extra, schema, kreis, status, reason, levers, learned: {
-            **extra, "schema": schema, "kreis": kreis, "ts": "x", "status": status, "reason": reason, "levers": levers,
+        lambda extra, schema, kreis, status, code, levers, learned: {
+            **extra, "schema": schema, "kreis": kreis, "ts": "x", "status": status, "code": code, "params": None, "levers": levers,
             "learned": learned},
         st.dictionaries(st.text(max_size=8), JSON_WERT, max_size=3),
         st.sampled_from([5, 5, 5, 5]) | JSON_WERT,
