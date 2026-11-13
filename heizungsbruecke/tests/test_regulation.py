@@ -738,3 +738,74 @@ def test_zehn_plananstiege_an_einem_tag_halten_die_quote_von_sechs_starts(make_s
         gestartet += _starts_comfort(rt)
 
     assert gestartet == starts
+
+
+def test_fehlt_der_plan_nach_einer_absenkung_gilt_der_anstieg_nicht_als_der_des_kunden(make_store, monkeypatch):
+    """Das Dokument verliert kurz sein Feld, waehrend die Absenkung gilt: das Soll wird zum Wunsch und steigt, aber der
+    Plan hat das Soll vorher gesenkt, nicht der Kunde. Beim Profil kurve gibt es dann keinen Comfort-Boost."""
+    rt = _runtime(make_store(backup={"last_room_target": 18.0, **RESTORE_POINT}), room_actual=18.0, room_target=21.0)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(23, 30), konfiguration={"kreis": 1, "absenkung_k": 3.0, "aufheizen": "kurve"})
+    regulation.run_local_check(rt)
+    assert rt.geltendes_soll.soll_art == "absenkung" and rt.store.state.boost_active is False
+
+    rt.config = runtime_config(plan_source=lambda: None)
+    regulation.run_local_check(rt)
+
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (21.0, "wunsch")
+    assert rt.store.state.boost_active is False
+
+
+def test_ohne_jeden_plan_ist_ein_anstieg_des_wunsches_der_des_kunden(make_store):
+    rt = _runtime(make_store(backup={"last_room_target": 20.0, **RESTORE_POINT}), room_actual=18.0, room_target=21.0)
+    regulation.run_local_check(rt)
+    rt.store.update(stable_target=22.0)
+
+    regulation.run_local_check(rt)
+
+    assert rt.store.state.boost_active is True
+
+
+# --- ein Fehler der Plan-Eingabe haelt den Kaelteschutz nicht an ---
+
+def _notfall_lage(make_store):
+    """Notbetrieb mit zu kaltem Raum: der Notfall-Boost startet, sobald die Pruefung bis dorthin kommt."""
+    store = make_store(backup=dict(RESTORE_POINT), failsafe={"failsafe_active": True})
+    return store, _runtime(store, room_actual=19.5, room_target=21.0)
+
+
+def _ausnahme(*_args, **_kwargs):
+    raise RuntimeError("Fremdwert 99")
+
+
+def test_eine_ausnahme_der_planquelle_laesst_den_kaelteschutz_laufen(make_store, monkeypatch, caplog):
+    store, rt = _notfall_lage(make_store)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(12, 0))
+    rt.config = runtime_config(plan_source=_ausnahme)
+
+    with caplog.at_level(logging.WARNING):
+        regulation.run_local_check(rt)
+
+    assert _writes(rt) == EMERGENCY and store.state.emergency_boost_active is True
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (21.0, "wunsch")
+    assert "Fremdwert" not in caplog.text and "RuntimeError" in caplog.text
+
+
+def test_eine_ausnahme_des_uhrurteils_laesst_den_kaelteschutz_laufen(make_store, monkeypatch):
+    store, rt = _notfall_lage(make_store)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(12, 0))
+    rt.uhr_vertrauen = _ausnahme
+
+    regulation.run_local_check(rt)
+
+    assert _writes(rt) == EMERGENCY and store.state.emergency_boost_active is True
+
+
+def test_eine_ausnahme_der_planrechnung_laesst_den_kaelteschutz_laufen(make_store, monkeypatch):
+    store, rt = _notfall_lage(make_store)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(12, 0))
+    monkeypatch.setattr("smartheat_runtime.plan_quelle.soll_effektiv", _ausnahme)
+
+    regulation.run_local_check(rt)
+
+    assert _writes(rt) == EMERGENCY and store.state.emergency_boost_active is True
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (21.0, "wunsch")

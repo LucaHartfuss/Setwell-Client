@@ -650,9 +650,13 @@ def _on_soll_ende_erledigt(rt: Runtime, event: Event) -> None:
 def _unless_idle(rt: Runtime, handler, event: Event) -> None:
     """Im Ruhezustand (Fristende im Betrieb) laufen alle Handler ausser dem Lebenszeichen leer;
     sie planen sich dann auch nicht neu ein. Vor jedem Handler folgt der Tag der Tageszaehler der Wanduhr, aber nur
-    mit vertrauenswuerdiger Uhr (ein Uhrsprung setzt das Tageslimit nicht zurueck)."""
+    mit vertrauenswuerdiger Uhr (ein Uhrsprung setzt das Tageslimit nicht zurueck), sonst der monotonen Uhr. Ein Fehler
+    dabei haelt den Handler nicht an (Kaelteschutz und Watchdog laufen weiter); der Tag bleibt dann."""
     if not rt.idle:
-        write_budget.tag_fortschreiben(rt.uhr_vertrauen)
+        try:
+            write_budget.tag_fortschreiben(rt.uhr_vertrauen, rt.clock)
+        except Exception as fehler:
+            logger.warning("Tag der Tageszaehler nicht fortgeschrieben (%s), er bleibt", type(fehler).__name__)
         handler(rt, event)
 
 

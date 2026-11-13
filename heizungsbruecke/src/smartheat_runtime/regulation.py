@@ -104,9 +104,8 @@ def run_local_check(rt: Runtime) -> None:
     # Das geltende Soll: der Wunsch des Thermostats oder, mit Zeitzone und Betriebsart im Dokument, das Soll des Plans.
     # In der Testphase ohne Setwell gilt kein Plan. Bei Soll-Quelle aus (Thermostat aus, Frostschutz-Stellung) haelt der
     # Speicher nur den alten Wunsch: es gibt dann kein geltendes Soll, und der Kaelteschutz rechnet ohne Soll.
-    eingabe = None if testphase.aktiv(rt) else rt.config.plan_source()
     vorher = rt.geltendes_soll
-    soll = geltendes_soll(eingabe, wunsch, now, uhr_vertrauenswuerdig=rt.uhr_vertrauen(), soll_quelle_aus=rt.soll_quelle_aus)
+    eingabe, soll = _soll_rechnen(rt, wunsch, now)
     rt.geltendes_soll = soll
     # Der Kaelteschutz laeuft auch ohne Soll (dann nur die Frostnaehe) und ohne lesbaren Referenzraum. Eine Bedingung
     # fuer seine Wirksamkeit gehoert vor diesen Aufruf.
@@ -134,11 +133,11 @@ def run_local_check(rt: Runtime) -> None:
     if expired:
         logger.info("Comfort-Boost endet nach der Hoechstdauer (seit %s)", state.boost_since)
     safety = rt.override.safety
-    # Ohne Planeingabe kennt die Regelung nur die Wunschaenderung des Kunden. Mit ihr zaehlt ein Anstieg als der des
-    # Kunden, wenn die Soll-Art davor bekannt ist und der Wunsch (oder eine Uebersteuerung) ihn bringt; nach dem Start ist
-    # die Art davor unbekannt, dann gilt er nicht als der des Kunden (kein Plan-Boost ueber einen Neustart hinweg).
-    vom_kunden = eingabe is None or (
-        vorher is not None and anstieg_vom_kunden(vorher.soll_art, soll.soll_art))
+    # Ein Anstieg zaehlt als der des Kunden, wenn die Soll-Art davor bekannt ist und der Wunsch (oder eine Uebersteuerung)
+    # ihn bringt; fehlt die Planeingabe nach einer Absenkung, ist er es nicht (der Plan hatte das Soll gesenkt). Nach dem
+    # Start ist die Art davor unbekannt: mit Planeingabe gilt er dann nicht als der des Kunden (kein Plan-Boost ueber
+    # einen Neustart hinweg), ohne Planeingabe kennt die Regelung nur die Wunschaenderung des Kunden.
+    vom_kunden = (eingabe is None if vorher is None else anstieg_vom_kunden(vorher.soll_art, soll.soll_art))
     # Ohne Comfort-Boost-Werte (z. B. Fussbodenheizung) gibt es keinen Comfort-Boost.
     comfort = not expired and bool(safety.comfort_boost) and not testphase.aktiv(rt) and decide_boost(
         room_actual=room_actual,
@@ -166,6 +165,18 @@ def run_local_check(rt: Runtime) -> None:
     refused = comfort and not comfort_set and not rt.override.comfort_start_heute_gesperrt
     remembered = state.last_room_target if refused else room_target
     rt.store.update_saved(last_room_target=remembered)
+
+
+def _soll_rechnen(rt: Runtime, wunsch: float | None, now: datetime):
+    """Planeingabe und geltendes Soll des Kreises. Jeder Fehler der Eingabe, des Uhrurteils oder der Rechnung laesst
+    den Wunsch gelten (Log nur mit der Fehlerart): der Kaelteschutz danach darf an keiner dieser Stellen haengen."""
+    try:
+        eingabe = None if testphase.aktiv(rt) else rt.config.plan_source()
+        return eingabe, geltendes_soll(
+            eingabe, wunsch, now, uhr_vertrauenswuerdig=rt.uhr_vertrauen(), soll_quelle_aus=rt.soll_quelle_aus)
+    except Exception as fehler:
+        logger.warning("Plan nicht berechenbar (%s), es gilt der Wunsch", type(fehler).__name__)
+        return None, geltendes_soll(None, wunsch, now, uhr_vertrauenswuerdig=False, soll_quelle_aus=rt.soll_quelle_aus)
 
 
 def _ausser_betrieb_pruefen(rt: Runtime) -> None:

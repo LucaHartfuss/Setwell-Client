@@ -105,7 +105,7 @@ def _ist(rt, **werte):
 
 def _pruefen(rt):
     # Wie der Worker vor jedem Ereignis: die Uhr laeuft hier gleichmaessig (Wand und monoton zusammen), also vertrauenswuerdig.
-    write_budget.tag_fortschreiben(lambda: True)
+    write_budget.tag_fortschreiben(lambda: True, rt.clock)
     with contextlib.suppress(SignalUngueltig):
         regulation.run_local_check(rt)
 

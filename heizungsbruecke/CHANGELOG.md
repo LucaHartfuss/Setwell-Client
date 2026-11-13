@@ -5,6 +5,12 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Ohne vertrauenswürdige Uhr rückt der Tag der Tageszähler nach der monotonen Uhr vor (je volle 24 Stunden einer, nie
+  zurück): der Start-Zähler, den der Kälteschutz teilt, hängt so nicht bis zum Neustart fest. Einträge eines späteren
+  Tages (Uhr stand beim Start vor) zählen als heute. Ein Fehler bei der Plan-Eingabe, beim Uhrurteil oder beim
+  Fortschreiben des Tages hält Kälteschutz und Watchdog nicht an (es gilt der Wunsch). Fehlt die Plan-Eingabe nach
+  einer Absenkung kurz, gilt der Anstieg des Wunsches nicht als der des Kunden.
+
 - Ein Sprung der Uhr über Mitternacht setzt die Tageszähler nicht mehr zurück: das Tageslimit des Schreibbudgets und
   „Durchsetzen höchstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswürdiger Uhr. Ohne Vertrauen (Zeitdienst
   nie synchron seit dem Start, Wanduhr gegen die monotone Uhr gesprungen) bleibt der alte Tag, es wird dann eher weniger

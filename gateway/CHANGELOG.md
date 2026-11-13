@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Ohne vertrauenswuerdige Uhr rueckt der Tag der Tageszaehler nach der monotonen Uhr vor (je volle 24 Stunden einer); der
+  Start-Zaehler des Kaelteschutzes haengt nicht mehr bis zum Neustart fest. Eintraege eines spaeteren Tages zaehlen als
+  heute. Ein Fehler der Plan-Eingabe oder des Uhrurteils haelt den Kaelteschutz nicht an (es gilt der Wunsch).
+
 - Ein Sprung der Uhr ueber Mitternacht setzt die Tageszaehler nicht mehr zurueck: Tageslimit des Schreibbudgets und
   „Durchsetzen hoechstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswuerdiger Uhr, sonst bleibt der alte Tag.
   Die Grenzwerte sind unveraendert.
