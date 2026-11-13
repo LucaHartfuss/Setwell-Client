@@ -22,28 +22,58 @@ GERAETE = [
      "definition": {"model": "TRV-Test", "vendor": "Test", "exposes": [_KLIMA, _BATTERIE_LEER]}},
 ]
 
-#: Bindungsparameter des Hebelsatzes viessmann_vicare, wie der Server sie sendet
+_KANAELE = ("electrical_heating", "electrical_dhw", "primary_heating", "primary_dhw", "thermal_heating",
+            "thermal_dhw", "electrical_total")
+_SCHUTZ_EEPROM = {"tag": 10, "lebensdauer_hinweis": 50000, "durchsetzen_tag": 6}
+_SCHEMATA = {"praefixe": ["hz_operationmode_", "heating_circuit_operation_mode_"],
+             "normal_bereich": {"hz_operationmode_": [16.0, 28.0], "heating_circuit_operation_mode_": [18.0, 25.0]}}
+#: Bindungsparameter je Hebelsatz, wie der Server sie sendet (ohne die Energiekanaele)
 _PARAMETER = {
-    "schritte": {"curve": 0.1, "level": 1.0, "room_setpoint": 1.0},
-    "toleranzen": {"curve": 0.05, "level": 0.5, "room_setpoint": 0.5}, "wartezeit_s": 180,
-    "schreibgruppen": [["curve", "level"]], "zurueck": ["curve", "level", "room_setpoint"],
-    "zurueck_optional": [], "nur_lesen": [], "zaehler": "daily",
-    "schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 4}, "schemata": {},
-    "energie": {kanal: "kWh" for kanal in ("electrical_heating", "electrical_dhw", "primary_heating", "primary_dhw",
-                                           "thermal_heating", "thermal_dhw", "electrical_total")},
+    "vaillant_vrc720": {
+        "schritte": {"curve": 0.05, "room_setpoint": 0.5, "heat_limit": 0.1, "min_flow": 0.1},
+        "toleranzen": {"curve": 0.025, "room_setpoint": 0.25, "heat_limit": 0.05, "min_flow": 0.05},
+        "wartezeit_s": 2100, "schreibgruppen": [], "zurueck": ["curve", "room_setpoint", "heat_limit", "min_flow"],
+        "zurueck_optional": ["heat_limit"], "nur_lesen": [], "zaehler": "daily",
+        "schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 6}, "schemata": {},
+    },
+    "weishaupt_wwp": {
+        "schritte": {"curve": 0.05, "room_setpoint": 0.5, "heat_limit": 0.5},
+        "toleranzen": {"curve": 0.025, "room_setpoint": 0.25, "heat_limit": 0.25},
+        "wartezeit_s": 120, "schreibgruppen": [], "zurueck": ["curve", "room_setpoint", "heat_limit"],
+        "zurueck_optional": [], "nur_lesen": [], "zaehler": "daily", "schreibschutz": _SCHUTZ_EEPROM,
+        "schemata": _SCHEMATA,
+    },
+    "weishaupt_wwp_basis": {
+        "schritte": {"room_setpoint": 0.5}, "toleranzen": {"room_setpoint": 0.25}, "wartezeit_s": 120,
+        "schreibgruppen": [], "zurueck": ["room_setpoint"], "zurueck_optional": [], "nur_lesen": ["curve"],
+        "zaehler": "daily", "schreibschutz": _SCHUTZ_EEPROM, "schemata": _SCHEMATA,
+    },
+    "viessmann_vicare": {
+        "schritte": {"curve": 0.1, "level": 1.0, "room_setpoint": 1.0},
+        "toleranzen": {"curve": 0.05, "level": 0.5, "room_setpoint": 0.5}, "wartezeit_s": 180,
+        "schreibgruppen": [["curve", "level"]], "zurueck": ["curve", "level", "room_setpoint"],
+        "zurueck_optional": [], "nur_lesen": [], "zaehler": "daily",
+        "schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 4}, "schemata": {},
+    },
 }
+#: Leere Konfiguration: das Abmelden vom Dienst (Felder wie die Konfiguration, ohne Inhalt)
+LEERE_KONFIGURATION = {"anlage": None, "anlage_name": None, "weg": None, "kreise": [], "tagestick": None,
+                       "mindest_software": "0.6.0", "mindest_integration": None, "software": None,
+                       "bindungsparameter": None}
 
 
-def konfiguration() -> dict:
+def konfiguration(satz: str = "viessmann_vicare", verteilsystem: str = "Heizkoerper") -> dict:
     """Konfigurationsdokument (ohne schema/version) wie der Server es sendet: ein Kreis mit Simulationstreiber."""
     raum = {"raum": 1, "name": "Wohnzimmer", "rolle": "referenz", "fuehler": [f"zigbee:{SENSOR}:temperature"],
             "soll_quelle": False, "versatz_k": 0.0, "ziel_fest": None}
-    bindung = {"treiber": {"id": "simulation", "parameter": {"lever_set": "viessmann_vicare", "heizkreis": 0}},
+    bindung = {"treiber": {"id": "simulation", "parameter": {"lever_set": satz, "heizkreis": 0}},
                "thermostat": THERMOSTAT}
+    parameter = copy.deepcopy(_PARAMETER[satz])
+    parameter["energie"] = {kanal: "kWh" for kanal in _KANAELE}
     return {
         "anlage": "akzeptanz", "anlage_name": "Akzeptanzanlage", "weg": "simulation",
         "kreise": [{"kreis": 1, "name": "Kreis 1", "bindung": bindung, "raeume": [raum],
-                    "hebelsatz": "viessmann_vicare", "verteilsystem": "Heizkoerper", "abo": "aktiv"}],
+                    "hebelsatz": satz, "verteilsystem": verteilsystem, "abo": "aktiv"}],
         "tagestick": "12:00", "mindest_software": "0.6.0", "mindest_integration": None,
-        "software": None, "bindungsparameter": copy.deepcopy(_PARAMETER),
+        "software": None, "bindungsparameter": parameter,
     }

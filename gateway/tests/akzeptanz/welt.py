@@ -9,12 +9,13 @@ import itertools
 import json
 import re
 
-from anlagen import GERAETE, SENSOR, THERMOSTAT, konfiguration
+from anlagen import GERAETE, SENSOR, THERMOSTAT
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from uhr import Uhr
+from welt_handgriffe import Handgriffe
 
 from smartheat_core import dateien
 from smartheat_device import bootstrap, identity, prozess
@@ -184,7 +185,7 @@ def _zugang_ablegen(device_dir) -> None:
     bootstrap.speichern(device_dir, bootstrap.Antwort("uebernommen", zugang))
 
 
-class Welt:
+class Welt(Handgriffe):
     """Eine Gateway-Anlage unter Test. `starten()` ist der Prozessstart; die Zeit laeuft nur ueber `runde`."""
 
     def __init__(self, tmp_path, monkeypatch) -> None:
@@ -272,29 +273,3 @@ class Welt:
                 host.driver.poll_once()
         self.arbeiten()
 
-    def verbinden(self) -> None:
-        self.link.verbinden()
-        self.arbeiten()
-
-    def vom_server(self, name: str, inhalt: dict) -> None:
-        self.link.empfangen(name, inhalt)
-        self.arbeiten()
-
-    def einrichten(self, version: int = 1) -> None:
-        """Konfiguration des Servers (ein Kreis, Simulationstreiber): Neustart in den Betrieb, verbinden."""
-        self.vom_server("down/config", {"schema": 2, "version": version, **konfiguration()})
-        self.verbinden()
-
-    def antworten(self, hebel: dict) -> None:
-        """Die Antwort des Dienstes auf den letzten Tick (down/setpoints, seq aus dem letzten Snapshot)."""
-        seq = self.link.von("up/snapshot")[-1]["seq"]
-        self.vom_server("down/setpoints", {"schema": 5, "kreis": 1, "seq": seq, "ts": self.uhr.wand().isoformat(),
-                                           "status": "ok", "reason": None, "levers": hebel, "learned": {}})
-
-    def wuensche(self) -> list[dict]:
-        """Alle Wuensche (up/wish), die ein Link dieser Welt gesendet hat."""
-        return [inhalt for link in self.links for inhalt in link.von("up/wish")]
-
-    def anlagenstand(self) -> dict:
-        """Der Stand der simulierten Anlage (Datei des Treibers, schreibt nur die Laufzeit)."""
-        return json.loads((self.paths.sim_dir / "plant.json").read_text())
