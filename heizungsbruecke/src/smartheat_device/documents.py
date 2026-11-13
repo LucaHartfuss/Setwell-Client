@@ -166,6 +166,8 @@ def _bedienung_pruefen(inhalt: dict) -> config_check.Ablehnung | None:
         return ablehnung
     if inhalt.get("quelle") not in wire.QUELLEN:
         return config_check.Ablehnung(UNGUELTIG, fehler.details("quelle", "unbekannt"))
+    if not isinstance(inhalt["ts"], str) or not inhalt["ts"]:
+        return config_check.Ablehnung(UNGUELTIG, fehler.details("ts", "ungueltig"))
     if ablehnung := _kreise_pruefen(inhalt, wire.BEDIENUNG_KREIS_FIELDS):
         return ablehnung
     for eintrag in inhalt["kreise"]:
@@ -461,10 +463,12 @@ class DocumentStore:
                      or software_pruefen(inhalt["software"]))
         if ablehnung is not None:
             return ablehnung
-        mindest = inhalt.get("mindest_software")  # erst eine vollstaendige Konfiguration setzt den Anlass neu
+        if problem := config_check.mindest_software_pruefen(inhalt):  # vor dem Anlass: ein Unlesbares blockiert nicht
+            return config_check.Ablehnung(UNGUELTIG, problem)
+        mindest = inhalt["mindest_software"]  # erst eine vollstaendige Konfiguration setzt den Anlass neu
         self._update_anlass = (UPDATE_NOETIG, mindest) if unter_mindest(self._software_version, mindest) else None
         if config_check.ist_leer(inhalt):
-            return None
+            return config_check.pruefen(inhalt, None, host=self._host)
         if self._update_anlass is not None:
             return config_check.Ablehnung(UPDATE_NOETIG)
         self._rastung = self._rastung_laden()  # vor jeder Annahme neu lesen (Migration im laufenden Betrieb)

@@ -298,14 +298,11 @@ _NICHT_ENDLICH = [float("nan"), float("inf"), float("-inf"), 10**400, -(10**400)
 _FORMEN = [lambda zahl: zahl, lambda zahl: [zahl], lambda zahl: {"x": zahl}, lambda zahl: {"x": [zahl]}]
 
 
-#: Felder, die der Leser nicht auf Typ und Zahl prueft (offene-punkte.md TO-client-kern-T8): `mindest_software`
-#: und `ts` liest im Geraet keine Stelle als Zahl; `ursprungswerte` liest nur die Pipeline und filtert dort jede nicht
-#: endliche Zahl (`ist_endliche_zahl`, Rueckweg auf den lokalen Wert) und klemmt auf die lokalen Grenzen; `push_regeln`
-#: lehnt das Dokument nie ab: der Leser (`config_check.push_regeln_lesen`) nimmt nur ganze Zahlen im Bereich und sonst den
-#: Standard. Eine leere Konfiguration ist "immer gueltig" (nur `anlage` None zaehlt):
-#: sie fehlt in dieser Aufzaehlung ganz.
-UNGEPRUEFT = {"konfiguration": ("mindest_software", "ursprungswerte", "push_regeln"),
-              "konfiguration_mit_ursprung": ("mindest_software", "ursprungswerte", "push_regeln"), "bedienung": ("ts",)}
+#: Felder, die der Leser nicht ablehnt: `push_regeln` lehnt das Dokument nie ab, der Leser
+#: (`config_check.push_regeln_lesen`) nimmt nur ganze Zahlen im Bereich und sonst den Standard. Alles andere prueft der
+#: Leser auf Typ und Zahl, auch die leere Konfiguration und `ursprungswerte`.
+UNGEPRUEFT = {"konfiguration": ("push_regeln",), "konfiguration_mit_ursprung": ("push_regeln",),
+              "konfiguration_leer": ("push_regeln",), "bedienung": ()}
 
 
 @pytest.mark.parametrize("dokument", [d for d in DOKUMENTE if d[0] in UNGEPRUEFT], ids=list(UNGEPRUEFT))
@@ -318,7 +315,6 @@ def test_nicht_endliche_zahl_an_jeder_stelle_wird_abgelehnt_oder_nie_gespeichert
     zaehler = 0
     for pfad in pfade(gut):
         if (not pfad or pfad[0] in ("version", "schema", *UNGEPRUEFT[name])
-                or pfad[:3] == ("kreise", 0, "ursprungswerte")
                 or pfad[:5] == ("kreise", 0, "bindung", "treiber", "parameter")):
             continue
         for zahl in _NICHT_ENDLICH:
@@ -375,11 +371,11 @@ def _utf8_speicherbar(wert) -> bool:
 
 def _soll_laufen(nachricht) -> bool:
     """Unabhaengige Aussage der Annahmeregeln (Befehle: genau die Felder des Vertrags, die Nutzlast ein Objekt mit allen
-    Pflichtfeldern der Art und sonst nur deren optionalen Feldern). Schreibt das HEUTIGE Verhalten fest, kein Sollwert:
-    der Wert von `schema` prueft die Annahme nicht (Dokumente pruefen ihn gegen wire.SCHEMATA), Restpunkt
-    TO-client-kern-T8; kommt die Pruefung, wird das Orakel angepasst."""
+    Pflichtfeldern der Art und sonst nur deren optionalen Feldern, `schema` einer der Vertragswerte)."""
     command_id, kind, payload = nachricht.get("command_id"), nachricht.get("kind"), nachricht.get("payload")
     if not (isinstance(command_id, str) and 0 < len(command_id) <= 64) or set(nachricht) != set(COMMAND_FELDER):
+        return False
+    if nachricht["schema"] not in wire.SCHEMATA:
         return False
     if not _utf8_speicherbar(nachricht):
         return False
@@ -428,6 +424,17 @@ def test_befehl_mit_fremdem_feld_fuehrt_keinen_handler_aus(befehl, fremd, im_pay
         _register(verzeichnis, sent, aufrufe).empfangen(nachricht)
         assert aufrufe == []
         assert [(r["ok"], r["error"]["grund"]) for r in sent.results] == [(False, "ungueltige_nutzlast")]
+        _ergebnisse_sind_wohlgeformt(sent)
+
+
+@given(st.sampled_from(BEFEHLE), JSON_WERT)
+def test_befehl_mit_beliebigem_schema_laeuft_nur_mit_einem_vertragswert(befehl, schema):
+    kind, payload = befehl
+    nachricht = {**_command(kind, payload=payload), "schema": schema}
+    with tempfile.TemporaryDirectory() as verzeichnis:
+        sent, aufrufe = Sent(), []
+        _register(verzeichnis, sent, aufrufe).empfangen(nachricht)
+        assert len(aufrufe) == int(schema in wire.SCHEMATA and not isinstance(schema, bool))
         _ergebnisse_sind_wohlgeformt(sent)
 
 

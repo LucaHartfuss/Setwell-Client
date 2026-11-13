@@ -407,7 +407,7 @@ def gateway_konfiguration(**changes):
 def ha_konfiguration(**changes) -> dict:
     base = {
         "anlage": "zuhause2", "hebelsatz": "vaillant_vrc720",
-        "verteilsystem": "Heizkoerper", "tagestick": "12:07", "abo": "aktiv",
+        "verteilsystem": "Heizkoerper", "tagestick": "12:07", "abo": "aktiv", "mindest_software": "0.6.0",
         "bindungsparameter": parameter("vaillant_vrc720"), "raumfuehler": ["sensor.wohnzimmer_thermostat_temperatur"],
         "bindung": {
             "kreis": {"plattform": "mypyllant", "config_entry": "e1", "anlage": "S", "nummer": "0"},

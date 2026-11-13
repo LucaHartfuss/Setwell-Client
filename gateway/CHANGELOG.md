@@ -2,6 +2,9 @@
 
 ## Unveroeffentlicht
 
+- Das Geraet prueft die Typen seiner Dokumente strenger (`mindest_software` als Versionstext, `ts` der Bedienung,
+  `ursprungswerte`, die Felder einer leeren Konfiguration) und lehnt Befehle mit unbekanntem `schema` mit
+  `ungueltige_nutzlast` ab. Der Server schreibt alle diese Felder schon richtig.
 - Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard; Ruhezeit 22 bis 7 Uhr, Tageslimit 1 bis 5,
   Standard 5; ungültige Werte liest das Geraet als Standard) und neue optionale Leserolle `fault_codes` im Geraetekern.
   Der Hinweis `raumfuehler` entfaellt aus `hinweise_aus`. Ein Dokument ohne `push_regeln` oder mit `raumfuehler` lehnt das

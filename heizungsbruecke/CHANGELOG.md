@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät prüft die Typen seiner Dokumente strenger: `mindest_software` muss ein Versionstext `X.Y.Z` sein, `ts` der
+  Bedienung ein nichtleerer Text, `ursprungswerte` ein Objekt aus höchstens 16 Namen mit Wahrheitswerten, Zahlen oder
+  kurzen Texten, und in einer leeren Konfiguration müssen auch `anlage_name`, `weg`, `tagestick`, `kreise`,
+  `bindungsparameter` und `mindest_integration` den richtigen Typ haben. Ein Befehl mit unbekanntem `schema` wird mit
+  `ungueltige_nutzlast` abgelehnt, ohne dass ein Handler läuft. Der Server schreibt alle diese Felder schon richtig.
 - Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard): Ruhezeit (Standard 22 bis 7 Uhr) und
   Tageslimit der Pushes (1 bis 5, Standard 5). Ein ungültiger Wert wird nicht abgelehnt, das Gerät nimmt dafür den
   Standard. Ein Dokument ohne das Feld lehnt das Gerät ab; `client1` bekommt es mit dem nächsten `refresh`.

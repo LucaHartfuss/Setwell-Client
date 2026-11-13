@@ -196,6 +196,8 @@ class CommandRegister:
                 return Failed("ungueltige_nutzlast", fehler.details(feld, "fehlt"))
         if fremd := fehler.fremdes_feld(message, wire.COMMAND_FIELDS):
             return Failed("ungueltige_nutzlast", fremd)
+        if message["schema"] not in wire.SCHEMATA:
+            return Failed("ungueltige_nutzlast", fehler.details("schema", "unbekannt"))
         payload = message["payload"]
         handler = self._handlers.get(kind)
         if handler is None:
