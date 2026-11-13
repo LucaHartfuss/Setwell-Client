@@ -30,7 +30,7 @@ KONFIGURATION = {
         "batterien": ["sensor.thermostat_battery"], "benachrichtigung": ["notify.mobile_app_handy"], "hinweise_aus": [],
         "abfrage_s": 1800,
     },
-    "bindungsparameter": bindung_beispiele.parameter("vaillant_vrc720"),
+    "bindungsparameter": bindung_beispiele.parameter("vaillant_vrc720"), "push_regeln": None,
 }
 
 

@@ -635,6 +635,74 @@ def test_a_configuration_with_origin_values_is_taken(tmp_path):
     assert store.inhalt("konfiguration")["kreise"][0]["ursprungswerte"] == {"heat_limit": 18.0}
 
 
+def _abgelehnt(store, art, dokument, feld):
+    """Das Dokument wird mit Grund ungueltig und dem Feld in details abgelehnt; der Stand bleibt wie er war."""
+    vorher = (store.version(art), store.inhalt(art), store.update_noetig)
+    ergebnis = store.empfangen(art, dokument)
+    assert (ergebnis.ok, ergebnis.grund, ergebnis.details.get("feld")) == (False, "ungueltig", feld), ergebnis
+    assert (store.version(art), store.inhalt(art), store.update_noetig) == vorher
+
+
+@pytest.mark.parametrize("wert", [None, 5, True, "", "neu", "1.0", "1.0.0-rc1", ["1.0.0"], {"v": "1.0.0"}])
+def test_eine_mindestversion_ohne_versionstext_wird_abgelehnt(tmp_path, wert):
+    """Ein Nicht-Text oder Unlesbares blockierte nie und ging als gueltig durch; jetzt lehnt das Geraet ab, auch bei
+    der leeren Konfiguration."""
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    _abgelehnt(store, "konfiguration", _konfiguration(version=2, mindest_software=wert), "mindest_software")
+    _abgelehnt(store, "konfiguration", {**_leer(version=3), "mindest_software": wert}, "mindest_software")
+
+
+def test_eine_ungueltige_mindestversion_setzt_keinen_update_anlass(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    assert store.empfangen("konfiguration", _konfiguration(version=2, mindest_software=5)).grund == "ungueltig"
+    assert not store.update_noetig
+
+
+@pytest.mark.parametrize("wert", [None, 5, True, "", ["2027-01-15T08:00:00+00:00"], {"ts": "x"}])
+def test_eine_bedienung_ohne_zeitstempeltext_wird_abgelehnt(tmp_path, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("bedienung", _bedienung(version=1)).uebernommen
+    _abgelehnt(store, "bedienung", _bedienung(version=2, ts=wert), "ts")
+
+
+@pytest.mark.parametrize("wert", [None, [], "x", 5, {1: 2}, {"": 1.0}, {"heat_limit": None}, {"heat_limit": [1.0]},
+                                  {"heat_limit": {"a": 1}}, {"heat_limit": float("nan")}, {"heat_limit": float("inf")},
+                                  {"heat_limit": 10**400}])
+def test_ursprungswerte_haben_namen_und_einfache_werte(tmp_path, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    _abgelehnt(store, "konfiguration", _konfiguration(version=2, ursprungswerte=wert), "ursprungswerte")
+
+
+def test_ursprungswerte_nehmen_zahl_wahrheitswert_und_text_an(tmp_path):
+    """Der Server schreibt diese drei Arten (Zahl, Wahrheitswert, kurzer Text)."""
+    werte = {"heat_limit": 18.0, "stufe": 2, "an": True, "modus": "heizen"}
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(ursprungswerte=werte)).uebernommen
+    assert store.inhalt("konfiguration")["kreise"][0]["ursprungswerte"] == werte
+
+
+@pytest.mark.parametrize("feld, wert", [
+    ("anlage_name", 5), ("anlage_name", ""), ("weg", ["x"]), ("weg", 7), ("kreise", "x"), ("kreise", None),
+    ("tagestick", 5), ("tagestick", "25:00"), ("mindest_integration", 5), ("mindest_integration", ""),
+    ("bindungsparameter", []), ("bindungsparameter", "x"),
+])
+def test_eine_leere_konfiguration_hat_typrichtige_felder(tmp_path, feld, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    _abgelehnt(store, "konfiguration", {**_leer(version=2), feld: wert}, feld)
+
+
+def test_die_leere_konfiguration_des_servers_wird_angenommen(tmp_path):
+    """Die Felder, die der Server in der leeren Konfiguration schreibt: null bzw. leere Liste."""
+    leer = _leer(version=1)
+    assert {leer[feld] for feld in ("anlage_name", "weg", "tagestick", "bindungsparameter", "mindest_integration")} == {None}
+    assert leer["kreise"] == []
+    assert _store(tmp_path).empfangen("konfiguration", leer).uebernommen
+
+
 @pytest.mark.parametrize("version", [0, -1, "1", True, None, 1.5])
 def test_unreadable_versions_get_no_answer(tmp_path, version):
     assert _store(tmp_path).empfangen("konfiguration", {**_konfiguration(), "version": version}) is None

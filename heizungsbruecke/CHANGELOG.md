@@ -9,6 +9,17 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
   und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
   keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+- Das Gerät prüft die Typen seiner Dokumente strenger: `mindest_software` muss ein Versionstext `X.Y.Z` sein, `ts` der
+  Bedienung ein nichtleerer Text, `ursprungswerte` ein Objekt aus höchstens 16 Namen mit Wahrheitswerten, Zahlen oder
+  kurzen Texten, und in einer leeren Konfiguration müssen auch `anlage_name`, `weg`, `tagestick`, `kreise`,
+  `bindungsparameter` und `mindest_integration` den richtigen Typ haben. Ein Befehl mit unbekanntem `schema` wird mit
+  `ungueltige_nutzlast` abgelehnt, ohne dass ein Handler läuft. Der Server schreibt alle diese Felder schon richtig.
+- Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard): Ruhezeit (Standard 22 bis 7 Uhr) und
+  Tageslimit der Pushes (1 bis 5, Standard 5). Ein ungültiger Wert wird nicht abgelehnt, das Gerät nimmt dafür den
+  Standard. Ein Dokument ohne das Feld lehnt das Gerät ab; `client1` bekommt es mit dem nächsten `refresh`.
+- Neue optionale Leserolle `fault_codes` (Störungsanzeige des Erzeugers, `binary_sensor` der Klasse `problem`); die
+  Inventur lässt für Binärsensoren nun neben `battery` auch die Klasse `problem` durch. Der Hinweis `raumfuehler` entfällt
+  aus `hinweise_aus`; ein Dokument, das ihn noch nennt, lehnt das Gerät ab.
 - Der Befehl `hinweis` trägt `key`, `code`, `params` und `stufe` statt eines fertigen Textes; das Gerät nimmt nur
   Codes der eigenen Meldungstabelle an. Der Laufzeitstatus nennt den Grund einer Störung als Code mit Parametern
   (`status.grund_*`) statt als Satz, ein Startfehler trägt dort keinen Fehlertext mehr (die Meldung an den Kunden bleibt).

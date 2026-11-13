@@ -109,6 +109,24 @@ def test_a_foreign_field_in_a_command_is_refused_and_does_not_run(tmp_path, feld
     assert calls == [] and sent.results == [_fail("ungueltige_nutzlast", erwartet)]
 
 
+@pytest.mark.parametrize("schema", [1, 3, 0, None, "2", 2.5, True, [2], {"v": 2}])
+def test_a_command_with_a_schema_outside_the_contract_is_refused_and_does_not_run(tmp_path, schema):
+    sent, calls = Sent(), []
+    register = cmd.CommandRegister(tmp_path, sent)
+    register.register("diagnostics", lambda payload: calls.append(1) or cmd.Done({}))
+    register.empfangen({**_command(), "schema": schema})
+    assert calls == [] and sent.results == [_fail("ungueltige_nutzlast", {"feld": "schema", "regel": "unbekannt"})]
+
+
+def test_a_command_with_a_known_schema_runs(tmp_path):
+    sent, calls = Sent(), []
+    register = cmd.CommandRegister(tmp_path, sent)
+    register.register("diagnostics", lambda payload: calls.append(1) or cmd.Done({}))
+    for schema in wire.SCHEMATA:
+        register.empfangen({**_command(command_id=f"s{schema}"), "schema": schema})
+    assert len(calls) == len(wire.SCHEMATA)
+
+
 @pytest.mark.parametrize("kind, payload, erwartet", [
     ("diagnostics", {"zukunft": 1}, {"regel": "unbekannt"}),
     ("diagnostics", {"stunden": 1}, {"feld": "stunden", "regel": "unbekannt"}),
