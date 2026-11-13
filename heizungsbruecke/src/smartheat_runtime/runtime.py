@@ -13,6 +13,7 @@ from smartheat_runtime.texts import HA_TEXTS, HostTexts
 
 if TYPE_CHECKING:
     from smartheat_core.pipeline import LeverPipeline
+    from smartheat_core.plan import SollErgebnis
     from smartheat_runtime.budget_store import ZustandsSpeicher
     from smartheat_runtime.notifier import Notifier
     from smartheat_runtime.ports import MqttChannel, SignalSource, TriggerSource
@@ -80,6 +81,10 @@ class Runtime:
     # Ob die Wanduhr als Grundlage einer Frist gilt (uhr.UhrVertrauen, vom Start verdrahtet). Der Vorgabewert vertraut
     # nie: ohne verlaessliche Uhr beginnt keine Abo-Frist und keine endet.
     uhr_vertrauen: Callable[[], bool] = lambda: False
+    # Das geltende Soll des letzten lokalen Checks (plan.SollErgebnis): Quelle der Soll-Art davor (ein Anstieg durch den
+    # Plan ist nicht der des Kunden) und des Merkers `uhr_unklar` (ruhende Betriebsarten bei unklarer Uhr). None bis
+    # zum ersten Check nach dem Start. Nicht persistiert.
+    geltendes_soll: SollErgebnis | None = None
     # Die Abo-Frist sollte beginnen, die Uhr war aber nicht vertrauenswuerdig (abo.enter_inactive); abo.frist_nachholen
     # holt den Beginn nach. Nicht persistiert.
     frist_offen: bool = False

@@ -5,6 +5,12 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Der Prüftakt rechnet jetzt je Heizkreis das geltende Soll aus dem Wunsch am Thermostat und der Bedienung des Kreises
+  (Wochenplan, Abwesenheit, Leerstand, Übersteuerung). Kälteschutz und Notfall-Boost lesen dieses Soll; ist die
+  Soll-Quelle aus (Thermostat aus, Frostschutz-Stellung), schreibt der Plan nichts. Ein Anstieg durch den Plan startet
+  den Comfort-Boost nur beim Profil „Boost“ (ein Anstieg des Kunden wie bisher immer). Ohne Plan, ohne Zeitzone oder
+  in der Testphase gilt unverändert der Wunsch; ein Fehler der Rechnung hält die Regelung nicht an.
+
 - Die Rechnung des geltenden Solls nimmt das Urteil über die Uhr entgegen: ist die Uhr nicht vertrauenswürdig, ruhen
   Wochenplan, Abwesenheit, Leerstand und Übersteuerung, das Soll ist der Wunsch (die warme Richtung), und das Ergebnis
   trägt einen Merker für die spätere Meldung „Uhr unklar“. Sobald die Uhr wieder vertrauenswürdig ist, gilt der Plan an

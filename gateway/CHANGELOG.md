@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Der Pruefertakt rechnet je Heizkreis das geltende Soll aus dem Wunsch und der Bedienung des Kreises (Wochenplan,
+  Abwesenheit, Leerstand, Uebersteuerung); jeder Kreis liest seinen eigenen Eintrag der Dokumente. Ohne Plan gilt wie
+  bisher der Wunsch des Thermostats.
+
 - Das Manifest nennt die Art der Aenderung (`art`: `sicherheit`, `funktion` oder `treiberfix`) und ein Ablaufdatum
   (`ablauf`, UTC). Der Updater installiert ein abgelaufenes Manifest nicht (Ergebnis `manifest_abgelaufen`, nicht in der
   Liste der abgelehnten Manifeste, eine neu signierte Fassung derselben Version bleibt annehmbar), ebenso keines mit

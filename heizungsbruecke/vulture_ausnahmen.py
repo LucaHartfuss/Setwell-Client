@@ -28,11 +28,9 @@ _.UNAUTHENTICATED_ERROR  # Server: geraete/devices_api.py (Text der 401-Antwort)
 _.ENERGIE_EINHEITEN  # Server: einrichtung/ha_pruefung.py, einrichtung/ha.py, geraete/device_config.py; im Geraet nur gepinnt (bindungsparameter.EINHEITEN)
 _.expires_rule  # Feld von wire.Command: Server geraete/device_protocol.py wertet die Regel aus (expires_seconds None)
 
-# --- Soll aus der Bedienung (smartheat_core/plan.py): die Verdrahtung in beide Hosts folgt, bis dahin ruft nur der Test ---
-_.soll_effektiv  # smartheat_core/plan.py: noch ohne Aufrufer in den Hosts (tests/test_core_plan.py)
-_.soll_art  # smartheat_core/plan.py SollErgebnis: Feld wird mit der Verdrahtung in die Telemetrie gelesen
+# --- Soll aus der Bedienung (smartheat_core/plan.py): der Prueftakt rechnet es je Kreis (smartheat_runtime/plan_quelle.py) ---
 _.naechster_wechsel  # smartheat_core/plan.py SollErgebnis: Feld wird mit dem Wochenplan vom Wecker gelesen
-_.uhr_unklar  # smartheat_core/plan.py SollErgebnis: Merker fuer die Meldung "Uhr unklar", gelesen ab der Verdrahtung und der Meldung
+_.uhr_unklar  # smartheat_core/plan.py SollErgebnis: Merker fuer die Meldung "Uhr unklar", gelesen mit der Meldung
 _.wochenplan_fehler  # smartheat_core/plan.py: Formpruefung des Wochenplans, der Dokument-Pruefer des Hosts ruft sie mit der Verdrahtung
 _.anstieg_vom_kunden  # smartheat_core/plan.py: Eingang des Boosts (anstieg_vom_kunden), mit der Verdrahtung gerufen
 _.SOLL_ART_ABSENKUNG  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung

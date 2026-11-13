@@ -23,7 +23,7 @@ from heizungsbruecke.manifest import build_manifest, entity_ref
 from heizungsbruecke.version import ADDON_VERSION
 from smartheat_core import config_check, kreisansicht, wallclock
 from smartheat_core.logtext import lesbar
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, plan_quelle
 from smartheat_runtime.app import Loaded, Notice, RestoreParts, StartFailure
 from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError
 from smartheat_runtime.notifier import STATE_OK
@@ -202,7 +202,8 @@ class HaHost:
                 self._konfiguration, rastung_pfad=config.RASTUNG_PATH,
                 entitlement_path=config.entitlement_path(self.kreis), kreis=self.kreis,
                 abo_source=lambda: self._geraet.abo_status(self.kreis),
-                zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis))
+                zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
+                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
             # Ohne gueltige Bindungsparameter kein Start
             description = dokument_config.beschreibung(self._konfiguration, self.kreis)
             _wait_for_required_entities(self._ha_api, b)

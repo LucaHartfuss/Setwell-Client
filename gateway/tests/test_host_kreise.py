@@ -400,3 +400,24 @@ def test_das_soll_ende_senkt_nie_und_schreibt_nicht_auf_ein_ausgeschaltetes_ther
     world.advance(3600)
 
     assert _gesetzt(world, THERMOSTAT) == []
+
+
+def test_jeder_kreis_rechnet_sein_geltendes_soll_aus_dem_eigenen_eintrag_der_dokumente(world):
+    """Die Planquelle gibt je Kreis dessen Eintrag aus Konfiguration und Bedienung; ohne Betriebsart ist das geltende Soll
+    jedes Kreises der Wunsch seines Thermostats, wie ohne Plan."""
+    dokument = zwei_kreise()
+    dokument["zeitzone"] = "Europe/Berlin"
+    _einrichten(world, dokument)
+    world.start_runtime()
+    world.z2m.report(SENSOR2, temperature=19.0, battery=80)
+    world.connect()
+    world.bedienung_senden(zwei_bedienung(22.0, 24.0), 1)
+
+    eingaben = {kreis: laufzeit.config.plan_source() for kreis, laufzeit in world.laufzeit.kreise().items()}
+    world.advance(600)  # mindestens ein lokaler Check je Kreis
+    soll = {kreis: laufzeit.geltendes_soll for kreis, laufzeit in world.laufzeit.kreise().items()}
+
+    assert {kreis: eingabe.konfiguration["kreis"] for kreis, eingabe in eingaben.items()} == {1: 1, 2: 2}
+    assert {kreis: eingabe.bedienung["raum_soll"] for kreis, eingabe in eingaben.items()} == {1: 22.0, 2: 24.0}
+    assert {kreis: (ergebnis.soll, ergebnis.soll_art) for kreis, ergebnis in soll.items()} == {
+        1: (22.0, "wunsch"), 2: (24.0, "wunsch")}

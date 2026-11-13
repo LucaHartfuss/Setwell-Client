@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 from bindung_beispiele import VAILLANT_MYPYLLANT
@@ -14,9 +15,11 @@ from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.ha_binding import HaPlantBinding
 from smartheat_core import wallclock, write_budget
 from smartheat_core.pipeline import LeverPipeline
+from smartheat_core.plan import SollErgebnis
 from smartheat_core.safety import LocalSafety
 from smartheat_runtime import regulation
 from smartheat_runtime.backup_store import load_backup
+from smartheat_runtime.plan_quelle import PlanEingabe
 from smartheat_runtime.roles import ChannelManifest
 
 # Unterscheidbar: Notfall (= Clamp-Maximum) 0.8/5.0, Comfort 0.5/2.0, Wiederherstellungspunkt 0.3/1.0.
@@ -56,6 +59,7 @@ def _runtime(
     return SimpleNamespace(
         manifest=manifest, signals=ha_api, ha_api=ha_api, config=runtime_config(), store=store,
         states=values, clock=clock or time.monotonic, boost_mono_start=None, kaelteschutz_mono_start=None, soll_quelle_aus=False,
+        uhr_vertrauen=lambda: False, geltendes_soll=None,
         override=LeverPipeline(
             store, HaPlantBinding(ha_api, manifest, VAILLANT_MYPYLLANT), safety, **({} if clock is None else {"clock": clock}),
         ),
@@ -542,3 +546,195 @@ def test_an_unreadable_room_target_logs_the_error_text_from_ha_only_escaped(make
     with caplog.at_level(logging.WARNING, logger="smartheat_runtime.regulation"):
         regulation.refresh_stable_target(rt)
     assert f"room_target nicht lesbar, Stable-Target-Cache bleibt bei 21.0: {FREMDTEXT_IM_LOG}" in logzeilen(caplog)
+
+
+# --- geltendes Soll aus dem Plan ---
+
+BERLIN = ZoneInfo("Europe/Berlin")
+WOCHENPLAN = [{"tag": tag, "warm_ab": "06:30", "kuehl_ab": "22:30"} for tag in range(1, 8)]
+ABWESEND = {"bis": "2026-12-01T10:00:00Z", "temp": 17.0, "aufheizen_ab": None}
+
+
+def _berlin(stunde, minute=0, tag=2):
+    return datetime(2026, 11, tag, stunde, minute, tzinfo=BERLIN)
+
+
+def _mit_plan(rt, monkeypatch, *, jetzt, bedienung=None, konfiguration=None, vertrauen=True, zeitzone="Europe/Berlin"):
+    """Haengt eine Planquelle an die Laufzeit; das Ergebnis ist die veraenderliche Eingabe (`jetzt`, `bedienung`,
+    `konfiguration`, `vertrauen`), die ein Test zwischen den Checks aendert."""
+    eingabe = {
+        "jetzt": jetzt, "vertrauen": vertrauen,
+        "bedienung": bedienung if bedienung is not None else {"kreis": 1, "modus": "manuell", "raum_soll": 21.0, "wochenplan": WOCHENPLAN},
+        "konfiguration": konfiguration if konfiguration is not None else {"kreis": 1, "absenkung_k": 3.0},
+    }
+    monkeypatch.setattr(wallclock, "_now", lambda: eingabe["jetzt"])
+    rt.config = runtime_config(plan_source=lambda: PlanEingabe(zeitzone, eingabe["bedienung"], eingabe["konfiguration"]))
+    rt.uhr_vertrauen = lambda: eingabe["vertrauen"]
+    rt.geltendes_soll = None
+    return eingabe
+
+
+def _starts_comfort(rt):
+    vorher = rt.store.state.boost_active
+    regulation.run_local_check(rt)
+    return not vorher and rt.store.state.boost_active
+
+
+def test_ohne_plan_ist_das_geltende_soll_der_wunsch(make_store):
+    rt = _runtime(make_store(backup={"last_room_target": 21.0, **RESTORE_POINT}), room_actual=20.0, room_target=21.0)
+
+    regulation.run_local_check(rt)
+
+    assert rt.geltendes_soll == SollErgebnis(21.0, "wunsch", None)
+
+
+def test_notfall_boost_liest_das_geltende_soll_der_kuehlen_phase(make_store, monkeypatch):
+    """In der kuehlen Phase gilt 18 Grad (Wunsch 21, Absenkung 3 K): 19,5 Grad sind dort kein Notfall, gegen den Wunsch
+    waeren es 1,5 K darunter. In der warmen Phase gilt der Wunsch, derselbe Raum startet den Notfall-Boost."""
+    store = make_store(backup=dict(RESTORE_POINT), failsafe={"failsafe_active": True})
+    rt = _runtime(store, room_actual=19.5, room_target=21.0)
+    eingabe = _mit_plan(rt, monkeypatch, jetzt=_berlin(23, 30))
+
+    regulation.run_local_check(rt)
+
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (18.0, "absenkung")
+    assert _writes(rt) == [] and store.state.emergency_boost_active is False
+
+    eingabe["jetzt"] = _berlin(7, 0, tag=3)
+    regulation.run_local_check(rt)
+
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (21.0, "wunsch")
+    assert _writes(rt) == EMERGENCY and store.state.emergency_boost_active is True
+
+
+def test_kaelteschutz_rechnet_mit_dem_geltenden_soll_und_bei_soll_quelle_aus_ohne_soll(make_store, monkeypatch):
+    gesehen = []
+    echt = regulation._kaelteschutz_entscheiden
+
+    def spaeher(rt, now, soll):
+        gesehen.append(soll)
+        return echt(rt, now, soll)
+
+    monkeypatch.setattr(regulation, "_kaelteschutz_entscheiden", spaeher)
+    rt = _runtime(make_store(backup={"last_room_target": 18.0, **RESTORE_POINT}), room_actual=19.5, room_target=21.0)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(23, 30))
+
+    regulation.run_local_check(rt)
+    rt.soll_quelle_aus = True
+    regulation.run_local_check(rt)
+
+    assert gesehen == [18.0, None]
+    assert rt.geltendes_soll == SollErgebnis(None, None, None)
+
+
+def test_die_soll_quelle_aus_schreibt_nichts_auch_nicht_ueber_den_plan(make_store, monkeypatch):
+    rt = _runtime(make_store(backup={"last_room_target": 21.0, **RESTORE_POINT}), room_actual=15.0, room_target=21.0)
+    rt.soll_quelle_aus = True
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(23, 30))
+
+    regulation.run_local_check(rt)
+
+    assert _writes(rt) == []
+    assert [aufruf for aufruf in rt.ha_api.method_calls if aufruf[0].startswith(("set_", "call_"))] == []
+
+
+@pytest.mark.parametrize("profil,startet", [("boost", True), ("kurve", False), (None, False), ("unbekannt", False)])
+def test_ein_anstieg_durch_den_plan_boostet_nur_beim_profil_boost(make_store, monkeypatch, profil, startet):
+    rt = _runtime(make_store(backup={"last_room_target": 18.0, **RESTORE_POINT}), room_actual=18.0, room_target=21.0)
+    konfiguration = {"kreis": 1, "absenkung_k": 3.0, **({} if profil is None else {"aufheizen": profil})}
+    eingabe = _mit_plan(rt, monkeypatch, jetzt=_berlin(6, 0), konfiguration=konfiguration)
+    regulation.run_local_check(rt)  # kuehle Phase, Soll 18: kein Anstieg
+    assert rt.store.state.boost_active is False
+
+    eingabe["jetzt"] = _berlin(6, 31)  # Beginn der warmen Phase: das Soll steigt auf 21
+    regulation.run_local_check(rt)
+
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (21.0, "wunsch")
+    assert rt.store.state.boost_active is startet
+    assert rt.store.state.last_room_target == 21.0  # der Anstieg ist verbraucht, auch ohne Boost
+
+
+def test_die_erhoehung_durch_den_kunden_boostet_auch_beim_profil_kurve(make_store, monkeypatch):
+    rt = _runtime(make_store(backup={"last_room_target": 21.0, **RESTORE_POINT}), room_actual=19.0, room_target=21.0)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(12, 0), konfiguration={"kreis": 1, "absenkung_k": 3.0, "aufheizen": "kurve"})
+    regulation.run_local_check(rt)
+    assert rt.store.state.boost_active is False
+
+    rt.store.update(stable_target=22.0)
+    regulation.run_local_check(rt)
+
+    assert rt.store.state.boost_active is True
+
+
+def test_nach_dem_start_gilt_ein_anstieg_ohne_bekannte_herkunft_nicht_als_der_des_kunden(make_store, monkeypatch):
+    """Nach einem Neustart fehlt die Art des Solls davor: ein Anstieg gegen das gemerkte Soll kann der Plan sein und
+    boostet beim Profil kurve nicht; ab dem zweiten Check kennt die Laufzeit die Herkunft."""
+    rt = _runtime(make_store(backup={"last_room_target": 18.0, **RESTORE_POINT}), room_actual=18.0, room_target=21.0)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(7, 0), konfiguration={"kreis": 1, "absenkung_k": 3.0, "aufheizen": "kurve"})
+
+    regulation.run_local_check(rt)
+
+    assert rt.store.state.boost_active is False and rt.store.state.last_room_target == 21.0
+
+
+def test_in_der_testphase_ohne_setwell_gibt_es_keinen_plan_boost_auch_beim_profil_boost(make_store, monkeypatch):
+    rt = _runtime(make_store(backup={"last_room_target": 18.0, **RESTORE_POINT}), room_actual=18.0, room_target=21.0)
+    eingabe = _mit_plan(rt, monkeypatch, jetzt=_berlin(6, 0), konfiguration={"kreis": 1, "absenkung_k": 3.0, "aufheizen": "boost"})
+    rt.config = dataclasses.replace(rt.config, zustand_source=lambda: "testphase_ohne")
+    regulation.run_local_check(rt)
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (21.0, "wunsch")  # ohne Setwell gilt kein Plan
+    eingabe["jetzt"] = _berlin(6, 31)
+
+    regulation.run_local_check(rt)
+
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art) == (21.0, "wunsch")
+    assert rt.store.state.boost_active is False
+
+
+def test_bei_unklarer_uhr_gilt_der_wunsch_und_der_naechste_check_rechnet_neu(make_store, monkeypatch):
+    rt = _runtime(make_store(backup={"last_room_target": 21.0, **RESTORE_POINT}), room_actual=21.0, room_target=21.0)
+    eingabe = _mit_plan(rt, monkeypatch, jetzt=_berlin(23, 30), vertrauen=False)
+
+    regulation.run_local_check(rt)
+
+    assert rt.geltendes_soll == SollErgebnis(21.0, "wunsch", None, uhr_unklar=True)
+
+    eingabe["vertrauen"] = True
+    eingabe["jetzt"] = _berlin(23, 35)
+    regulation.run_local_check(rt)
+
+    assert (rt.geltendes_soll.soll, rt.geltendes_soll.soll_art, rt.geltendes_soll.uhr_unklar) == (18.0, "absenkung", False)
+
+
+def test_eine_unbrauchbare_zone_haelt_die_regelung_nicht_an(make_store, monkeypatch, caplog):
+    rt = _runtime(make_store(backup={"last_room_target": 21.0, **RESTORE_POINT}), room_actual=21.0, room_target=21.0)
+    _mit_plan(rt, monkeypatch, jetzt=_berlin(23, 30), zeitzone="Mars/Olympus")
+
+    with caplog.at_level(logging.WARNING):
+        regulation.run_local_check(rt)
+
+    assert rt.geltendes_soll == SollErgebnis(21.0, "wunsch", None)
+    assert "Mars" not in caplog.text
+
+
+@pytest.mark.parametrize("profil,starts", [("boost", 6), ("kurve", 0)])
+def test_zehn_plananstiege_an_einem_tag_halten_die_quote_von_sechs_starts(make_store, clock, monkeypatch, profil, starts):
+    """Abwesenheit und Rueckkehr im Wechsel: jede Rueckkehr hebt das Soll von 17 auf 21 Grad durch den Plan, 60 Minuten
+    nach der letzten, der Raum ist jedes Mal kalt. Mit Profil boost startet die Quote des Schreibbudgets sechs
+    Comfort-Boosts am Tag, danach keinen mehr; mit Profil kurve keinen."""
+    rt = _runtime(make_store(backup={"last_room_target": 17.0, **RESTORE_POINT}), room_actual=17.5, room_target=21.0, clock=clock)
+    weg = {"kreis": 1, "modus": "abwesend", "raum_soll": 21.0, "abwesend": ABWESEND}
+    da = {"kreis": 1, "modus": "manuell", "raum_soll": 21.0}
+    eingabe = _mit_plan(rt, monkeypatch, jetzt=_berlin(6, 0), bedienung=weg,
+                        konfiguration={"kreis": 1, "absenkung_k": 3.0, "aufheizen": profil})
+    gestartet = 0
+    for _ in range(10):
+        eingabe["bedienung"], eingabe["jetzt"] = weg, eingabe["jetzt"] + timedelta(minutes=30)
+        clock.advance(1800)
+        regulation.run_local_check(rt)  # Abwesend: das Soll sinkt, ein laufender Boost endet
+        assert rt.geltendes_soll.soll_art == "abwesend" and rt.store.state.boost_active is False
+        eingabe["bedienung"], eingabe["jetzt"] = da, eingabe["jetzt"] + timedelta(minutes=30)
+        clock.advance(1800)
+        gestartet += _starts_comfort(rt)
+
+    assert gestartet == starts
