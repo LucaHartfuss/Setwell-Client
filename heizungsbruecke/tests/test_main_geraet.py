@@ -800,7 +800,8 @@ def test_a_marker_that_does_not_fit_the_lock_stays_on_reset_and_nothing_is_delet
         geraet_env.clock.advance(3 * 300)
         result.worker.run_pending()  # ein Neustart wuerde hier prozess.Neustart werfen
         events = [data for kind, data in geraet_env.ha.events if kind == "smartheat_status"]
-        assert events[-1]["status"] == "abgemeldet" and events[-1]["grund"] == app.SIGN_OFF_INVALID_CONFIG
+        assert events[-1]["status"] == "abgemeldet"
+        assert events[-1]["grund"] == {"code": "status.grund_konfiguration_ungueltig", "params": {}}
         assert geraet_env.ha.writes == [] and ha.deleted == []
         gelesen = aufraeumen_markierung.lesen(config.AUFRAEUMEN_PATH)
         assert gelesen is not None and gelesen.zurueckgesetzt is False

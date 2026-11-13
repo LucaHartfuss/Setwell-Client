@@ -447,11 +447,12 @@ def test_the_led_file_follows_the_state(welt, clock):
 
 def test_snapshot_has_no_claim_code_and_only_known_host_fields(welt):
     dateien.schreiben_json(welt.host_dir / "status.json", {"netz": True, "dns": False, "zeit_synchron": True, "geheim": "x"}, modus=dateien.LESBAR)
-    welt.host.anzeigen(_anzeige(hinweise=({"key": "k", "stufe": "info", "text": "t"},)))
+    hinweis = {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}
+    welt.host.anzeigen(_anzeige(hinweise=(hinweis,)))
     snap = welt.host.snapshot()
     assert snap["geraet"] == "shg-aaaaaaaaaaaaaaaa" and snap["host"] == {"netz": True, "dns": False,
                                                                         "zeit_synchron": True}
-    assert "ABCDEFGHIJKL" not in json.dumps(snap) and snap["hinweise"] == [{"key": "k", "stufe": "info", "text": "t"}]
+    assert "ABCDEFGHIJKL" not in json.dumps(snap) and snap["hinweise"] == [hinweis]
 
 
 def test_wish_and_setpoint_source_go_to_the_device(welt):

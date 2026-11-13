@@ -76,6 +76,7 @@ from smartheat_runtime.status import (
     STATUS_ABO_BEENDET,
     STATUS_KONFIGURATIONSFEHLER,
     StatusReporter,
+    laufzeitgrund,
 )
 from smartheat_runtime.texts import HostTexts
 from smartheat_runtime.worker import Event, RegulationWorker
@@ -95,8 +96,6 @@ GRUND_ZUSTAND_NICHT_MIGRIERT = (
 #: Code, wenn der Zustand des Kreises zu einer anderen Anlage gehoert als die, auf die das Dokument ihn jetzt zeigen
 #: laesst: nichts wird geschrieben (Wiederherstellungspunkt und Ursprungswerte gehoeren zur alten Anlage).
 GRUND_ANDERE_ANLAGE = "zustand_andere_anlage"
-SIGN_OFF_INVALID_CONFIG = "Konfiguration ungültig, die Anlage wurde nicht zurückgesetzt"
-SIGN_OFF_RESTORE_FAILED = "Zurücksetzen der Anlage scheitert, neuer Versuch in {seconds} s"
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +239,7 @@ def _fail_start(notifier, status, clock, grund: str, key: str | None = None, *, 
         meldung = meldungen.neu("meldung.konfiguration_fehler_boost", **params)
     if not notifier.notify("konfiguration", f"fehler:{grund if key is None else key}", meldung, critical=True):
         notifier.refresh_persistent("konfiguration", meldung)
-    status.update(konfigurationsfehler=True, grund=grund)
+    status.update(konfigurationsfehler=True, grund=laufzeitgrund("start_fehlgeschlagen"))
     return _idle(clock, status, STATUS_KONFIGURATIONSFEHLER, neustart=neustart, recheck_after=CONFIG_RECHECK_SECONDS)
 
 
@@ -313,7 +312,7 @@ def _sign_off(parts: RestoreParts | None, store, notifier, status, clock, retry_
     # die Anlage noch auf Boost-Werten steht.
     notifier.clear_all(keep=(abo.RESTORE_KEY,))
     if restorer is None:
-        grund = GRUND_ANDERE_ANLAGE if andere_anlage else SIGN_OFF_INVALID_CONFIG
+        grund = laufzeitgrund("andere_anlage" if andere_anlage else "konfiguration_ungueltig")
         if boosting:
             _report_sign_off_restore(notifier, "meldung.abmeldung_boost_aktiv", store.state, None, None,
                                      zusatz=GRUND_ANDERE_ANLAGE if andere_anlage else None)
@@ -321,7 +320,7 @@ def _sign_off(parts: RestoreParts | None, store, notifier, status, clock, retry_
         grund = None
         abo.report_restore(notifier, ok=True)
     else:
-        grund = SIGN_OFF_RESTORE_FAILED.format(seconds=retry_seconds)
+        grund = laufzeitgrund("zuruecksetzen_scheitert", sekunden=retry_seconds)
         assert parts is not None  # restorer entsteht nur mit parts
         _report_sign_off_restore(notifier, "meldung.abmeldung_zuruecksetzen_scheitert", store.state,
                                  parts.binding.description, restorer.sign_off_values())
@@ -418,7 +417,7 @@ def _finish_at_start(rt: Runtime, clock, ende_quelle: Callable[[], SollEnde | No
             rt, "Abo-inaktiv-Frist abgelaufen, Boost-Werte konnten nicht zurueckgesetzt werden - "
             "erneuter Versuch in %s s", retry_seconds,
         )
-        status.update(grund=abo.RESTORE_FAILED_REASON)
+        status.update(grund=laufzeitgrund("wiederherstellung_scheitert"))
         bridge.worker.schedule(retry_seconds, Event(EV_RECHECK))
 
     bridge.worker.register(EV_RECHECK, _attempt)
@@ -827,7 +826,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     if _zustand_nicht_migriert(boot):
         # Vor jedem Schreiben: Meldung und Fehlerroute wuerden einen frischen Zustand im Kreisordner anlegen.
         logger.error("FEHLER: %s", GRUND_ZUSTAND_NICHT_MIGRIERT)
-        status.update(konfigurationsfehler=True, grund=GRUND_ZUSTAND_NICHT_MIGRIERT)
+        status.update(konfigurationsfehler=True, grund=laufzeitgrund("zustand_nicht_migriert"))
         return _idle(clock, status, STATUS_KONFIGURATIONSFEHLER, neustart=neustart,
                      recheck_after=CONFIG_RECHECK_SECONDS)
     notifier = Notifier(store, notify_sink or host.notify_sink, boot.notify_hints_off)

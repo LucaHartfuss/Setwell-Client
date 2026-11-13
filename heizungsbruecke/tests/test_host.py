@@ -14,6 +14,7 @@ from heizungsbruecke.derived_sensors import DerivedSensors
 from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.host import DERIVED_SENSORS_RETRY_DELAYS_SECONDS, HaHost
 from smartheat_core import meldungen
+from smartheat_runtime import status
 from smartheat_runtime.app import IdleBridge, StartFailure
 from smartheat_runtime.backup_store import load_backup, save_backup
 from smartheat_runtime.dokument_config import ConfigError
@@ -31,7 +32,7 @@ def test_sign_off_with_broken_configuration_restores_nothing_and_reports_why(env
     bridge = _start_bridge(env, abgemeldet=True, verteilsystem=None)
     assert isinstance(bridge, IdleBridge) and bridge.reason == "abgemeldet"
     assert env.ha.writes == []
-    assert bridge.status is not None and bridge.status.flags.grund.startswith("Konfiguration ungültig")
+    assert bridge.status is not None and bridge.status.flags.grund == status.laufzeitgrund("konfiguration_ungueltig")
 
 
 def test_sign_off_parts_are_none_for_a_broken_configuration():

@@ -9,6 +9,8 @@ from device_helpers import Sent, _command
 from smartheat_device import commands as cmd
 from smartheat_device import fehler, nachrichten, wire
 
+HINWEIS_DOPPELT = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
+HINWEIS_LOESCHEN = {"key": "geraet_doppelt", "code": None, "params": {}, "stufe": None}
 
 class Clock:
     def __init__(self) -> None:
@@ -111,7 +113,7 @@ def test_a_foreign_field_in_a_command_is_refused_and_does_not_run(tmp_path, feld
     ("diagnostics", {"zukunft": 1}, {"regel": "unbekannt"}),
     ("diagnostics", {"stunden": 1}, {"feld": "stunden", "regel": "unbekannt"}),
     ("inventory", {"stunden": 1, "extra": 2}, {"regel": "unbekannt"}),
-    ("hinweis", {"key": "k", "stufe": "info", "text": "t", "zukunft": 1}, {"regel": "unbekannt"}),
+    ("hinweis", {**HINWEIS_DOPPELT, "zukunft": 1}, {"regel": "unbekannt"}),
 ])
 def test_a_foreign_payload_field_is_refused_and_does_not_run(tmp_path, kind, payload, erwartet):
     sent, calls = Sent(), []
@@ -125,8 +127,10 @@ def test_a_foreign_payload_field_is_refused_and_does_not_run(tmp_path, kind, pay
     ("claim_state", {}, "device_state"),
     ("zigbee_permit_join", {}, "seconds"),
     ("inventory", {"filter": {"treiber": "simulation"}}, "stunden"),
-    ("hinweis", {"key": "k", "stufe": "info"}, "text"),
-    ("hinweis", {"stufe": "info", "text": "t"}, "key"),
+    ("hinweis", {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}}, "stufe"),
+    ("hinweis", {"code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}, "key"),
+    ("hinweis", {"key": "geraet_doppelt", "params": {}, "stufe": "rot"}, "code"),
+    ("hinweis", {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "stufe": "rot"}, "params"),
 ])
 def test_a_missing_required_payload_field_is_refused_and_does_not_run(tmp_path, kind, payload, feld):
     sent, calls = Sent(), []
@@ -138,7 +142,7 @@ def test_a_missing_required_payload_field_is_refused_and_does_not_run(tmp_path, 
 
 @pytest.mark.parametrize("kind, payload", [
     ("claim_state", {"device_state": "uebernommen"}), ("new_claim_code", {}), ("sign_off", {}), ("diagnostics", {}),
-    ("hinweis", {"key": "k", "stufe": "info", "text": "t"}), ("inventory", {"stunden": 0}),
+    ("hinweis", HINWEIS_DOPPELT), ("hinweis", HINWEIS_LOESCHEN), ("inventory", {"stunden": 0}),
     ("inventory", {"stunden": 1, "filter": {"treiber": "simulation"}}), ("zigbee_permit_join", {"seconds": 60}),
     ("zigbee_devices", {}),
 ])
@@ -603,49 +607,64 @@ def test_a_broken_store_counts_as_empty(tmp_path):
 
 def test_a_hint_is_set_persisted_and_cleared(tmp_path):
     hinweise = cmd.Hinweise(tmp_path)
-    assert hinweise.handler({"key": "geraet_doppelt", "stufe": "kritisch", "text": "Kopie stoppen"}) == cmd.Done({})
-    assert hinweise.alle() == ({"key": "geraet_doppelt", "stufe": "kritisch", "text": "Kopie stoppen"},)
+    assert hinweise.handler(HINWEIS_DOPPELT) == cmd.Done({})
+    assert hinweise.alle() == ({"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {},
+                                "stufe": "rot"},)
     assert cmd.Hinweise(tmp_path).alle() == hinweise.alle()
-    hinweise.handler({"key": "geraet_doppelt", "stufe": "kritisch", "text": ""})
+    hinweise.handler(HINWEIS_LOESCHEN)
     assert hinweise.alle() == () and cmd.Hinweise(tmp_path).alle() == ()
 
 
-@pytest.mark.parametrize("payload", [
-    {"key": "", "stufe": "info", "text": "x"}, {"key": "k", "stufe": "laut", "text": "x"},
-    {"key": "k", "stufe": "info", "text": 5}, {"key": "k" * 65, "stufe": "info", "text": "x"},
-])
-def test_invalid_hints_are_refused(tmp_path, payload):
-    with pytest.raises(cmd.InvalidPayload) as error:
-        cmd.Hinweise(tmp_path).handler(payload)
-    assert error.value.details["feld"] in ("key", "stufe", "text")
-
-
-def test_hinweis_ueber_der_obergrenze_wird_abgelehnt(tmp_path):
-    """Ein neuer Schluessel nur bis 32; Ueberschreiben und Loeschen gehen weiter, die Datei
-    bleibt bei der Ablehnung unveraendert (der Server sendet nur die fuenf wire.MELDUNGEN, keine gueltige Eingabe faellt)."""
+def test_a_hint_with_parameters_keeps_them(tmp_path):
     hinweise = cmd.Hinweise(tmp_path)
-    for nr in range(32):
-        hinweise.handler({"key": f"k{nr}", "stufe": "info", "text": "t"})
-    vorher = (tmp_path / cmd.HINWEISE_FILE).read_bytes()
+    hinweise.handler({"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt",
+                      "params": {"roh": 30, "begrenzt": 25}, "stufe": "orange"})
+    assert cmd.Hinweise(tmp_path).alle() == (
+        {"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt", "params": {"roh": 30, "begrenzt": 25},
+         "stufe": "orange"},)
+
+
+@pytest.mark.parametrize(("payload", "feld"), [
+    ({**HINWEIS_DOPPELT, "key": ""}, "key"),
+    ({**HINWEIS_DOPPELT, "key": "erfunden"}, "key"),
+    ({**HINWEIS_DOPPELT, "key": "x" * 65}, "key"),
+    ({**HINWEIS_DOPPELT, "code": "meldung.erfunden"}, "code"),
+    ({**HINWEIS_DOPPELT, "code": "meldung.gesperrt"}, "code"),  # Code gehoert zu einem anderen Schluessel
+    ({**HINWEIS_DOPPELT, "code": 5}, "code"),
+    ({**HINWEIS_DOPPELT, "stufe": "kritisch"}, "stufe"),  # alte Stufenwoerter sind keine Stufen mehr
+    ({**HINWEIS_DOPPELT, "stufe": "orange"}, "stufe"),  # die Stufe gehoert zum Code
+    ({**HINWEIS_DOPPELT, "stufe": None}, "stufe"),
+    ({**HINWEIS_DOPPELT, "params": {"fremd": 1}}, "params"),
+    ({**HINWEIS_DOPPELT, "params": []}, "params"),
+    ({"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt", "params": {"roh": 30}, "stufe": "orange"},
+     "params"),
+    ({"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt", "params": {"roh": True, "begrenzt": 1},
+      "stufe": "orange"}, "params"),
+    ({**HINWEIS_LOESCHEN, "stufe": "rot"}, "stufe"),  # Loeschen traegt weder Parameter noch Stufe
+    ({**HINWEIS_LOESCHEN, "params": {"a": 1}}, "params"),
+])
+def test_invalid_hints_are_refused(tmp_path, payload, feld):
+    hinweise = cmd.Hinweise(tmp_path)
     with pytest.raises(cmd.InvalidPayload) as error:
-        hinweise.handler({"key": "zu_viel", "stufe": "info", "text": "t"})
-    assert error.value.details["feld"] == "key" and error.value.details["regel"] == "ungueltig"
-    assert (tmp_path / cmd.HINWEISE_FILE).read_bytes() == vorher and len(hinweise.alle()) == 32
-    hinweise.handler({"key": "k0", "stufe": "kritisch", "text": "neu"})  # Ueberschreiben geht
-    assert {"key": "k0", "stufe": "kritisch", "text": "neu"} in hinweise.alle()
-    hinweise.handler({"key": "unbekannt", "stufe": "info", "text": ""})  # Loeschen eines fehlenden Schluessels geht
-    hinweise.handler({"key": "k1", "stufe": "info", "text": ""})
-    assert len(hinweise.alle()) == 32 - 1
-    hinweise.handler({"key": "zu_viel", "stufe": "info", "text": "t"})  # wieder Platz
-    assert len(hinweise.alle()) == 32
+        hinweise.handler(payload)
+    assert error.value.details["feld"] == feld
+    assert hinweise.alle() == () and not (tmp_path / cmd.HINWEISE_FILE).exists()
 
 
 def test_the_hint_command_through_the_register(tmp_path):
     sent = Sent()
     register = cmd.CommandRegister(tmp_path, sent)
     register.register("hinweis", cmd.Hinweise(tmp_path).handler)
-    register.empfangen(_command("hinweis", payload={"key": "k", "stufe": "laut", "text": "x"}))
+    register.empfangen(_command("hinweis", payload={**HINWEIS_DOPPELT, "stufe": "laut"}))
     assert sent.results[0]["error"]["grund"] == "ungueltige_nutzlast"
+
+
+def test_an_old_hint_file_with_texts_is_dropped(tmp_path):
+    """Kein Lesen des alten Formats: eine Datei mit Klartext-Hinweisen bleibt ohne Wirkung."""
+    (tmp_path / cmd.HINWEISE_FILE).write_text(
+        '{"geraet_doppelt": {"stufe": "kritisch", "text": "Kopie stoppen"},'
+        ' "gesperrt": {"code": "meldung.update_noetig", "params": {}, "stufe": "rot"}}')
+    assert cmd.Hinweise(tmp_path).alle() == ()
 
 
 def test_a_command_id_with_a_lone_surrogate_is_dropped_like_an_invalid_one(tmp_path):
@@ -666,8 +685,11 @@ def test_a_hint_with_a_lone_surrogate_is_refused_and_does_not_poison_the_stored_
     sent = Sent()
     register, hinweise = cmd.CommandRegister(tmp_path, sent), cmd.Hinweise(tmp_path)
     register.register("hinweis", hinweise.handler)
-    register.empfangen(_command("hinweis", "c1", {"key": "k", "stufe": "info", "text": "a\ud800"}))
-    register.empfangen(_command("hinweis", "c2", {"key": "k", "stufe": "info", "text": "gut"}))
+    register.empfangen(_command("hinweis", "c1", {"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt",
+                                                  "params": {"roh": 30, "begrenzt": 25, "herkunft": "a\ud800"},
+                                                  "stufe": "orange"}))
+    register.empfangen(_command("hinweis", "c2", HINWEIS_DOPPELT))
     assert [(r["command_id"], r["ok"]) for r in sent.results] == [("c1", False), ("c2", True)]
     assert sent.results[0]["error"]["grund"] == "ungueltige_nutzlast"
-    assert hinweise.alle() == ({"key": "k", "stufe": "info", "text": "gut"},)
+    assert hinweise.alle() == ({"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {},
+                                "stufe": "rot"},)

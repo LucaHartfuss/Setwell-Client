@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Der Befehl `hinweis` trägt `key`, `code`, `params` und `stufe` statt eines fertigen Textes; das Gerät nimmt nur
+  Codes der eigenen Meldungstabelle an. Der Laufzeitstatus nennt den Grund einer Störung als Code mit Parametern
+  (`status.grund_*`) statt als Satz, ein Startfehler trägt dort keinen Fehlertext mehr (die Meldung an den Kunden bleibt).
+  Hinweise im alten Textformat in `hinweise.json` werden verworfen. Im Ereignis `smartheat_status` ist `grund` damit ein
+  Objekt `{code, params}` statt eines Strings.
 - Neuer Befehl `weg_pruefen` im Geräte-Vertrag (Ergebnis `gleiche_anlage`, `abweichung` oder `nicht_lesbar`); das Gerät
   lehnt ihn vorerst mit `nicht_unterstuetzt` ab. Die Anmeldephase `password` und das Feld `ciphertext` des Befehls
   `driver_login` entfallen, weil kein Treiber sie nutzt.

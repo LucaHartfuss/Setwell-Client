@@ -21,6 +21,9 @@ from smartheat_runtime.status import (
 )
 
 SEIT = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
+ENDE = status.laufzeitgrund("wiederherstellung_scheitert")
+START = status.laufzeitgrund("start_fehlgeschlagen")
+SCHEITERT = status.laufzeitgrund("zuruecksetzen_scheitert", sekunden=30)
 VAILLANT = LEVER_SETS["vaillant_vrc720"]
 WEISHAUPT = LEVER_SETS["weishaupt_wwp"]
 
@@ -47,15 +50,15 @@ def test_ohne_kreis_gibt_es_kein_ereignis():
 
 
 def test_die_felder_der_anlage_folgen_dem_schlechtesten_kreis():
-    eins = _ereignis(Flags(abo_beendet=True, grund="Frist abgelaufen"))
+    eins = _ereignis(Flags(abo_beendet=True, grund=ENDE))
     zwei = _ereignis(Flags(gestartet=True))
     erg = zusammenfassen({1: eins, 2: zwei})
     assert erg["status"] == "abo_beendet"
-    assert erg["grund"] == "Frist abgelaufen"
+    assert erg["grund"] == ENDE
 
     erg = zusammenfassen({1: zwei, 2: eins})
     assert erg["status"] == "abo_beendet"  # der schlechteste Kreis ist der zweite
-    assert erg["grund"] == "Frist abgelaufen"
+    assert erg["grund"] == ENDE
 
 
 @pytest.mark.parametrize("schlechter,besser", [
@@ -130,19 +133,19 @@ def test_ein_abgemeldeter_kreis_macht_die_anlage_nicht_abgemeldet_solange_andere
 
 def test_der_schlechteste_der_uebrigen_kreise_zaehlt_neben_einem_abgemeldeten():
     abgemeldet = _ereignis(Flags(abgemeldet=True))
-    fehler = _ereignis(Flags(konfigurationsfehler=True, grund="Hebelsatz"))
+    fehler = _ereignis(Flags(konfigurationsfehler=True, grund=START))
     erg = zusammenfassen({1: abgemeldet, 2: fehler})
     assert erg["status"] == "konfigurationsfehler"
-    assert erg["grund"] == "Hebelsatz"
+    assert erg["grund"] == START
 
 
 def test_abgemeldet_mit_grund_bleibt_im_ereignis_der_anlage_wenn_alle_abgemeldet_sind():
     """Ein Kreis, dessen Zuruecksetzen scheiterte (grund), darf die Anlage nicht als zurueckgesetzt zeigen, auch wenn
     ein niedrigerer Kreis ohne Grund abgemeldet ist."""
     sauber = _ereignis(Flags(abgemeldet=True))
-    offen = _ereignis(Flags(abgemeldet=True, grund="Zuruecksetzen gescheitert"))
-    assert zusammenfassen({1: sauber, 2: offen})["grund"] == "Zuruecksetzen gescheitert"
-    assert zusammenfassen({1: offen, 2: sauber})["grund"] == "Zuruecksetzen gescheitert"
+    offen = _ereignis(Flags(abgemeldet=True, grund=SCHEITERT))
+    assert zusammenfassen({1: sauber, 2: offen})["grund"] == SCHEITERT
+    assert zusammenfassen({1: offen, 2: sauber})["grund"] == SCHEITERT
     assert zusammenfassen({1: sauber, 2: sauber})["grund"] is None
 
 
@@ -165,7 +168,7 @@ def test_die_kreisliste_fuehrt_jeden_kreis_aufsteigend_mit_seinen_eigenen_felder
 
 
 def test_ein_kreis_beendet_der_andere_aktiv_stehen_getrennt_in_der_kreisliste():
-    beendet = _ereignis(Flags(abo_beendet=True, grund="Frist abgelaufen"))
+    beendet = _ereignis(Flags(abo_beendet=True, grund=ENDE))
     aktiv = _ereignis(Flags(gestartet=True, abo="aktiv"))
     erg = zusammenfassen({1: aktiv, 2: beendet})
     assert [kreis["abo"] for kreis in erg["kreise"]] == ["aktiv", "beendet"]
@@ -188,9 +191,9 @@ def test_der_sammler_sendet_nach_jedem_kreis_ein_ereignis_der_anlage():
     eins.publish(_ereignis())
     assert [e["status"] for e in senke.ereignisse] == ["regelt"]
 
-    zwei.publish(_ereignis(Flags(konfigurationsfehler=True, grund="kaputt")))
+    zwei.publish(_ereignis(Flags(konfigurationsfehler=True, grund=START)))
     assert [e["status"] for e in senke.ereignisse] == ["regelt", "konfigurationsfehler"]
-    assert senke.ereignisse[-1]["grund"] == "kaputt"
+    assert senke.ereignisse[-1]["grund"] == START
 
     zwei.publish(_ereignis())  # der zweite Kreis erholt sich: die Anlage meldet wieder regelt
     assert senke.ereignisse[-1]["status"] == "regelt"

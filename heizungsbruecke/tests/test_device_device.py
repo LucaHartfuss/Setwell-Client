@@ -17,6 +17,8 @@ from smartheat_runtime import aufraeumen
 from smartheat_runtime.runtime import EV_MQTT_CONNECTED, EV_SETPOINTS
 from smartheat_runtime.worker import RegulationWorker
 
+HINWEIS = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
+
 SOFTWARE = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
             "signature": "sig"}
 
@@ -164,8 +166,8 @@ def test_a_rejected_configuration_keeps_the_old_one_and_tells_the_display(tmp_pa
     assert result["ok"] is False and result["error"] == {
         "grund": "treiber_parameter", "details": {"feld": "parameter", "regel": "ungueltig"}}
     assert world.host.konfigurationen == []
-    assert world.host.anzeigen_liste[-1].konfiguration_abgelehnt == device.ABLEHNUNG_ANZEIGE.format(
-        grund="treiber_parameter")
+    assert world.host.anzeigen_liste[-1].konfiguration_abgelehnt == {
+        "code": "meldung.konfiguration_abgelehnt", "params": {"grund": "treiber_parameter"}, "stufe": "rot"}
 
 
 def test_a_rejection_from_before_5c_shows_the_local_hint_with_the_code_and_reports_no_text(tmp_path):
@@ -175,7 +177,8 @@ def test_a_rejection_from_before_5c_shows_the_local_hint_with_the_code_and_repor
         {"update_anlass": None, "abgelehnt": {"konfiguration": [3, "ungueltig", "Alter Gerätetext"]}}))
     world = World(tmp_path)
     hinweis = world.device.anzeige().konfiguration_abgelehnt
-    assert hinweis == device.ABLEHNUNG_ANZEIGE.format(grund="ungueltig") and "Alter" not in hinweis
+    assert hinweis == {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "ungueltig"}, "stufe": "rot"}
+    assert "Alter" not in str(hinweis)
     assert world.device.documents.ablehnung("konfiguration") == (3, "ungueltig", None)
 
 
@@ -455,8 +458,7 @@ def test_every_contract_down_topic_reaches_exactly_its_receiver_and_takes_effect
     world.verbinden()
     koerper = {"down/config": _konfiguration(version=1), "down/operation": _bedienung(version=3),
                "down/display": _anzeige(version=2),
-               "down/command": _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                            "text": "Kopie stoppen"}),
+               "down/command": _command("hinweis", payload=HINWEIS),
                "down/setpoints": {"kreis": 1, "seq": "s1"}}
     assert (world.device.konfiguration(), world.device.bedienung(), world.link.of("up/result")) == (None, None, [])
     world.empfangen(name, koerper[name])
@@ -485,8 +487,7 @@ def test_a_foreign_down_topic_reaches_nobody(tmp_path, caplog):
     world = World(tmp_path)
     world.verbinden()
     with caplog.at_level("WARNING", logger=device.logger.name):
-        world.empfangen("down/zukunft", _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                                     "text": "Kopie stoppen"}))
+        world.empfangen("down/zukunft", _command("hinweis", payload=HINWEIS))
         world.link.ereignis("nachricht", "down/zukunft", b"{kaputt")
         world.device.schritt()
     assert world.link.of("up/result") == []
@@ -525,10 +526,8 @@ def test_commands_run_once_across_reconnects(tmp_path):
 def test_a_hint_command_reaches_the_display(tmp_path):
     world = World(tmp_path)
     world.verbinden()
-    world.empfangen("down/command", _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                                 "text": "Kopie stoppen"}))
-    assert world.host.anzeigen_liste[-1].hinweise == (
-        {"key": "geraet_doppelt", "stufe": "kritisch", "text": "Kopie stoppen"},)
+    world.empfangen("down/command", _command("hinweis", payload=HINWEIS))
+    assert world.host.anzeigen_liste[-1].hinweise == (HINWEIS,)
 
 
 def test_inventory_parts_go_up_before_the_result(tmp_path):

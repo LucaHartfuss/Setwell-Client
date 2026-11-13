@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 RESTORE_KEY = "wiederherstellung"
 RESTORE_FAILED_STATE = "fehlgeschlagen"
-RESTORE_FAILED_REASON = "Zurücksetzen auf die ursprünglichen Werte scheitert"
 
 
 def inactive_meldung(inactive_since: datetime) -> Meldung:

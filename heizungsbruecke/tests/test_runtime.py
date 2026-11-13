@@ -51,7 +51,6 @@ from smartheat_core.enforce import RETRY_SECONDS
 from smartheat_core.pipeline import LeverPipeline
 from smartheat_device.laufzeit import RuntimeChannel
 from smartheat_runtime import (
-    abo,
     app,
     aufraeumen,
     backup_store,
@@ -1805,7 +1804,7 @@ def test_closing_start_retries_a_failed_restore_and_reports_it_once(env, monkeyp
 
     assert bridge.reason == "abo_beendet"
     assert env.trigger_clients == []
-    assert _last_event(env)["grund"] == abo.RESTORE_FAILED_REASON
+    assert _last_event(env)["grund"] == {"code": "status.grund_wiederherstellung_scheitert", "params": {}}
     assert env.ha.pushes == [RESTORE_FAILED]
 
     _advance(env, bridge, 300)
@@ -2452,7 +2451,8 @@ def test_sign_off_retries_a_failed_restore_with_reason(env):
     bridge = _start_bridge(env, abgemeldet=True)
 
     assert _last_event(env)["status"] == "abgemeldet"
-    assert _last_event(env)["grund"] == app.SIGN_OFF_RESTORE_FAILED.format(seconds=300)
+    assert _last_event(env)["grund"] == {"code": "status.grund_zuruecksetzen_scheitert",
+                                         "params": {"sekunden": 300}}
 
     env.ha.write_error = None
     _advance(env, bridge, 300)
@@ -2468,7 +2468,7 @@ def test_sign_off_with_invalid_configuration_does_not_write(env):
 
     assert bridge.reason == "abgemeldet"
     assert env.ha.writes == []
-    assert _last_event(env)["grund"] == app.SIGN_OFF_INVALID_CONFIG
+    assert _last_event(env)["grund"] == {"code": "status.grund_konfiguration_ungueltig", "params": {}}
 
 
 def test_sign_off_during_a_comfort_boost_restores_the_learned_values(env):
@@ -2658,7 +2658,8 @@ def test_reset_fails_keeps_state_across_restart(env, monkeypatch):
     assert neustarts == [] and aufraeumen.entscheiden(pfad, {"anlage": None})[0] == aufraeumen.ZURUECKSETZEN
     assert _backup(env)["boost_active"] is True
     assert _last_event(env)["status"] == "abgemeldet"
-    assert _last_event(env)["grund"] == app.SIGN_OFF_RESTORE_FAILED.format(seconds=300)
+    assert _last_event(env)["grund"] == {"code": "status.grund_zuruecksetzen_scheitert",
+                                         "params": {"sekunden": 300}}
     message = meldungs_text("meldung.abmeldung_zuruecksetzen_scheitert", werte=WERTE_ZONE)
     assert ("smartheat_wiederherstellung", message) in env.ha.persistent
 

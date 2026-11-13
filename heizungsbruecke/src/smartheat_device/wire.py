@@ -185,7 +185,6 @@ SOFTWARE_ERRORS = (
     "manifest_ungueltig", "signatur_ungueltig", "updater_zu_alt", "version_zu_alt", "start_fehlgeschlagen",
     "ungesund", "server_unerreichbar",
 )
-HINWEIS_STUFEN = ("info", "warnung", "kritisch")
 MELDUNGEN = ("wunsch_begrenzt", "soll_quelle_aus", "geraet_doppelt", "update_noetig", "gesperrt")
 
 COMMAND_FIELDS = ("schema", "command_id", "kind", "payload", "expires_at")
@@ -222,7 +221,7 @@ COMMANDS: dict[str, Command] = {
     "diagnostics": Command((), (), 300),
     # Liest an der Anbindung, ob der gewaehlte Weg dieselbe Anlage meint (Nutzlast: der Weg aus `WEGE`).
     "weg_pruefen": Command(("weg",), ("ergebnis",), 3600, ("weg_unbekannt", "weg_mehrfach")),
-    "hinweis": Command(("key", "stufe", "text"), (), 24 * 3600),
+    "hinweis": Command(("key", "code", "params", "stufe"), (), 24 * 3600),
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),

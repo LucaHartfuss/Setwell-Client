@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 from heizungsbruecke import dokument as ha_dokument
 from heizungsbruecke.ha_sinks import EVENT_TYPE
 from heizungsbruecke.version import ADDON_VERSION
-from smartheat_core import kreisansicht
+from smartheat_core import kreisansicht, meldungen
 from smartheat_core.config_check import HA_DIENST, HA_HINWEISE
 from smartheat_device.documents import Dokument
 from smartheat_device.host import Anzeige
@@ -45,28 +45,37 @@ HINWEIS_FIELDS = ("key", "stufe", "text")
 KONFIGURATION_ABGELEHNT = "konfiguration_abgelehnt"
 #: HA nicht erreichbar: so lange Pause bis zum naechsten Versuch des Takts (wie discovery.RETRY_SECONDS: Log nicht fuellen).
 WIEDERHOLEN_SECONDS = 60
-ZUSTAND_TEXTE = {
-    "update_noetig": "Das Add-on ist zu alt für den SmartHeat-Dienst. Bitte das Add-on aktualisieren.",
-    "gesperrt": "Dieses Gerät ist beim SmartHeat-Dienst gesperrt. Bitte den Support kontaktieren.",
+#: Zustaende des Geraets, die einen Hinweis tragen, mit dem Code der Meldung.
+ZUSTAND_MELDUNGEN = {
+    "update_noetig": meldungen.PREFIX + "update_noetig",
+    "gesperrt": meldungen.PREFIX + "gesperrt",
 }
+#: Das Ereignis (Vertrag mit der Integration) kennt die Stufen kritisch/warnung/info; die Stufe des Codes wird abgebildet.
+EREIGNIS_STUFE = {"rot": "kritisch", "orange": "warnung", "gelb": "info"}
 
 
-def _hinweis(key: str, stufe: str, text: str) -> dict:
-    return dict(zip(HINWEIS_FIELDS, (key, stufe, text), strict=True))
+def _hinweis(key: str, meldung: meldungen.Meldung) -> dict:
+    return dict(zip(HINWEIS_FIELDS, (key, EREIGNIS_STUFE[meldung.stufe], meldungen.text(meldung)), strict=True))
 
 
 def hinweise(anzeige: Anzeige) -> list[dict]:
     """Hinweise der Anzeige als {key, stufe, text}: Hinweise des Servers, eigene Meldungen des Geraets, abgelehnte
-    Konfiguration und die Zustaende update_noetig/gesperrt. Bei update_noetig mit abgelehnter Konfiguration stehen
-    bewusst beide Hinweise da (Brief-Test): der Grund der Ablehnung und die Handlungsanweisung."""
-    result = [_hinweis(str(h["key"]), h.get("stufe") or "warnung", h.get("text") or "")
-              for h in anzeige.hinweise if isinstance(h, dict) and h.get("key")]
-    result += [_hinweis(str(m["key"]), "warnung", m.get("text") or "")
+    Konfiguration und die Zustaende update_noetig/gesperrt, alle aus Codes der Meldungstabelle gerendert (was keine
+    gueltige Meldung ist, entfaellt). Bei update_noetig mit abgelehnter Konfiguration stehen bewusst beide Hinweise da
+    (Brief-Test): der Grund der Ablehnung und die Handlungsanweisung."""
+    result = []
+    for h in anzeige.hinweise:
+        meldung = meldungen.aus_dict({feld: h.get(feld) for feld in ("code", "params", "stufe")}
+                                     ) if isinstance(h, dict) and h.get("key") else None
+        if meldung is not None:
+            result.append(_hinweis(str(h["key"]), meldung))
+    result += [dict(zip(HINWEIS_FIELDS, (str(m["key"]), "warnung", m.get("text") or ""), strict=True))
                for m in anzeige.meldungen if isinstance(m, dict) and m.get("key")]
-    if anzeige.konfiguration_abgelehnt:
-        result.append(_hinweis(KONFIGURATION_ABGELEHNT, "kritisch", anzeige.konfiguration_abgelehnt))
-    if anzeige.zustand in ZUSTAND_TEXTE:
-        result.append(_hinweis(anzeige.zustand, "kritisch", ZUSTAND_TEXTE[anzeige.zustand]))
+    abgelehnt = meldungen.aus_dict(anzeige.konfiguration_abgelehnt)
+    if abgelehnt is not None:
+        result.append(_hinweis(KONFIGURATION_ABGELEHNT, abgelehnt))
+    if anzeige.zustand in ZUSTAND_MELDUNGEN:
+        result.append(_hinweis(anzeige.zustand, meldungen.neu(ZUSTAND_MELDUNGEN[anzeige.zustand])))
     return result
 
 

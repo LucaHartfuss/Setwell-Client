@@ -90,6 +90,30 @@ KREIS_FELDER = ("boost", "hebelsatz", "hebel", "gelernt", "abo", "abo_frist_ende
 _SCHLECHTESTER = ("status", "grund", "datenfehler", "letzte_serverantwort", "hinweise")
 
 
+#: Gruende, aus denen der Status eine Stoerung traegt; der Code im Ereignis ist `status.grund_<name>`, der Server
+#: haelt die Texte (Katalog), hier steht kein Text.
+GRUENDE = (
+    "start_fehlgeschlagen", "zustand_nicht_migriert", "andere_anlage", "konfiguration_ungueltig",
+    "zuruecksetzen_scheitert", "wiederherstellung_scheitert",
+)
+GRUND_PREFIX = "status.grund_"
+#: Parameter je Grund (Name -> Zahlen); die uebrigen Gruende tragen keine.
+GRUND_PARAMS = {"zuruecksetzen_scheitert": ("sekunden",)}
+
+
+def laufzeitgrund(name: str, **params) -> dict:
+    """Grund einer Stoerung im Status als Code mit Parametern (`{code, params}`); ein unbekannter Name oder abweichende
+    Parameter sind ein Programmierfehler."""
+    if name not in GRUENDE:
+        raise ValueError(f"unbekannter Laufzeitgrund: {name!r}")
+    if set(params) != set(GRUND_PARAMS.get(name, ())):
+        raise ValueError(f"Parameter des Laufzeitgrunds {name!r} stimmen nicht: {sorted(params)}")
+    if not all(isinstance(wert, (int, float)) and not isinstance(wert, bool) for wert in params.values()):
+        raise ValueError(f"Parameter des Laufzeitgrunds {name!r} sind keine Zahlen")
+    return {"code": GRUND_PREFIX + name, "params": {key: int(wert) if float(wert).is_integer() else wert
+                                                     for key, wert in params.items()}}
+
+
 @dataclass(frozen=True)
 class Flags:
     """Laufzeit-Merkmale des Gesamtzustands, die nicht in BridgeState stehen."""
@@ -100,7 +124,7 @@ class Flags:
     # Erster Start abgeschlossen: MQTT verbunden bzw. im Abo-inaktiv-Modus hochgefahren.
     gestartet: bool = False
     abo: str = ABO_UNBEKANNT  # Ergebnis der Abo-Abfrage beim Start (aktiv/unbekannt)
-    grund: str | None = None
+    grund: dict | None = None  # laufzeitgrund(...)
 
 
 _STORAGE_FAULT_ROLES = (delivery.ROLE_DATENTRAEGER,)

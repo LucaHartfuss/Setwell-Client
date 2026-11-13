@@ -76,15 +76,14 @@ def test_weishaupt_without_a_comfort_setpoint_is_a_configuration_error(env):
     bridge = _start_bridge(env, **{**WEISHAUPT, "entity_setpoint_comfort": ""})
 
     assert bridge.reason == "konfigurationsfehler"
-    assert "setpoint_comfort" in _last_event(env)["grund"]  # Kundentext nennt die Rolle (dokument.lokal_pruefen)
-    assert "weishaupt_wwp" in _last_event(env)["grund"]
+    assert _last_event(env)["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
     assert env.ha.writes == []
 
 
 def test_an_unknown_lever_set_is_a_configuration_error_not_vaillant(env):
     bridge = _start_bridge(env, lever_set="buderus")
     assert bridge.reason == "konfigurationsfehler"
-    assert "buderus" in _last_event(env)["grund"]
+    assert _last_event(env)["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
     assert env.ha.writes == []
 
 

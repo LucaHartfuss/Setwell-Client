@@ -1,6 +1,7 @@
 """Start, Startfehler und Start-Hilfen des HA-Hosts im Geraete-Pfad: Konfigurationsfehler mit Ruhezustand, Neupruefung und Meldezustand, Warten auf HA, Budget fuer fehlende
 Entities und Hilfssensoren, Zeitzone. Die hostneutralen Handler der Laufzeit (Telemetrie, _prime, Verbindungswaechter)
 stehen mit der echten Laufzeit in test_runtime.py, der Einstieg main() in test_main_geraet.py."""
+import json
 import logging
 from unittest.mock import MagicMock, call
 
@@ -172,8 +173,8 @@ def test_repeated_helper_failure_with_changing_error_text_does_not_push_again(en
     assert len(persistent) == 2
     assert "9f8e7d6c" in persistent[-1][1]
     grund = _status_events(env)[-1]["grund"]
-    assert "Hilfs-Entities konnten nicht angelegt werden" in grund
-    assert "9f8e7d6c" in grund  # der Status zeigt den aktuellen Fehler im Detail
+    assert grund == {"code": "status.grund_start_fehlgeschlagen", "params": {}}  # der Status nennt keinen Fehlertext
+    assert "9f8e7d6c" not in json.dumps(_status_events(env)[-1])
 
 
 def test_repeated_missing_entity_does_not_push_again(env, sleeps):
@@ -183,7 +184,8 @@ def test_repeated_missing_entity_does_not_push_again(env, sleeps):
     assert _start_bridge(env).reason == "konfigurationsfehler"
 
     assert len(env.ha.pushes) == 1
-    assert "Entity fehlt in Home Assistant: number.heat_limit" in _status_events(env)[-1]["grund"]
+    assert _status_events(env)[-1]["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
+    assert "number.heat_limit" not in json.dumps(_status_events(env)[-1])
 
 
 def test_start_waits_for_ha_before_reporting(env, sleeps):

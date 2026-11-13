@@ -54,9 +54,9 @@ class Anzeige:
     server_ok: bool  # Link verbunden
     device_state: str | None  # zuletzt bekannter Uebernahmestatus (Bootstrap)
     eingerichtet: bool
-    hinweise: tuple[dict, ...]  # Befehl hinweis: {key, stufe, text}
+    hinweise: tuple[dict, ...]  # Befehl hinweis: {key, code, params, stufe}
     meldungen: tuple[dict, ...]  # eigene Meldungen des Geraets (wunsch_begrenzt, soll_quelle_aus): {key, text}
-    konfiguration_abgelehnt: str | None  # lokaler Hinweis zur zuletzt abgelehnten Konfiguration (Code)
+    konfiguration_abgelehnt: dict | None  # zuletzt abgelehnte Konfiguration als Meldung {code, params, stufe}
 
     @property
     def code_zeigen(self) -> bool:

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from runtime_helpers import _is_running, _start_bridge
 
-from smartheat_runtime import app
+from smartheat_runtime import app, status
 from smartheat_runtime.budget_store import BudgetStore
 from smartheat_runtime.state import StateStore
 
@@ -31,7 +31,7 @@ def test_ein_leerer_kreisordner_gilt_nicht_als_migriert(env):
     bridge = _start_bridge(env)
 
     assert not _is_running(bridge)
-    assert bridge.status.flags.grund == app.GRUND_ZUSTAND_NICHT_MIGRIERT
+    assert bridge.status.flags.grund == status.laufzeitgrund("zustand_nicht_migriert")
     assert list(kreis.iterdir()) == []  # die Fehlerroute legt nichts an
 
 
@@ -54,13 +54,14 @@ def test_ein_migrierter_kreisordner_mit_sicherung_startet(env):
     assert _is_running(_start_bridge(env))
 
 
-def test_der_grund_nennt_den_code_und_den_weg(env):
+def test_der_grund_ist_ein_code_und_das_log_nennt_den_weg(env, caplog):
     env.paths["ALTER_BACKUP_PATH"].write_text("{}")
 
     bridge = _start_bridge(env)
 
-    assert bridge.status.flags.grund == app.GRUND_ZUSTAND_NICHT_MIGRIERT
+    assert bridge.status.event()["grund"] == {"code": "status.grund_zustand_nicht_migriert", "params": {}}
     assert bridge.status.flags.konfigurationsfehler
+    assert app.GRUND_ZUSTAND_NICHT_MIGRIERT in caplog.text
 
 
 def test_ohne_alten_zustand_startet_die_laufzeit(env):

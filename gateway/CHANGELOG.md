@@ -2,6 +2,8 @@
 
 ## Unveroeffentlicht
 
+- Hinweise des Geräts und der Grund der Laufzeitstörung kommen als Code mit Parametern; die Diagnoseseite setzt den Text
+  aus `lokale_texte.json` zusammen (je Hinweis ein Eintrag `hinweis.<name>`, Parameterwerte erscheinen dort nicht).
 - Meldungen entstehen im Geraetekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der
   Host zusammen (Wortlaut unveraendert). Der Meldungszustand je Kreis heisst jetzt `notify_meldungen`; die alten Felder
   `notify_states` und `notify_messages` entfernt einmalig `python -m smartheat_device.meldungszustand_migration

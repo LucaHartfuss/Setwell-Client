@@ -128,6 +128,17 @@ TABELLE: dict[str, Vorlage] = {
         "wunsch_begrenzt": Vorlage("orange", ("roh", "begrenzt"), _wunsch_begrenzt, ("herkunft",)),
         "soll_quelle_aus": Vorlage("orange", ("wirksam",), _soll_quelle_aus),
         "soll_quelle_aus_unbekannt": Vorlage("orange", (), _soll_quelle_aus_unbekannt),
+        "geraet_doppelt": _vorlage(
+            "rot", (),
+            "Dieses Gerät läuft offenbar zweimal (zum Beispiel aus einem Backup oder einem kopierten Datenträger). "
+            "Bitte die Kopie stoppen; SmartHeat regelt weiter."),
+        "update_noetig": _vorlage(
+            "rot", (), "Das Add-on ist zu alt für den SmartHeat-Dienst. Bitte das Add-on aktualisieren."),
+        "gesperrt": _vorlage(
+            "rot", (), "Dieses Gerät ist beim SmartHeat-Dienst gesperrt. Bitte den Support kontaktieren."),
+        "konfiguration_abgelehnt": _vorlage(
+            "rot", ("grund",),
+            "Die Einrichtung wurde abgelehnt (Code {grund}). Die Begründung zeigt der Einrichtungsassistent."),
         "raumfuehler_restmittel": Vorlage("orange", ("fuehler", "anzahl"), _restmittel),
         "raumfuehler_keiner": _vorlage(
             "orange", ("fuehler",),

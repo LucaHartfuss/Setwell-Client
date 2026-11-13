@@ -23,6 +23,21 @@ def test_jede_stufe_der_tabelle_steht_im_vertrag():
     assert {vorlage.stufe for vorlage in meldungen.TABELLE.values()} <= {"rot", "orange", "gelb"}
 
 
+@pytest.mark.parametrize(("name", "params"), [
+    ("geraet_doppelt", {}), ("update_noetig", {}), ("gesperrt", {}), ("konfiguration_abgelehnt", {"grund": "ungueltig"}),
+])
+def test_die_hinweise_des_geraets_sind_codes_der_stufe_rot(name, params):
+    meldung = meldungen.neu(f"meldung.{name}", **params)
+    assert meldung.stufe == "rot" and meldungen.text(meldung)
+    assert meldungen.aus_dict(meldungen.zu_dict(meldung)) == meldung
+
+
+def test_jeder_schluessel_der_hinweise_hat_einen_code_in_der_tabelle():
+    """Der Befehl hinweis nimmt nur Schluessel aus wire.MELDUNGEN an; jeder hat den Code meldung.<schluessel>."""
+    from smartheat_device import wire
+    assert all(meldungen.PREFIX + key in meldungen.TABELLE for key in wire.MELDUNGEN)
+
+
 def test_ein_unbekannter_code_scheitert_laut():
     with pytest.raises(ValueError, match="Code"):
         meldungen.neu("meldung.gibt_es_nicht")
