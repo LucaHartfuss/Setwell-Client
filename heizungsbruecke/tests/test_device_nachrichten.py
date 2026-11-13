@@ -59,7 +59,7 @@ def test_status_meldung_notifications_ergebnis_register_zertifikat():
     assert set(status) == set(wire.STATUS_FIELDS)
     assert set(nachrichten.status(zustand="regelt", runtime_status=None, kreise=_kreise(None), ts="t", ursprungswerte={"a": 1})) \
         == set(wire.STATUS_FIELDS) | {"ursprungswerte"}
-    item = nachrichten.meldung(key="k", kategorie="k", stufe="orange", text="t", offen=True, ts="t")
+    item = nachrichten.meldung(key="k", code="meldung.quellwechsel", params={}, stufe="orange", offen=True, ts="t")
     assert set(item) == set(wire.NOTIFICATION_FIELDS)
     assert set(nachrichten.notifications([item])) == set(wire.NOTIFICATIONS_FIELDS)
     assert set(nachrichten.ergebnis_dokument("konfiguration", 1, True)) <= set(wire.RESULT_FIELDS) | set(
@@ -153,11 +153,66 @@ def test_status_lehnt_falsche_kreise_ab(kreise):
 
 def test_meldung_traegt_stufe_statt_kritisch():
     for stufe in wire.STUFEN:
-        item = nachrichten.meldung(key="k", kategorie="k", stufe=stufe, text="t", offen=True, ts="t")
-        assert item["stufe"] == stufe and "kritisch" not in item
+        item = nachrichten.meldung(key="k", code="meldung.quellwechsel", params={}, stufe=stufe, offen=True, ts="t")
+        assert item["stufe"] == stufe and "kritisch" not in item and "text" not in item and "kategorie" not in item
 
 
 @pytest.mark.parametrize("stufe", [True, False, "kritisch", "ROT", "", None, 1])
 def test_meldung_lehnt_unbekannte_stufe_ohne_bool_alias_ab(stufe):
     with pytest.raises(nachrichten.Vertragsfehler):
-        nachrichten.meldung(key="k", kategorie="k", stufe=stufe, text="t", offen=True, ts="t")
+        nachrichten.meldung(key="k", code="meldung.quellwechsel", params={}, stufe=stufe, offen=True, ts="t")
+
+
+def test_meldung_nimmt_kreis_nur_wenn_er_gesetzt_ist():
+    item = nachrichten.meldung(key="k", code="meldung.quellwechsel", params={}, stufe="orange", offen=True, ts="t")
+    assert "kreis" not in item and "quelle" not in item and "roh" not in item
+    item = nachrichten.meldung(key="k", code="meldung.quellwechsel", params={}, stufe="orange", offen=True, ts="t",
+                               kreis=2)
+    assert item["kreis"] == 2
+
+
+def test_meldung_schliessen_ohne_code_ist_nur_geschlossen_erlaubt():
+    zu = nachrichten.meldung(key="k", code=None, params={}, stufe=None, offen=False, ts="t")
+    assert (zu["code"], zu["params"], zu["stufe"], zu["offen"]) == (None, {}, None, False)
+    with pytest.raises(nachrichten.Vertragsfehler):
+        nachrichten.meldung(key="k", code=None, params={}, stufe=None, offen=True, ts="t")
+    with pytest.raises(nachrichten.Vertragsfehler):
+        nachrichten.meldung(key="k", code="meldung.quellwechsel", params={}, stufe=None, offen=False, ts="t")
+
+
+@pytest.mark.parametrize("key", [
+    "notbetrieb", "abo", "a" * 40, "schreibbudget_boost"])
+def test_ein_schlichter_key_bleibt_wie_er_ist(key):
+    assert nachrichten.draht_key(key) == (key, None)
+
+
+@pytest.mark.parametrize("key", [
+    "raumfuehler:sensor.wohnzimmer_temp", "entity_fehlt:aussentemperatur", "batterie:binary_sensor.x",
+    "fehler:Konfiguration fehlt: sensor.bad", "kreis-2:raumfuehler:climate.zuhause_circuit_0", "ä" * 3,
+    "x" * 200, ""])
+def test_ein_key_mit_namen_wird_zu_kategorie_und_pruefsumme(key):
+    import re
+    draht, _ = nachrichten.draht_key(key)
+    assert re.fullmatch(r"[a-z0-9_]{1,29}:[0-9a-f]{10}", draht), draht
+    for teil in ("sensor", "climate", "binary", "wohnzimmer", "zuhause", "Konfiguration"):
+        assert teil not in draht
+    assert nachrichten.draht_key(key) == nachrichten.draht_key(key)  # stabil: derselbe key, derselbe Draht-key
+
+
+def test_zwei_keys_geben_zwei_draht_keys():
+    schluessel = ["raumfuehler:sensor.a", "raumfuehler:sensor.b", "kreis-1:raumfuehler:sensor.a",
+                  "kreis-2:raumfuehler:sensor.a", "kreis-1:notbetrieb", "kreis-2:notbetrieb", "notbetrieb"]
+    assert len({nachrichten.draht_key(key)[0] for key in schluessel}) == len(schluessel)
+
+
+def test_der_kreispraefix_wird_zum_feld_kreis():
+    assert nachrichten.draht_key("kreis-2:notbetrieb")[1] == 2
+    assert nachrichten.draht_key("kreis-12:raumfuehler:sensor.x")[1] == 12
+    assert nachrichten.draht_key("notbetrieb")[1] is None
+    assert nachrichten.draht_key("kreis-0:notbetrieb")[1] is None  # keine Kreisnummer
+    assert nachrichten.draht_key("kreis-x:notbetrieb")[1] is None
+
+
+def test_die_kategorie_des_draht_keys_ist_die_des_schluessels_ohne_kreispraefix():
+    assert nachrichten.draht_key("kreis-2:raumfuehler:sensor.x")[0].startswith("raumfuehler:")
+    assert nachrichten.draht_key("kreis-2:notbetrieb")[0].startswith("notbetrieb:")

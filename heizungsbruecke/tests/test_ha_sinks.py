@@ -43,4 +43,4 @@ def test_the_combined_sink_gives_the_meldung_to_both_sides():
     sink.show("abo", ABO)
 
     assert ha.persistent == [("smartheat_abo", TEXT)]
-    assert gemeldet == [(("abo", TEXT), {"offen": True, "stufe": "rot"})]
+    assert gemeldet == [(("abo", ABO), {"offen": True})]

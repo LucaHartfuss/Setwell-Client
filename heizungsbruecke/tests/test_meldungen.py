@@ -1,5 +1,7 @@
 """Meldung als Code (smartheat_core.meldungen): Typ, Tabelle der Texte, Rendern und Ablage im Zustand."""
+import json
 import math
+import re
 
 import pytest
 
@@ -139,3 +141,67 @@ def test_die_ablage_im_zustand_ist_umkehrbar():
 ])
 def test_eine_unbrauchbare_ablage_gibt_none(ablage):
     assert meldungen.aus_dict(ablage) is None
+
+
+# --- Auf dem Draht (up/notifications): nur Code, Parameter des Katalogs und Stufe; nie Namen (S-12) ---
+
+def test_die_drahtform_laesst_lokale_parameter_weg():
+    meldung = meldungen.neu("meldung.raumfuehler_restmittel", fuehler="sensor.wohnzimmer_temp", anzahl=2)
+    assert meldungen.draht(meldung) == {"code": "meldung.raumfuehler_restmittel", "params": {"anzahl": 2},
+                                        "stufe": "orange"}
+    assert "sensor.wohnzimmer_temp" in meldungen.text(meldung)  # lokal bleibt der Name im Text
+
+
+@pytest.mark.parametrize(("code", "lokal"), [
+    ("batterie_schwach", {"bezeichnung": "Fenster Bad"}),
+    ("manueller_eingriff", {"was": "climate.zuhause_circuit_0"}),
+    ("datenfehler_lokal", {"rollen": "ist (sensor.x)"}),
+    ("datenfehler_schreiben", {"detail": "number.vaillant_x"}),
+    ("abmeldung_zuruecksetzen_scheitert", {"werte": "number.heizkurve 1,2"}),
+])
+def test_ein_lokaler_parameter_erreicht_den_draht_nie(code, lokal):
+    meldung = meldungen.neu(f"meldung.{code}", **lokal)
+    assert meldungen.draht(meldung)["params"] == {}
+    for wert in lokal.values():
+        assert wert not in json.dumps(meldungen.draht(meldung))
+
+
+def test_die_optionalen_lokalen_parameter_gehen_nicht_auf_den_draht():
+    begrenzt = meldungen.neu("meldung.wunsch_begrenzt", roh=30.0, begrenzt=25.0, herkunft="thermostat")
+    assert meldungen.draht(begrenzt)["params"] == {"roh": 30.0, "begrenzt": 25.0}
+    boost = meldungen.neu("meldung.konfiguration_fehler_boost", grund="abgelehnt", werte="Vorlauf 45",
+                          zusatz="zustand_andere_anlage")
+    assert meldungen.draht(boost)["params"] == {"grund": "abgelehnt"}
+
+
+@pytest.mark.parametrize("grund", [
+    "Entity sensor.wohnzimmer_temp fehlt", "Grund X", "", "x" * 65, "A", "a.b", "number.heizkurve"])
+def test_ein_textwert_ohne_codeform_wird_auf_dem_draht_unbekannt(grund):
+    meldung = meldungen.neu("meldung.konfiguration_fehler", grund=grund)
+    assert meldungen.draht(meldung)["params"] == {"grund": "unbekannt"}
+    assert grund in meldungen.text(meldung)  # lokal bleibt der Grund im Text
+
+
+def test_ein_wert_in_codeform_bleibt_auf_dem_draht():
+    assert meldungen.draht(meldungen.neu("meldung.datenfehler_server", grund="grund_fehlt"))["params"] == {
+        "grund": "grund_fehlt"}
+    assert meldungen.draht(meldungen.neu("meldung.entity_fehlt", feld="aussentemperatur"))["params"] == {
+        "feld": "aussentemperatur"}
+    assert meldungen.draht(meldungen.neu("meldung.abo_inaktiv", ende="2026-12-31"))["params"] == {"ende": "2026-12-31"}
+
+
+def test_jeder_drahtparameter_ist_eine_zahl_ein_code_oder_ein_datum():
+    code_art, datum = re.compile(r"[a-z][a-z0-9_]{0,63}"), re.compile(r"\d{4}-\d{2}-\d{2}")
+    for code, vorlage in meldungen.TABELLE.items():
+        # Namen als Werte: so scheitert jeder durchgereichte Text an der Form
+        params = {name: _ZAHLEN.get(name, "2026-11-30" if name == "ende" else "sensor.bad_temp")
+                  for name in vorlage.params}
+        draht = meldungen.draht(meldungen.Meldung(code, params, vorlage.stufe))
+        assert len(draht["params"]) <= meldungen.MAX_PARAMS
+        for wert in draht["params"].values():
+            assert (isinstance(wert, (int, float)) or code_art.fullmatch(wert) or datum.fullmatch(wert)), code
+
+
+def test_die_lokalen_parameter_sind_parameter_der_vorlage():
+    for code, vorlage in meldungen.TABELLE.items():
+        assert set(vorlage.lokal) <= set(vorlage.params) | set(vorlage.optional), code

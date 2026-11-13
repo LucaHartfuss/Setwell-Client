@@ -10,8 +10,8 @@ import konfig_form
 import pytest
 from device_helpers import WALL, FakeHost, FakeLink, World, _anzeige, _konfiguration, _leer
 
-from smartheat_core import config_check, dateien
-from smartheat_device import bootstrap, commands, device, identity, wire, wish
+from smartheat_core import config_check, dateien, meldungen
+from smartheat_device import bootstrap, commands, device, identity, nachrichten, wire, wish
 from smartheat_device.geraet_host_basis import EV_RELOAD, GeraetHostBasis
 from smartheat_runtime import aufraeumen
 from smartheat_runtime.runtime import EV_MQTT_CONNECTED, EV_SETPOINTS
@@ -1060,13 +1060,15 @@ def test_setpoint_source_off_without_a_value_keeps_the_message_open(tmp_path):
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ({"key": "soll_quelle_aus", "text": ohne_wert},)
     (item,) = world.link.of("up/notifications")[-1]["items"]
-    assert (item["key"], item["offen"], item["text"]) == ("soll_quelle_aus", True, ohne_wert)
+    assert (item["key"], item["offen"], item["code"], item["params"]) == (
+        "soll_quelle_aus", True, "meldung.soll_quelle_aus_unbekannt", {})
+    assert "text" not in item
     world.device.soll_quelle_aus(False)
     world.clock.now += 10
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ()
-    assert [(i["key"], i["offen"]) for i in world.link.of("up/notifications")[-1]["items"]] == [
-        ("soll_quelle_aus", False)]
+    assert [(i["key"], i["offen"], i["code"]) for i in world.link.of("up/notifications")[-1]["items"]] == [
+        ("soll_quelle_aus", False, "meldung.soll_quelle_aus_unbekannt")]  # geschlossen wird die gemerkte Meldung
 
 
 def test_setpoint_source_off_without_a_value_opens_the_message_without_a_value(tmp_path):
@@ -1107,14 +1109,18 @@ def test_status_ignores_the_timestamp_of_the_room(tmp_path):
 def test_notifications_are_batched_and_sent_again_after_a_reconnect(tmp_path):
     world = World(tmp_path)
     world.verbinden()
-    world.device.meldung("notbetrieb", "Notbetrieb aktiv", offen=True, stufe="rot")
-    world.device.meldung("raumfuehler:0x1", "Fühler weg", offen=True, stufe="orange")
+    notbetrieb = meldungen.neu("meldung.notbetrieb")
+    world.device.meldung("notbetrieb", notbetrieb, offen=True)
+    world.device.meldung("raumfuehler:sensor.bad_temp", meldungen.neu("meldung.raumfuehler_ok", fuehler="Bad"),
+                         offen=True)
     world.device.schritt()
     (batch,) = world.link.of("up/notifications")
-    assert [item["key"] for item in batch["items"]] == ["notbetrieb", "raumfuehler:0x1"]
+    fuehler_key = nachrichten.draht_key("raumfuehler:sensor.bad_temp")[0]
+    assert [item["key"] for item in batch["items"]] == ["notbetrieb", fuehler_key]
     assert [item["stufe"] for item in batch["items"]] == ["rot", "orange"]
-    assert batch["items"][1]["kategorie"] == "raumfuehler" and set(batch["items"][0]) == set(wire.NOTIFICATION_FIELDS)
-    world.device.meldung("notbetrieb", "", offen=False, stufe="rot")
+    assert [item["code"] for item in batch["items"]] == ["meldung.notbetrieb", "meldung.raumfuehler_ok"]
+    assert set(batch["items"][0]) == set(wire.NOTIFICATION_FIELDS)
+    world.device.meldung("notbetrieb", notbetrieb, offen=False)
     world.device.schritt()
     assert len(world.link.of("up/notifications")) == 1  # binnen 10 s
     world.clock.now += device.MELDUNGEN_MIN_SECONDS
@@ -1123,7 +1129,7 @@ def test_notifications_are_batched_and_sent_again_after_a_reconnect(tmp_path):
     world.link.trennen()
     world.link.verbinden()
     world.device.schritt()
-    assert [i["key"] for i in world.link.of("up/notifications")[-1]["items"]] == ["raumfuehler:0x1"]
+    assert [i["key"] for i in world.link.of("up/notifications")[-1]["items"]] == [fuehler_key]
 
 
 # --- Rettungsweg ---
@@ -1528,7 +1534,7 @@ def test_ein_nicht_endlicher_wert_im_status_wird_nicht_gesendet_der_takt_lebt_we
 def test_an_own_message_outside_the_contract_keys_is_logged_not_raised(tmp_path, caplog):
     world = World(tmp_path)
     world.verbinden()
-    world.device._inbox.put(("eigene", "frei_erfunden", "Text"))
+    world.device._inbox.put(("eigene", "frei_erfunden", meldungen.neu("meldung.notbetrieb")))
     world.device.schritt()
     assert "Vertragsfehler" in caplog.text and world.link.of("up/notifications") == []
 
@@ -1774,12 +1780,38 @@ def test_at_most_fifty_notifications_go_in_one_message(tmp_path):
     world = World(tmp_path)
     world.verbinden()
     for i in range(51):
-        world.device.meldung(f"raumfuehler:0x{i:02x}", "Fühler weg", offen=True, stufe="orange")
+        world.device.meldung(f"raumfuehler:0x{i:02x}", meldungen.neu("meldung.raumfuehler_ok", fuehler="Bad"), offen=True)
     world.device.schritt()
     assert [len(batch["items"]) for batch in world.link.of("up/notifications")] == [50]
     world.clock.now += 10
     world.device.schritt()
     assert [len(batch["items"]) for batch in world.link.of("up/notifications")] == [50, 1]
+
+
+def test_no_entity_id_room_name_or_free_text_reaches_the_wire_in_a_notification(tmp_path):
+    """Schluessel, Fuehler, Bezeichnung, Rollen und Detail tragen Entity-IDs und Raumnamen: auf dem Draht (Text, Key,
+    Parameter) steht davon nichts, nur Code, Zahlen und Codeformen."""
+    world = World(tmp_path)
+    world.verbinden()
+    namen = ("sensor.wohnzimmer_temp", "Wohnzimmer", "climate.vaillant_zuhause", "number.zuhause_circuit_0_x")
+    world.device.meldung(f"raumfuehler:{namen[0]}", meldungen.neu("meldung.raumfuehler_keiner", fuehler=namen[1]),
+                         offen=True)
+    world.device.meldung(f"kreis-2:batterie:{namen[0]}",
+                         meldungen.neu("meldung.batterie_schwach_prozent", bezeichnung=namen[1], prozent=12), offen=True)
+    world.device.meldung("datenfehler", meldungen.neu("meldung.datenfehler_lokal", rollen=f"ist ({namen[2]})"),
+                         offen=True)
+    world.device.meldung("schreiben", meldungen.neu("meldung.datenfehler_schreiben", detail=namen[3]), offen=True)
+    world.device.meldung("konfiguration", meldungen.neu("meldung.konfiguration_fehler", grund=f"{namen[1]} {namen[2]}"),
+                         offen=True)
+    world.device.schritt()
+    items = world.link.of("up/notifications")[-1]["items"]
+    assert len(items) == 5
+    gesendet = json.dumps(world.link.of("up/notifications"))
+    for name in namen:
+        assert name not in gesendet
+    assert all(set(item) <= {*wire.NOTIFICATION_FIELDS, *wire.NOTIFICATION_OPTIONAL} for item in items)
+    assert [item.get("kreis") for item in items] == [None, 2, None, None, None]
+    assert items[4]["params"] == {"grund": "unbekannt"}
 
 
 def test_an_own_notification_of_the_device_is_not_critical(tmp_path):

@@ -11,6 +11,7 @@ fremder Parameter und eine Stufe gegen die Tabelle scheitern laut.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
@@ -24,6 +25,8 @@ MAX_PARAMS = 6
 STANDARD_PRAEFIX = "Heizungsbrücke"
 STANDARD_TRAEGER = "des Home-Assistant-Systems"
 _DATUM_PARAMS = frozenset({"ende"})
+_CODE_ART = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_UNBEKANNT = "unbekannt"
 _QUELLE = {"thermostat": "Thermostat"}
 _QUELLE_STANDARD = "Wunschtemperatur"
 
@@ -58,14 +61,18 @@ class Vorlage:
     params: tuple[str, ...]
     render: Callable[[Mapping[str, Param], Umgebung], str]
     optional: tuple[str, ...] = field(default=())
+    #: Parameter, die nur den lokalen Text füllen (Entity-, Raum- oder Anlagennamen, Freitext): sie gehen nie auf
+    #: den Draht (Sicherheitsgrundsatz S-12), der Katalog des Servers kennt sie nicht.
+    lokal: tuple[str, ...] = field(default=())
 
 
-def _vorlage(stufe: str, params: tuple[str, ...], text: str, optional: tuple[str, ...] = ()) -> Vorlage:
+def _vorlage(stufe: str, params: tuple[str, ...], text: str, optional: tuple[str, ...] = (),
+             lokal: tuple[str, ...] = ()) -> Vorlage:
     """Textvorlage mit {name}-Platzhaltern; Zahlen laufen durch `_zahl`, Text bleibt unverändert."""
     def render(p: Mapping[str, Param], u: Umgebung) -> str:
         werte = {name: (_zahl(wert) if isinstance(wert, (int, float)) else wert) for name, wert in p.items()}
         return text.format(praefix=u.praefix, traeger=u.traeger, **werte)
-    return Vorlage(stufe, params, render, optional)
+    return Vorlage(stufe, params, render, optional, lokal)
 
 
 def _wunsch_begrenzt(p: Mapping[str, Param], u: Umgebung) -> str:
@@ -125,7 +132,7 @@ _BUDGET = ("SmartHeat: Das Tageslimit von {limit} Schreibvorgängen an der Heizu
 
 TABELLE: dict[str, Vorlage] = {
     PREFIX + name: vorlage for name, vorlage in {
-        "wunsch_begrenzt": Vorlage("orange", ("roh", "begrenzt"), _wunsch_begrenzt, ("herkunft",)),
+        "wunsch_begrenzt": Vorlage("orange", ("roh", "begrenzt"), _wunsch_begrenzt, ("herkunft",), ("herkunft",)),
         "soll_quelle_aus": Vorlage("orange", ("wirksam",), _soll_quelle_aus),
         "soll_quelle_aus_unbekannt": Vorlage("orange", (), _soll_quelle_aus_unbekannt),
         "geraet_doppelt": _vorlage(
@@ -139,24 +146,30 @@ TABELLE: dict[str, Vorlage] = {
         "konfiguration_abgelehnt": _vorlage(
             "rot", ("grund",),
             "Die Einrichtung wurde abgelehnt (Code {grund}). Die Begründung zeigt der Einrichtungsassistent."),
-        "raumfuehler_restmittel": Vorlage("orange", ("fuehler", "anzahl"), _restmittel),
+        "raumfuehler_restmittel": Vorlage("orange", ("fuehler", "anzahl"), _restmittel, (), ("fuehler",)),
         "raumfuehler_keiner": _vorlage(
             "orange", ("fuehler",),
             "SmartHeat: Raumfühler {fuehler} liefert keine Werte. Kein Raumfühler liefert mehr gültige Werte, die "
-            "Heizkurve bleibt unverändert."),
-        "raumfuehler_ok": _vorlage("orange", ("fuehler",), "SmartHeat: Raumfühler {fuehler} liefert wieder Werte."),
+            "Heizkurve bleibt unverändert.", lokal=("fuehler",)),
+        "raumfuehler_ok": _vorlage(
+            "orange", ("fuehler",), "SmartHeat: Raumfühler {fuehler} liefert wieder Werte.", lokal=("fuehler",)),
         "batterie_schwach": _vorlage(
-            "orange", ("bezeichnung",), "SmartHeat: Batterie von {bezeichnung} ist schwach. Bitte bald wechseln."),
-        "batterie_schwach_prozent": Vorlage("orange", ("bezeichnung", "prozent"), _batterie_prozent),
-        "batterie_ok": _vorlage("orange", ("bezeichnung",), "SmartHeat: Batterie von {bezeichnung} wieder in Ordnung."),
+            "orange", ("bezeichnung",), "SmartHeat: Batterie von {bezeichnung} ist schwach. Bitte bald wechseln.",
+            lokal=("bezeichnung",)),
+        "batterie_schwach_prozent": Vorlage(
+            "orange", ("bezeichnung", "prozent"), _batterie_prozent, (), ("bezeichnung",)),
+        "batterie_ok": _vorlage(
+            "orange", ("bezeichnung",), "SmartHeat: Batterie von {bezeichnung} wieder in Ordnung.",
+            lokal=("bezeichnung",)),
         "manueller_eingriff": _vorlage(
             "orange", ("was",),
             "SmartHeat: Die Heizungseinstellung wurde in der App verstellt ({was}) und zurückgesetzt. "
-            "Einstellungen bitte nur über das Raumthermostat."),
+            "Einstellungen bitte nur über das Raumthermostat.", lokal=("was",)),
         "manueller_eingriff_limit": _vorlage(
             "orange", ("was",),
             "SmartHeat: Die Heizungseinstellung wird immer wieder verstellt ({was}). SmartHeat setzt sie heute nicht "
-            "mehr zurück, um das Abrufkontingent der Hersteller-Cloud zu schonen, und versucht es morgen erneut."),
+            "mehr zurück, um das Abrufkontingent der Hersteller-Cloud zu schonen, und versucht es morgen erneut.",
+            lokal=("was",)),
         "manueller_eingriff_ok": _vorlage(
             "orange", (), "SmartHeat: Die Heizungseinstellung steht wieder auf den gelernten Werten."),
         "quellwechsel": _vorlage("orange", (), "SmartHeat: Die Quelle der Raumtemperatur hat sich geändert."),
@@ -188,14 +201,14 @@ TABELLE: dict[str, Vorlage] = {
         "datenfehler_lokal": _vorlage(
             "rot", ("rollen",),
             "{praefix}: Sensor(en) ohne gültigen Wert: {rollen}. Die Heizkurve bleibt unverändert, bis die Werte "
-            "wieder verfügbar sind (z. B. Batterie prüfen)."),
+            "wieder verfügbar sind (z. B. Batterie prüfen).", lokal=("rollen",)),
         "datenfehler_server": _vorlage(
             "rot", ("grund",),
             "{praefix}: Server hat die Messwerte abgelehnt (Code {grund}). Die Heizkurve bleibt unverändert."),
         "datenfehler_schreiben": _vorlage(
             "rot", ("detail",),
             "{praefix}: Neue Heizkurve konnte nicht an die Anlage übertragen werden ({detail}). Wird automatisch "
-            "erneut versucht."),
+            "erneut versucht.", lokal=("detail",)),
         "datenfehler_ok": _vorlage(
             "rot", (), "{praefix}: Messwerte wieder gültig, Heizkurve wird wieder angepasst."),
         "datenfehler_schreiben_ok": _vorlage(
@@ -205,7 +218,7 @@ TABELLE: dict[str, Vorlage] = {
             "SmartHeat: Konfigurationsfehler – {grund}. Die Heizungssteuerung ist gestoppt, die Anlage behält ihre "
             "letzten Werte."),
         "konfiguration_fehler_boost": Vorlage(
-            "rot", ("grund", "werte"), _konfiguration_fehler_boost, ("zusatz",)),
+            "rot", ("grund", "werte"), _konfiguration_fehler_boost, ("zusatz",), ("werte", "zusatz")),
         "konfiguration_ok": _vorlage(
             "rot", (), "SmartHeat: Einrichtung in Ordnung, die Heizungssteuerung läuft."),
         "abo_inaktiv": Vorlage("rot", ("ende",), _abo_inaktiv),
@@ -223,8 +236,8 @@ TABELLE: dict[str, Vorlage] = {
         "abmeldung_zuruecksetzen_scheitert": _vorlage(
             "rot", ("werte",),
             "SmartHeat wurde entfernt, konnte die Heizung aber nicht auf die ursprünglichen Werte zurücksetzen "
-            "({werte}). Es wird weiter versucht, sonst bitte diese Werte von Hand einstellen."),
-        "abmeldung_boost_aktiv": Vorlage("rot", ("werte",), _abmeldung_boost_aktiv, ("zusatz",)),
+            "({werte}). Es wird weiter versucht, sonst bitte diese Werte von Hand einstellen.", lokal=("werte",)),
+        "abmeldung_boost_aktiv": Vorlage("rot", ("werte",), _abmeldung_boost_aktiv, ("zusatz",), ("werte", "zusatz")),
     }.items()
 }
 
@@ -281,6 +294,22 @@ def neu(code: str, **params: Param) -> Meldung:
 def text(meldung: Meldung, *, praefix: str = STANDARD_PRAEFIX, traeger: str = STANDARD_TRAEGER) -> str:
     """Wortlaut der Meldung für den Draht und die Oberfläche; die Hosttexte steuern Absender und Träger bei."""
     return TABELLE[meldung.code].render(meldung.params, Umgebung(praefix, traeger))
+
+
+def draht(meldung: Meldung) -> dict[str, Any]:
+    """Form auf dem Draht (`up/notifications`): Code, Parameter des Katalogs und Stufe, nie ein Name (S-12).
+
+    Lokale Parameter bleiben weg; Zahlen und das Datum `ende` gehen unverändert, ein Text nur in Codeform
+    (`[a-z][a-z0-9_]{0,63}`), sonst als `unbekannt`."""
+    vorlage = TABELLE[meldung.code]
+    params: dict[str, Param] = {}
+    for name, wert in meldung.params.items():
+        if name in vorlage.lokal:
+            continue
+        if isinstance(wert, str) and name not in _DATUM_PARAMS and not _CODE_ART.fullmatch(wert):
+            wert = _UNBEKANNT
+        params[name] = wert
+    return {"code": meldung.code, "params": params, "stufe": meldung.stufe}
 
 
 def zu_dict(meldung: Meldung) -> dict[str, Any]:

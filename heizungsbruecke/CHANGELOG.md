@@ -84,6 +84,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   Meldungszustand leer: ein noch bestehender Anlass wird einmal neu gemeldet, der Notbetrieb wird aus dem
   Failsafe-Zustand wieder gesät. Offene Hinweise in Home Assistant, die vor dem Update gemeldet wurden, räumt das Gerät
   danach nicht mehr selbst ab. Rückweg: die Sicherung zurückspielen.
+- `up/notifications` trägt je Meldung `code`, `params` und `stufe` statt `kategorie` und `text`, dazu optional `kreis`.
+  Auf den Draht gehen nur Parameter des Katalogs; Namen (Entity, Raum, Anlage) und Freitext bleiben lokal und füllen nur
+  den Text in Home Assistant. Ein Textparameter geht nur als Code, sonst als `unbekannt`. Ein Schlüssel mit Namen
+  oder Kreis wird zu `<art>:<Prüfsumme>`; der Kreis geht als eigenes Feld. Schließt das Gerät eine Meldung, die es nicht
+  mehr kennt, steht `code` auf `null`. Der Server von vor diesem Stand liest das neue Format nicht.
 
 ## 1.1.0
 

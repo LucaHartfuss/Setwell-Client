@@ -364,8 +364,8 @@ class Device:
     def abo_status(self, kreis=None):
         return "aktiv"
 
-    def meldung(self, key, text, *, offen, stufe):
-        self.meldungen.append((key, text, offen, stufe))
+    def meldung(self, key, meldung, *, offen):
+        self.meldungen.append((key, meldung, offen))
 
 
 def _paths(tmp_path, monkeypatch):

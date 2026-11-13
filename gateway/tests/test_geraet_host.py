@@ -83,22 +83,20 @@ def test_runtime_messages_become_notifications(welt):
     sink = welt.host.notify_sink
     notbetrieb = meldungen.neu("meldung.notbetrieb")
     batterie = meldungen.neu("meldung.batterie_schwach", bezeichnung="Bad")
-    text_notbetrieb = meldungen.text(notbetrieb, praefix="SmartHeat-Gateway")
-    text_batterie = meldungen.text(batterie)
     sink.show("notbetrieb", notbetrieb)
     sink.push("notbetrieb", notbetrieb)
     sink.push("batterie:0x1", batterie)
     sink.withdraw("notbetrieb")
-    assert text_notbetrieb.startswith("SmartHeat-Gateway: ")
     assert welt.device.meldungen == [
-        ("notbetrieb", text_notbetrieb, True, "rot"), ("notbetrieb", text_notbetrieb, True, "rot"),
-        ("batterie:0x1", text_batterie, False, "orange"), ("notbetrieb", text_notbetrieb, False, "rot")]
+        ("notbetrieb", notbetrieb, True), ("notbetrieb", notbetrieb, True),
+        ("batterie:0x1", batterie, False), ("notbetrieb", notbetrieb, False)]
 
 
-def test_the_datentraeger_message_names_the_gateway(welt):
+def test_the_datentraeger_message_goes_to_the_device_as_a_code(welt):
+    """Auf dem Draht steht der Code; den Wortlaut bildet der Server, kein Text und kein Gateway-Name geht mit."""
     welt.host.notify_sink.show("datentraeger", meldungen.neu("meldung.datentraeger_nicht_beschreibbar"))
-    (_, text, _, _) = welt.device.meldungen[-1]
-    assert "Datenträger des Gateways ist nicht beschreibbar" in text
+    (_, meldung, _) = welt.device.meldungen[-1]
+    assert meldung.code == "meldung.datentraeger_nicht_beschreibbar"
 
 
 def test_the_gateway_reports_the_ways_of_its_drivers(welt):

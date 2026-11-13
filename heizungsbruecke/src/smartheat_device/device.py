@@ -34,7 +34,6 @@ from smartheat_device.host import Anzeige, DeviceHost
 from smartheat_device.laufzeit import RuntimeChannel
 from smartheat_device.link import ANMELDUNG_SCHEITERT, GESENDET, GETRENNT, NACHRICHT, VERBUNDEN, Link
 from smartheat_runtime import dokument_config
-from smartheat_runtime.notifier import category
 from smartheat_runtime.soll_speicher import KREIS
 from smartheat_runtime.worker import RegulationWorker
 
@@ -146,7 +145,7 @@ class Device:
         self._hello_offen = False  # verbunden, hello noch nicht gesendet (Takt versucht es erneut)
         self._rettung = False
         self._kanaele: dict[int, RuntimeChannel] = {}  # je Kreis ein Kanal ueber denselben Link
-        self._eigene: dict[str, str] = {}  # eigene Meldungen des Geraets: key -> Text
+        self._eigene: dict[str, meldungen.Meldung] = {}  # eigene Meldungen des Geraets: key -> Meldung
         self._meldungen: dict[str, dict] = {}  # offene Meldungen (Geraet und Laufzeit)
         self._meldungen_neu: dict[str, dict] = {}  # geaendert, noch nicht gesendet
         self._meldungen_at: float | None = None
@@ -223,14 +222,18 @@ class Device:
     def soll_quelle_aus(self, aus: bool, wirksam: float | None = None) -> None:
         """Soll-Quelle aus (Thermostat aus/Frostschutz): kein Wunsch, nur die Meldung soll_quelle_aus. Ohne
         wirksames Soll bleibt sie offen, nur ohne Wert im Text; schliessen kann sie nur aus=False."""
-        text = meldungen.text(wish.soll_quelle_aus_meldung(wirksam)) if aus else None
-        self._inbox.put(("eigene", wish.SOLL_QUELLE_AUS_KEY, text))
+        meldung = wish.soll_quelle_aus_meldung(wirksam) if aus else None
+        self._inbox.put(("eigene", wish.SOLL_QUELLE_AUS_KEY, meldung))
 
-    def meldung(self, key: str, text: str, *, offen: bool, stufe: str) -> None:
-        """Meldung der Laufzeit (NotifySink des Hosts): Upsert je key ueber up/notifications. Die Stufe (wire.STUFEN)
-        setzt der Aufrufer; eine unbekannte lehnt nachrichten.meldung laut ab."""
-        self._inbox.put(("meldung", nachrichten.meldung(key=key, kategorie=category(key), stufe=stufe, text=text,
-                                                        offen=offen, ts=_iso(self._wall()))))
+    def meldung(self, key: str, meldung: meldungen.Meldung | None, *, offen: bool) -> None:
+        """Meldung der Laufzeit (NotifySink des Hosts): Upsert je key ueber up/notifications. Auf den Draht gehen
+        Code, Parameter des Katalogs und Stufe der Meldung (meldungen.draht), nie ein Text oder Name; der Key wird zu
+        einem Draht-Key ohne Namen, ein Kreispraefix zum Feld kreis (nachrichten.draht_key). Ohne Meldung (None) kann
+        nur geschlossen werden."""
+        draht_key, kreis = nachrichten.draht_key(key)
+        draht = meldungen.draht(meldung) if meldung is not None else {"code": None, "params": {}, "stufe": None}
+        self._inbox.put(("meldung", nachrichten.meldung(key=draht_key, offen=offen, ts=_iso(self._wall()),
+                                                        kreis=kreis, **draht)))
 
     def im_geraete_thread(self, aufgabe: Callable[[], None]) -> None:
         """Eine Aufgabe des Hosts (z. B. lokales Abmelden ueber stdin) im Geraete-Thread ausfuehren lassen: aus
@@ -292,7 +295,8 @@ class Device:
             zustand=self.zustand(), server_ok=(link := self.link) is not None and link.connected,
             device_state=bootstrap.device_state(self._dir), eingerichtet=self.documents.eingerichtet(),
             hinweise=self.hinweise.alle(),
-            meldungen=tuple({"key": key, "text": text} for key, text in sorted(self._eigene.items())),
+            meldungen=tuple({"key": key, "text": meldungen.text(meldung)}
+                            for key, meldung in sorted(self._eigene.items())),
             konfiguration_abgelehnt=(
                 meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))
                 if ablehnung is not None else None))
@@ -666,8 +670,8 @@ class Device:
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall())
         self.wunsch_puffer.setzen(neu)
         self.documents.mark_dirty()
-        text = meldungen.text(wish.begrenzt_meldung(roh, begrenzt, herkunft)) if roh is not None else None
-        self._eigene_meldung(wish.BEGRENZT_KEY, text)
+        meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
+        self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:
@@ -710,16 +714,19 @@ class Device:
         if self._entfernt_mid is not None:
             self._entfernt_frei_ab = now + ENTFERNT_WIEDERHOLUNG_SECONDS
 
-    def _eigene_meldung(self, key: str, text: str | None) -> None:
+    def _eigene_meldung(self, key: str, meldung: meldungen.Meldung | None) -> None:
         if key not in wire.MELDUNGEN:
             raise nachrichten.Vertragsfehler("eigene Meldung: key steht nicht in MELDUNGEN")
-        if self._eigene.get(key) == text:
+        if self._eigene.get(key) == meldung:
             return
         vorher = self._eigene.pop(key, None)
-        if text is not None:
-            self._eigene[key] = text
-        self._meldung_merken(nachrichten.meldung(key=key, kategorie=key, stufe="orange", text=text or vorher or "",
-                                                 offen=text is not None, ts=_iso(self._wall())))
+        if meldung is not None:
+            self._eigene[key] = meldung
+        # geschlossen wird mit der zuletzt offenen Meldung: so bleiben Code und Stufe des Items die der Meldung
+        gesendet = meldung or vorher
+        inhalt = (meldungen.draht(gesendet) if gesendet is not None
+                  else {"code": None, "params": {}, "stufe": None})
+        self._meldung_merken(nachrichten.meldung(key=key, offen=meldung is not None, ts=_iso(self._wall()), **inhalt))
 
     def _meldung_merken(self, item: dict) -> None:
         key = item["key"]

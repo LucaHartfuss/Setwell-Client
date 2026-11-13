@@ -74,7 +74,9 @@ ZUSTAENDE = (
 )
 RAUM_FIELDS = ("ist", "soll", "soll_quelle", "ts")
 NOTIFICATIONS_FIELDS = ("schema", "items")
-NOTIFICATION_FIELDS = ("key", "kategorie", "stufe", "text", "offen", "ts")
+NOTIFICATION_FIELDS = ("key", "code", "params", "stufe", "offen", "ts")
+# kreis: Kreisnummer; quelle/roh: nur bei erzeuger.*, Hersteller und Roh-Code der Anlage (`[a-z0-9_]`, hoechstens 32)
+NOTIFICATION_OPTIONAL = ("kreis", "quelle", "roh")
 STUFEN = ("rot", "orange", "gelb")  # Dringlichkeit einer Meldung; rot und orange gehen als Push hinaus, gelb nie
 INVENTORY_FIELDS = ("schema", "command_id", "teil", "teile", "daten")
 INVENTUR_FILTER_FIELDS = ("plattformen", "domaenen", "geraeteklassen", "dienste")

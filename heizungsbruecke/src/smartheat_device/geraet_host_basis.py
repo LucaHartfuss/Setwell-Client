@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from smartheat_core import dateien
+from smartheat_core.meldungen import Meldung
 from smartheat_device.commands import Done, Waiting
 from smartheat_device.hintergrund import Hintergrund
 from smartheat_device.host import Anzeige, MeldungSink
@@ -77,7 +78,7 @@ class GeraetHostBasis:
         #: blockierende Host-Aufrufe der Befehle neben dem Geraete-Thread; prozess.beenden stoppt ihn
         self.hintergrund = Hintergrund()
         #: Meldungen der Laufzeit an den Geraetekern (up/notifications); einer je Prozess
-        self.notify_sink = MeldungSink(self._melden, self.texts)
+        self.notify_sink = MeldungSink(self._melden)
         self._workers: dict[int, RegulationWorker] = {}  # je Kreis der Worker seiner Laufzeit
         #: False im Ruhezustand (IdleBridge): der Worker des Kreises hat keinen Soll-Eingang
         self._soll_eingaenge: dict[int, bool] = {}
@@ -141,9 +142,9 @@ class GeraetHostBasis:
             for worker in self._workers.values():
                 worker.post(Event(EV_RELOAD))
 
-    def _melden(self, key: str, text: str, *, offen: bool, stufe: str) -> None:
+    def _melden(self, key: str, meldung: Meldung | None, *, offen: bool) -> None:
         if self.device is not None:
-            self.device.meldung(key, text, offen=offen, stufe=stufe)
+            self.device.meldung(key, meldung, offen=offen)
 
     # --- Sicht der Laufzeit ---
 

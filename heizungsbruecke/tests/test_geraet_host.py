@@ -685,8 +685,8 @@ def test_runtime_messages_go_to_ha_and_to_the_device_core(tmp_path, monkeypatch)
     sink.push("batterie:sensor.x", batterie)
     sink.withdraw("notbetrieb")
     assert device.meldungen == [
-        ("notbetrieb", text_notbetrieb, True, "rot"), ("notbetrieb", text_notbetrieb, True, "rot"),
-        ("batterie:sensor.x", text_batterie, False, "orange"), ("notbetrieb", text_notbetrieb, False, "rot")]
+        ("notbetrieb", notbetrieb, True), ("notbetrieb", notbetrieb, True),
+        ("batterie:sensor.x", batterie, False), ("notbetrieb", notbetrieb, False)]
     assert ha.pushes == [text_notbetrieb, text_batterie]
     assert ha.persistent == [("smartheat_notbetrieb", text_notbetrieb)]
     assert ha.dismissed == ["smartheat_notbetrieb"]
@@ -707,8 +707,7 @@ def test_a_failing_ha_notification_still_reaches_the_device_core(tmp_path, monke
         sink.show("schreibbudget", budget)
     with pytest.raises(ConnectionError):
         sink.withdraw("schreibbudget")
-    text = meldungen.text(budget)
-    assert device.meldungen == [("schreibbudget", text, True, "rot"), ("schreibbudget", text, False, "rot")]
+    assert device.meldungen == [("schreibbudget", budget, True), ("schreibbudget", budget, False)]
 
 
 def test_the_notifier_reports_a_critical_runtime_message_to_the_device_core(tmp_path, monkeypatch):
@@ -723,10 +722,10 @@ def test_the_notifier_reports_a_critical_runtime_message_to_the_device_core(tmp_
     notifier.notify("notbetrieb", "aktiv", an, critical=True)
     notifier.notify("notbetrieb", "ok", aus, critical=True)
     # Regeln des Gateways (MeldungSink): der Geraetekern sendet je key nur den letzten Stand (Upsert), am Ende geschlossen
-    assert device.meldungen == [("notbetrieb", meldungen.text(an), False, "orange"),  # Push vor der offenen Meldung
-                                ("notbetrieb", meldungen.text(an), True, "rot"),
-                                ("notbetrieb", meldungen.text(aus), True, "rot"),
-                                ("notbetrieb", meldungen.text(an), False, "rot")]
+    assert device.meldungen == [("notbetrieb", an, False),  # Push vor der offenen Meldung
+                                ("notbetrieb", an, True),
+                                ("notbetrieb", aus, True),
+                                ("notbetrieb", an, False)]
     assert ha.persistent == [("smartheat_notbetrieb", meldungen.text(an))] and ha.dismissed == ["smartheat_notbetrieb"]
 
 

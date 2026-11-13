@@ -13,38 +13,35 @@ from typing import Protocol
 
 from smartheat_core.meldungen import Meldung
 from smartheat_device.commands import CommandRegister
-from smartheat_runtime.texts import HA_TEXTS, HostTexts
 
 
 class MeldungSink:
     """NotifySink der Laufzeit (smartheat_runtime.ports) auf den Geraetekern (up/notifications), fuer jeden Host
     (Gateway allein, HA-Add-on neben HA-Benachrichtigungen). Regeln: show = offene
-    kritische Meldung, withdraw = geschlossen, push = Ereignis (offen und kritisch nur, solange der key offen ist).
-    `melden(key, text, *, offen, stufe)` ist Device.meldung (oder ein Host-Rueckruf darauf). Stufe rot: offene oder
-    geschlossene Meldung (show, withdraw, push solange der key offen ist); orange: Ereignis ohne offenen key.
-    Den Text bildet `texts` des Hosts aus der Meldung; auf dem Draht steht er bis zur Umstellung auf Codes."""
+    kritische Meldung, withdraw = geschlossen, push = Ereignis (offen nur, solange der key offen ist).
+    `melden(key, meldung, *, offen)` ist Device.meldung (oder ein Host-Rueckruf darauf); Code, Parameter und Stufe
+    stehen in der Meldung, einen Text bildet der Sink nicht. Geschlossen wird mit der zuletzt offenen Meldung des
+    keys, ohne eine solche mit None (der Kern schliesst dann nur)."""
 
-    def __init__(self, melden: Callable[..., None], texts: HostTexts = HA_TEXTS) -> None:
+    def __init__(self, melden: Callable[..., None]) -> None:
         self._melden = melden
-        self._texts = texts
-        self._offen: dict[str, str] = {}
+        self._offen: dict[str, Meldung] = {}
         self._lock = threading.Lock()
 
     def push(self, key: str, meldung: Meldung) -> None:
         with self._lock:
             offen = key in self._offen
-        self._melden(key, self._texts.text(meldung), offen=offen, stufe="rot" if offen else "orange")
+        self._melden(key, meldung, offen=offen)
 
     def show(self, key: str, meldung: Meldung) -> None:
-        message = self._texts.text(meldung)
         with self._lock:
-            self._offen[key] = message
-        self._melden(key, message, offen=True, stufe="rot")
+            self._offen[key] = meldung
+        self._melden(key, meldung, offen=True)
 
     def withdraw(self, key: str) -> None:
         with self._lock:
-            text = self._offen.pop(key, "")
-        self._melden(key, text, offen=False, stufe="rot")
+            meldung = self._offen.pop(key, None)
+        self._melden(key, meldung, offen=False)
 
 
 @dataclass(frozen=True)
