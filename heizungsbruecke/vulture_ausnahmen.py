@@ -62,3 +62,11 @@ _.kritische_mindestversion_abgelaufen  # smartheat_runtime/entitlement.py: Haken
 
 # --- Stand des Add-ons (supervisor.py): die Meldung an den Server liest den Schalter erst mit der Statusmeldung der Version; bis dahin ruft nur der Test ---
 _.addon_auto_update  # supervisor.py: liest den Schalter "Automatisch aktualisieren" (nur lesen), noch ohne Aufrufer in den Hosts (tests/test_supervisor.py)
+
+# --- Grenzen der Betriebsarten (smartheat_core/safety.py): Plan, Leerstand und Abwesenheit rufen die Pruefer mit der Verdrahtung in den Takt; bis dahin ruft nur der Test ---
+_.LEERSTAND_VORGABE_C  # smartheat_core/safety.py: Voreinstellung der Leerstandstemperatur (tests/test_core_safety.py, tests/test_regel4_werte.py)
+_.absenktemperatur  # smartheat_core/safety.py: kuehles Soll nie unter der Untergrenze, noch ohne Aufrufer im Takt
+_.leerstand_temperatur_gueltig  # smartheat_core/safety.py: Untergrenze des Leerstands, noch ohne Aufrufer im Takt
+_.leerstand_bis_gueltig  # smartheat_core/safety.py: Hoechstdauer des Leerstands, noch ohne Aufrufer im Takt
+_.phasendauer_gueltig  # smartheat_core/safety.py: Mindestdauer der Phase, noch ohne Aufrufer im Takt
+_.abwesenheit_vorschlag  # smartheat_core/safety.py: Vorschlag je Verteilsystem, noch ohne Aufrufer im Takt

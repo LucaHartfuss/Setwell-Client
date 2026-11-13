@@ -10,7 +10,7 @@ import pytest
 from bindung_beispiele import BINDINGS
 
 from heizungsbruecke import ha_binding
-from smartheat_core import boost, emergency_boost, write_budget
+from smartheat_core import boost, emergency_boost, safety, write_budget
 from smartheat_core.clamping import round_to_step
 from smartheat_core.pipeline import LeverPipeline
 from smartheat_core.safety import LOCAL_SAFETY
@@ -68,6 +68,13 @@ KONSTANTEN = {
     "Kaelteschutz Ist gleich Plausibilitaet": (emergency_boost.KAELTESCHUTZ_IST_BEREICH, plausibility.ROOM_ACTUAL_RANGE),
     "Notbetrieb": ((delivery.NOTBETRIEB_AFTER_SERVER_FAILURES, delivery.ACK_TIMEOUT_SECONDS), (2, 30)),
     "Abo-Frist": (entitlement.GRACE_PERIOD, timedelta(days=30)),
+    "Betriebsarten Absenk-Untergrenze": (safety.ABSENK_UNTERGRENZE_C, 16.0),
+    "Betriebsarten Leerstand-Untergrenze": (safety.LEERSTAND_UNTERGRENZE_C, 15.0),
+    "Betriebsarten Leerstand-Voreinstellung": (safety.LEERSTAND_VORGABE_C, 16.0),
+    "Betriebsarten Mindestdauer der Phase": (safety.PHASE_MINDESTDAUER, timedelta(minutes=60)),
+    "Betriebsarten Leerstand hoechstens": (safety.LEERSTAND_HOECHSTDAUER, timedelta(days=365)),
+    "Betriebsarten Abwesenheits-Vorschlag": (
+        dict(safety.ABWESENHEIT_VORSCHLAG_C), {"Heizkoerper": 17.0, "Fussbodenheizung": 19.0}),
 }
 
 

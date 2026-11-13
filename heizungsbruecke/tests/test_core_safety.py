@@ -1,9 +1,24 @@
 import dataclasses
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from smartheat_core.clamping import target_value
-from smartheat_core.safety import LOCAL_SAFETY, check_invariants, resolve_local_safety
+from smartheat_core.safety import (
+    ABSENK_UNTERGRENZE_C,
+    ABWESENHEIT_VORSCHLAG_C,
+    LEERSTAND_UNTERGRENZE_C,
+    LEERSTAND_VORGABE_C,
+    LOCAL_SAFETY,
+    absenktemperatur,
+    abwesenheit_vorschlag,
+    check_invariants,
+    leerstand_bis_gueltig,
+    leerstand_temperatur_gueltig,
+    phasendauer_gueltig,
+    resolve_local_safety,
+)
 
 
 def _verteilsysteme() -> tuple[str, ...]:
@@ -123,3 +138,110 @@ def test_the_heat_limit_is_never_written_below_10_degrees_nor_above_the_profile_
     assert target_value(high, low, high, step) == high
     assert target_value(high + 0.1, low, high, step) == high
     assert target_value(8.0, low, high, step) == 10.0
+
+
+# --- Grenzen der Betriebsarten (Absenkung, Leerstand, Phasen, Abwesenheits-Vorschlag) ---
+
+NAN = float("nan")
+INF = float("inf")
+T0 = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(("wunsch", "tiefe", "erwartet"), [
+    (21.0, 3.0, 18.0),
+    (21.0, 5.0, 16.0),  # genau auf der Untergrenze
+    (21.0, 5.5, 16.0),  # tiefer wird auf die Untergrenze gehoben
+    (21.0, 30.0, 16.0),
+    (25.0, 3.0, 22.0),
+    (21.0, 0.0, 21.0),  # Tiefe 0 = keine Absenkung
+    (16.0, 3.0, 16.0),  # Wunsch auf der Untergrenze: nicht tiefer
+    (15.5, 3.0, 15.5),  # Wunsch unter der Untergrenze: nie waermer als der Wunsch
+    (15.0, 5.0, 15.0),
+])
+def test_absenktemperatur_nie_unter_der_untergrenze_und_nie_ueber_dem_wunsch(wunsch, tiefe, erwartet):
+    assert absenktemperatur(wunsch, tiefe) == erwartet
+
+
+@pytest.mark.parametrize(("wunsch", "tiefe"), [
+    (21.0, -0.5), (21.0, NAN), (21.0, INF), (21.0, -INF), (NAN, 3.0), (INF, 3.0), (21.0, True), ("21", 3.0), (21.0, None),
+])
+def test_absenktemperatur_verweigert_unbrauchbare_eingaben(wunsch, tiefe):
+    with pytest.raises(ValueError, match="Absenk"):
+        absenktemperatur(wunsch, tiefe)
+
+
+@pytest.mark.parametrize(("temp", "erwartet"), [
+    (15.0, True), (16.0, True), (25.0, True), (14.9, False), (14.99, False), (5.0, False), (-40.0, False),
+    (NAN, False), (INF, False), (-INF, False), (None, False), ("16", False), (True, False),
+])
+def test_leerstandtemperatur_mindestens_15(temp, erwartet):
+    assert leerstand_temperatur_gueltig(temp) is erwartet
+
+
+def test_leerstand_voreinstellung_ist_selbst_gueltig():
+    assert LEERSTAND_VORGABE_C == 16.0
+    assert leerstand_temperatur_gueltig(LEERSTAND_VORGABE_C)
+
+
+@pytest.mark.parametrize(("bis", "erwartet"), [
+    (T0 + timedelta(seconds=1), True),
+    (T0 + timedelta(days=30), True),
+    (T0 + timedelta(days=365), True),  # genau 365 Tage
+    (T0 + timedelta(days=365, seconds=1), False),
+    (T0 + timedelta(days=366), False),
+    (T0, False),  # nicht in der Zukunft
+    (T0 - timedelta(seconds=1), False),
+    (T0 - timedelta(days=1), False),
+])
+def test_leerstand_bis_zukunft_und_hoechstens_365_tage(bis, erwartet):
+    assert leerstand_bis_gueltig(T0, bis) is erwartet
+
+
+def test_leerstand_bis_rechnet_in_absoluter_zeit_ueber_zonen():
+    berlin = ZoneInfo("Europe/Berlin")
+    gesetzt = datetime(2026, 11, 13, 13, 0, tzinfo=berlin)  # 12:00 UTC
+    assert leerstand_bis_gueltig(gesetzt, T0 + timedelta(days=365)) is True
+    assert leerstand_bis_gueltig(gesetzt, T0 + timedelta(days=365, seconds=1)) is False
+
+
+@pytest.mark.parametrize(("gesetzt", "bis"), [
+    (T0.replace(tzinfo=None), T0 + timedelta(days=1)),
+    (T0, (T0 + timedelta(days=1)).replace(tzinfo=None)),
+    (None, T0), (T0, None), ("2026-11-13", T0),
+])
+def test_leerstand_bis_verweigert_zeiten_ohne_zone_und_fremde_typen(gesetzt, bis):
+    assert leerstand_bis_gueltig(gesetzt, bis) is False
+
+
+@pytest.mark.parametrize(("dauer", "erwartet"), [
+    (timedelta(minutes=60), True),
+    (timedelta(minutes=61), True),
+    (timedelta(hours=8), True),
+    (timedelta(minutes=59, seconds=59), False),
+    (timedelta(minutes=59), False),
+    (timedelta(0), False),
+    (timedelta(minutes=-60), False),
+    (None, False), (3600, False),
+])
+def test_phase_mindestens_60_minuten(dauer, erwartet):
+    assert phasendauer_gueltig(dauer) is erwartet
+
+
+def test_abwesenheit_vorschlag_je_verteilsystem():
+    assert abwesenheit_vorschlag("Heizkoerper") == 17.0
+    assert abwesenheit_vorschlag("Fussbodenheizung") == 19.0
+
+
+def test_abwesenheit_vorschlag_deckt_jedes_verteilsystem_und_liegt_ueber_der_untergrenze():
+    assert set(ABWESENHEIT_VORSCHLAG_C) == set(_verteilsysteme())
+    assert all(wert > LEERSTAND_UNTERGRENZE_C for wert in ABWESENHEIT_VORSCHLAG_C.values())
+
+
+@pytest.mark.parametrize("verteilsystem", ["Deckenheizung", None, "", "heizkoerper", 17])
+def test_abwesenheit_vorschlag_ohne_stillen_rueckfall(verteilsystem):
+    with pytest.raises(ValueError, match="keine lokalen Sicherheitswerte für Verteilsystem"):
+        abwesenheit_vorschlag(verteilsystem)
+
+
+def test_untergrenzen_liegen_im_bedienbereich_und_die_absenkung_nicht_unter_dem_leerstand():
+    assert 15.0 <= LEERSTAND_UNTERGRENZE_C <= ABSENK_UNTERGRENZE_C <= 25.0

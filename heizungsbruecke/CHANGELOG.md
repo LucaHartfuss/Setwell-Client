@@ -5,6 +5,9 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät kennt jetzt die Grenzen der kommenden Betriebsarten (Absenkung nie unter 16 °C, Leerstand nie unter
+  15 °C und höchstens 365 Tage, jede Phase mindestens 60 Minuten, Abwesenheits-Vorschlag 17 °C bzw. 19 °C je
+  Verteilsystem). Noch ohne Wirkung: sie werden erst mit dem Wochenplan angewendet.
 - Das Add-on liest das Lebenszeichen der Integration (Version, gelesene Status-Schemata; nach 900 Sekunden ohne
   Ereignis gilt die Version als unbekannt) und kann den Schalter „Automatisch aktualisieren“ des Add-ons lesen
   (nur lesen, nie setzen; ist er nicht lesbar, gilt er als unbekannt). Sichtbar wird das erst mit der Meldung an den

@@ -3,10 +3,24 @@ kommen nie vom Server. Jedes Profil des Servers hat hier eine Zeile, und seine S
 (Contract-Check, Vertrag V4); die Verteilsysteme spiegeln VERTEILSYSTEME_MIT_LOKALEN_SICHERHEITSWERTEN im Server (je
 Seite gepinnt: tests/test_core_safety.py, Server tests/generic/test_profiles.py). Fehlen Werte, verweigert der Client
 den Start, bis der Nutzer Werte freigibt."""
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from types import MappingProxyType
 
 from smartheat_core.levers import LEVER_SETS
+
+# Betriebsarten (Absenkung, Leerstand, Wochenplan): Untergrenzen und Dauern liegen im Geraet und kommen nie vom Server.
+# Sie gelten zusaetzlich zum Bedienbereich und zu room_setpoint des Hebelsatzes (der engere Bereich gewinnt) und aendern
+# keine bestehende Grenze. Der Abstand zum Kaelteschutz bleibt: keine Betriebsart liegt unter 15 Grad.
+ABSENK_UNTERGRENZE_C = 16.0
+LEERSTAND_UNTERGRENZE_C = 15.0
+LEERSTAND_VORGABE_C = 16.0
+PHASE_MINDESTDAUER = timedelta(minutes=60)
+LEERSTAND_HOECHSTDAUER = timedelta(days=365)
+#: Vorschlag der Abwesenheitstemperatur je Verteilsystem (Voreinstellung fuer den Kunden, keine Grenze).
+ABWESENHEIT_VORSCHLAG_C: Mapping[str, float] = MappingProxyType({"Heizkoerper": 17.0, "Fussbodenheizung": 19.0})
 
 
 @dataclass(frozen=True)
@@ -124,3 +138,46 @@ def resolve_local_safety(lever_set_id: str, verteilsystem) -> LocalSafety:
         raise ValueError(f"keine lokalen Sicherheitswerte für Verteilsystem '{verteilsystem}'")
     check_invariants(safety, lever_set_id, verteilsystem)
     return safety
+
+
+def _endliche_zahl(wert) -> bool:
+    return isinstance(wert, int | float) and not isinstance(wert, bool) and math.isfinite(wert)
+
+
+def absenktemperatur(wunsch_c, absenkung_k) -> float:
+    """Kuehles Soll einer Absenkung: nie unter ABSENK_UNTERGRENZE_C und nie waermer als der Wunsch. Eine Absenkung
+    von 0 K laesst den Wunsch; liegt der Wunsch selbst unter der Untergrenze, bleibt er (es wird nie angehoben).
+    Unbrauchbare Eingaben (keine endliche Zahl, negative Tiefe) sind ein Fehler: der Aufrufer faellt dann auf den
+    Wunsch zurueck, die warme Richtung."""
+    if not _endliche_zahl(wunsch_c) or not _endliche_zahl(absenkung_k) or absenkung_k < 0:
+        raise ValueError(f"Absenkung aus Wunsch {wunsch_c!r} und Tiefe {absenkung_k!r} unbrauchbar")
+    return min(float(wunsch_c), max(wunsch_c - absenkung_k, ABSENK_UNTERGRENZE_C))
+
+
+def leerstand_temperatur_gueltig(temp_c) -> bool:
+    """Die Leerstandstemperatur liegt mindestens auf LEERSTAND_UNTERGRENZE_C; die Obergrenze setzt der Bedienbereich
+    des Hebelsatzes beim Schreiben."""
+    return _endliche_zahl(temp_c) and temp_c >= LEERSTAND_UNTERGRENZE_C
+
+
+def leerstand_bis_gueltig(gesetzt: datetime, bis: datetime) -> bool:
+    """`bis` liegt nach dem Setzen und hoechstens LEERSTAND_HOECHSTDAUER danach. Beide Zeitpunkte brauchen eine
+    Zone; die Rechnung ist absolut, die Uhr kommt vom Aufrufer."""
+    if not isinstance(gesetzt, datetime) or not isinstance(bis, datetime):
+        return False
+    if gesetzt.tzinfo is None or bis.tzinfo is None:
+        return False
+    return timedelta(0) < bis - gesetzt <= LEERSTAND_HOECHSTDAUER
+
+
+def phasendauer_gueltig(dauer: timedelta) -> bool:
+    """Jede Phase des Wochenplans dauert mindestens PHASE_MINDESTDAUER."""
+    return isinstance(dauer, timedelta) and dauer >= PHASE_MINDESTDAUER
+
+
+def abwesenheit_vorschlag(verteilsystem) -> float:
+    """Vorschlag der Abwesenheitstemperatur je Verteilsystem; kein stiller Rueckfall fuer unbekannte Systeme."""
+    vorschlag = ABWESENHEIT_VORSCHLAG_C.get(verteilsystem) if isinstance(verteilsystem, str) else None
+    if vorschlag is None:
+        raise ValueError(f"keine lokalen Sicherheitswerte für Verteilsystem '{verteilsystem}'")
+    return vorschlag
