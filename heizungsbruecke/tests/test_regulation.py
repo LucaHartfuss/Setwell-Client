@@ -134,6 +134,26 @@ def test_target_raise_starts_comfort_boost(make_store, tmp_path):
     assert load_backup(tmp_path / "backup.json")["boost_active"] is True
 
 
+def test_check_gibt_aufheizen_und_herkunft_des_anstiegs_ausdruecklich_weiter(make_store, monkeypatch):
+    """Die Regelung kennt heute nur den Anstieg durch den Kunden (Wunschaenderung am Thermostat) und kein Profil;
+    beides geht ausdruecklich an `decide_boost`, dessen Parameter keine Standardwerte haben."""
+    aufrufe = []
+    echt = regulation.decide_boost
+
+    def spaeher(*args, **kwargs):
+        aufrufe.append(kwargs)
+        return echt(*args, **kwargs)
+
+    monkeypatch.setattr(regulation, "decide_boost", spaeher)
+    rt = _runtime(make_store(backup={"last_room_target": 20.0, **RESTORE_POINT}), room_actual=19.0)
+
+    regulation.run_local_check(rt)
+
+    assert len(aufrufe) == 1
+    assert aufrufe[0]["aufheizen"] is None and aufrufe[0]["anstieg_vom_kunden"] is True
+    assert _writes(rt) == COMFORT
+
+
 def test_thermostat_step_of_half_a_kelvin_starts_comfort_boost(make_store, tmp_path):
     """Ein Thermostatschritt von 0,5 K startet den Comfort-Boost."""
     rt = _runtime(make_store(backup={"last_room_target": 20.5, **RESTORE_POINT}), room_actual=20.0, room_target=21.0)

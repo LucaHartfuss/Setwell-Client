@@ -130,6 +130,9 @@ def run_local_check(rt: Runtime) -> None:
         previous_room_target=state.last_room_target,
         boost_was_active=state.boost_active,
         arrival_threshold_k=safety.arrival_threshold_k,
+        # Heute kennt die Regelung nur die Wunschaenderung des Kunden und kein Aufheizen-Profil.
+        aufheizen=None,
+        anstieg_vom_kunden=True,
     )
     emergency = state.delivery.notbetrieb and decide_emergency_boost(
         room_actual=room_actual,

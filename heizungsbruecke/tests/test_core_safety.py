@@ -1,5 +1,5 @@
 import dataclasses
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -194,23 +194,80 @@ def test_leerstand_voreinstellung_ist_selbst_gueltig():
     (T0 - timedelta(days=1), False),
 ])
 def test_leerstand_bis_zukunft_und_hoechstens_365_tage(bis, erwartet):
-    assert leerstand_bis_gueltig(T0, bis) is erwartet
+    assert leerstand_bis_gueltig(T0, bis, T0) is erwartet
 
 
 def test_leerstand_bis_rechnet_in_absoluter_zeit_ueber_zonen():
     berlin = ZoneInfo("Europe/Berlin")
-    gesetzt = datetime(2026, 11, 13, 13, 0, tzinfo=berlin)  # 12:00 UTC
-    assert leerstand_bis_gueltig(gesetzt, T0 + timedelta(days=365)) is True
-    assert leerstand_bis_gueltig(gesetzt, T0 + timedelta(days=365, seconds=1)) is False
+    jetzt = datetime(2026, 11, 13, 13, 0, tzinfo=berlin)  # 12:00 UTC
+    assert leerstand_bis_gueltig(jetzt, T0 + timedelta(days=365), jetzt) is True
+    assert leerstand_bis_gueltig(jetzt, T0 + timedelta(days=365, seconds=1), jetzt) is False
 
 
-@pytest.mark.parametrize(("gesetzt", "bis"), [
-    (T0.replace(tzinfo=None), T0 + timedelta(days=1)),
-    (T0, (T0 + timedelta(days=1)).replace(tzinfo=None)),
-    (None, T0), (T0, None), ("2026-11-13", T0),
+def test_leerstand_bis_rechnet_ueber_den_sommerzeitwechsel_in_absoluter_zeit():
+    """Beide Zeitpunkte tragen dasselbe tzinfo-Objekt: Python rechnete die Differenz dann naiv in Wandzeit. Hier
+    sind es naiv 364 Tage 23,5 h, absolut aber 365 Tage 30 Minuten (der Herbstwechsel liegt dazwischen)."""
+    berlin = ZoneInfo("Europe/Berlin")
+    jetzt = datetime(2027, 10, 30, 12, 0, tzinfo=berlin)  # MESZ
+    ueber = datetime(2028, 10, 29, 11, 30, tzinfo=berlin)  # MEZ
+    genau = datetime(2028, 10, 29, 10, 30, tzinfo=berlin)  # MEZ, absolut genau 365 Tage
+    assert ueber.astimezone(UTC) - jetzt.astimezone(UTC) == timedelta(days=365, minutes=30)
+    assert leerstand_bis_gueltig(jetzt, ueber, jetzt) is False
+    assert leerstand_bis_gueltig(jetzt, genau, jetzt) is True
+
+
+def test_leerstand_hoechstdauer_gilt_ab_der_geraeteuhr_nicht_ab_dem_gesetzten_zeitpunkt():
+    """Ein Server mit falschem `gesetzt` (weit in der Zukunft) verlaengert die Hoechstdauer nicht."""
+    gesetzt = T0 + timedelta(days=300)
+    assert leerstand_bis_gueltig(gesetzt, gesetzt + timedelta(days=100), T0) is False  # 400 Tage ab jetzt
+    assert leerstand_bis_gueltig(gesetzt, T0 + timedelta(days=365), T0) is True
+    assert leerstand_bis_gueltig(gesetzt, T0 + timedelta(days=365, seconds=1), T0) is False
+
+
+def test_leerstand_hoechstdauer_gilt_auch_ab_dem_gesetzten_zeitpunkt():
+    """Eine in der Vergangenheit gesetzte Dauer ueber 365 Tage bleibt ungueltig, auch wenn der Rest ab jetzt kurz ist."""
+    gesetzt = T0 - timedelta(days=100)
+    assert leerstand_bis_gueltig(gesetzt, gesetzt + timedelta(days=365), T0) is True
+    assert leerstand_bis_gueltig(gesetzt, gesetzt + timedelta(days=365, seconds=1), T0) is False
+
+
+def test_leerstand_bis_muss_nach_der_geraeteuhr_liegen():
+    gesetzt = T0 - timedelta(days=10)
+    assert leerstand_bis_gueltig(gesetzt, T0 + timedelta(seconds=1), T0) is True
+    assert leerstand_bis_gueltig(gesetzt, T0, T0) is False
+    assert leerstand_bis_gueltig(gesetzt, T0 - timedelta(days=1), T0) is False
+
+
+def test_leerstand_bis_nach_dem_setzen():
+    assert leerstand_bis_gueltig(T0 + timedelta(days=2), T0 + timedelta(days=1), T0) is False
+    assert leerstand_bis_gueltig(T0 + timedelta(days=1), T0 + timedelta(days=1), T0) is False
+
+
+@pytest.mark.parametrize(("gesetzt", "bis", "jetzt"), [
+    (T0.replace(tzinfo=None), T0 + timedelta(days=1), T0),
+    (T0, (T0 + timedelta(days=1)).replace(tzinfo=None), T0),
+    (T0, T0 + timedelta(days=1), T0.replace(tzinfo=None)),
+    (None, T0, T0), (T0, None, T0), (T0, T0, None), ("2026-11-13", T0, T0),
 ])
-def test_leerstand_bis_verweigert_zeiten_ohne_zone_und_fremde_typen(gesetzt, bis):
-    assert leerstand_bis_gueltig(gesetzt, bis) is False
+def test_leerstand_bis_verweigert_zeiten_ohne_zone_und_fremde_typen(gesetzt, bis, jetzt):
+    assert leerstand_bis_gueltig(gesetzt, bis, jetzt) is False
+
+
+class _OhneVersatz(tzinfo):
+    """Eine Zone, die keinen Versatz liefert: `tzinfo` ist gesetzt, `utcoffset()` aber None."""
+
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+
+def test_leerstand_bis_verweigert_eine_zone_ohne_versatz_statt_abzustuerzen():
+    fremd = T0.replace(tzinfo=_OhneVersatz())
+    assert leerstand_bis_gueltig(fremd, T0 + timedelta(days=1), T0) is False
+    assert leerstand_bis_gueltig(T0, fremd, T0) is False
+    assert leerstand_bis_gueltig(T0, T0 + timedelta(days=1), fremd) is False
 
 
 @pytest.mark.parametrize(("dauer", "erwartet"), [
@@ -244,4 +301,23 @@ def test_abwesenheit_vorschlag_ohne_stillen_rueckfall(verteilsystem):
 
 
 def test_untergrenzen_liegen_im_bedienbereich_und_die_absenkung_nicht_unter_dem_leerstand():
-    assert 15.0 <= LEERSTAND_UNTERGRENZE_C <= ABSENK_UNTERGRENZE_C <= 25.0
+    """Der weiteste Bedienbereich (`room_setpoint`) der lokalen Sicherheitswerte umfasst beide Untergrenzen."""
+    bereiche = [s.ranges["room_setpoint"] for s in LOCAL_SAFETY.values() if "room_setpoint" in s.ranges]
+    assert bereiche
+    untere, obere = min(lo for lo, _ in bereiche), max(hi for _, hi in bereiche)
+    assert untere <= LEERSTAND_UNTERGRENZE_C <= ABSENK_UNTERGRENZE_C <= obere
+
+
+def test_leerstand_bis_am_rand_des_zeitbereichs_ist_ungueltig_statt_ein_abbruch():
+    spaet = datetime(9999, 12, 31, 23, 0, tzinfo=ZoneInfo("Etc/GMT+5"))  # in UTC ueber dem Bereich
+    assert leerstand_bis_gueltig(T0, spaet, T0) is False
+
+
+@pytest.mark.parametrize("riesig", [10**400, -(10**400), 10**309], ids=["1e400", "minus-1e400", "1e309"])
+def test_riesige_ganzzahlen_sind_keine_brauchbaren_zahlen_statt_eines_abbruchs(riesig):
+    """`math.isfinite` wirft bei einer Ganzzahl ueber dem Gleitkommabereich einen OverflowError."""
+    assert leerstand_temperatur_gueltig(riesig) is False
+    with pytest.raises(ValueError, match="Absenk"):
+        absenktemperatur(riesig, 3.0)
+    with pytest.raises(ValueError, match="Absenk"):
+        absenktemperatur(21.0, riesig)

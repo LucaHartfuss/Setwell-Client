@@ -6,7 +6,7 @@ den Start, bis der Nutzer Werte freigibt."""
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 from smartheat_core.levers import LEVER_SETS
@@ -141,7 +141,12 @@ def resolve_local_safety(lever_set_id: str, verteilsystem) -> LocalSafety:
 
 
 def _endliche_zahl(wert) -> bool:
-    return isinstance(wert, int | float) and not isinstance(wert, bool) and math.isfinite(wert)
+    if not isinstance(wert, int | float) or isinstance(wert, bool):
+        return False
+    try:
+        return math.isfinite(wert)
+    except OverflowError:  # Ganzzahl ausserhalb des Gleitkommabereichs
+        return False
 
 
 def absenktemperatur(wunsch_c, absenkung_k) -> float:
@@ -160,14 +165,20 @@ def leerstand_temperatur_gueltig(temp_c) -> bool:
     return _endliche_zahl(temp_c) and temp_c >= LEERSTAND_UNTERGRENZE_C
 
 
-def leerstand_bis_gueltig(gesetzt: datetime, bis: datetime) -> bool:
-    """`bis` liegt nach dem Setzen und hoechstens LEERSTAND_HOECHSTDAUER danach. Beide Zeitpunkte brauchen eine
-    Zone; die Rechnung ist absolut, die Uhr kommt vom Aufrufer."""
-    if not isinstance(gesetzt, datetime) or not isinstance(bis, datetime):
+def leerstand_bis_gueltig(gesetzt: datetime, bis: datetime, jetzt: datetime) -> bool:
+    """`bis` liegt nach dem Setzen und nach `jetzt`, jeweils hoechstens LEERSTAND_HOECHSTDAUER davon entfernt. `jetzt`
+    ist die Geraeteuhr, vom Aufrufer uebergeben: `gesetzt` schreibt der Server, ein zu spaet gesetztes `gesetzt`
+    verlaengert die Hoechstdauer ab jetzt nicht (beide Grenzen gelten zugleich). Alle drei
+    Zeitpunkte brauchen eine Zone (`utcoffset()` nicht None); die Rechnung ist absolut in UTC, nie in Wandzeit."""
+    zeiten = (gesetzt, bis, jetzt)
+    if not all(isinstance(zeit, datetime) and zeit.utcoffset() is not None for zeit in zeiten):
         return False
-    if gesetzt.tzinfo is None or bis.tzinfo is None:
+    try:
+        gesetzt_utc, bis_utc, jetzt_utc = (zeit.astimezone(UTC) for zeit in zeiten)
+    except OverflowError:  # Zeitpunkt am Rand des darstellbaren Bereichs
         return False
-    return timedelta(0) < bis - gesetzt <= LEERSTAND_HOECHSTDAUER
+    return (timedelta(0) < bis_utc - gesetzt_utc <= LEERSTAND_HOECHSTDAUER
+            and timedelta(0) < bis_utc - jetzt_utc <= LEERSTAND_HOECHSTDAUER)
 
 
 def phasendauer_gueltig(dauer: timedelta) -> bool:

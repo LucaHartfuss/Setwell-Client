@@ -11,8 +11,8 @@ def decide_boost(
     boost_was_active: bool,
     arrival_threshold_k: float,
     *,
-    aufheizen: str | None = None,
-    anstieg_vom_kunden: bool = True,
+    aufheizen: str | None,
+    anstieg_vom_kunden: bool,
 ) -> bool:
     """Boost aktiviert ausschliesslich als Reaktion auf eine Erhoehung der
     Wunschtemperatur (Komfort-Beschleunigung), nicht mehr bei Kaelte aus anderer
@@ -31,9 +31,10 @@ def decide_boost(
     Ende von Abwesend oder Leerstand, `anstieg_vom_kunden=False`), startet der Boost nur beim Profil `boost`; bei
     `kurve`, fehlender oder unbekannter Angabe bleibt er aus (weniger Heizen und Schreiben). Der Aufrufer merkt das
     Soll dennoch als Vorwert, der Anstieg ist damit verbraucht und der Raum waermt ueber die Heizkurve. Die
-    Erhoehung durch den Kunden startet den Boost unabhaengig vom Profil, wie vor dem Plan; ohne beide Angaben gilt
-    das alte Verhalten. Ein laufender Boost endet unveraendert an der Ankunft. Die Quote (Tageszahl, Abstand) setzt
-    der Aufrufer ueber `write_budget` und bleibt unberuehrt.
+    Erhoehung durch den Kunden startet den Boost unabhaengig vom Profil, wie vor dem Plan. Beide Angaben sind
+    Pflicht ohne Standard: ein vergessener Parameter ist ein Fehler und liesse sonst einen Plananstieg boosten. Ein
+    laufender Boost endet unveraendert an der Ankunft. Die Quote (Tageszahl, Abstand) setzt der Aufrufer ueber
+    `write_budget` und bleibt unberuehrt.
     """
     not_arrived = room_actual < room_target - arrival_threshold_k
     if boost_was_active:

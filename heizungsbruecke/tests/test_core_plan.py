@@ -292,6 +292,16 @@ def test_leerstand_an_der_untergrenze_und_hoechstdauer_gilt():
     assert ergebnis(utc("2026-11-05T12:00:00Z"), doc("leerstand", leerstand=zu_lang)).soll_art == "wunsch"
 
 
+def test_leerstand_mit_zu_spaetem_beginn_gilt_nicht_laenger_als_365_tage_ab_der_geraeteuhr():
+    """Der Server schreibt `von`; ein Beginn weit in der Zukunft verlaengert die Hoechstdauer ab der Uhr des Geraets nicht."""
+    jetzt = utc("2026-11-05T12:00:00Z")
+    von = jetzt + timedelta(days=300)
+    zu_lang = leerstand(temp=15.0, von=text(von), bis=text(von + timedelta(days=100)))
+    assert ergebnis(jetzt, doc("leerstand", leerstand=zu_lang)).naechster_wechsel is None  # Fenster ungueltig
+    am_rand = leerstand(temp=15.0, von=text(von), bis=text(jetzt + timedelta(days=365)))
+    assert ergebnis(jetzt, doc("leerstand", leerstand=am_rand)).naechster_wechsel == von  # Fenster gilt
+
+
 def test_zeiten_als_text_und_als_datum_rechnen_gleich():
     als_text = doc("leerstand", leerstand=leerstand())
     als_datum = doc("leerstand", leerstand=leerstand(von=utc("2026-11-01T00:00:00Z"), bis=utc("2026-11-20T10:00:00Z")))

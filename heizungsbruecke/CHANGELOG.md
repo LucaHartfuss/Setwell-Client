@@ -15,7 +15,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 - Der Comfort-Boost kennt jetzt das Aufheizen des Profils: bei einem Anstieg des Solls durch den Plan, das Ende von
   Abwesend oder Leerstand startet er nur beim Profil „boost“, bei „kurve“ bleibt er aus. Die Erhöhung durch den Kunden
   und die Quote (höchstens 6 Starts am Tag, 1800 Sekunden Abstand) bleiben unverändert. Noch ohne Wirkung: der Plan
-  wird erst mit dem Wochenplan angebunden.
+  wird erst mit dem Wochenplan angebunden. Ein vergessener Parameter öffnet den Boost nicht mehr still: Profil und
+  Herkunft des Anstiegs müssen immer angegeben werden.
+- Die Höchstdauer des Leerstands gilt jetzt auch ab der Uhr des Geräts, nicht nur ab dem vom Server gesetzten Beginn,
+  und wird in absoluter Zeit gerechnet (auch über den Sommerzeitwechsel); eine unbrauchbare Zahl oder Zeitzone wird als
+  ungültig verworfen, statt die Rechnung abzubrechen.
 - Das Add-on liest das Lebenszeichen der Integration (Version, gelesene Status-Schemata; nach 900 Sekunden ohne
   Ereignis gilt die Version als unbekannt) und kann den Schalter „Automatisch aktualisieren“ des Add-ons lesen
   (nur lesen, nie setzen; ist er nicht lesbar, gilt er als unbekannt). Sichtbar wird das erst mit der Meldung an den

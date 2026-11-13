@@ -6,11 +6,14 @@ from runtime_helpers import ankunftsschwelle_der_laufzeit
 from smartheat_core import boost, write_budget
 from smartheat_core.boost import COMFORT_BOOST_MAX_SECONDS, comfort_boost_expired, decide_boost
 
+#: Anstieg durch den Kunden, kein Profil: die Angaben sind Pflicht, dies ist das Verhalten der Wunschaenderung am Thermostat.
+KUNDE = {"aufheizen": None, "anstieg_vom_kunden": True}
+
 
 def test_decide_boost_inactive_on_first_ever_tick_no_previous_target():
     decision = decide_boost(
         room_actual=18.0, room_target=20.0, previous_room_target=None,
-        boost_was_active=False, arrival_threshold_k=0.5,
+        boost_was_active=False, arrival_threshold_k=0.5, **KUNDE,
     )
     assert decision is False
 
@@ -21,7 +24,7 @@ def test_decide_boost_inactive_when_target_unchanged_even_if_room_cold():
     # Sicherheitsnetz-Eigenschaft).
     decision = decide_boost(
         room_actual=15.0, room_target=20.0, previous_room_target=20.0,
-        boost_was_active=False, arrival_threshold_k=0.5,
+        boost_was_active=False, arrival_threshold_k=0.5, **KUNDE,
     )
     assert decision is False
 
@@ -29,7 +32,7 @@ def test_decide_boost_inactive_when_target_unchanged_even_if_room_cold():
 def test_decide_boost_activates_when_target_raised():
     decision = decide_boost(
         room_actual=19.0, room_target=21.0, previous_room_target=20.0,
-        boost_was_active=False, arrival_threshold_k=0.5,
+        boost_was_active=False, arrival_threshold_k=0.5, **KUNDE,
     )
     assert decision is True
 
@@ -37,7 +40,7 @@ def test_decide_boost_activates_when_target_raised():
 def test_decide_boost_does_not_activate_for_tiny_float_noise_change():
     decision = decide_boost(
         room_actual=19.0, room_target=20.005, previous_room_target=20.0,
-        boost_was_active=False, arrival_threshold_k=0.5,
+        boost_was_active=False, arrival_threshold_k=0.5, **KUNDE,
     )
     assert decision is False
 
@@ -53,7 +56,7 @@ def test_decide_boost_stays_active_until_arrival_threshold_reached():
     # direkt darunter.
     decision = decide_boost(
         room_actual=19.4, room_target=20.0, previous_room_target=20.0,
-        boost_was_active=True, arrival_threshold_k=0.5,
+        boost_was_active=True, arrival_threshold_k=0.5, **KUNDE,
     )
     assert decision is True
 
@@ -61,7 +64,7 @@ def test_decide_boost_stays_active_until_arrival_threshold_reached():
 def test_decide_boost_exits_once_within_arrival_threshold():
     decision = decide_boost(
         room_actual=19.6, room_target=20.0, previous_room_target=20.0,
-        boost_was_active=True, arrival_threshold_k=0.4,
+        boost_was_active=True, arrival_threshold_k=0.4, **KUNDE,
     )
     assert decision is False
 
@@ -75,7 +78,7 @@ def test_comfort_boost_endet_an_der_echten_ankunftsschwelle(tmp_path, raum_ist, 
     Comfort-Boost nur bei ist < soll - 0,5 aktiv; bei 0,49 und genau 0,5 K Abstand endet er."""
     decision = decide_boost(
         room_actual=raum_ist, room_target=21.0, previous_room_target=21.0,
-        boost_was_active=True, arrival_threshold_k=ankunftsschwelle_der_laufzeit(tmp_path),
+        boost_was_active=True, arrival_threshold_k=ankunftsschwelle_der_laufzeit(tmp_path), **KUNDE,
     )
     assert decision is bleibt_aktiv
 
@@ -85,7 +88,7 @@ def test_decide_boost_stays_active_across_a_second_target_raise():
     # Exit-Pruefung vergleicht ohnehin gegen den AKTUELLEN room_target.
     decision = decide_boost(
         room_actual=20.5, room_target=22.0, previous_room_target=21.0,
-        boost_was_active=True, arrival_threshold_k=0.5,
+        boost_was_active=True, arrival_threshold_k=0.5, **KUNDE,
     )
     assert decision is True
 
@@ -100,7 +103,7 @@ def test_decide_boost_stays_active_across_a_second_target_raise():
 def test_kleinste_reale_erhoehung_startet_den_boost(vorher, nachher, boost):
     """Auch die kleinste reale Erhoehung der Wunschtemperatur startet den Boost."""
     assert decide_boost(room_actual=20.0, room_target=nachher, previous_room_target=vorher,
-                        boost_was_active=False, arrival_threshold_k=0.5) is boost
+                        boost_was_active=False, arrival_threshold_k=0.5, **KUNDE) is boost
 
 
 @pytest.mark.parametrize(("raum_ist", "startet"), [
@@ -115,25 +118,25 @@ def test_comfort_boost_startet_nur_wenn_der_raum_noch_nicht_angekommen_ist(raum_
     """Regel 4: eine Erhoehung startet den Boost nur bei Raum < Soll - Ankunftsschwelle; bei warmem Raum
     gibt es keinen Schein-Start, der den echten Boost 30 min sperrte. Der Grenzwert genau Soll - 0,5 startet nicht."""
     assert decide_boost(room_actual=raum_ist, room_target=21.0, previous_room_target=20.0,
-                        boost_was_active=False, arrival_threshold_k=0.5) is startet
+                        boost_was_active=False, arrival_threshold_k=0.5, **KUNDE) is startet
 
 
 def test_start_und_weiterlaufen_nutzen_dieselbe_schwelle():
     """Ohne und mit laufendem Boost entscheidet dieselbe Bedingung; nur die Erhoehung kommt zum Start hinzu."""
     for raum_ist in (20.4, 20.5, 20.51, 21.0):
         start = decide_boost(room_actual=raum_ist, room_target=21.0, previous_room_target=20.0,
-                             boost_was_active=False, arrival_threshold_k=0.5)
+                             boost_was_active=False, arrival_threshold_k=0.5, **KUNDE)
         laeuft = decide_boost(room_actual=raum_ist, room_target=21.0, previous_room_target=21.0,
-                              boost_was_active=True, arrival_threshold_k=0.5)
+                              boost_was_active=True, arrival_threshold_k=0.5, **KUNDE)
         assert start is laeuft
 
 
 def test_ein_laufender_boost_bleibt_bei_warmem_raum_nicht_aktiv_und_bei_kaltem_raum_aktiv():
     """Laufender Boost unveraendert: die Erhoehung spielt keine Rolle, nur der Raum."""
     kalt = decide_boost(room_actual=19.0, room_target=21.0, previous_room_target=21.0,
-                        boost_was_active=True, arrival_threshold_k=0.5)
+                        boost_was_active=True, arrival_threshold_k=0.5, **KUNDE)
     warm = decide_boost(room_actual=21.0, room_target=21.0, previous_room_target=20.0,
-                        boost_was_active=True, arrival_threshold_k=0.5)
+                        boost_was_active=True, arrival_threshold_k=0.5, **KUNDE)
     assert (kalt, warm) == (True, False)
 
 
@@ -144,7 +147,7 @@ def test_a_rise_of_exactly_the_epsilon_does_not_start_the_boost():
     vorher = 20.0
     nachher = vorher + boost._TARGET_RISE_EPSILON_K
     assert decide_boost(room_actual=19.0, room_target=nachher, previous_room_target=vorher,
-                        boost_was_active=False, arrival_threshold_k=0.5) is False
+                        boost_was_active=False, arrival_threshold_k=0.5, **KUNDE) is False
 
 
 _BEGINN = datetime(2026, 10, 8, 6, 0, tzinfo=UTC)
@@ -222,17 +225,26 @@ def test_erhoehung_durch_den_kunden_startet_den_boost_wie_heute(aufheizen):
     (20.0, 20.005, 18.0),
 ])
 @pytest.mark.parametrize("aktiv", [False, True])
-def test_ohne_neue_angaben_gilt_das_heutige_verhalten(vorher, nachher, raum_ist, aktiv):
-    """Ohne `aufheizen` und ohne Herkunft des Anstiegs entscheidet die Funktion wie vorher: jede Erhoehung zaehlt
-    als Erhoehung durch den Kunden, der Raum darf noch nicht angekommen sein."""
-    ohne = decide_boost(room_actual=raum_ist, room_target=nachher, previous_room_target=vorher,
-                        boost_was_active=aktiv, arrival_threshold_k=0.5)
-    ausdruecklich = decide_boost(room_actual=raum_ist, room_target=nachher, previous_room_target=vorher,
-                                 boost_was_active=aktiv, arrival_threshold_k=0.5,
-                                 aufheizen=None, anstieg_vom_kunden=True)
+def test_anstieg_durch_den_kunden_entscheidet_wie_die_wunschaenderung_am_thermostat(vorher, nachher, raum_ist, aktiv):
+    """Mit der Herkunft `Kunde` zaehlt jede Erhoehung, der Raum darf noch nicht angekommen sein; das Profil ist ohne
+    Wirkung."""
     erwartet = (raum_ist < nachher - 0.5) if aktiv else (
         vorher is not None and nachher > vorher + 0.01 and raum_ist < nachher - 0.5)
-    assert ohne is ausdruecklich is erwartet
+    for aufheizen in (None, "kurve", "boost"):
+        assert decide_boost(room_actual=raum_ist, room_target=nachher, previous_room_target=vorher,
+                            boost_was_active=aktiv, arrival_threshold_k=0.5,
+                            aufheizen=aufheizen, anstieg_vom_kunden=True) is erwartet
+
+
+@pytest.mark.parametrize("fehlt", [["aufheizen"], ["anstieg_vom_kunden"], ["aufheizen", "anstieg_vom_kunden"]])
+def test_aufheizen_und_herkunft_des_anstiegs_sind_pflicht(fehlt):
+    """Ein vergessener Parameter darf nicht still das Verhalten eines Kundenanstiegs ergeben: er ist ein Fehler."""
+    angaben = {"aufheizen": "kurve", "anstieg_vom_kunden": False}
+    for name in fehlt:
+        del angaben[name]
+    with pytest.raises(TypeError):
+        decide_boost(room_actual=18.0, room_target=21.0, previous_room_target=20.0,
+                     boost_was_active=False, arrival_threshold_k=0.5, **angaben)
 
 
 @pytest.mark.parametrize("aufheizen", ["boost", "kurve", None])

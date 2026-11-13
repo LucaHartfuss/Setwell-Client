@@ -77,7 +77,7 @@ def soll_effektiv(jetzt: datetime, zone: str, bedienung: Mapping[str, object], k
         raise ValueError("bedienung hat keinen brauchbaren Wunsch")
     if soll_quelle_aus:
         return SollErgebnis(soll=None, soll_art=None, naechster_wechsel=None)
-    rechnung = _Rechnung(ZoneInfo(zone), bedienung, konfiguration, float(wunsch))
+    rechnung = _Rechnung(ZoneInfo(zone), bedienung, konfiguration, float(wunsch), jetzt)
     zustand = rechnung.zustand(jetzt)
     return SollErgebnis(soll=zustand.soll, soll_art=zustand.art,
                         naechster_wechsel=rechnung.naechster_wechsel(jetzt, zustand))
@@ -224,12 +224,12 @@ class _Fenster:
     aufheizen_ab: datetime | None
 
 
-def _leerstand_lesen(wert: object) -> _Fenster | None:
+def _leerstand_lesen(wert: object, jetzt: datetime) -> _Fenster | None:
     if not isinstance(wert, Mapping):
         return None
     von, bis = _zeitpunkt(wert.get("von")), _zeitpunkt(wert.get("bis"))
     temp = wert.get("temp")
-    if (von is None or bis is None or not isinstance(temp, int | float) or not leerstand_bis_gueltig(von, bis)
+    if (von is None or bis is None or not isinstance(temp, int | float) or not leerstand_bis_gueltig(von, bis, jetzt)
             or not leerstand_temperatur_gueltig(temp)):
         return None
     return _Fenster(von, bis, float(temp), _zeitpunkt(wert.get("aufheizen_ab")))
@@ -261,7 +261,7 @@ class _Rechnung:
     """Eine Berechnung fuer einen Kreis: liest Bedienung und Konfiguration einmal und bewertet beliebige Zeitpunkte."""
 
     def __init__(self, zone: ZoneInfo, bedienung: Mapping[str, object], konfiguration: Mapping[str, object],
-                 wunsch: float) -> None:
+                 wunsch: float, jetzt: datetime) -> None:
         self._zone = zone
         self._wunsch = wunsch
         modus = bedienung.get("modus")
@@ -271,7 +271,7 @@ class _Rechnung:
             if fehler is not None:
                 zeiten = None
         self._zeiten = zeiten
-        self._leerstand = _leerstand_lesen(bedienung.get("leerstand")) if modus == "leerstand" else None
+        self._leerstand = _leerstand_lesen(bedienung.get("leerstand"), jetzt) if modus == "leerstand" else None
         self._abwesend = _abwesend_lesen(bedienung.get("abwesend")) if modus == "abwesend" else None
         self._uebersteuerung = _uebersteuerung_lesen(bedienung.get("uebersteuerung"))
         aufheizdauer = konfiguration.get("aufheizdauer_min")
