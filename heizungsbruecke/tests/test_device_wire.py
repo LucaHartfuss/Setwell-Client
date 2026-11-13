@@ -102,6 +102,9 @@ NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts i
     "KREISE_MAX",  # config_check.KREISE_MAX
     "KREIS_FIELDS",  # config_check.KREIS_FELDER
     "KREIS_OPTIONAL",  # config_check.KREIS_OPTIONAL
+    "PUSH_REGELN_FIELDS",  # config_check.PUSH_REGELN_FELDER
+    "PUSH_STUNDEN",  # config_check.PUSH_STUNDEN
+    "PUSH_TAGESLIMIT",  # config_check.PUSH_TAGESLIMIT
     "RAEUME_MAX",  # config_check.RAEUME_MAX
     "RAUM_FUEHLER_MAX",  # config_check.RAUM_FUEHLER_MAX
     "RAUM_ROLLEN",  # config_check.RAUM_ROLLEN

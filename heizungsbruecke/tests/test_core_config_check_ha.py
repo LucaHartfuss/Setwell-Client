@@ -63,6 +63,7 @@ def test_the_host_is_asked_only_for_a_structurally_valid_configuration():
     ({"bindung": {"batterien": "sensor.x"}}, cc.ROLLE_UNZULAESSIG),
     ({"bindung": {"benachrichtigung": ["notify.Handy Papa"]}}, cc.ROLLE_UNZULAESSIG),
     ({"bindung": {"hinweise_aus": ["quatsch"]}}, cc.ROLLE_UNZULAESSIG),
+    ({"bindung": {"hinweise_aus": ["raumfuehler"]}}, cc.ROLLE_UNZULAESSIG),    # Raumfuehler-Meldungen nie abschaltbar
     ({"bindung": {"hinweise_aus": ["notbetrieb"]}}, cc.ROLLE_UNZULAESSIG),     # kritische Meldungen nie abschaltbar
     ({"bindung": {"hinweise_aus": ["konfiguration"]}}, cc.ROLLE_UNZULAESSIG),
     ({"bindung": {"hinweise_aus": ["zugang"]}}, cc.ROLLE_UNZULAESSIG),
@@ -187,6 +188,18 @@ def test_every_contract_role_is_accepted():
     rollen = {"room_target": "climate.w::temperature"}
     rollen.update({rolle: f"sensor.{rolle}" for rolle in wire.HA_ROLLEN if rolle != "room_target"})
     assert _pruefen(ha_konfiguration(bindung={"rollen": rollen})) is None
+
+
+def test_the_fault_code_role_is_optional_and_read_only():
+    assert "fault_codes" in cc.HA_ROLLEN and "fault_codes" in wire.HA_ROLLEN
+    rollen = {"room_target": "climate.w::temperature", "fault_codes": "binary_sensor.zuhause_trouble_codes"}
+    assert _pruefen(ha_konfiguration(bindung={"rollen": rollen})) is None
+    assert _pruefen(ha_konfiguration()) is None  # ohne die Rolle bleibt die Konfiguration gueltig
+
+
+def test_the_room_sensor_notice_cannot_be_switched_off():
+    assert "raumfuehler" not in cc.HA_HINWEISE and "raumfuehler" not in wire.HA_HINWEISE
+    assert len(cc.HA_HINWEISE) == 5
 
 
 def test_gateway_rules_are_unchanged():

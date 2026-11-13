@@ -15,6 +15,8 @@ ALL_ROLES = (
     "energy_electrical_total",
     # Liefer-Signale des Waermeerzeugers, optional
     "generator_hours", "generator_starts", "generator_state",
+    # Stoerungscodes des Waermeerzeugers (nur lesend, optional)
+    "fault_codes",
 )
 
 # Pflicht-Entities der Bruecke (fuer alle Profile gleich). room_actual kommt aus derived_sensors.

@@ -300,10 +300,12 @@ _FORMEN = [lambda zahl: zahl, lambda zahl: [zahl], lambda zahl: {"x": zahl}, lam
 
 #: Felder, die der Leser nicht auf Typ und Zahl prueft (offene-punkte.md TO-client-kern-T8): `mindest_software`
 #: und `ts` liest im Geraet keine Stelle als Zahl; `ursprungswerte` liest nur die Pipeline und filtert dort jede nicht
-#: endliche Zahl (`ist_endliche_zahl`, Rueckweg auf den lokalen Wert) und klemmt auf die lokalen Grenzen. Eine leere Konfiguration ist "immer gueltig" (nur `anlage` None zaehlt):
+#: endliche Zahl (`ist_endliche_zahl`, Rueckweg auf den lokalen Wert) und klemmt auf die lokalen Grenzen; `push_regeln`
+#: lehnt das Dokument nie ab: der Leser (`config_check.push_regeln_lesen`) nimmt nur ganze Zahlen im Bereich und sonst den
+#: Standard. Eine leere Konfiguration ist "immer gueltig" (nur `anlage` None zaehlt):
 #: sie fehlt in dieser Aufzaehlung ganz.
-UNGEPRUEFT = {"konfiguration": ("mindest_software", "ursprungswerte"),
-              "konfiguration_mit_ursprung": ("mindest_software", "ursprungswerte"), "bedienung": ("ts",)}
+UNGEPRUEFT = {"konfiguration": ("mindest_software", "ursprungswerte", "push_regeln"),
+              "konfiguration_mit_ursprung": ("mindest_software", "ursprungswerte", "push_regeln"), "bedienung": ("ts",)}
 
 
 @pytest.mark.parametrize("dokument", [d for d in DOKUMENTE if d[0] in UNGEPRUEFT], ids=list(UNGEPRUEFT))

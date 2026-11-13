@@ -117,7 +117,7 @@ DOKUMENT_TOPICS = {"konfiguration": "down/config", "bedienung": "down/operation"
 #: Bindung, Raeume, Abo), je Raum `KONFIGURATION_RAUM_FIELDS`. `profil` und die Raumfuehler-Liste gibt es nicht mehr.
 KONFIGURATION_FIELDS = (
     "schema", "version", "anlage", "anlage_name", "weg", "kreise", "tagestick", "mindest_software",
-    "mindest_integration", "software", "bindungsparameter",
+    "mindest_integration", "software", "bindungsparameter", "push_regeln",
 )
 KONFIGURATION_KREIS_FIELDS = ("kreis", "name", "bindung", "raeume", "hebelsatz", "verteilsystem", "abo")
 #: ursprungswerte: fehlt = keine Ursprungswerte auf dem Server; zustand: fehlt = in_betrieb (der Server sendet ihn nur an ein
@@ -153,9 +153,15 @@ HA_ROLLEN = (
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",
     "system_water_pressure", "efficiency_ratio", "generator_hours", "generator_starts", "generator_state",
     "energy_electrical_heating", "energy_electrical_dhw", "energy_primary_heating", "energy_primary_dhw",
-    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total",
+    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total", "fault_codes",
 )
-HA_HINWEISE = ("raumfuehler", "batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: Hinweise, die die Person abschalten darf; die Hinweise des Raumfuehlers gehoeren nicht dazu.
+HA_HINWEISE = ("batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: push_regeln der Konfiguration: null (Standard des Geraets) oder genau diese Felder; Ruhezeit in ganzen Stunden
+#: (von und bis verschieden), Pushes je Tag. Ein Wert ausserhalb liest das Geraet als Standard, es lehnt nicht ab.
+PUSH_REGELN_FIELDS = ("ruhe_von", "ruhe_bis", "tageslimit")
+PUSH_STUNDEN = (0, 23)
+PUSH_TAGESLIMIT = (1, 5)
 TREIBER_FIELDS = ("id", "parameter")
 SOFTWARE_FIELDS = ("version", "manifest_url", "manifest_sha256", "signature")
 ABO = ("aktiv", "inaktiv")

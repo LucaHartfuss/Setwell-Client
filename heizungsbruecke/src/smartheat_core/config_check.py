@@ -95,9 +95,15 @@ HA_ROLLEN = (
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",
     "system_water_pressure", "efficiency_ratio", "generator_hours", "generator_starts", "generator_state",
     "energy_electrical_heating", "energy_electrical_dhw", "energy_primary_heating", "energy_primary_dhw",
-    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total",
+    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total", "fault_codes",
 )
-HA_HINWEISE = ("raumfuehler", "batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: Die Hinweise des Raumfuehlers fehlen hier mit Absicht: sie lassen sich nicht abschalten.
+HA_HINWEISE = ("batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: Push-Regeln der Person (Kopie aus smartheat_device.wire: PUSH_REGELN_FIELDS, PUSH_STUNDEN, PUSH_TAGESLIMIT, ebenfalls
+#: in test_core_vertrag_pin.py gehalten): Ruhezeit in ganzen Stunden und Pushes je Tag.
+PUSH_REGELN_FELDER = ("ruhe_von", "ruhe_bis", "tageslimit")
+PUSH_STUNDEN = (0, 23)
+PUSH_TAGESLIMIT = (1, 5)
 #: Referenzen wie die bisherigen entity_*-Optionen des Add-ons (entity_id oder entity_id::attribut); als Attribut
 #: lesen und schreiben die Rollen nur die Temperaturen (sonst liesse sich jedes Attribut einer Entity binden,
 #: etwa Laengen- und Breitengrad einer Zone). Die Form je Rolle prueft der Host mit der Inventur, hier nur der Aufbau.
@@ -142,6 +148,35 @@ def befund(feld: str | None = None, regel: str | None = None, **zahlen: float) -
 def ist_leer(inhalt) -> bool:
     """Leere Konfiguration: `anlage` fehlt oder ist None."""
     return isinstance(inhalt, Mapping) and inhalt.get("anlage") is None
+
+
+@dataclass(frozen=True)
+class PushRegeln:
+    """Ruhezeit (ganze Stunden, `ruhe_von` bis `ruhe_bis`, ueber Mitternacht erlaubt) und Pushes je Tag."""
+    ruhe_von: int
+    ruhe_bis: int
+    tageslimit: int
+
+
+PUSH_STANDARD = PushRegeln(ruhe_von=22, ruhe_bis=7, tageslimit=5)
+
+
+def _ganz(wert, bereich: tuple[int, int]) -> int | None:
+    if isinstance(wert, int) and not isinstance(wert, bool) and bereich[0] <= wert <= bereich[1]:
+        return wert
+    return None
+
+
+def push_regeln_lesen(wert) -> PushRegeln:
+    """Die Push-Regeln aus dem Dokument. Ungueltiges lehnt das Dokument nie ab: eine Ruhezeit mit fehlender, falsch
+    getypter oder ausserhalb liegender Stunde oder mit gleichem Anfang und Ende gilt als Standard, ebenso ein ungueltiges
+    Tageslimit; beides unabhaengig voneinander."""
+    roh = wert if isinstance(wert, Mapping) else {}
+    von, bis = _ganz(roh.get("ruhe_von"), PUSH_STUNDEN), _ganz(roh.get("ruhe_bis"), PUSH_STUNDEN)
+    if von is None or bis is None or von == bis:
+        von, bis = PUSH_STANDARD.ruhe_von, PUSH_STANDARD.ruhe_bis
+    limit = _ganz(roh.get("tageslimit"), PUSH_TAGESLIMIT)
+    return PushRegeln(von, bis, PUSH_STANDARD.tageslimit if limit is None else limit)
 
 
 def _text(value, limit: int = TEXT_MAX_CHARS) -> bool:

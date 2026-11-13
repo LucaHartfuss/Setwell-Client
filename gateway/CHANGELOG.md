@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard; Ruhezeit 22 bis 7 Uhr, Tageslimit 1 bis 5,
+  Standard 5; ungültige Werte liest das Geraet als Standard) und neue optionale Leserolle `fault_codes` im Geraetekern.
+  Der Hinweis `raumfuehler` entfaellt aus `hinweise_aus`. Ein Dokument ohne `push_regeln` oder mit `raumfuehler` lehnt das
+  Geraet ab.
 - Hinweise des Geräts und der Grund der Laufzeitstörung kommen als Code mit Parametern; die Diagnoseseite setzt den Text
   aus `lokale_texte.json` zusammen (je Hinweis ein Eintrag `hinweis.<name>`, Parameterwerte erscheinen dort nicht).
 - Meldungen entstehen im Geraetekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der

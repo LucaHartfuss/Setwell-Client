@@ -8,7 +8,7 @@ HA haelt persistent_notifications nur im Speicher. Deshalb bleibt die Meldung (C
 offenen kritischen Meldung in BridgeState.notify_meldungen, und republish_persistent() legt sie nach einem HA-Neustart
 neu an -- ohne erneuten Push.
 
-Die sechs Hinweis-Kategorien (config_check.HA_HINWEISE, Feld bindung.hinweise_aus) lassen sich einzeln
+Die fuenf Hinweis-Kategorien (config_check.HA_HINWEISE, Feld bindung.hinweise_aus) lassen sich einzeln
 abschalten: der Zustand wird weiter verfolgt und geloggt (Grundlage der Hinweise im Status), nur
 der Push entfaellt. Kritische Meldungen sind nie abschaltbar."""
 import logging

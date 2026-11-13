@@ -12,7 +12,7 @@ HUELLE = ("schema", "version")
 #: Flache Angaben, die einen Platz im Dokument haben; alles andere gilt als Fremdfeld und bleibt oben im Dokument.
 BEKANNT = frozenset(HUELLE) | frozenset(KREIS_FELDER) | {
     "anlage", "anlage_name", "weg", "kreise", "raumfuehler", "tagestick", "mindest_software", "mindest_integration",
-    "software", "bindungsparameter"}
+    "software", "bindungsparameter", "push_regeln"}
 
 
 def weg_von(bindung) -> str:
@@ -54,7 +54,7 @@ def nach_form(flach: Mapping, *, kreise=None) -> dict:
                                    else [kreis(flach)]),
         "tagestick": flach.get("tagestick"), "mindest_software": flach.get("mindest_software"),
         "mindest_integration": flach.get("mindest_integration"), "software": flach.get("software"),
-        "bindungsparameter": flach.get("bindungsparameter"),
+        "bindungsparameter": flach.get("bindungsparameter"), "push_regeln": flach.get("push_regeln"),
     })
     neu.update({feld: wert for feld, wert in flach.items() if feld not in BEKANNT})
     return neu

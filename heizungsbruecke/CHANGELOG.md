@@ -5,6 +5,12 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard): Ruhezeit (Standard 22 bis 7 Uhr) und
+  Tageslimit der Pushes (1 bis 5, Standard 5). Ein ungültiger Wert wird nicht abgelehnt, das Gerät nimmt dafür den
+  Standard. Ein Dokument ohne das Feld lehnt das Gerät ab; `client1` bekommt es mit dem nächsten `refresh`.
+- Neue optionale Leserolle `fault_codes` (Störungsanzeige des Erzeugers, `binary_sensor` der Klasse `problem`); die
+  Inventur lässt für Binärsensoren nun neben `battery` auch die Klasse `problem` durch. Der Hinweis `raumfuehler` entfällt
+  aus `hinweise_aus`; ein Dokument, das ihn noch nennt, lehnt das Gerät ab.
 - Der Befehl `hinweis` trägt `key`, `code`, `params` und `stufe` statt eines fertigen Textes; das Gerät nimmt nur
   Codes der eigenen Meldungstabelle an. Der Laufzeitstatus nennt den Grund einer Störung als Code mit Parametern
   (`status.grund_*`) statt als Satz, ein Startfehler trägt dort keinen Fehlertext mehr (die Meldung an den Kunden bleibt).

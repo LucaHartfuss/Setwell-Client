@@ -41,6 +41,9 @@ _VERTRAG_GEPINNT_KREIS_MAX = (wire.KREIS_MAX, config_check.KREIS_NUMMER_MAX)
 _VERTRAG_GEPINNT_WEGE = (wire.WEGE, config_check.WEGE)
 _VERTRAG_GEPINNT_WEG_DER_PLATTFORM = (wire.WEG_DER_PLATTFORM, config_check.WEG_DER_PLATTFORM)
 _VERTRAG_GEPINNT_WEG_DES_TREIBERS = (wire.WEG_DES_TREIBERS, config_check.WEG_DES_TREIBERS)
+_VERTRAG_GEPINNT_PUSH_REGELN_FIELDS = (wire.PUSH_REGELN_FIELDS, config_check.PUSH_REGELN_FELDER)
+_VERTRAG_GEPINNT_PUSH_STUNDEN = (wire.PUSH_STUNDEN, config_check.PUSH_STUNDEN)
+_VERTRAG_GEPINNT_PUSH_TAGESLIMIT = (wire.PUSH_TAGESLIMIT, config_check.PUSH_TAGESLIMIT)
 _VERTRAG_GEPINNT_ABO_LAUFZEIT = (wire.ABO, tuple(dokument_config.ABO))  # Schluessel der Abbildung auf entitlement
 
 PINS = {name: wert for name, wert in sorted(globals().items()) if name.startswith("_VERTRAG_GEPINNT_")}
