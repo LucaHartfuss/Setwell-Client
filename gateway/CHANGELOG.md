@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
+  auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
+  und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
+  keine Migration; ohne sie meldet jeder Start sofort wie bisher).
 - Hinweise des Geräts und der Grund der Laufzeitstörung kommen als Code mit Parametern; die Diagnoseseite setzt den Text
   aus `lokale_texte.json` zusammen (je Hinweis ein Eintrag `hinweis.<name>`, Parameterwerte erscheinen dort nicht).
 - Meldungen entstehen im Geraetekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der

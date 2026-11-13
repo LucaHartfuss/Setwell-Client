@@ -135,6 +135,7 @@ class FakeGeraet:
         self.sent = Sent(log)
         self.channel = None
         self.channels = []
+        self.abgelehnt = False  # der Geraetekern hat die zuletzt gelieferte Konfiguration abgelehnt
         self.neustarts: list[int] = []
         self.host = None
         self._ha = ha
@@ -171,6 +172,9 @@ class FakeGeraet:
     def abo_status(self, kreis=None):
         return self._abo() if callable(self._abo) else self._abo
 
+    def konfiguration_abgelehnt(self):
+        return self.abgelehnt
+
     def notify_sink_fuer(self, services):
         return HaNotifySink(self._ha, services) if self._ha is not None else _NullSink()
 
@@ -202,7 +206,7 @@ class FakeGeraet:
 
 def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedienung=None, log=None,
                  verbunden=True, leer_mit_markierung=False, ursprungswerte=None, neustart=None, zeit_synchron=True,
-                 **option_overrides):
+                 abgelehnt=False, **option_overrides):
     """Startet die Laufzeit auf dem Dokument aus den Test-Optionen (options, z. B. runtime_helpers.OPTIONS; plus
     Overrides). Liefert (bridge, geraet); die gesendeten Nachrichten stehen in geraet.sent, der Kanal in geraet.channel.
     Ohne bedienung ist die Bedienung des Servers der Wert, den die Soll-Entity gerade zeigt (wie nach einem Wunsch,
@@ -214,7 +218,8 @@ def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedi
     channel.verbunden).
     ursprungswerte: Feld `ursprungswerte` der Konfiguration.
     neustart: Rueckruf des Hosts fuer app.start; ohne ihn zaehlt geraet.neustarts die Neustarts.
-    zeit_synchron: was der Zeitdienst des Hosts dem Supervisor meldet (dt_synchronized)."""
+    zeit_synchron: was der Zeitdienst des Hosts dem Supervisor meldet (dt_synchronized).
+    abgelehnt: der Geraetekern hat die zuletzt gelieferte Konfiguration abgelehnt."""
     options = {**options, **option_overrides}
     konfiguration = konfiguration_aus_optionen(options)
     if ursprungswerte is not None:
@@ -234,6 +239,7 @@ def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedi
     geraet = FakeGeraet(konfiguration, abo=abo, ha=env.ha, bedienung=bedienung, log=log,
                         start_markierung=start_markierung, clock=env.clock)
     geraet.zeitdienst_setzen(zeit_synchron)
+    geraet.abgelehnt = abgelehnt
     geraet.sent.connected = verbunden
     geraet.host = HaHost(geraet, env.ha, clock=env.clock)
     # wie die Laufzeit der Kreise: ein Statussammler fasst das Ereignis des einen Kreises fuer die Statussenke zusammen

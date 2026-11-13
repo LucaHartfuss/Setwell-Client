@@ -5,6 +5,10 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
+  auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
+  und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
+  keine Migration; ohne sie meldet jeder Start sofort wie bisher).
 - Der Befehl `hinweis` trägt `key`, `code`, `params` und `stufe` statt eines fertigen Textes; das Gerät nimmt nur
   Codes der eigenen Meldungstabelle an. Der Laufzeitstatus nennt den Grund einer Störung als Code mit Parametern
   (`status.grund_*`) statt als Satz, ein Startfehler trägt dort keinen Fehlertext mehr (die Meldung an den Kunden bleibt).

@@ -50,6 +50,9 @@ class BootInfo:
     # Liest den Zustand des Kreises (`kreise[n].zustand`) frisch aus dem Dokument; das Status-Ereignis meldet ihn, auch
     # im Ruhezustand ohne Laufzeit-Konfiguration.
     zustand_source: Callable[[], str] = lambda: kreisansicht.IN_BETRIEB
+    # Hat der Geraetekern die zuletzt gelieferte Konfiguration abgelehnt? Dann meldet ein Konfigurationsfehler sofort
+    # (nach einem Softwarewechsel wartet die Meldung sonst auf die neue Konfiguration, karenz.py).
+    konfiguration_abgelehnt: Callable[[], bool] = lambda: False
 
 
 def _in_betrieb() -> str:

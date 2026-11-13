@@ -17,6 +17,7 @@ from pathlib import Path
 
 from smartheat_core import dateien
 from smartheat_device.commands import Done, Waiting
+from smartheat_device.documents import KONFIGURATION
 from smartheat_device.hintergrund import Hintergrund
 from smartheat_device.host import Anzeige, MeldungSink
 from smartheat_runtime import aufraeumen, dokument_config
@@ -149,6 +150,10 @@ class GeraetHostBasis:
 
     def konfiguration(self) -> dict | None:
         return self.device.konfiguration() if self.device is not None else None
+
+    def konfiguration_abgelehnt(self) -> bool:
+        """Hat der Geraetekern die zuletzt gelieferte Konfiguration abgelehnt (die Laufzeit regelt mit der alten)?"""
+        return self.device is not None and self.device.documents.ablehnung(KONFIGURATION) is not None
 
     def bedienung(self) -> tuple[dict | None, bool]:
         if self.device is None:
