@@ -1,5 +1,8 @@
 _TARGET_RISE_EPSILON_K = 0.01
 
+#: Profil-Aufheizen, bei dem ein Anstieg durch Plan, Ende von Abwesend oder Leerstand den Comfort-Boost startet.
+AUFHEIZEN_BOOST = "boost"
+
 
 def decide_boost(
     room_actual: float,
@@ -7,6 +10,9 @@ def decide_boost(
     previous_room_target: float | None,
     boost_was_active: bool,
     arrival_threshold_k: float,
+    *,
+    aufheizen: str | None = None,
+    anstieg_vom_kunden: bool = True,
 ) -> bool:
     """Boost aktiviert ausschliesslich als Reaktion auf eine Erhoehung der
     Wunschtemperatur (Komfort-Beschleunigung), nicht mehr bei Kaelte aus anderer
@@ -20,10 +26,20 @@ def decide_boost(
     (`room_actual < room_target - arrival_threshold_k`, dieselbe Bedingung wie fuers
     Weiterlaufen): bei warmem Raum gaebe es einen Schein-Start, der beim naechsten Check
     endet und den echten Boost ueber das Startbudget (30 min Abstand) sperrt.
+
+    Aufheizen nach dem Profil des Kreises: stammt der Anstieg nicht vom Kunden (Beginn der warmen Phase des Plans,
+    Ende von Abwesend oder Leerstand, `anstieg_vom_kunden=False`), startet der Boost nur beim Profil `boost`; bei
+    `kurve`, fehlender oder unbekannter Angabe bleibt er aus (weniger Heizen und Schreiben). Der Aufrufer merkt das
+    Soll dennoch als Vorwert, der Anstieg ist damit verbraucht und der Raum waermt ueber die Heizkurve. Die
+    Erhoehung durch den Kunden startet den Boost unabhaengig vom Profil, wie vor dem Plan; ohne beide Angaben gilt
+    das alte Verhalten. Ein laufender Boost endet unveraendert an der Ankunft. Die Quote (Tageszahl, Abstand) setzt
+    der Aufrufer ueber `write_budget` und bleibt unberuehrt.
     """
     not_arrived = room_actual < room_target - arrival_threshold_k
     if boost_was_active:
         return not_arrived
+    if not anstieg_vom_kunden and aufheizen != AUFHEIZEN_BOOST:
+        return False
     rose = previous_room_target is not None and room_target > previous_room_target + _TARGET_RISE_EPSILON_K
     return rose and not_arrived
 

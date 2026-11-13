@@ -54,6 +54,7 @@ KONSTANTEN = {
     "Comfort-Boost Ausloeser": (boost._TARGET_RISE_EPSILON_K, 0.01),
     "Comfort-Boost hoechstens": (boost.COMFORT_BOOST_MAX_SECONDS, 4 * 3600),
     "Comfort-Boost unlesbar": (boost.UNREADABLE_ROOM_CHECKS, 3),
+    "Comfort-Boost bei Plananstieg nur bei Aufheizen": (boost.AUFHEIZEN_BOOST, "boost"),
     "Notfall-Boost ab": (emergency_boost.EMERGENCY_TRIGGER_K, 1.0),
     "Kaelteschutz Soll-Ausloeser": (
         (emergency_boost.KAELTESCHUTZ_SOLL_DELTA_K, emergency_boost.KAELTESCHUTZ_SOLL_DAUER),

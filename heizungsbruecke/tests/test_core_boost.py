@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from runtime_helpers import ankunftsschwelle_der_laufzeit
 
-from smartheat_core import boost
+from smartheat_core import boost, write_budget
 from smartheat_core.boost import COMFORT_BOOST_MAX_SECONDS, comfort_boost_expired, decide_boost
 
 
@@ -188,3 +188,99 @@ def test_die_monotone_dauer_ist_unabhaengig_vom_wanduhrbeginn():
     assert comfort_boost_expired(None, _BEGINN, COMFORT_BOOST_MAX_SECONDS) is True
     assert comfort_boost_expired(None, _BEGINN, 60.0) is False
     assert comfort_boost_expired(None, _BEGINN, None) is False
+
+
+# --- Aufheizen nach Profil: Boost nur bei `boost`, Kurve und fehlende Angabe unterdruecken ---------------------
+
+def _start(vorher, nachher, **kw):
+    return decide_boost(room_actual=18.0, room_target=nachher, previous_room_target=vorher,
+                        boost_was_active=False, arrival_threshold_k=0.5, **kw)
+
+
+@pytest.mark.parametrize(("aufheizen", "erwartet"), [
+    pytest.param("boost", True, id="boost"),
+    pytest.param("kurve", False, id="kurve"),
+    pytest.param(None, False, id="ohne-angabe"),
+    pytest.param("", False, id="leer"),
+    pytest.param("Boost", False, id="andere-schreibweise"),
+    pytest.param("unbekannt", False, id="unbekannt"),
+])
+def test_anstieg_durch_plan_startet_den_boost_nur_bei_aufheizen_boost(aufheizen, erwartet):
+    """Beginn der warmen Phase, Ende von Away und Leerstand: nur das Profil `boost` startet den Comfort-Boost;
+    `kurve`, eine fehlende oder unbekannte Angabe unterdruecken ihn (weniger Heizen und Schreiben, sicher)."""
+    assert _start(20.0, 21.0, aufheizen=aufheizen, anstieg_vom_kunden=False) is erwartet
+
+
+@pytest.mark.parametrize("aufheizen", ["boost", "kurve", None, "unbekannt"])
+def test_erhoehung_durch_den_kunden_startet_den_boost_wie_heute(aufheizen):
+    """Die Erhoehung durch den Kunden hat mit dem Aufheizen des Profils nichts zu tun."""
+    assert _start(20.0, 21.0, aufheizen=aufheizen, anstieg_vom_kunden=True) is True
+
+
+@pytest.mark.parametrize(("vorher", "nachher", "raum_ist"), [
+    (None, 21.0, 18.0), (20.0, 21.0, 18.0), (20.0, 20.0, 15.0), (20.0, 19.0, 15.0), (20.0, 21.0, 20.9),
+    (20.0, 20.005, 18.0),
+])
+@pytest.mark.parametrize("aktiv", [False, True])
+def test_ohne_neue_angaben_gilt_das_heutige_verhalten(vorher, nachher, raum_ist, aktiv):
+    """Ohne `aufheizen` und ohne Herkunft des Anstiegs entscheidet die Funktion wie vorher: jede Erhoehung zaehlt
+    als Erhoehung durch den Kunden, der Raum darf noch nicht angekommen sein."""
+    ohne = decide_boost(room_actual=raum_ist, room_target=nachher, previous_room_target=vorher,
+                        boost_was_active=aktiv, arrival_threshold_k=0.5)
+    ausdruecklich = decide_boost(room_actual=raum_ist, room_target=nachher, previous_room_target=vorher,
+                                 boost_was_active=aktiv, arrival_threshold_k=0.5,
+                                 aufheizen=None, anstieg_vom_kunden=True)
+    erwartet = (raum_ist < nachher - 0.5) if aktiv else (
+        vorher is not None and nachher > vorher + 0.01 and raum_ist < nachher - 0.5)
+    assert ohne is ausdruecklich is erwartet
+
+
+@pytest.mark.parametrize("aufheizen", ["boost", "kurve", None])
+def test_ein_laufender_boost_endet_unabhaengig_vom_aufheizen_an_der_ankunft(aufheizen):
+    """Das Profil entscheidet nur ueber den Start; Weiterlaufen und Ende bleiben (Ankunft, Raum noch kalt)."""
+    for raum_ist, bleibt in ((19.0, True), (20.5, False)):
+        assert decide_boost(room_actual=raum_ist, room_target=21.0, previous_room_target=21.0,
+                            boost_was_active=True, arrival_threshold_k=0.5,
+                            aufheizen=aufheizen, anstieg_vom_kunden=False) is bleibt
+
+
+@pytest.mark.parametrize("aufheizen", ["boost", "kurve", None])
+def test_kein_boost_ohne_anstieg_auch_nicht_bei_aufheizen_boost(aufheizen):
+    for vorher, nachher in ((20.0, 20.0), (20.0, 19.0), (None, 21.0), (20.0, 20.0 + boost._TARGET_RISE_EPSILON_K)):
+        assert _start(vorher, nachher, aufheizen=aufheizen, anstieg_vom_kunden=False) is False
+
+
+def test_bei_kurve_ist_der_anstieg_nach_dem_nachziehen_verbraucht():
+    """Das Soll wird beim naechsten Pruefen als Vorwert gemerkt (`previous_room_target`): bei `kurve` gibt es weder
+    beim Anstieg noch danach einen Boost; der Raum waermt langsam ueber die Heizkurve."""
+    assert _start(20.0, 21.0, aufheizen="kurve", anstieg_vom_kunden=False) is False
+    assert _start(21.0, 21.0, aufheizen="kurve", anstieg_vom_kunden=False) is False
+
+
+def test_quote_bleibt_bei_jedem_aufheizen_unueberschritten():
+    """Auch mit Profil `boost` bleibt die Quote (hoechstens 6 Starts am Tag, 1800 s Abstand): zehn Plananstiege im
+    Abstand von 1800 s starten hoechstens sechsmal, und nie zwei Starts naeher als 1800 s."""
+    regel = write_budget.START_QUOTA
+    assert (regel.max_per_day, regel.waits) == (6, (1800,))
+    tag = "2026-11-13"
+    eintrag = None
+    starts = []
+    for i in range(10):
+        jetzt = 1000.0 + i * 1800
+        if _start(20.0, 21.0, aufheizen="boost", anstieg_vom_kunden=False) and write_budget.allowed(
+                eintrag, regel, jetzt, tag):
+            eintrag = write_budget.counted(eintrag, jetzt, tag)
+            starts.append(jetzt)
+    assert len(starts) == 6
+    assert all(b - a >= 1800 for a, b in zip(starts, starts[1:], strict=False))
+    assert not write_budget.allowed(eintrag, regel, starts[-1] + 86000, tag)
+    assert not write_budget.allowed(write_budget.counted(None, 1000.0, tag), regel, 1000.0 + 1799, tag)
+
+
+def test_kurve_verbraucht_keine_quote():
+    """`kurve` startet nie einen Boost, also zaehlt der Anstieg nicht gegen die Tagesquote."""
+    eintrag = None
+    for i in range(10):
+        if _start(20.0, 21.0, aufheizen="kurve", anstieg_vom_kunden=False):
+            eintrag = write_budget.counted(eintrag, 1000.0 + i * 1800, "2026-11-13")
+    assert eintrag is None
