@@ -431,6 +431,14 @@ def test_aufheizdauer_mit_nur_einem_schluessel_gilt_fuer_den_anderen_als_null():
     assert paar(ergebnis(utc("2026-11-10T15:59:59Z"), doc("abwesend", abwesend=abwesend()), nur_plan)) == (17.0, "abwesend")
 
 
+@pytest.mark.parametrize("aufheizdauer", ["x", [60], 60])
+def test_aufheizdauer_ohne_schluessel_heisst_kein_aufheizen_der_abwesenheit(aufheizdauer):
+    konfiguration = {"absenkung_k": 3, "aufheizdauer_min": aufheizdauer}
+    erg = ergebnis(utc("2026-11-09T16:00:00Z"), doc("abwesend", abwesend=abwesend(bis="2026-11-10T16:00:00Z")), konfiguration)
+    assert paar(erg) == (17.0, "abwesend")
+    assert erg.naechster_wechsel == utc("2026-11-10T16:00:00Z")
+
+
 def test_ohne_aufheizdauer_gibt_es_absenkung_und_kein_aufheizen():
     ohne = {"absenkung_k": 3}
     assert paar(ergebnis(NACHT, doc(wochenplan=wochenplan()), ohne)) == (18.0, "absenkung")
@@ -495,16 +503,18 @@ def test_nachtschicht_am_sonntag_gehoert_zum_sonntag_und_ueberdeckt_den_montagmo
     assert erg.naechster_wechsel == utc("2026-11-09T05:30:00Z")
 
 
-def test_warmer_beginn_in_der_luecke_der_sommerzeit_gilt_ab_dem_ersten_gueltigen_moment():
-    eintraege = plan_mit_sonderzeiten(t7=("02:30", "22:30"))  # Sonntag 2026-03-29: 02:00 bis 03:00 Berlin gibt es nicht
+@pytest.mark.parametrize("warm", ["02:07", "02:30"])
+def test_warmer_beginn_in_der_luecke_der_sommerzeit_gilt_ab_dem_ersten_gueltigen_moment(warm):
+    eintraege = plan_mit_sonderzeiten(t7=(warm, "22:30"))  # Sonntag 2026-03-29: 02:00 bis 03:00 Berlin gibt es nicht
     vorher = ergebnis(utc("2026-03-29T00:59:59Z"), doc(wochenplan=eintraege))
     assert paar(vorher) == (18.0, "absenkung")
     assert vorher.naechster_wechsel == utc("2026-03-29T01:00:00Z")
     assert paar(ergebnis(utc("2026-03-29T01:00:00Z"), doc(wochenplan=eintraege))) == (21.0, "wunsch")
 
 
-def test_kuehler_beginn_in_der_luecke_der_sommerzeit_gilt_ab_dem_ersten_gueltigen_moment():
-    eintraege = plan_mit_sonderzeiten(t7=("00:30", "02:30"))
+@pytest.mark.parametrize("kuehl", ["02:07", "02:30"])
+def test_kuehler_beginn_in_der_luecke_der_sommerzeit_gilt_ab_dem_ersten_gueltigen_moment(kuehl):
+    eintraege = plan_mit_sonderzeiten(t7=("00:30", kuehl))
     vorher = ergebnis(utc("2026-03-29T00:59:59Z"), doc(wochenplan=eintraege))
     assert paar(vorher) == (21.0, "wunsch")
     assert vorher.naechster_wechsel == utc("2026-03-29T01:00:00Z")
