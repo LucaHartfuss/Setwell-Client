@@ -649,8 +649,10 @@ def _on_soll_ende_erledigt(rt: Runtime, event: Event) -> None:
 
 def _unless_idle(rt: Runtime, handler, event: Event) -> None:
     """Im Ruhezustand (Fristende im Betrieb) laufen alle Handler ausser dem Lebenszeichen leer;
-    sie planen sich dann auch nicht neu ein."""
+    sie planen sich dann auch nicht neu ein. Vor jedem Handler folgt der Tag der Tageszaehler der Wanduhr, aber nur
+    mit vertrauenswuerdiger Uhr (ein Uhrsprung setzt das Tageslimit nicht zurueck)."""
     if not rt.idle:
+        write_budget.tag_fortschreiben(rt.uhr_vertrauen)
         handler(rt, event)
 
 

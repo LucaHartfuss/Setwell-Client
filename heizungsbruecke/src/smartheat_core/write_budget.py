@@ -7,6 +7,7 @@ Ein Log je Schluessel in BridgeState.write_budget (backup.json): {"day", "count"
 `last` laeuft auf der monotonen Worker-Uhr und wird beim Laden verworfen (state._parse_budget): nach
 einem Neustart gilt das Tageslimit weiter, der Mindestabstand beginnt neu."""
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from smartheat_core import wallclock
@@ -46,8 +47,29 @@ BOOST_END = "boost_end"
 RESTORE = "restore"
 
 
+# Tag der Tageszaehler (Schreibbudget, Durchsetzen). Er folgt der Wanduhr nur bei vertrauenswuerdiger Uhr
+# (`tag_fortschreiben`): ein Uhrsprung ueber die Tagesgrenze darf die Zaehler nicht zuruecksetzen, sonst waeren am selben
+# Tag erneut so viele Schreibvorgaenge erlaubt. Ohne Vertrauen bleibt der alte Tag (weniger Schreiben ist die sichere
+# Richtung). Prozessweit wie die Wanduhr; der erste Aufruf nimmt den Tag der Wanduhr, es gibt davor nichts zu schuetzen.
+_tag: str | None = None
+
+
 def today() -> str:
-    return wallclock.today().isoformat()
+    """Tag der Tageszaehler, ISO-Datum."""
+    global _tag
+    if _tag is None:
+        _tag = wallclock.today().isoformat()
+    return _tag
+
+
+def tag_fortschreiben(uhr_vertrauenswuerdig: Callable[[], bool]) -> None:
+    """Stellt den Tag der Zaehler auf den der Wanduhr, aber nur mit vertrauenswuerdiger Uhr (vorwaerts wie rueckwaerts).
+    Das Urteil wird nur bei abweichendem Tag erfragt (es kostet eine Abfrage des Zeitdienstes). Im Worker-Thread vor
+    jedem Ereignis aufrufen."""
+    global _tag
+    wand = wallclock.today().isoformat()
+    if _tag is None or _tag == wand or uhr_vertrauenswuerdig() is True:
+        _tag = wand
 
 
 def allowed(entry: dict | None, rule: Rule, now: float, day: str) -> bool:

@@ -74,7 +74,7 @@ LIMIT_MESSAGE = (
 RETURN_MESSAGE = "SmartHeat: Die Heizungseinstellung steht wieder auf den gelernten Werten."
 
 def _today() -> date:
-    return wallclock.today()
+    return date.fromisoformat(write_budget.today())
 
 
 def _set_misses(rt: EnforceRuntime, misses: int) -> None:

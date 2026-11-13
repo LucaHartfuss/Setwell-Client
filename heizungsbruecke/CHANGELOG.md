@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Ein Sprung der Uhr über Mitternacht setzt die Tageszähler nicht mehr zurück: das Tageslimit des Schreibbudgets und
+  „Durchsetzen höchstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswürdiger Uhr. Ohne Vertrauen (Zeitdienst
+  nie synchron seit dem Start, Wanduhr gegen die monotone Uhr gesprungen) bleibt der alte Tag, es wird dann eher weniger
+  geschrieben. Die Grenzwerte sind unverändert.
+
 - Der Prüftakt rechnet jetzt je Heizkreis das geltende Soll aus dem Wunsch am Thermostat und der Bedienung des Kreises
   (Wochenplan, Abwesenheit, Leerstand, Übersteuerung). Kälteschutz und Notfall-Boost lesen dieses Soll; ist die
   Soll-Quelle aus (Thermostat aus, Frostschutz-Stellung), schreibt der Plan nichts. Ein Anstieg durch den Plan startet

@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Ein Sprung der Uhr ueber Mitternacht setzt die Tageszaehler nicht mehr zurueck: Tageslimit des Schreibbudgets und
+  „Durchsetzen hoechstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswuerdiger Uhr, sonst bleibt der alte Tag.
+  Die Grenzwerte sind unveraendert.
+
 - Der Pruefertakt rechnet je Heizkreis das geltende Soll aus dem Wunsch und der Bedienung des Kreises (Wochenplan,
   Abwesenheit, Leerstand, Uebersteuerung); jeder Kreis liest seinen eigenen Eintrag der Dokumente. Ohne Plan gilt wie
   bisher der Wunsch des Thermostats.
