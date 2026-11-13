@@ -255,9 +255,6 @@ def _uebersteuerung_lesen(wert: object) -> tuple[float, datetime] | None:
 class _Zustand:
     soll: float
     art: str
-    #: Das Soll haengt vom Wochenplan ab (Plan, Wunsch, Uebersteuerung der kuehlen Phase): sein Wechsel kann vor dem
-    #: naechsten Zeitpunkt der Ueberlagerung liegen.
-    plan_abhaengig: bool
 
 
 class _Rechnung:
@@ -303,7 +300,10 @@ class _Rechnung:
 
     def _intervalle(self, zeitpunkt: datetime) -> list[tuple[datetime, datetime]]:
         """Kuehle Phasen (Beginn, Ende als Zeitpunkte) um `zeitpunkt`, nach Beginn sortiert."""
-        tag = zeitpunkt.astimezone(self._zone).date()
+        try:
+            tag = zeitpunkt.astimezone(self._zone).date()
+        except OverflowError:
+            return []  # am Rand des darstellbaren Bereichs: kein Plan
         if tag not in self._intervalle_je_tag:
             self._intervalle_je_tag[tag] = self._intervalle_berechnen(tag)
         return self._intervalle_je_tag[tag]
@@ -334,7 +334,7 @@ class _Rechnung:
             return None
 
     def _plan_zustand(self, zeitpunkt: datetime) -> _Zustand:
-        wunsch = _Zustand(self._wunsch, SOLL_ART_WUNSCH, self._hat_absenkung)
+        wunsch = _Zustand(self._wunsch, SOLL_ART_WUNSCH)
         absenktemperatur_plan = self._absenk_temp
         if not self._hat_absenkung or absenktemperatur_plan is None:
             return wunsch
@@ -345,10 +345,10 @@ class _Rechnung:
             if aufheizen is None or not phasendauer_gueltig(aufheizen - kuehl):
                 return wunsch  # die kuehle Phase ist nach dem Aufheizen zu kurz: keine Absenkung
             if zeitpunkt >= aufheizen:
-                return _Zustand(self._wunsch, SOLL_ART_AUFHEIZEN, True)
+                return _Zustand(self._wunsch, SOLL_ART_AUFHEIZEN)
             if self._uebersteuerung is not None and zeitpunkt < self._uebersteuerung[1] <= aufheizen:
-                return _Zustand(self._uebersteuerung[0], SOLL_ART_UEBERSTEUERT, True)
-            return _Zustand(absenktemperatur_plan, SOLL_ART_ABSENKUNG, True)
+                return _Zustand(self._uebersteuerung[0], SOLL_ART_UEBERSTEUERT)
+            return _Zustand(absenktemperatur_plan, SOLL_ART_ABSENKUNG)
         return wunsch
 
     def _plan_grenzen(self, von: datetime, bis: datetime) -> list[datetime]:
@@ -377,16 +377,16 @@ class _Rechnung:
         beginn = self._aufheizbeginn(fenster)
         if beginn is None or zeitpunkt < beginn:
             return None
-        return _Zustand(self._plan_zustand(fenster.bis).soll, SOLL_ART_AUFHEIZEN, False)
+        return _Zustand(self._plan_zustand(fenster.bis).soll, SOLL_ART_AUFHEIZEN)
 
     def zustand(self, zeitpunkt: datetime) -> _Zustand:
         leerstand, abwesend = self._leerstand, self._abwesend
         if leerstand is not None and leerstand.von is not None and leerstand.von <= zeitpunkt < leerstand.bis:
             if self._uebersteuerung is not None and zeitpunkt < self._uebersteuerung[1] <= leerstand.bis:
-                return _Zustand(self._uebersteuerung[0], SOLL_ART_UEBERSTEUERT, False)
-            return self._aufheizzustand(leerstand, zeitpunkt) or _Zustand(leerstand.temp, SOLL_ART_LEERSTAND, False)
+                return _Zustand(self._uebersteuerung[0], SOLL_ART_UEBERSTEUERT)
+            return self._aufheizzustand(leerstand, zeitpunkt) or _Zustand(leerstand.temp, SOLL_ART_LEERSTAND)
         if abwesend is not None and zeitpunkt < abwesend.bis:
-            return self._aufheizzustand(abwesend, zeitpunkt) or _Zustand(abwesend.temp, SOLL_ART_ABWESEND, False)
+            return self._aufheizzustand(abwesend, zeitpunkt) or _Zustand(abwesend.temp, SOLL_ART_ABWESEND)
         return self._plan_zustand(zeitpunkt)
 
     # --- Wechsel ---
@@ -408,20 +408,23 @@ class _Rechnung:
 
     def naechster_wechsel(self, jetzt: datetime, aktuell: _Zustand) -> datetime | None:
         """Erster Zeitpunkt nach `jetzt`, an dem sich Soll oder Art aendern. Zwischen zwei Zeitpunkten der
-        Ueberlagerung kommen nur Wechsel des Plans in Frage, und nur wenn das Soll vom Plan abhaengt."""
+        Ueberlagerung kommen nur Wechsel des Plans in Frage (nur mit Absenkung)."""
         schluessel = (aktuell.soll, aktuell.art)
-        zustand, beginn = aktuell, jetzt
+        beginn = jetzt
         for ende in [*sorted(z for z in self._zeitpunkte_der_ueberlagerung() if z > jetzt), None]:
-            if zustand.plan_abhaengig and self._hat_absenkung:
-                horizont = beginn + timedelta(days=_PLAN_SUCHTAGE)
+            if self._hat_absenkung:
+                try:
+                    horizont = beginn + timedelta(days=_PLAN_SUCHTAGE)
+                except OverflowError:
+                    horizont = datetime.max.replace(tzinfo=UTC)
                 for grenze in self._plan_grenzen(beginn, horizont if ende is None else min(horizont, ende)):
                     gewechselt = self.zustand(grenze)
                     if (gewechselt.soll, gewechselt.art) != schluessel:
                         return grenze
             if ende is None:
                 return None
-            zustand = self.zustand(ende)
-            if (zustand.soll, zustand.art) != schluessel:
+            danach = self.zustand(ende)
+            if (danach.soll, danach.art) != schluessel:
                 return ende
             beginn = ende
         return None

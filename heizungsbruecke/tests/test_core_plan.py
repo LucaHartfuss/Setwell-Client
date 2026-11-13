@@ -420,6 +420,105 @@ def test_wochenende_und_wochengrenze_nutzen_den_eintrag_des_tages():
     assert paar(ergebnis(montag_morgen, doc(wochenplan=plan_doc))) == (21.0, "wunsch")
 
 
+def test_aufheizdauer_mit_nur_einem_schluessel_gilt_fuer_den_anderen_als_null():
+    nur_weg = {"absenkung_k": 3, "aufheizdauer_min": {"weg": 60}}
+    assert paar(ergebnis(NACHT, doc(wochenplan=wochenplan()), nur_weg)) == (18.0, "absenkung")
+    erg = ergebnis(utc("2026-11-10T15:00:00Z"), doc("abwesend", abwesend=abwesend()), nur_weg)
+    assert paar(erg) == (21.0, "aufheizen")
+    nur_plan = {"absenkung_k": 3, "aufheizdauer_min": {"plan": 60}}
+    assert ergebnis(utc("2026-11-03T04:29:59Z"), doc(wochenplan=wochenplan()), nur_plan).soll_art == "absenkung"
+    assert ergebnis(utc("2026-11-03T04:30:00Z"), doc(wochenplan=wochenplan()), nur_plan).soll_art == "aufheizen"
+    assert paar(ergebnis(utc("2026-11-10T15:59:59Z"), doc("abwesend", abwesend=abwesend()), nur_plan)) == (17.0, "abwesend")
+
+
+def test_ohne_aufheizdauer_gibt_es_absenkung_und_kein_aufheizen():
+    ohne = {"absenkung_k": 3}
+    assert paar(ergebnis(NACHT, doc(wochenplan=wochenplan()), ohne)) == (18.0, "absenkung")
+    assert ergebnis(utc("2026-11-03T05:29:59Z"), doc(wochenplan=wochenplan()), ohne).soll_art == "absenkung"
+    assert paar(ergebnis(utc("2026-11-10T15:59:59Z"), doc("abwesend", abwesend=abwesend()), ohne)) == (17.0, "abwesend")
+
+
+def test_uebersteuerung_die_jetzt_endet_gilt_nicht_mehr():
+    jetzt = utc("2026-11-02T23:00:00Z")
+    konfiguration = {"absenkung_k": 3, "aufheizdauer_min": {"plan": 60, "weg": 0}}
+    ueber = {"temp": 20.0, "bis": "2026-11-02T23:00:00Z"}
+    assert paar(ergebnis(jetzt, doc(wochenplan=wochenplan(), uebersteuerung=ueber), konfiguration)) == (18.0, "absenkung")
+    ueber = {"temp": 20.0, "bis": "2026-11-02T23:00:01Z"}
+    erg = ergebnis(jetzt, doc(wochenplan=wochenplan(), uebersteuerung=ueber), konfiguration)
+    assert paar(erg) == (20.0, "uebersteuert")
+    assert erg.naechster_wechsel == utc("2026-11-02T23:00:01Z")
+
+
+def test_uebersteuerung_im_leerstand_gilt_bis_zum_leerstandsende_einschliesslich():
+    bedienung = doc("leerstand", leerstand=leerstand(bis="2026-11-05T16:00:00Z"),
+                    uebersteuerung={"temp": 19.0, "bis": "2026-11-05T16:00:00Z"})
+    erg = ergebnis(utc("2026-11-05T12:00:00Z"), bedienung)
+    assert paar(erg) == (19.0, "uebersteuert")
+    assert erg.naechster_wechsel == utc("2026-11-05T16:00:00Z")
+    bedienung = doc("leerstand", leerstand=leerstand(bis="2026-11-05T16:00:00Z"),
+                    uebersteuerung={"temp": 19.0, "bis": "2026-11-05T12:00:00Z"})
+    assert ergebnis(utc("2026-11-05T12:00:00Z"), bedienung).soll_art == "leerstand"
+
+
+def plan_mit_sonderzeiten(**je_tag):
+    eintraege = wochenplan()
+    for tag, (warm, kuehl) in je_tag.items():
+        eintraege[int(tag[1:]) - 1] = {"tag": int(tag[1:]), "warm_ab": warm, "kuehl_ab": kuehl}
+    return eintraege
+
+
+@pytest.mark.parametrize("tag", range(1, 8))
+def test_jeder_wochentag_nutzt_seinen_eigenen_eintrag(tag):
+    # Montag 2026-11-02 (Winterzeit, UTC+1); warm_ab je Tag verschieden: 06:00 + 15 min je Tag
+    eintraege = [{"tag": t, "warm_ab": "{:02d}:{:02d}".format(*divmod(6 * 60 + 15 * t, 60)), "kuehl_ab": "22:30"}
+                 for t in range(1, 8)]
+    minute = 6 * 60 + 15 * tag - 60  # in UTC
+    tag_beginn = datetime(2026, 11, 1 + tag, tzinfo=UTC)
+    warm = tag_beginn + timedelta(minutes=minute)
+    assert paar(ergebnis(warm - timedelta(seconds=1), doc(wochenplan=eintraege))) == (18.0, "absenkung")
+    erg = ergebnis(warm, doc(wochenplan=eintraege))
+    assert paar(erg) == (21.0, "wunsch")
+    assert erg.naechster_wechsel == tag_beginn + timedelta(hours=21, minutes=30)
+
+
+def test_nachtschicht_am_sonntag_gehoert_zum_sonntag_und_ueberdeckt_den_montagmorgen():
+    eintraege = plan_mit_sonderzeiten(t7=("14:00", "03:00"))  # Sonntag warm ab 14:00 bis Montag 03:00
+    sonntag_vormittag = utc("2026-11-08T11:00:00Z")  # 12:00 Berlin
+    assert paar(ergebnis(sonntag_vormittag, doc(wochenplan=eintraege))) == (18.0, "absenkung")
+    assert ergebnis(sonntag_vormittag, doc(wochenplan=eintraege)).naechster_wechsel == utc("2026-11-08T13:00:00Z")
+    montag_nacht = utc("2026-11-09T01:59:59Z")  # 02:59 Berlin, noch warm
+    erg = ergebnis(montag_nacht, doc(wochenplan=eintraege))
+    assert paar(erg) == (21.0, "wunsch")
+    assert erg.naechster_wechsel == utc("2026-11-09T02:00:00Z")
+    erg = ergebnis(utc("2026-11-09T02:00:00Z"), doc(wochenplan=eintraege))
+    assert paar(erg) == (18.0, "absenkung")
+    assert erg.naechster_wechsel == utc("2026-11-09T05:30:00Z")
+
+
+def test_warmer_beginn_in_der_luecke_der_sommerzeit_gilt_ab_dem_ersten_gueltigen_moment():
+    eintraege = plan_mit_sonderzeiten(t7=("02:30", "22:30"))  # Sonntag 2026-03-29: 02:00 bis 03:00 Berlin gibt es nicht
+    vorher = ergebnis(utc("2026-03-29T00:59:59Z"), doc(wochenplan=eintraege))
+    assert paar(vorher) == (18.0, "absenkung")
+    assert vorher.naechster_wechsel == utc("2026-03-29T01:00:00Z")
+    assert paar(ergebnis(utc("2026-03-29T01:00:00Z"), doc(wochenplan=eintraege))) == (21.0, "wunsch")
+
+
+def test_kuehler_beginn_in_der_luecke_der_sommerzeit_gilt_ab_dem_ersten_gueltigen_moment():
+    eintraege = plan_mit_sonderzeiten(t7=("00:30", "02:30"))
+    vorher = ergebnis(utc("2026-03-29T00:59:59Z"), doc(wochenplan=eintraege))
+    assert paar(vorher) == (21.0, "wunsch")
+    assert vorher.naechster_wechsel == utc("2026-03-29T01:00:00Z")
+    assert paar(ergebnis(utc("2026-03-29T01:00:00Z"), doc(wochenplan=eintraege))) == (18.0, "absenkung")
+
+
+@pytest.mark.parametrize("jetzt", [datetime(9999, 12, 30, tzinfo=UTC), datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC),
+                                   datetime(1, 1, 3, tzinfo=UTC)])
+def test_aeusserste_zeitpunkte_rechnen_ohne_absturz(jetzt):
+    erg = ergebnis(jetzt, doc(wochenplan=wochenplan()))
+    assert erg.soll_art in {"wunsch", "absenkung"}
+    assert erg.naechster_wechsel is None or erg.naechster_wechsel > jetzt
+
+
 # --- Form des Wochenplans -------------------------------------------------------------------------------------
 
 
