@@ -98,11 +98,13 @@ class Bus:
 
 class Zigbee:
     """Zigbee2MQTT mit einem Raumfuehler und einem Thermostat: meldet retained Zustaende und antwortet auf set mit dem
-    neuen Soll (das Thermostat uebernimmt es sofort). `gesetzt` ist die Folge der geschriebenen Soll-Werte."""
+    neuen Soll (das Thermostat uebernimmt es sofort). `gesetzt` ist die Folge der geschriebenen Soll-Werte,
+    `set_nachrichten` zaehlt jede set-Nachricht an das Thermostat, gleich mit welchem Inhalt."""
 
     def __init__(self, bus: Bus) -> None:
         self._bus = bus
         self.gesetzt: list[float] = []
+        self.set_nachrichten = 0
         bus.publish(f"{BASE}/bridge/state", {"state": "online"}, retain=True)
         bus.publish(f"{BASE}/bridge/devices", GERAETE, retain=True)
         bus.subscribe(f"{BASE}/+/set", self._set)
@@ -112,6 +114,8 @@ class Zigbee:
 
     def _set(self, topic, payload, retain) -> None:
         ieee, inhalt = topic.split("/")[1], decode(payload)
+        if ieee == THERMOSTAT:
+            self.set_nachrichten += 1
         if ieee == THERMOSTAT and isinstance(inhalt, dict) and "occupied_heating_setpoint" in inhalt:
             self.gesetzt.append(inhalt["occupied_heating_setpoint"])
             self.melden(ieee, occupied_heating_setpoint=inhalt["occupied_heating_setpoint"], local_temperature=20.0)
