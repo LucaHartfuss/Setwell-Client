@@ -20,6 +20,7 @@ from smartheat_gateway.drivers.vicare_cloud.driver import QUOTA, ViCareCloudDriv
 from smartheat_gateway.paths import Paths
 from smartheat_gateway.quota import QuotaExhausted
 from smartheat_runtime import delivery
+from smartheat_runtime.texts import HA_TEXTS
 
 PARAMETER = {"installation_id": 2012345, "gateway_serial": "7637415000000001", "device_id": "0", "heizkreis": 0,
              "poll_seconds": 300.0}
@@ -229,7 +230,7 @@ def test_an_expired_login_is_not_logged_in_and_writes_nothing(env):
     assert error.value.grund == "nicht_angemeldet" and driver.physical_writes == 0 and server.commands == []
     # Lokale Meldung: der Kunde liest einen deutschen Satz, nie den nackten Code.
     schreibfehler = DeviceWriteError("curve", "treiber:curve", error.value)
-    text = delivery.notification_text(delivery.NOTIFY_DATENFEHLER_WRITE, (str(schreibfehler),), {})
+    text = HA_TEXTS.text(delivery.notification_meldung(delivery.NOTIFY_DATENFEHLER_WRITE, (str(schreibfehler),), {}))
     assert "Anmeldung" in text and "erneuern" in text and "nicht_angemeldet" not in text
 
 

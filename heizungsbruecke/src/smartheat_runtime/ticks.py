@@ -239,9 +239,9 @@ def _notify(rt: Runtime, action) -> None:
         **rt.manifest.refs,
         **{lever: binding.ref(lever) for lever in binding.description.lever_set.levers if binding.has(lever)},
     }
-    text = delivery.notification_text(action.kind, action.detail, refs, rt.texts)
+    meldung = delivery.notification_meldung(action.kind, action.detail, refs)
     key, state = _notice(action.kind, action.detail)
-    rt.notifier.notify(key, state, text, critical=True)
+    rt.notifier.notify(key, state, meldung, critical=True)
 
 
 def _record_answer(rt: Runtime) -> None:

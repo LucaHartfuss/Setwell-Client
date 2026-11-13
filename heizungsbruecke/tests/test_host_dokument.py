@@ -10,6 +10,7 @@ from runtime_helpers import OPTIONS
 from heizungsbruecke import config
 from heizungsbruecke.ha_signals import SOLL_REF
 from heizungsbruecke.host import HaHost
+from smartheat_core import meldungen
 from smartheat_runtime import app, aufraeumen
 from smartheat_runtime.app import StartFailure
 from smartheat_runtime.ports import SourceUnavailable
@@ -400,6 +401,9 @@ class _DiensteHa(FakeHa):
     def send_notification(self, service, message):
         self.dienste.append((service, message))
 
+_MELDUNG = meldungen.neu("meldung.notbetrieb")
+_TEXT = meldungen.text(_MELDUNG)
+
 
 def test_hinweise_batterien_und_meldedienste_kommen_aus_der_bindung(env):
     options = {**OPTIONS, "notify_hints_off": ["batterie"],
@@ -409,8 +413,8 @@ def test_hinweise_batterien_und_meldedienste_kommen_aus_der_bindung(env):
                       "binary_sensor.thermostat_battery_low": "off",
                       "binary_sensor.thermostat_battery_low::device_class": "battery"})
     host = HaHost(FakeGeraet(konfiguration_aus_optionen(options), ha=ha), ha, clock=env.clock)
-    host.notify_sink.push("test", "Text")  # der Sink des Hosts schickt an die Meldedienste der Bindung
-    assert ha.dienste == [("notify.mobile_app_handy", "Text")]
+    host.notify_sink.push("test", _MELDUNG)  # der Sink des Hosts schickt an die Meldedienste der Bindung
+    assert ha.dienste == [("notify.mobile_app_handy", _TEXT)]
     assert host.boot_info().notify_hints_off == ("batterie",)
     runtime = host.load().config
     assert runtime.notify_hints_off == ("batterie",)
@@ -427,9 +431,9 @@ def test_while_the_reset_is_pending_the_messages_go_to_the_services_of_the_marke
     leer = {**konfiguration, "anlage": None,
             "kreise": [{**kreis, "bindung": {**kreis["bindung"], "benachrichtigung": []}}]}
     ha = _DiensteHa()
-    HaHost(FakeGeraet(leer, ha=ha), ha, clock=env.clock).notify_sink.push("wiederherstellung", "Text")
+    HaHost(FakeGeraet(leer, ha=ha), ha, clock=env.clock).notify_sink.push("wiederherstellung", _MELDUNG)
     assert ha.dienste == []
     host = HaHost(FakeGeraet(leer, ha=ha, start_markierung=_offene_markierung(konfiguration)), ha, clock=env.clock)
     assert host.boot_info().signed_off
-    host.notify_sink.push("wiederherstellung", "Text")
-    assert ha.dienste == [("notify.mobile_app_handy", "Text")]
+    host.notify_sink.push("wiederherstellung", _MELDUNG)
+    assert ha.dienste == [("notify.mobile_app_handy", _TEXT)]

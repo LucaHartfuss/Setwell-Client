@@ -258,7 +258,7 @@ def test_riesige_ungueltige_antwort_gibt_nur_einen_code(make_store, clock):
     assert _server_grund(rt) == "antwort_ungueltig"
     (_, meldung) = sink.pushes[-1]
     assert len(meldung) < 400 and "xxxx" not in meldung
-    assert len(rt.store.state.notify_messages["datenfehler"]) < 400
+    assert len(str(rt.store.state.notify_meldungen["datenfehler"])) < 400
 
 
 def test_riesiges_unbekanntes_schema_gibt_nur_einen_code(make_store, clock):

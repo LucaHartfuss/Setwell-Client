@@ -21,7 +21,7 @@ from heizungsbruecke.ha_binding import binding_for, binding_roles
 from heizungsbruecke.ha_signals import SOLL_REF, GeraetSignale, HaSignalSource
 from heizungsbruecke.manifest import build_manifest, entity_ref
 from heizungsbruecke.version import ADDON_VERSION
-from smartheat_core import config_check, kreisansicht, wallclock
+from smartheat_core import config_check, kreisansicht, meldungen, wallclock
 from smartheat_core.logtext import lesbar
 from smartheat_runtime import dokument_config
 from smartheat_runtime.app import Loaded, Notice, RestoreParts, StartFailure
@@ -55,10 +55,6 @@ DERIVED_SENSORS_RETRY_DELAYS_SECONDS = (5, 10, 20, 40, 60, 60, 60)
 #: Raum fuer up/status (wie das Gateway): Takt im Worker zusaetzlich zu jeder Soll-Aenderung.
 EV_RAUM = "ha_raum"
 RAUM_SECONDS = 30
-ENTITY_FEHLT_MESSAGE = ("SmartHeat: {feld}: zugeordnete Entity fehlt in Home Assistant und wird bis zum nächsten Start "
-                        "nicht gelesen.")
-ENTITY_DA_MESSAGE = "SmartHeat: {feld}: zugeordnete Entity ist in Home Assistant wieder vorhanden und wird gelesen."
-SOURCE_CHANGE_MESSAGE = "SmartHeat: Die Quelle der Raumtemperatur hat sich geändert."
 NOT_CONFIGURED_HINT = (
     "Add-on ist noch nicht eingerichtet -- bitte in Home Assistant unter Einstellungen -> Geraete & Dienste -> "
     "SmartHeat einrichten. Bis dahin bleibt das Add-on im Ruhezustand."
@@ -245,13 +241,13 @@ class HaHost:
                 for entity_id in b.batterien if entity_id not in ungelesen))
         notices: tuple[Notice, ...] = ()
         if derived.replaced:
-            notices = (Notice("quellwechsel", derived.sources_fingerprint, SOURCE_CHANGE_MESSAGE),)
+            notices = (Notice("quellwechsel", derived.sources_fingerprint, meldungen.neu("meldung.quellwechsel")),)
         fehlend = {feld for feld, _ in ohne_zustand}
         # Jedes gebundene optionale Feld meldet seinen Zustand; mit Zustand entwarnt der Melder einen offenen
         # Hinweis (und nur diesen), sonst bliebe „fehlt“ nach der Rueckkehr stehen und ein erneutes Fehlen schwiege.
         notices += tuple(
-            Notice(f"entity_fehlt:{feld}", "fehlt", ENTITY_FEHLT_MESSAGE.format(feld=feld)) if feld in fehlend
-            else Notice(f"entity_fehlt:{feld}", STATE_OK, ENTITY_DA_MESSAGE.format(feld=feld))
+            Notice(f"entity_fehlt:{feld}", "fehlt", meldungen.neu("meldung.entity_fehlt", feld=feld)) if feld in fehlend
+            else Notice(f"entity_fehlt:{feld}", STATE_OK, meldungen.neu("meldung.entity_fehlt_ok", feld=feld))
             for feld in dokument.optionale_felder(b))
         return Loaded(config=runtime, manifest=manifest, binding=binding, plant_id=plant_id, notices=notices)
 

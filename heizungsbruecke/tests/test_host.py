@@ -13,11 +13,13 @@ from heizungsbruecke import dokument
 from heizungsbruecke.derived_sensors import DerivedSensors
 from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.host import DERIVED_SENSORS_RETRY_DELAYS_SECONDS, HaHost
+from smartheat_core import meldungen
 from smartheat_runtime.app import IdleBridge, StartFailure
 from smartheat_runtime.backup_store import load_backup, save_backup
 from smartheat_runtime.dokument_config import ConfigError
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.roles import lever_refs_identity
+from smartheat_runtime.texts import HA_TEXTS
 
 
 def test_boot_info_without_a_document_is_not_configured():
@@ -152,10 +154,8 @@ def test_eine_optionale_rolle_ohne_zustand_startet_ungelesen_mit_hinweis(env, an
     loaded = _host(env, entity_flow_temperature="sensor.vorlauf").load()
     assert "flow_temperature" not in loaded.manifest.refs and sleeps == []
     assert [(n.key, n.message) for n in loaded.notices] == [(
-        "entity_fehlt:flow_temperature",
-        "SmartHeat: flow_temperature: zugeordnete Entity fehlt in Home Assistant und wird bis zum nächsten Start "
-        "nicht gelesen.")]
-    assert "sensor.vorlauf" not in loaded.notices[0].message
+        "entity_fehlt:flow_temperature", meldungen.neu("meldung.entity_fehlt", feld="flow_temperature"))]
+    assert "sensor.vorlauf" not in HA_TEXTS.text(loaded.notices[0].message)
 
 
 BASIS_ZUSTAENDE = {
@@ -225,7 +225,7 @@ def test_eine_batterie_ohne_zustand_wird_nicht_gelesen_und_gemeldet(env, angeleg
     loaded = _host(env, battery_entities=["sensor.gut", "binary_sensor.weg_battery_low"]).load()
     assert [ref.ref for ref in loaded.config.battery_refs] == ["sensor.gut"]
     assert [n.key for n in loaded.notices] == ["entity_fehlt:batterien"]
-    assert "binary_sensor.weg_battery_low" not in loaded.notices[0].message
+    assert "binary_sensor.weg_battery_low" not in HA_TEXTS.text(loaded.notices[0].message)
 
 
 def test_entity_fehlt_meldet_nach_rueckkehr_und_erneutem_fehlen_wieder(env, sleeps):

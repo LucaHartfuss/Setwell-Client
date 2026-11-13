@@ -2,6 +2,11 @@
 
 ## Unveroeffentlicht
 
+- Meldungen entstehen im Geraetekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der
+  Host zusammen (Wortlaut unveraendert). Der Meldungszustand je Kreis heisst jetzt `notify_meldungen`; die alten Felder
+  `notify_states` und `notify_messages` entfernt einmalig `python -m smartheat_device.meldungszustand_migration
+  --device-dir <Ordner> --release <Version>` (Sicherung `backup.json.pre-<Version>` als Rueckweg). Danach beginnt der
+  Meldungszustand leer, ein noch bestehender Anlass wird einmal neu gemeldet.
 - Neuer Befehl `weg_pruefen` im Geraete-Vertrag (Geraetekern); das Gateway lehnt ihn vorerst mit `nicht_unterstuetzt` ab.
   Die Anmeldephase `password` und das Feld `ciphertext` des Befehls `driver_login` entfallen, weil kein Treiber sie nutzt.
 - Lehnt der Server einen Snapshot ab, liest das Gateway (gemeinsamer Client-Kern) nur noch den kurzen Code der Antwort und

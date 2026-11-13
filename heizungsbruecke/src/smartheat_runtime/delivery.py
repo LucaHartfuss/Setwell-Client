@@ -11,8 +11,9 @@ seqs speichert der Server nicht, ein Retry wird mit frischen Werten neu gerechne
 """
 from dataclasses import dataclass, replace
 
+from smartheat_core import meldungen
+from smartheat_core.meldungen import Meldung
 from smartheat_runtime.entitlement import INACTIVE
-from smartheat_runtime.texts import HA_TEXTS, HostTexts
 
 ACK_TIMEOUT_SECONDS = 30
 NOTBETRIEB_AFTER_SERVER_FAILURES = 2
@@ -484,31 +485,20 @@ def _parse_fault(raw) -> DataFault | None:
     return DataFault(source=source, detail=tuple(detail))
 
 
-def notification_text(
-    kind: str, detail: tuple[str, ...], refs: dict[str, str], texts: HostTexts = HA_TEXTS,
-) -> str:
-    prefix = texts.delivery_prefix
+def notification_meldung(kind: str, detail: tuple[str, ...], refs: dict[str, str]) -> Meldung:
     if kind == NOTIFY_NOTBETRIEB_ON:
-        return f"{prefix}: Server antwortet nicht, Notbetrieb aktiv. Die Heizung wird bei Bedarf lokal abgesichert."
+        return meldungen.neu("meldung.notbetrieb")
     if kind == NOTIFY_NOTBETRIEB_OFF:
-        return f"{prefix}: Serververbindung wiederhergestellt, Notbetrieb beendet."
+        return meldungen.neu("meldung.notbetrieb_ok")
     if kind == NOTIFY_DATENFEHLER_LOCAL:
         sensors = ", ".join(f"{role} ({refs.get(role, 'nicht zugeordnet')})" for role in detail)
-        return (
-            f"{prefix}: Sensor(en) ohne gültigen Wert: {sensors}. Die Heizkurve bleibt "
-            f"unverändert, bis die Werte wieder verfügbar sind (z. B. Batterie prüfen)."
-        )
+        return meldungen.neu("meldung.datenfehler_lokal", rollen=sensors)
     if kind == NOTIFY_DATENFEHLER_SERVER:
-        code = detail[0] if detail else _NO_CODE
-        return f"{prefix}: Server hat die Messwerte abgelehnt (Code {code}). Die Heizkurve bleibt unverändert."
+        return meldungen.neu("meldung.datenfehler_server", grund=detail[0] if detail else _NO_CODE)
     if kind == NOTIFY_DATENFEHLER_RESOLVED:
-        return f"{prefix}: Messwerte wieder gültig, Heizkurve wird wieder angepasst."
+        return meldungen.neu("meldung.datenfehler_ok")
     if kind == NOTIFY_DATENFEHLER_WRITE:
-        detail_text = detail[0] if detail else "unbekannt"
-        return (
-            f"{prefix}: Neue Heizkurve konnte nicht an die Anlage übertragen werden ({detail_text}). "
-            f"Wird automatisch erneut versucht."
-        )
+        return meldungen.neu("meldung.datenfehler_schreiben", detail=detail[0] if detail else "unbekannt")
     if kind == NOTIFY_WRITE_RESOLVED:
-        return f"{prefix}: Anlage wieder erreichbar, Heizkurve übertragen."
+        return meldungen.neu("meldung.datenfehler_schreiben_ok")
     raise ValueError(f"Unbekannte Meldungsart: {kind!r}")

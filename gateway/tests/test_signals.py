@@ -158,10 +158,10 @@ class RecordingSink:
     def __init__(self) -> None:
         self.pushed: list[tuple[str, str]] = []
 
-    def push(self, key: str, message: str) -> None:
-        self.pushed.append((key, message))
+    def push(self, key: str, meldung) -> None:
+        self.pushed.append((key, SHG_TEXTS.text(meldung)))
 
-    def show(self, key: str, message: str) -> None:
+    def show(self, key: str, meldung) -> None:
         pass
 
     def withdraw(self, key: str) -> None:

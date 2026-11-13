@@ -3,7 +3,8 @@ import logging
 from dataclasses import replace
 from datetime import datetime
 
-from smartheat_core import wallclock
+from smartheat_core import meldungen, wallclock
+from smartheat_core.meldungen import Meldung
 from smartheat_runtime import entitlement
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.runtime import Runtime
@@ -13,24 +14,14 @@ from smartheat_runtime.worker import Event
 
 logger = logging.getLogger(__name__)
 
-ABO_ENDED_MESSAGE = (
-    "SmartHeat: Abo seit 30 Tagen inaktiv. Die Heizungssteuerung ist beendet, "
-    "die ursprünglichen Werte sind wieder eingestellt."
-)
-ABO_ACTIVE_MESSAGE = "SmartHeat: Abo wieder aktiv, die Heizungssteuerung läuft wieder normal."
 RESTORE_KEY = "wiederherstellung"
 RESTORE_FAILED_STATE = "fehlgeschlagen"
-RESTORE_FAILED_MESSAGE = "SmartHeat: Zurücksetzen auf die ursprünglichen Werte scheitert. Bitte die Anlage prüfen."
-RESTORE_OK_MESSAGE = "SmartHeat: Die ursprünglichen Werte sind wieder eingestellt."
 RESTORE_FAILED_REASON = "Zurücksetzen auf die ursprünglichen Werte scheitert"
 
 
-def inactive_message(inactive_since: datetime) -> str:
-    end = entitlement.grace_end(inactive_since).strftime("%d.%m.%Y")
-    return (
-        f"SmartHeat: Abo inaktiv. Die Heizung läuft noch bis {end} im Notbetrieb weiter, "
-        f"danach stellt es die ursprünglichen Werte wieder ein und beendet die Steuerung."
-    )
+def inactive_meldung(inactive_since: datetime) -> Meldung:
+    """Abo inaktiv: `ende` ist das Fristende als ISO-Datum, die Schicht darueber setzt es in den Kundentext."""
+    return meldungen.neu("meldung.abo_inaktiv", ende=entitlement.grace_end(inactive_since).date().isoformat())
 
 
 def enter_inactive(rt: Runtime, now: datetime) -> None:
@@ -65,7 +56,7 @@ def enter_inactive(rt: Runtime, now: datetime) -> None:
         except Exception:
             logger.exception("MQTT-Verbindung konnte nicht sauber beendet werden")
     if newly_set:
-        rt.notifier.notify("abo", "inaktiv", inactive_message(since), critical=True)
+        rt.notifier.notify("abo", "inaktiv", inactive_meldung(since), critical=True)
     else:
         logger.warning(
             "Abo weiterhin inaktiv (seit %s) - Notbetrieb laeuft bis %s.",
@@ -102,7 +93,7 @@ def finish_grace(rt: Runtime, *, always_restore: bool, final_notice: bool) -> bo
         ende_festhalten(rt)
     rt.worker.post(Event(EV_SOLL_ENDE))
     if final_notice:
-        rt.notifier.notify("abo", "beendet", ABO_ENDED_MESSAGE, critical=True)
+        rt.notifier.notify("abo", "beendet", meldungen.neu("meldung.abo_beendet"), critical=True)
     else:
         logger.info("Abo-inaktiv-Frist ist bereits abgelaufen - Add-on bleibt ohne weitere Eingriffe im Ruhezustand.")
     return True
@@ -127,8 +118,9 @@ def report_restore(notifier, ok: bool) -> bool:
     (kritisch), die spaetere Rueckkehr ebenfalls. Gelingt sie gleich, bleibt es still. True bei einem
     Zustandswechsel: die Aufrufer loggen ERROR nur dann, nicht bei jedem zurueckgestellten Versuch."""
     if ok:
-        return notifier.notify(RESTORE_KEY, STATE_OK, RESTORE_OK_MESSAGE, critical=True)
-    return notifier.notify(RESTORE_KEY, RESTORE_FAILED_STATE, RESTORE_FAILED_MESSAGE, critical=True)
+        return notifier.notify(RESTORE_KEY, STATE_OK, meldungen.neu("meldung.wiederherstellung_ok"), critical=True)
+    return notifier.notify(RESTORE_KEY, RESTORE_FAILED_STATE,
+                           meldungen.neu("meldung.wiederherstellung_fehlgeschlagen"), critical=True)
 
 
 def log_restore_failure(rt: Runtime, message: str, *args) -> None:

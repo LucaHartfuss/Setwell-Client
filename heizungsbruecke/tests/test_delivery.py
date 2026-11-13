@@ -46,10 +46,16 @@ from smartheat_runtime.delivery import (
     accepts_ack,
     from_persisted,
     is_storage_fault,
-    notification_text,
+    notification_meldung,
     step,
     to_persisted,
 )
+from smartheat_runtime.texts import HA_TEXTS  # noqa: E402
+
+
+def notification_text(kind, detail, refs):
+    """Der Text der Meldung beim HA-Host."""
+    return HA_TEXTS.text(notification_meldung(kind, detail, refs))
 
 
 def _run(state, *events):
@@ -701,6 +707,25 @@ def test_notification_texts_for_server_fault_and_state_changes():
     assert notification_text(NOTIFY_DATENFEHLER_RESOLVED, (), {}) == (
         "Heizungsbrücke: Messwerte wieder gültig, Heizkurve wird wieder angepasst."
     )
+
+
+def test_every_notification_kind_is_a_code_with_its_params():
+    local = notification_meldung(NOTIFY_DATENFEHLER_LOCAL, ("dat", "room_actual"), {"dat": "sensor.dat"})
+    assert (local.code, local.params) == (
+        "meldung.datenfehler_lokal", {"rollen": "dat (sensor.dat), room_actual (nicht zugeordnet)"})
+    server = notification_meldung(NOTIFY_DATENFEHLER_SERVER, ("hebel_fehlen",), {})
+    assert (server.code, server.params) == ("meldung.datenfehler_server", {"grund": "hebel_fehlen"})
+    assert notification_meldung(NOTIFY_DATENFEHLER_SERVER, (), {}).params == {"grund": "grund_fehlt"}
+    write = notification_meldung(NOTIFY_DATENFEHLER_WRITE, ("curve",), {})
+    assert (write.code, write.params) == ("meldung.datenfehler_schreiben", {"detail": "curve"})
+    assert notification_meldung(NOTIFY_DATENFEHLER_WRITE, (), {}).params == {"detail": "unbekannt"}
+    codes = {kind: notification_meldung(kind, (), {}).code for kind in (
+        NOTIFY_NOTBETRIEB_ON, NOTIFY_NOTBETRIEB_OFF, NOTIFY_DATENFEHLER_RESOLVED, NOTIFY_WRITE_RESOLVED)}
+    assert codes == {
+        NOTIFY_NOTBETRIEB_ON: "meldung.notbetrieb", NOTIFY_NOTBETRIEB_OFF: "meldung.notbetrieb_ok",
+        NOTIFY_DATENFEHLER_RESOLVED: "meldung.datenfehler_ok", NOTIFY_WRITE_RESOLVED: "meldung.datenfehler_schreiben_ok"}
+    with pytest.raises(ValueError, match="Meldungsart"):
+        notification_meldung("gibt_es_nicht", (), {})
 
 
 # --- Broker wieder verbunden (F3) ---

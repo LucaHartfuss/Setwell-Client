@@ -81,13 +81,14 @@ def test_verteilsystem_without_safety_values_is_a_configuration_error(env, caplo
 
 def test_der_grund_eines_konfigurationsfehlers_steht_auf_einer_logzeile(env, caplog, sleeps):
     """Sicherheitscheck zu a9756e8: der Grund traegt Text der Konfiguration (beim Gateway vom Server). Steuerzeichen
-    darin taeuschen keine eigene Logzeile vor: FEHLER-Zeile und Meldung schreiben sie als Escape."""
+    darin taeuschen keine eigene Logzeile vor: die FEHLER-Zeile schreibt sie als Escape; die Meldung nennt im Log
+    nur ihren Code."""
     with caplog.at_level(logging.INFO):
         result = _start_bridge(env, verteilsystem="Decke\r\nERROR    gefaelscht\x1b[31m")
 
     assert result.reason == "konfigurationsfehler"
     zeilen = [r.getMessage() for r in caplog.records if "Decke" in r.getMessage()]
-    assert len(zeilen) >= 2  # FEHLER-Zeile der Laufzeit und Logzeile der Meldung
+    assert len(zeilen) >= 1  # FEHLER-Zeile der Laufzeit
     assert any(zeile.startswith("FEHLER: ") for zeile in zeilen)
     for zeile in zeilen:
         assert "Decke\\r\\nERROR    gefaelscht\\x1b[31m" in zeile

@@ -59,6 +59,15 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 - Scheitert beim Abmelden das Zurücksetzen der Heizung, nennt die Meldung jetzt die Werte, die SmartHeat selbst
   geschrieben hätte (Ursprungswert des Servers, auf die lokalen Grenzen gebracht), nicht den lokalen Ursprungswert.
   Geschrieben wird unverändert dasselbe.
+- Meldungen entstehen im Gerätekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der
+  Host zusammen (Wortlaut, Meldetext der Handys und der Hinweise in Home Assistant bleiben gleich). Der Meldungszustand
+  in der `backup.json` jedes Kreises heißt jetzt `notify_meldungen`; die alten Felder `notify_states` und
+  `notify_messages` liest das Gerät nicht mehr. Beim Update einmal im Wartungsfenster
+  `python -m smartheat_device.meldungszustand_migration --device-dir <Ordner> --release <Version>` aufrufen: der Lauf
+  sichert jede betroffene Datei als `backup.json.pre-<Version>` und entfernt die beiden Felder. Danach beginnt der
+  Meldungszustand leer: ein noch bestehender Anlass wird einmal neu gemeldet, der Notbetrieb wird aus dem
+  Failsafe-Zustand wieder gesät. Offene Hinweise in Home Assistant, die vor dem Update gemeldet wurden, räumt das Gerät
+  danach nicht mehr selbst ab. Rückweg: die Sicherung zurückspielen.
 
 ## 1.1.0
 

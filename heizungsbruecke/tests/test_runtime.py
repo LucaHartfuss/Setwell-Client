@@ -18,6 +18,8 @@ from fakes import (
     VIESSMANN_ZUSTAND,
     FakeHa,
     logzeilen,
+    meldungs_ablage,
+    meldungs_text,
 )
 from runtime_helpers import (
     _OMIT,
@@ -52,9 +54,7 @@ from smartheat_runtime import (
     abo,
     app,
     aufraeumen,
-    aussentemperatur,
     backup_store,
-    datentraeger,
     dokument_config,
     entitlement,
     ticks,
@@ -62,19 +62,23 @@ from smartheat_runtime import (
 from smartheat_runtime.backup_store import load_backup, save_backup
 from smartheat_runtime.delivery import DataFault, DeliveryState
 from smartheat_runtime.ports import SignalUngueltig
-from smartheat_runtime.texts import HA_TEXTS
 
 SETTLE = VAILLANT_MYPYLLANT.settle_seconds
 
-NOTBETRIEB_ON = "Heizungsbrücke: Server antwortet nicht, Notbetrieb aktiv. Die Heizung wird bei Bedarf lokal abgesichert."
+NOTBETRIEB_ON = meldungs_text("meldung.notbetrieb")
+ABO_ACTIVE = meldungs_text("meldung.abo_aktiv")
+RESTORE_FAILED = meldungs_text("meldung.wiederherstellung_fehlgeschlagen")
+RESTORE_OK = meldungs_text("meldung.wiederherstellung_ok")
+STORAGE_FAILED = meldungs_text("meldung.datentraeger_nicht_beschreibbar")
+STORAGE_OK = meldungs_text("meldung.datentraeger_ok")
+AUSSEN_FAILED = meldungs_text("meldung.aussentemperatur_ausgefallen")
+AUSSEN_OK = meldungs_text("meldung.aussentemperatur_ok")
+WERTE_ZONE = "Heizkurve 0,9, Wunschtemperatur der Zone 22"
 
 
 # --- Hilfen nur dieser Datei (die geteilten Hilfen stehen in runtime_helpers.py) ---
 
-ABO_ENDED = (
-    "SmartHeat: Abo seit 30 Tagen inaktiv. Die Heizungssteuerung ist beendet, "
-    "die ursprünglichen Werte sind wieder eingestellt."
-)
+ABO_ENDED = meldungs_text("meldung.abo_beendet")
 
 
 def _awaiting_ack(bridge) -> bool:
@@ -659,7 +663,7 @@ def test_inaktiv_dann_aktiv_pusht_genau_einmal(env):
     env.abo["status"] = entitlement.ACTIVE
     _start(env)
 
-    assert env.ha.pushes == [*inaktiv_pushes, abo.ABO_ACTIVE_MESSAGE]
+    assert env.ha.pushes == [*inaktiv_pushes, ABO_ACTIVE]
     assert _status_states(env)[-3:] == ["abo_inaktiv", "startet", "regelt"]
 
 
@@ -753,7 +757,7 @@ def test_start_mit_altem_notbetrieb_abo_unbekannt_meldet_nach_timeouts(env):
 def _reported_stale_notbetrieb(env):
     """Notbetrieb ohne offenen Tick, dessen "Notbetrieb aktiv" vor dem Abo-inaktiv-Modus erschienen ist (Meldezustand
     und Text in backup.json), Start mit Abo-Status UNKNOWN."""
-    _quiet_backup(env, notify_states={"notbetrieb": "aktiv"}, notify_messages={"notbetrieb": NOTBETRIEB_ON})
+    _quiet_backup(env, notify_states={"notbetrieb": "aktiv"}, notify_meldungen={"notbetrieb": meldungs_ablage("meldung.notbetrieb")})
     save_backup(env.paths["FAILSAFE_PATH"], {"failsafe_active": True, "datenfehler": None, "pending": None})
     env.abo["status"] = entitlement.UNKNOWN
     return _start(env)
@@ -943,7 +947,7 @@ def test_open_critical_notifications_are_recreated_when_the_ha_connection_comes_
     HA). Beim Wiederverbinden legt das Add-on die offenen kritischen neu an, ohne Push."""
     _quiet_backup(
         env, notify_states={"abo": "inaktiv", "batterie:sensor.x": "niedrig"},
-        notify_messages={"abo": "SmartHeat: Abo inaktiv"},
+        notify_meldungen={"abo": meldungs_ablage("meldung.abo_inaktiv", ende="2026-01-01")},
     )
     env.abo["status"] = entitlement.UNKNOWN  # Abo-Meldung bleibt offen
     bridge = _start(env)
@@ -952,7 +956,7 @@ def test_open_critical_notifications_are_recreated_when_the_ha_connection_comes_
 
     _ha_verbunden(env, bridge)
 
-    assert env.ha.persistent == [("smartheat_abo", "SmartHeat: Abo inaktiv")]
+    assert env.ha.persistent == [("smartheat_abo", meldungs_text("meldung.abo_inaktiv", ende="2026-01-01"))]
     assert env.ha.pushes == pushes_before
 
 
@@ -1730,7 +1734,7 @@ def test_abo_reactivation_at_start_notifies_once_and_is_silent_on_next_restart(e
 
     _start(env)
 
-    assert env.ha.pushes == [abo.ABO_ACTIVE_MESSAGE]
+    assert env.ha.pushes == [ABO_ACTIVE]
     assert env.ha.dismissed == ["smartheat_abo"]
 
     pushes_before, dismissed_before = list(env.ha.pushes), list(env.ha.dismissed)
@@ -1802,14 +1806,14 @@ def test_closing_start_retries_a_failed_restore_and_reports_it_once(env, monkeyp
     assert bridge.reason == "abo_beendet"
     assert env.trigger_clients == []
     assert _last_event(env)["grund"] == abo.RESTORE_FAILED_REASON
-    assert env.ha.pushes == [abo.RESTORE_FAILED_MESSAGE]
+    assert env.ha.pushes == [RESTORE_FAILED]
 
     _advance(env, bridge, 300)
 
     assert ("number.shift_current", 22.0) in env.ha.writes
     assert _backup(env)["emergency_boost_active"] is False
     assert _last_event(env)["grund"] is None
-    assert env.ha.pushes == [abo.RESTORE_FAILED_MESSAGE, abo.RESTORE_OK_MESSAGE]
+    assert env.ha.pushes == [RESTORE_FAILED, RESTORE_OK]
 
 
 def test_unexpected_entitlement_query_error_counts_as_unknown(env):
@@ -1891,8 +1895,8 @@ def test_grace_end_with_failing_restore_keeps_running_and_retries(env, monkeypat
 
     bridge.worker.run_pending()
     assert bridge.idle is True
-    assert env.ha.pushes.count(abo.RESTORE_FAILED_MESSAGE) == 1
-    assert env.ha.pushes[-2:] == [ABO_ENDED, abo.RESTORE_OK_MESSAGE]
+    assert env.ha.pushes.count(RESTORE_FAILED) == 1
+    assert env.ha.pushes[-2:] == [ABO_ENDED, RESTORE_OK]
     ended = [entry for entry in env.ha.persistent if entry[1] == ABO_ENDED]
     assert len(ended) == 1
 
@@ -1927,7 +1931,7 @@ def _closing_start_with_failing_restore(env, monkeypatch, **backup):
 
 
 _RESTORE_FAILED_BEFORE = {"notify_states": {"wiederherstellung": "fehlgeschlagen"},
-                          "notify_messages": {"wiederherstellung": abo.RESTORE_FAILED_MESSAGE}}
+                          "notify_meldungen": {"wiederherstellung": meldungs_ablage("meldung.wiederherstellung_fehlgeschlagen")}}
 
 
 def test_grace_end_with_a_deferred_restore_logs_one_error_not_one_per_check(env, monkeypatch, caplog):
@@ -1943,12 +1947,12 @@ def test_grace_end_with_a_deferred_restore_logs_one_error_not_one_per_check(env,
 
     assert bridge.idle is False
     assert (len(_restore_logs(caplog, logging.ERROR)), len(_restore_logs(caplog, logging.WARNING))) == (1, 0)
-    assert env.ha.pushes.count(abo.RESTORE_FAILED_MESSAGE) == 1
+    assert env.ha.pushes.count(RESTORE_FAILED) == 1
 
     env.ha.write_error = None
     _advance(env, bridge, 1800)  # spaetestens nach der letzten Stufe der Rueckkehr-Staffel
     assert bridge.idle is True
-    assert env.ha.pushes[-1] == abo.RESTORE_OK_MESSAGE
+    assert env.ha.pushes[-1] == RESTORE_OK
 
 
 def test_grace_end_with_a_deferred_restore_after_a_restart_logs_one_warning(env, monkeypatch, caplog):
@@ -1961,7 +1965,7 @@ def test_grace_end_with_a_deferred_restore_after_a_restart_logs_one_warning(env,
 
     assert bridge.idle is False
     assert (len(_restore_logs(caplog, logging.ERROR)), len(_restore_logs(caplog, logging.WARNING))) == (0, 1)
-    assert abo.RESTORE_FAILED_MESSAGE not in env.ha.pushes
+    assert RESTORE_FAILED not in env.ha.pushes
 
 
 def test_closing_start_with_a_deferred_restore_logs_one_error_not_one_per_retry(env, monkeypatch, caplog):
@@ -1973,7 +1977,7 @@ def test_closing_start_with_a_deferred_restore_logs_one_error_not_one_per_retry(
 
     assert bridge.reason == "abo_beendet"
     assert (len(_restore_logs(caplog, logging.ERROR)), len(_restore_logs(caplog, logging.WARNING))) == (1, 0)
-    assert env.ha.pushes.count(abo.RESTORE_FAILED_MESSAGE) == 1
+    assert env.ha.pushes.count(RESTORE_FAILED) == 1
 
 
 def test_closing_start_with_a_deferred_restore_after_a_restart_logs_one_warning(env, monkeypatch, caplog):
@@ -1985,7 +1989,7 @@ def test_closing_start_with_a_deferred_restore_after_a_restart_logs_one_warning(
 
     assert bridge.reason == "abo_beendet"
     assert (len(_restore_logs(caplog, logging.ERROR)), len(_restore_logs(caplog, logging.WARNING))) == (0, 1)
-    assert abo.RESTORE_FAILED_MESSAGE not in env.ha.pushes
+    assert RESTORE_FAILED not in env.ha.pushes
 
 
 def test_inactive_restart_within_grace_does_not_notify_again(env):
@@ -2414,7 +2418,7 @@ def test_sign_off_during_emergency_boost_restores_clears_and_idles(env):
     _quiet_backup(
         env, emergency_boost_active=True,
         notify_states={"notbetrieb": "aktiv", "batterie:sensor.x": "niedrig"},
-        notify_messages={"notbetrieb": NOTBETRIEB_ON},
+        notify_meldungen={"notbetrieb": meldungs_ablage("meldung.notbetrieb")},
     )
     env.ha.states.update({"number.curve_current": 1.5, "number.shift_current": 25.0})
 
@@ -2484,7 +2488,7 @@ def test_sign_off_failed_restore_notifies_with_the_restore_values(env):
 
     _start_bridge(env, abgemeldet=True)
 
-    message = app.SIGN_OFF_RESTORE_FAILED_MESSAGE.format(werte="Heizkurve 0,9, Wunschtemperatur der Zone 22")
+    message = meldungs_text("meldung.abmeldung_zuruecksetzen_scheitert", werte=WERTE_ZONE)
     assert env.ha.pushes == [message]
     assert ("smartheat_wiederherstellung", message) in env.ha.persistent
     assert "smartheat_notbetrieb" in env.ha.dismissed
@@ -2501,16 +2505,17 @@ def test_sign_off_failed_restore_names_the_server_originals_that_it_would_have_w
 
     _start_bridge(env, abgemeldet=True, ursprungswerte={"heat_limit": vom_server})
 
-    message = app.SIGN_OFF_RESTORE_FAILED_MESSAGE.format(
-        werte=f"Heizkurve 0,9, Wunschtemperatur der Zone 22, Heizgrenze {heizgrenze}")
+    message = meldungs_text(
+        "meldung.abmeldung_zuruecksetzen_scheitert", werte=f"{WERTE_ZONE}, Heizgrenze {heizgrenze}")
     assert env.ha.pushes == [message]
 
 
 def test_sign_off_failed_restore_after_a_restart_renews_the_notification_without_push(env):
-    message = app.SIGN_OFF_RESTORE_FAILED_MESSAGE.format(werte="Heizkurve 0,9, Wunschtemperatur der Zone 22")
+    message = meldungs_text("meldung.abmeldung_zuruecksetzen_scheitert", werte=WERTE_ZONE)
     _quiet_backup(
         env, boost_active=True,
-        notify_states={"wiederherstellung": "fehlgeschlagen"}, notify_messages={"wiederherstellung": message},
+        notify_states={"wiederherstellung": "fehlgeschlagen"}, notify_meldungen={
+            "wiederherstellung": meldungs_ablage("meldung.abmeldung_zuruecksetzen_scheitert", werte=WERTE_ZONE)},
     )
     env.ha.write_error = RuntimeError("Cloud weg")
 
@@ -2529,7 +2534,7 @@ def test_sign_off_retry_success_reports_ok_and_dismisses_the_notification(env):
     env.ha.write_error = None
     _advance(env, bridge, 300)
 
-    assert env.ha.pushes[-1] == abo.RESTORE_OK_MESSAGE
+    assert env.ha.pushes[-1] == RESTORE_OK
     assert env.ha.dismissed[-1] == "smartheat_wiederherstellung"
     assert "notify_states" not in _backup(env) or _backup(env)["notify_states"] == {}
 
@@ -2539,7 +2544,7 @@ def test_sign_off_with_invalid_configuration_during_a_boost_asks_for_manual_valu
 
     _start_bridge(env, abgemeldet=True, verteilsystem="Unbekannt")
 
-    message = app.SIGN_OFF_NOT_RESTORED_MESSAGE.format(werte="Heizkurve 0,9, Raum-Soll 22")
+    message = meldungs_text("meldung.abmeldung_boost_aktiv", werte="Heizkurve 0,9, Raum-Soll 22")
     assert env.ha.pushes == [message]
     assert ("smartheat_wiederherstellung", message) in env.ha.persistent
 
@@ -2654,7 +2659,7 @@ def test_reset_fails_keeps_state_across_restart(env, monkeypatch):
     assert _backup(env)["boost_active"] is True
     assert _last_event(env)["status"] == "abgemeldet"
     assert _last_event(env)["grund"] == app.SIGN_OFF_RESTORE_FAILED.format(seconds=300)
-    message = app.SIGN_OFF_RESTORE_FAILED_MESSAGE.format(werte="Heizkurve 0,9, Wunschtemperatur der Zone 22")
+    message = meldungs_text("meldung.abmeldung_zuruecksetzen_scheitert", werte=WERTE_ZONE)
     assert ("smartheat_wiederherstellung", message) in env.ha.persistent
 
     env.ha.write_error = None
@@ -2866,12 +2871,12 @@ def test_unwritable_disk_is_reported_once_and_cleared_after_repair(env, monkeypa
 
         assert _last_event(env)["status"] == "datenfehler"
         assert _last_event(env)["datenfehler"] == {"art": "lokal", "rollen": ["datentraeger"]}
-        assert env.ha.pushes.count(HA_TEXTS.storage_failed) == 1
+        assert env.ha.pushes.count(STORAGE_FAILED) == 1
         assert _mqtt(env).snapshots == []  # N5: ohne gespeicherte Buchung kein Tick
 
     _advance(env, bridge, 300)  # EV_HEALTH: flush gelingt, ohne dass sich Zustand aendert
 
-    assert env.ha.pushes[-1] == datentraeger.OK_MESSAGE
+    assert env.ha.pushes[-1] == STORAGE_OK
     assert _last_event(env)["status"] == "regelt"
 
 
@@ -2891,7 +2896,7 @@ def test_server_fault_is_dismissed_after_a_disk_fault_cycle_and_the_ack(env, mon
         _break_backup_writes(patch)
         _answer(env, bridge, seq)
         assert _delivery(bridge).datenfehler == DataFault("local", ("datentraeger",))
-        assert env.ha.pushes.count(HA_TEXTS.storage_failed) == 1
+        assert env.ha.pushes.count(STORAGE_FAILED) == 1
 
     _advance(env, bridge, 300)  # EV_HEALTH: flush gelingt, Datentraeger entwarnt
     _advance(env, bridge, 30)
@@ -2900,7 +2905,7 @@ def test_server_fault_is_dismissed_after_a_disk_fault_cycle_and_the_ack(env, mon
     assert _delivery(bridge).datenfehler is None
     assert bridge.notifier.state("datenfehler") == "ok"
     assert "smartheat_datenfehler" in env.ha.dismissed
-    assert env.ha.pushes.count(HA_TEXTS.storage_failed) == 1
+    assert env.ha.pushes.count(STORAGE_FAILED) == 1
 
 
 def test_pure_disk_fault_cycle_adds_no_data_fault_push(env, monkeypatch):
@@ -2918,7 +2923,7 @@ def test_pure_disk_fault_cycle_adds_no_data_fault_push(env, monkeypatch):
     _answer(env, bridge, seq)
 
     assert env.ha.pushes == pushes_before
-    assert pushes_before == [HA_TEXTS.storage_failed, datentraeger.OK_MESSAGE]
+    assert pushes_before == [STORAGE_FAILED, STORAGE_OK]
     assert _delivery(bridge).datenfehler is None
 
 
@@ -2976,13 +2981,13 @@ def test_permanently_missing_outdoor_temperature_is_no_data_fault_and_telemetry_
     assert _delivery(bridge).datenfehler is None
     assert (_last_event(env)["status"], _last_event(env)["datenfehler"]) == ("regelt", None)
     assert bridge.notifier.state("aussentemperatur") == "ausgefallen"
-    assert [push for push in env.ha.pushes if "Außentemperatur" in push] == [aussentemperatur.FAILED_MESSAGE]
+    assert [push for push in env.ha.pushes if "Außentemperatur" in push] == [AUSSEN_FAILED]
 
     env.ha.states["sensor.outdoor_temp"] = 6.0
     _advance(env, bridge, 300)
 
     assert bridge.notifier.state("aussentemperatur") == "ok"
-    assert env.ha.pushes[-1] == aussentemperatur.OK_MESSAGE
+    assert env.ha.pushes[-1] == AUSSEN_OK
 
 
 def test_telemetry_reports_the_unwritable_disk_as_local_data_fault(env, monkeypatch):
@@ -3008,7 +3013,7 @@ def test_unwritable_disk_on_answer_reports_one_message_and_writes_nothing(env, m
 
     assert _delivery(bridge).datenfehler == DataFault("local", ("datentraeger",))
     assert _delivery(bridge).notbetrieb is False
-    assert env.ha.pushes == [HA_TEXTS.storage_failed]
+    assert env.ha.pushes == [STORAGE_FAILED]
     assert env.ha.writes == writes_before
 
 

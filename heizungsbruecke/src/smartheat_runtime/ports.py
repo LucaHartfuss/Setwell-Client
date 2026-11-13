@@ -3,6 +3,8 @@ Die Anlage ist smartheat_core.binding.PlantBinding, die Wanduhr smartheat_core.w
 Callable[[], float] uebergeben."""
 from typing import Protocol
 
+from smartheat_core.meldungen import Meldung
+
 
 class SignalNotFound(LookupError):
     """Die Referenz gibt es bei der Quelle nicht (HA: HTTP 404). Ueberwachungen ueberspringen sie."""
@@ -47,11 +49,11 @@ class StatusSink(Protocol):
 class NotifySink(Protocol):
     """Meldungen an den Kunden. Entprellung, Hinweis-Schalter und offene Meldungen fuehrt der Notifier."""
 
-    def push(self, key: str, message: str) -> None:
+    def push(self, key: str, meldung: Meldung) -> None:
         """Einmalige Nachricht (HA: alle Notify-Dienste). Fehler einzelner Kanaele behandelt der Sink selbst."""
         ...
 
-    def show(self, key: str, message: str) -> None:
+    def show(self, key: str, meldung: Meldung) -> None:
         """Offene kritische Meldung anlegen oder ersetzen (HA: persistent_notification). Darf werfen."""
         ...
 

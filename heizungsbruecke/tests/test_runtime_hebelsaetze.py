@@ -21,8 +21,8 @@ from runtime_helpers import (
 )
 
 from heizungsbruecke import host as host_modul
-from smartheat_core import write_budget
-from smartheat_core.pipeline import BUDGET_KEY, BUDGET_MESSAGE
+from smartheat_core import meldungen, write_budget
+from smartheat_core.pipeline import BUDGET_KEY
 from smartheat_runtime.backup_store import save_backup
 
 
@@ -157,7 +157,8 @@ def test_daily_limit_notice_goes_through_the_notifier_once_a_day(env):
         bridge.override.apply_server_values({"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
 
     assert env.ha.writes[writes:] == []
-    assert [push for push in env.ha.pushes[pushes:] if "Tageslimit" in push] == [BUDGET_MESSAGE.format(limit=limit)]
+    assert [push for push in env.ha.pushes[pushes:] if "Tageslimit" in push] == [
+        meldungen.text(meldungen.neu("meldung.schreibbudget", limit=limit))]
     assert bridge.store.state.notify_states[BUDGET_KEY] == write_budget.today()
 
 

@@ -23,6 +23,7 @@ from smartheat_runtime import aufraeumen, dokument_config
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
 from smartheat_runtime.soll_speicher import KREIS, SOURCE_PORTAL, raum_soll_von
 from smartheat_runtime.status import STATUS_ABGEMELDET
+from smartheat_runtime.texts import HA_TEXTS, HostTexts
 from smartheat_runtime.worker import Event, RegulationWorker
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,8 @@ class GeraetHostBasis:
     version: str
     #: herkunft eines Bedienwunschs ohne eigene Angabe (HA: Soll-Entity, Gateway: Thermostat)
     wunsch_herkunft: str
+    #: Absender und Datentraeger-Traeger der Meldungstexte (Gateway: eigene Texte)
+    texts: HostTexts = HA_TEXTS
 
     def __init__(self) -> None:
         self.device = None  # smartheat_device.device.Device, nach dem Anlegen per verbinden()
@@ -74,7 +77,7 @@ class GeraetHostBasis:
         #: blockierende Host-Aufrufe der Befehle neben dem Geraete-Thread; prozess.beenden stoppt ihn
         self.hintergrund = Hintergrund()
         #: Meldungen der Laufzeit an den Geraetekern (up/notifications); einer je Prozess
-        self.notify_sink = MeldungSink(self._melden)
+        self.notify_sink = MeldungSink(self._melden, self.texts)
         self._workers: dict[int, RegulationWorker] = {}  # je Kreis der Worker seiner Laufzeit
         #: False im Ruhezustand (IdleBridge): der Worker des Kreises hat keinen Soll-Eingang
         self._soll_eingaenge: dict[int, bool] = {}

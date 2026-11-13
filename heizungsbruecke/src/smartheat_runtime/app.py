@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from smartheat_core import enforce, wallclock, write_budget
+from smartheat_core import enforce, meldungen, wallclock, write_budget
 from smartheat_core.binding import BindingDescription, PlantBinding
 from smartheat_core.logtext import lesbar
+from smartheat_core.meldungen import Meldung
 from smartheat_core.pipeline import LeverPipeline, WriteBudgetExhausted
 from smartheat_core.safety import LocalSafety
 from smartheat_runtime import (
@@ -91,29 +92,11 @@ GRUND_ZUSTAND_NICHT_MIGRIERT = (
     "zustand_nicht_migriert: der Zustand liegt noch im alten Pfad, die Migration des Zustands und der Rastung "
     "nachholen (python -m smartheat_device.zustand_migration), danach neu starten"
 )
-CONFIG_OK_MESSAGE = "SmartHeat: Einrichtung in Ordnung, die Heizungssteuerung läuft."
-CONFIG_ERROR_MESSAGE = (
-    "SmartHeat: Konfigurationsfehler – {grund}. Die Heizungssteuerung ist gestoppt, "
-    "die Anlage behält ihre letzten Werte."
-)
-CONFIG_ERROR_BOOST_MESSAGE = (
-    "SmartHeat: Konfigurationsfehler – {grund}. Die Heizungssteuerung ist gestoppt, die Anlage steht aber noch auf "
-    "Boost-Werten. Bitte die ursprünglichen Werte von Hand einstellen ({werte})."
-)
 #: Code, wenn der Zustand des Kreises zu einer anderen Anlage gehoert als die, auf die das Dokument ihn jetzt zeigen
 #: laesst: nichts wird geschrieben (Wiederherstellungspunkt und Ursprungswerte gehoeren zur alten Anlage).
 GRUND_ANDERE_ANLAGE = "zustand_andere_anlage"
-ANDERE_ANLAGE_ZUSATZ = " Der Zustand gehört zu einer anderen Anlage, es wurde nichts zurückgeschrieben ({code})."
 SIGN_OFF_INVALID_CONFIG = "Konfiguration ungültig, die Anlage wurde nicht zurückgesetzt"
 SIGN_OFF_RESTORE_FAILED = "Zurücksetzen der Anlage scheitert, neuer Versuch in {seconds} s"
-SIGN_OFF_RESTORE_FAILED_MESSAGE = (
-    "SmartHeat wurde entfernt, konnte die Heizung aber nicht auf die ursprünglichen Werte "
-    "zurücksetzen ({werte}). Es wird weiter versucht, sonst bitte diese Werte von Hand einstellen."
-)
-SIGN_OFF_NOT_RESTORED_MESSAGE = (
-    "SmartHeat wurde entfernt, die Heizung steht aber noch auf Boost-Werten (Konfiguration "
-    "ungültig, kein Zurücksetzen möglich). Bitte die ursprünglichen Werte von Hand einstellen ({werte})."
-)
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +116,7 @@ class Notice:
     """Nicht kritischer Hinweis des Hosts beim Start (HA: Quelle der Raumtemperatur gewechselt)."""
     key: str
     state: str
-    message: str
+    message: Meldung
 
 
 @dataclass(frozen=True)
@@ -247,16 +230,16 @@ def _fail_start(notifier, status, clock, grund: str, key: str | None = None, *, 
     Ruhezustand mit Neupruefung nach CONFIG_RECHECK_SECONDS. Laeuft ein Boost, nimmt der Start ihn ueber `parts`
     zurueck; geht das nicht, sagt die Meldung, dass die Boost-Werte noch auf der Anlage stehen."""
     logger.error("FEHLER: %s", lesbar(grund))  # der Grund traegt Text der Konfiguration (Gateway: vom Server)
-    message = CONFIG_ERROR_MESSAGE.format(grund=grund)
+    meldung = meldungen.neu("meldung.konfiguration_fehler", grund=grund)
     if (store is not None and (store.state.boost_active or store.state.emergency_boost_active)
             and not _end_boosts(store, parts, clock)):
         description = None if parts is None else parts.binding.description
-        message = CONFIG_ERROR_BOOST_MESSAGE.format(
-            grund=grund, werte=_restore_values_text(store.state, description))
+        params = {"grund": grund, "werte": _restore_values_text(store.state, description)}
         if parts is not None and not _gleiche_anlage(store, parts):
-            message += ANDERE_ANLAGE_ZUSATZ.format(code=GRUND_ANDERE_ANLAGE)
-    if not notifier.notify("konfiguration", f"fehler:{grund if key is None else key}", message, critical=True):
-        notifier.refresh_persistent("konfiguration", message)
+            params["zusatz"] = GRUND_ANDERE_ANLAGE
+        meldung = meldungen.neu("meldung.konfiguration_fehler_boost", **params)
+    if not notifier.notify("konfiguration", f"fehler:{grund if key is None else key}", meldung, critical=True):
+        notifier.refresh_persistent("konfiguration", meldung)
     status.update(konfigurationsfehler=True, grund=grund)
     return _idle(clock, status, STATUS_KONFIGURATIONSFEHLER, neustart=neustart, recheck_after=CONFIG_RECHECK_SECONDS)
 
@@ -332,18 +315,16 @@ def _sign_off(parts: RestoreParts | None, store, notifier, status, clock, retry_
     if restorer is None:
         grund = GRUND_ANDERE_ANLAGE if andere_anlage else SIGN_OFF_INVALID_CONFIG
         if boosting:
-            vorlage = SIGN_OFF_NOT_RESTORED_MESSAGE
-            if andere_anlage:
-                vorlage += ANDERE_ANLAGE_ZUSATZ.format(code=GRUND_ANDERE_ANLAGE)
-            _report_sign_off_restore(notifier, vorlage, store.state, None, None)
+            _report_sign_off_restore(notifier, "meldung.abmeldung_boost_aktiv", store.state, None, None,
+                                     zusatz=GRUND_ANDERE_ANLAGE if andere_anlage else None)
     elif restored:
         grund = None
         abo.report_restore(notifier, ok=True)
     else:
         grund = SIGN_OFF_RESTORE_FAILED.format(seconds=retry_seconds)
         assert parts is not None  # restorer entsteht nur mit parts
-        _report_sign_off_restore(notifier, SIGN_OFF_RESTORE_FAILED_MESSAGE, store.state, parts.binding.description,
-                                 restorer.sign_off_values())
+        _report_sign_off_restore(notifier, "meldung.abmeldung_zuruecksetzen_scheitert", store.state,
+                                 parts.binding.description, restorer.sign_off_values())
     status.update(abgemeldet=True, grund=grund)
     bridge = _idle(clock, status, STATUS_ABGEMELDET, neustart=neustart)
     if restored:
@@ -363,19 +344,22 @@ def _sign_off(parts: RestoreParts | None, store, notifier, status, clock, retry_
 
 
 
-def _hint(notifier, key: str, state: str, message: str) -> None:
+def _hint(notifier, key: str, state: str, meldung: Meldung) -> None:
     """Nicht kritischer Hinweis der Hebel-Pipeline (Tageslimit, Lebensdauerzaehler)."""
-    notifier.notify(key, state, message, critical=False)
+    notifier.notify(key, state, meldung, critical=False)
 
 
-def _report_sign_off_restore(notifier, template: str, state, description: BindingDescription | None,
-                             originals: Mapping[str, float] | None) -> None:
+def _report_sign_off_restore(notifier, code: str, state, description: BindingDescription | None,
+                             originals: Mapping[str, float] | None, *, zusatz: str | None = None) -> None:
     """Kritische Meldung mit den Werten des Wiederherstellungspunkts, einmal mit Push; bei jedem
     weiteren Start (Neustart, Zuruecksetzen scheitert weiter) nur die offene Meldung neu, die der
     Host (HA) nicht speichert."""
-    message = template.format(werte=_restore_values_text(state, description, originals=originals))
-    if not notifier.notify(abo.RESTORE_KEY, abo.RESTORE_FAILED_STATE, message, critical=True):
-        notifier.refresh_persistent(abo.RESTORE_KEY, message)
+    params = {"werte": _restore_values_text(state, description, originals=originals)}
+    if zusatz is not None:
+        params["zusatz"] = zusatz
+    meldung = meldungen.neu(code, **params)
+    if not notifier.notify(abo.RESTORE_KEY, abo.RESTORE_FAILED_STATE, meldung, critical=True):
+        notifier.refresh_persistent(abo.RESTORE_KEY, meldung)
 
 
 # Ohne Beschreibung (Konfiguration ungueltig) kennt die Meldung die Anzeigenamen der Anlage nicht.
@@ -680,7 +664,7 @@ def _after_each(rt: Runtime, melder: Callable[[], None]) -> None:
     """Nach jedem Worker-Ereignis: Datentraeger-Meldung, dann das Status-Event, falls es
     sich geaendert hat. Dazu die Ursprungswerte an den Host (der Worker kennt nur einen Rueckruf)."""
     try:
-        datentraeger.report(rt.store, rt.notifier, rt.texts)
+        datentraeger.report(rt.store, rt.notifier)
     except Exception:
         logger.exception("Datentraeger-Meldung fehlgeschlagen")
     melder()
@@ -861,7 +845,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
         return _fail_start(notifier, status, clock, error.grund, error.key, neustart=neustart, store=store,
                            parts=host.sign_off_parts() if boosting else None)
 
-    notifier.notify("konfiguration", STATE_OK, CONFIG_OK_MESSAGE, critical=True)
+    notifier.notify("konfiguration", STATE_OK, meldungen.neu("meldung.konfiguration_ok"), critical=True)
     for notice in loaded.notices:
         notifier.notify(notice.key, notice.state, notice.message, critical=False)
     config = loaded.config
@@ -894,7 +878,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     abo_status = entitlement.UNKNOWN if ausser else entitlement.query(config)
     if abo_status == entitlement.ACTIVE:
         entitlement.clear(config.entitlement_path)
-        notifier.notify("abo", STATE_OK, abo.ABO_ACTIVE_MESSAGE, critical=True)
+        notifier.notify("abo", STATE_OK, meldungen.neu("meldung.abo_aktiv"), critical=True)
         status.update(abo=ABO_AKTIV)
     elif not ausser and entitlement.ist_beendet(config.entitlement_path):
         # Das Ende ist schon einmal abgewickelt: es gilt ohne Blick auf die Uhr, bis das Abo wieder aktiv ist (nur ACTIVE
@@ -961,9 +945,9 @@ def _end_stale_notbetrieb(rt: Runtime, *, beenden: bool) -> None:
     die Abo-Meldung) geht still auf ok, sonst entwarnte die Antwort ihn mit "Notbetrieb beendet"."""
     if beenden:
         ticks.deliver(rt, delivery.ClearStaleNotbetrieb())
-    elif "notbetrieb" in rt.store.state.notify_messages:
+    elif "notbetrieb" in rt.store.state.notify_meldungen:
         return
     rt.notifier.notify(
-        "notbetrieb", STATE_OK, delivery.notification_text(delivery.NOTIFY_NOTBETRIEB_OFF, (), {}, rt.texts),
+        "notbetrieb", STATE_OK, delivery.notification_meldung(delivery.NOTIFY_NOTBETRIEB_OFF, (), {}),
         critical=True, silent_ok=True,
     )

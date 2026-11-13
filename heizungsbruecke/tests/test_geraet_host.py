@@ -15,6 +15,7 @@ from runtime_helpers import OPTIONS
 from heizungsbruecke import config, discovery, geraet_host, stdin_befehl
 from heizungsbruecke.host import EV_RAUM, RAUM_SECONDS, HaHost
 from heizungsbruecke.supervisor import SupervisorApi
+from smartheat_core import meldungen
 from smartheat_core.config_check import NichtPruefbar
 from smartheat_device import inventory, nachrichten, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Waiting
@@ -665,8 +666,9 @@ def test_der_raum_wird_je_kreis_gemerkt(tmp_path, monkeypatch):
 def test_notify_sink_sends_to_the_given_services(tmp_path, monkeypatch):
     ha = FakeHa()
     host, _, _ = _host(tmp_path, monkeypatch, ha=ha)
-    host.notify_sink_fuer(["notify.mobile_app_handy"]).push("k", "Hallo")
-    assert ha.pushes == ["Hallo"]
+    meldung = meldungen.neu("meldung.notbetrieb_ok")
+    host.notify_sink_fuer(["notify.mobile_app_handy"]).push("k", meldung)
+    assert ha.pushes == [meldungen.text(meldung)]
 
 
 def test_runtime_messages_go_to_ha_and_to_the_device_core(tmp_path, monkeypatch):
@@ -675,15 +677,18 @@ def test_runtime_messages_go_to_ha_and_to_the_device_core(tmp_path, monkeypatch)
     ha = FakeHa()
     host, device, _ = _host(tmp_path, monkeypatch, ha=ha)
     sink = host.notify_sink_fuer(["notify.mobile_app_handy"])
-    sink.show("notbetrieb", "Notbetrieb aktiv")
-    sink.push("notbetrieb", "Notbetrieb aktiv")
-    sink.push("batterie:sensor.x", "Batterie schwach")
+    notbetrieb = meldungen.neu("meldung.notbetrieb")
+    batterie = meldungen.neu("meldung.batterie_schwach", bezeichnung="Bad")
+    text_notbetrieb, text_batterie = meldungen.text(notbetrieb), meldungen.text(batterie)
+    sink.show("notbetrieb", notbetrieb)
+    sink.push("notbetrieb", notbetrieb)
+    sink.push("batterie:sensor.x", batterie)
     sink.withdraw("notbetrieb")
     assert device.meldungen == [
-        ("notbetrieb", "Notbetrieb aktiv", True, "rot"), ("notbetrieb", "Notbetrieb aktiv", True, "rot"),
-        ("batterie:sensor.x", "Batterie schwach", False, "orange"), ("notbetrieb", "Notbetrieb aktiv", False, "rot")]
-    assert ha.pushes == ["Notbetrieb aktiv", "Batterie schwach"]
-    assert ha.persistent == [("smartheat_notbetrieb", "Notbetrieb aktiv")]
+        ("notbetrieb", text_notbetrieb, True, "rot"), ("notbetrieb", text_notbetrieb, True, "rot"),
+        ("batterie:sensor.x", text_batterie, False, "orange"), ("notbetrieb", text_notbetrieb, False, "rot")]
+    assert ha.pushes == [text_notbetrieb, text_batterie]
+    assert ha.persistent == [("smartheat_notbetrieb", text_notbetrieb)]
     assert ha.dismissed == ["smartheat_notbetrieb"]
 
 
@@ -697,12 +702,13 @@ def test_a_failing_ha_notification_still_reaches_the_device_core(tmp_path, monke
 
     host, device, _ = _host(tmp_path, monkeypatch, ha=_HaDown())
     sink = host.notify_sink_fuer([])
+    budget = meldungen.neu("meldung.schreibbudget", limit=50)
     with pytest.raises(ConnectionError):  # der Notifier faengt und loggt das (show/withdraw duerfen werfen)
-        sink.show("schreibbudget", "Budget erschoepft")
+        sink.show("schreibbudget", budget)
     with pytest.raises(ConnectionError):
         sink.withdraw("schreibbudget")
-    assert device.meldungen == [("schreibbudget", "Budget erschoepft", True, "rot"),
-                                ("schreibbudget", "Budget erschoepft", False, "rot")]
+    text = meldungen.text(budget)
+    assert device.meldungen == [("schreibbudget", text, True, "rot"), ("schreibbudget", text, False, "rot")]
 
 
 def test_the_notifier_reports_a_critical_runtime_message_to_the_device_core(tmp_path, monkeypatch):
@@ -713,14 +719,15 @@ def test_the_notifier_reports_a_critical_runtime_message_to_the_device_core(tmp_
     host, device, _ = _host(tmp_path, monkeypatch, ha=ha)
     notifier = Notifier(StateStore(tmp_path / "backup.json", tmp_path / "failsafe.json"),
                         host.notify_sink_fuer(["notify.mobile_app_handy"]))
-    notifier.notify("notbetrieb", "aktiv", "Notbetrieb aktiv", critical=True)
-    notifier.notify("notbetrieb", "ok", "Notbetrieb beendet", critical=True)
+    an, aus = meldungen.neu("meldung.notbetrieb"), meldungen.neu("meldung.notbetrieb_ok")
+    notifier.notify("notbetrieb", "aktiv", an, critical=True)
+    notifier.notify("notbetrieb", "ok", aus, critical=True)
     # Regeln des Gateways (MeldungSink): der Geraetekern sendet je key nur den letzten Stand (Upsert), am Ende geschlossen
-    assert device.meldungen == [("notbetrieb", "Notbetrieb aktiv", False, "orange"),  # Push vor der offenen Meldung
-                                ("notbetrieb", "Notbetrieb aktiv", True, "rot"),
-                                ("notbetrieb", "Notbetrieb beendet", True, "rot"),
-                                ("notbetrieb", "Notbetrieb aktiv", False, "rot")]
-    assert ha.persistent == [("smartheat_notbetrieb", "Notbetrieb aktiv")] and ha.dismissed == ["smartheat_notbetrieb"]
+    assert device.meldungen == [("notbetrieb", meldungen.text(an), False, "orange"),  # Push vor der offenen Meldung
+                                ("notbetrieb", meldungen.text(an), True, "rot"),
+                                ("notbetrieb", meldungen.text(aus), True, "rot"),
+                                ("notbetrieb", meldungen.text(an), False, "rot")]
+    assert ha.persistent == [("smartheat_notbetrieb", meldungen.text(an))] and ha.dismissed == ["smartheat_notbetrieb"]
 
 
 # --- Raum fuer up/status (Controller-Entscheid 2) und Soll-Speicher mit dem echten Geraete-Host -------------------

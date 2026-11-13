@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from smartheat_core import config_check, kreisansicht
+from smartheat_core import config_check, kreisansicht, meldungen
 from smartheat_core.logtext import lesbar
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_core.zeitquelle import echte_epoche, fachliche_epoche
@@ -226,7 +226,7 @@ class Device:
     def soll_quelle_aus(self, aus: bool, wirksam: float | None = None) -> None:
         """Soll-Quelle aus (Thermostat aus/Frostschutz): kein Wunsch, nur die Meldung soll_quelle_aus. Ohne
         wirksames Soll bleibt sie offen, nur ohne Wert im Text; schliessen kann sie nur aus=False."""
-        text = wish.soll_quelle_aus_text(wirksam) if aus else None
+        text = meldungen.text(wish.soll_quelle_aus_meldung(wirksam)) if aus else None
         self._inbox.put(("eigene", wish.SOLL_QUELLE_AUS_KEY, text))
 
     def meldung(self, key: str, text: str, *, offen: bool, stufe: str) -> None:
@@ -668,7 +668,7 @@ class Device:
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall())
         self.wunsch_puffer.setzen(neu)
         self.documents.mark_dirty()
-        text = wish.begrenzt_text(roh, begrenzt, herkunft) if roh is not None else None
+        text = meldungen.text(wish.begrenzt_meldung(roh, begrenzt, herkunft)) if roh is not None else None
         self._eigene_meldung(wish.BEGRENZT_KEY, text)
         self._wunsch_senden()
 

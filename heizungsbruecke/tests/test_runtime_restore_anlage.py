@@ -16,6 +16,7 @@ from smartheat_runtime.notifier import Notifier
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.state import StateStore
 from smartheat_runtime.status import StatusReporter
+from smartheat_runtime.texts import HA_TEXTS
 
 MANIFEST = ChannelManifest(refs={
     "curve_current": "number.hk", "shift_current": "number.normal", "heat_limit": "number.swu",
@@ -52,11 +53,11 @@ class Senke:
     def publish(self, event):
         self.ereignisse.append(event)
 
-    def push(self, key, message):
-        self.meldungen.append(message)
+    def push(self, key, meldung):
+        self.meldungen.append(HA_TEXTS.text(meldung))
 
-    def show(self, key, message):
-        self.meldungen.append(message)
+    def show(self, key, meldung):
+        self.meldungen.append(HA_TEXTS.text(meldung))
 
     def withdraw(self, key):
         pass
