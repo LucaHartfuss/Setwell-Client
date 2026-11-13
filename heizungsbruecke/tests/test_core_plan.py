@@ -22,12 +22,12 @@ def bedienung(raum_soll=21.0):
 
 
 def test_ohne_plan_ist_das_soll_der_gemerkte_wunsch():
-    ergebnis = soll_effektiv(JETZT, ZONE, bedienung(21.5), KONFIGURATION)
+    ergebnis = soll_effektiv(JETZT, ZONE, bedienung(21.5), KONFIGURATION, uhr_vertrauenswuerdig=True)
     assert ergebnis == SollErgebnis(soll=21.5, soll_art="wunsch", naechster_wechsel=None)
 
 
 def test_ergebnis_ist_unveraenderlich():
-    ergebnis = soll_effektiv(JETZT, ZONE, bedienung(), KONFIGURATION)
+    ergebnis = soll_effektiv(JETZT, ZONE, bedienung(), KONFIGURATION, uhr_vertrauenswuerdig=True)
     with pytest.raises(dataclasses.FrozenInstanceError):
         ergebnis.soll = 5.0  # type: ignore[misc]
 
@@ -35,52 +35,52 @@ def test_ergebnis_ist_unveraenderlich():
 @pytest.mark.parametrize("wunsch", [5.0, 35.0, 5, 35, 4.9, 35.1])
 def test_wunsch_am_rand_wird_unveraendert_durchgereicht(wunsch):
     # Die Grenzen des Raumbereichs setzt der Wunsch-Eingang; hier wird nichts begrenzt.
-    assert soll_effektiv(JETZT, ZONE, bedienung(wunsch), KONFIGURATION).soll == wunsch
+    assert soll_effektiv(JETZT, ZONE, bedienung(wunsch), KONFIGURATION, uhr_vertrauenswuerdig=True).soll == wunsch
 
 
 def test_soll_quelle_aus_oder_frostschutz_ergibt_kein_soll():
-    ergebnis = soll_effektiv(JETZT, ZONE, bedienung(21.5), KONFIGURATION, soll_quelle_aus=True)
+    ergebnis = soll_effektiv(JETZT, ZONE, bedienung(21.5), KONFIGURATION, uhr_vertrauenswuerdig=True, soll_quelle_aus=True)
     assert ergebnis == SollErgebnis(soll=None, soll_art=None, naechster_wechsel=None)
 
 
 def test_soll_quelle_an_ist_der_standard():
-    assert soll_effektiv(JETZT, ZONE, bedienung(20.0), KONFIGURATION, soll_quelle_aus=False).soll == 20.0
+    assert soll_effektiv(JETZT, ZONE, bedienung(20.0), KONFIGURATION, uhr_vertrauenswuerdig=True, soll_quelle_aus=False).soll == 20.0
 
 
 def test_naive_jetzt_wird_abgelehnt():
     with pytest.raises(ValueError, match="^jetzt braucht eine Zeitzone$"):
-        soll_effektiv(datetime(2026, 11, 2, 12, 0), ZONE, bedienung(), KONFIGURATION)
+        soll_effektiv(datetime(2026, 11, 2, 12, 0), ZONE, bedienung(), KONFIGURATION, uhr_vertrauenswuerdig=True)
 
 
 @pytest.mark.parametrize("jetzt", ["2026-11-02T12:00:00+00:00", None, 1.0])
 def test_jetzt_ohne_datum_wird_abgelehnt(jetzt):
     with pytest.raises(ValueError, match="^jetzt braucht eine Zeitzone$"):
-        soll_effektiv(jetzt, ZONE, bedienung(), KONFIGURATION)
+        soll_effektiv(jetzt, ZONE, bedienung(), KONFIGURATION, uhr_vertrauenswuerdig=True)
 
 
 @pytest.mark.parametrize("zone", ["Mars/Olympus", "", "../etc/passwd", "Europe/Berlin\x00", None, 3, "/etc"])
 def test_ungueltige_zone_wird_abgelehnt_ohne_den_namen_zu_nennen(zone):
     with pytest.raises(ValueError, match="^zone ist keine bekannte Zeitzone$") as fehler:
-        soll_effektiv(JETZT, zone, bedienung(), KONFIGURATION)
+        soll_effektiv(JETZT, zone, bedienung(), KONFIGURATION, uhr_vertrauenswuerdig=True)
     assert "Mars" not in str(fehler.value)
 
 
 @pytest.mark.parametrize("wunsch", [float("nan"), float("inf"), True, None, "21", [21.0]])
 def test_unbrauchbarer_wunsch_wird_abgelehnt_ohne_den_wert_zu_nennen(wunsch):
     with pytest.raises(ValueError, match="^bedienung hat keinen brauchbaren Wunsch$"):
-        soll_effektiv(JETZT, ZONE, bedienung(wunsch), KONFIGURATION)
+        soll_effektiv(JETZT, ZONE, bedienung(wunsch), KONFIGURATION, uhr_vertrauenswuerdig=True)
 
 
 @pytest.mark.parametrize("doc", [None, [], "x", {"kreis": 1}])
 def test_bedienung_ohne_wunsch_wird_abgelehnt(doc):
     with pytest.raises(ValueError, match="^bedienung hat keinen brauchbaren Wunsch$"):
-        soll_effektiv(JETZT, ZONE, doc, KONFIGURATION)
+        soll_effektiv(JETZT, ZONE, doc, KONFIGURATION, uhr_vertrauenswuerdig=True)
 
 
 @pytest.mark.parametrize("konfiguration", [None, [], "x"])
 def test_konfiguration_ohne_objekt_wird_abgelehnt(konfiguration):
     with pytest.raises(ValueError, match="^konfiguration ist kein Objekt$"):
-        soll_effektiv(JETZT, ZONE, bedienung(), konfiguration)
+        soll_effektiv(JETZT, ZONE, bedienung(), konfiguration, uhr_vertrauenswuerdig=True)
 
 
 def test_die_rechnung_ist_rein_und_wiederholbar(monkeypatch):
@@ -90,19 +90,19 @@ def test_die_rechnung_ist_rein_und_wiederholbar(monkeypatch):
 
     monkeypatch.setattr(wallclock, "_now", verboten)
     eingabe = bedienung(19.0)
-    erstes = soll_effektiv(JETZT, ZONE, eingabe, KONFIGURATION)
-    assert soll_effektiv(JETZT, ZONE, eingabe, KONFIGURATION) == erstes
+    erstes = soll_effektiv(JETZT, ZONE, eingabe, KONFIGURATION, uhr_vertrauenswuerdig=True)
+    assert soll_effektiv(JETZT, ZONE, eingabe, KONFIGURATION, uhr_vertrauenswuerdig=True) == erstes
     assert eingabe == bedienung(19.0)
 
 
 def test_die_zeitzone_des_hosts_aendert_nichts(monkeypatch):
     import time
 
-    erstes = soll_effektiv(JETZT, ZONE, bedienung(), KONFIGURATION)
+    erstes = soll_effektiv(JETZT, ZONE, bedienung(), KONFIGURATION, uhr_vertrauenswuerdig=True)
     monkeypatch.setenv("TZ", "Pacific/Auckland")
     time.tzset()
     try:
-        assert soll_effektiv(JETZT, ZONE, bedienung(), KONFIGURATION) == erstes
+        assert soll_effektiv(JETZT, ZONE, bedienung(), KONFIGURATION, uhr_vertrauenswuerdig=True) == erstes
     finally:
         monkeypatch.undo()
         time.tzset()
@@ -153,8 +153,8 @@ def abwesend(bis="2026-11-10T16:00:00Z", temp=17.0, aufheizen_ab=None):
     return {"bis": bis, "temp": temp, "aufheizen_ab": aufheizen_ab}
 
 
-def ergebnis(jetzt, bedienung, konfiguration=KONF, zone=ZONE):
-    return soll_effektiv(jetzt, zone, bedienung, konfiguration)
+def ergebnis(jetzt, bedienung, konfiguration=KONF, zone=ZONE, vertrauen=True):
+    return soll_effektiv(jetzt, zone, bedienung, konfiguration, uhr_vertrauenswuerdig=vertrauen)
 
 
 def paar(erg):
@@ -666,7 +666,7 @@ def faelle(draw, *, ueberlagerung=None, mit_aufheizen=True, mit_uebersteuerung=T
 def test_eigenschaft_nie_unter_der_untergrenze_und_nie_ueber_dem_wunsch_durch_die_absenkung(fall):
     jetzt, zone, bedienung, konfiguration = fall
     wunsch = bedienung["raum_soll"]
-    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration)
+    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration, uhr_vertrauenswuerdig=True)
     assert erg.soll is not None
     if erg.soll_art == "wunsch":
         assert erg.soll == wunsch
@@ -683,7 +683,7 @@ def test_eigenschaft_leerstand_gewinnt_gegen_abwesend_und_plan(fall):
     jetzt, zone, bedienung, konfiguration = fall
     fenster = bedienung["leerstand"]
     gueltig = utc(fenster["von"]) <= jetzt < utc(fenster["bis"]) and fenster["temp"] >= 15.0
-    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration)
+    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration, uhr_vertrauenswuerdig=True)
     if gueltig and utc(fenster["bis"]) - utc(fenster["von"]) <= timedelta(days=365):
         assert paar(erg) == (fenster["temp"], "leerstand")
     else:
@@ -694,7 +694,7 @@ def test_eigenschaft_leerstand_gewinnt_gegen_abwesend_und_plan(fall):
 def test_eigenschaft_abwesend_gewinnt_gegen_leerstand_und_plan(fall):
     jetzt, zone, bedienung, konfiguration = fall
     weg = bedienung["abwesend"]
-    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration)
+    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration, uhr_vertrauenswuerdig=True)
     if jetzt < utc(weg["bis"]) and weg["temp"] >= 15.0:
         assert paar(erg) == (weg["temp"], "abwesend")
     else:
@@ -704,12 +704,75 @@ def test_eigenschaft_abwesend_gewinnt_gegen_leerstand_und_plan(fall):
 @given(faelle())
 def test_eigenschaft_naechster_wechsel_ist_der_erste_wechsel(fall):
     jetzt, zone, bedienung, konfiguration = fall
-    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration)
+    erg = soll_effektiv(jetzt, zone, bedienung, konfiguration, uhr_vertrauenswuerdig=True)
     if erg.naechster_wechsel is None:
         return
     assert erg.naechster_wechsel > jetzt
     assert erg.naechster_wechsel.utcoffset() == timedelta(0)
-    davor = soll_effektiv(erg.naechster_wechsel - timedelta(seconds=1), zone, bedienung, konfiguration)
-    danach = soll_effektiv(erg.naechster_wechsel, zone, bedienung, konfiguration)
+    davor = soll_effektiv(erg.naechster_wechsel - timedelta(seconds=1), zone, bedienung, konfiguration, uhr_vertrauenswuerdig=True)
+    danach = soll_effektiv(erg.naechster_wechsel, zone, bedienung, konfiguration, uhr_vertrauenswuerdig=True)
     assert paar(davor) == paar(erg)
     assert paar(danach) != paar(erg)
+
+
+# --- Uhr unklar: die Betriebsarten ruhen ---------------------------------------------------------------------------
+
+UEBERSTEUERT = {"temp": 20.0, "bis": "2026-11-03T05:00:00Z"}
+BETRIEBSARTEN = {
+    "plan": doc(wochenplan=wochenplan()),
+    "abwesend": doc(modus="abwesend", abwesend=abwesend(bis="2026-11-10T16:00:00Z")),
+    "leerstand": doc(modus="leerstand", leerstand=leerstand()),
+    "uebersteuerung": doc(wochenplan=wochenplan(), uebersteuerung=UEBERSTEUERT),
+}
+
+
+@pytest.mark.parametrize("name", sorted(BETRIEBSARTEN))
+def test_ohne_vertrauenswuerdige_uhr_ist_das_soll_der_wunsch_und_der_merker_gesetzt(name):
+    bedienung = BETRIEBSARTEN[name]
+    mit = ergebnis(NACHT, bedienung)
+    assert mit.soll_art != "wunsch" and mit.uhr_unklar is False  # mit Vertrauen wirkt die Betriebsart
+    ohne = ergebnis(NACHT, bedienung, vertrauen=False)
+    assert ohne == SollErgebnis(soll=21.0, soll_art="wunsch", naechster_wechsel=None, uhr_unklar=True)
+
+
+def test_der_wunsch_bleibt_ohne_uhr_unbegrenzt_wie_er_ist():
+    assert ergebnis(NACHT, doc(raum_soll=24.5, wochenplan=wochenplan()), vertrauen=False).soll == 24.5
+
+
+def test_nach_der_synchronitaet_gilt_der_plan_an_der_aktuellen_stelle():
+    bedienung = doc(wochenplan=wochenplan())
+    kuehl, warm = utc("2026-11-02T22:00:00Z"), utc("2026-11-03T08:00:00Z")
+    assert ergebnis(kuehl, bedienung, vertrauen=False).soll_art == "wunsch"
+    assert paar(ergebnis(kuehl, bedienung)) == (18.0, "absenkung")
+    assert paar(ergebnis(warm, bedienung, vertrauen=False)) == (21.0, "wunsch")
+    assert ergebnis(warm, bedienung).naechster_wechsel == utc("2026-11-03T21:30:00Z")
+
+
+@pytest.mark.parametrize("bedienung", [doc(), doc(wochenplan=None), doc(abwesend=None, leerstand=None, uebersteuerung=None),
+                                       doc(wochenplan=[{"tag": 1}]), doc(modus="manuell", abwesend=abwesend()),
+                                       doc(modus="manuell", leerstand=leerstand())])
+def test_ruht_nichts_gibt_es_auch_keinen_merker(bedienung):
+    assert ergebnis(NACHT, bedienung, vertrauen=False) == SollErgebnis(21.0, "wunsch", None, False)
+
+
+@pytest.mark.parametrize("wert", [None, 1, "ja", 0, [], "True"])
+def test_nur_ein_echtes_true_gilt_als_vertrauen(wert):
+    ohne = soll_effektiv(NACHT, ZONE, BETRIEBSARTEN["plan"], KONF, uhr_vertrauenswuerdig=wert)
+    assert ohne.soll_art == "wunsch" and ohne.uhr_unklar is True
+
+
+def test_ohne_soll_quelle_ruht_nichts_und_es_gibt_keinen_merker():
+    erg = soll_effektiv(NACHT, ZONE, BETRIEBSARTEN["plan"], KONF, uhr_vertrauenswuerdig=False, soll_quelle_aus=True)
+    assert erg == SollErgebnis(soll=None, soll_art=None, naechster_wechsel=None, uhr_unklar=False)
+
+
+def test_das_urteil_der_uhr_ist_ein_pflichtparameter():
+    with pytest.raises(TypeError):
+        soll_effektiv(NACHT, ZONE, BETRIEBSARTEN["plan"], KONF)  # type: ignore[call-arg]
+
+
+def test_die_pruefung_der_eingaben_gilt_auch_ohne_vertrauen():
+    with pytest.raises(ValueError):
+        soll_effektiv(datetime(2026, 11, 2, 22, 0), ZONE, BETRIEBSARTEN["plan"], KONF, uhr_vertrauenswuerdig=False)
+    with pytest.raises(ValueError):
+        soll_effektiv(NACHT, "Nirgendwo/Nichts", BETRIEBSARTEN["plan"], KONF, uhr_vertrauenswuerdig=False)

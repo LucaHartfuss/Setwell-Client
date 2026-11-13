@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Die Rechnung des geltenden Solls nimmt das Urteil über die Uhr entgegen: ist die Uhr nicht vertrauenswürdig, ruhen
+  Wochenplan, Abwesenheit, Leerstand und Übersteuerung, das Soll ist der Wunsch (die warme Richtung), und das Ergebnis
+  trägt einen Merker für die spätere Meldung „Uhr unklar“. Sobald die Uhr wieder vertrauenswürdig ist, gilt der Plan an
+  der aktuellen Stelle. Noch ohne Wirkung: die Rechnung wird erst mit der Verdrahtung in die Hosts angewendet.
+
 - Das Gerät rechnet jetzt das geltende Soll aus Wochenplan, Abwesenheit und Leerstand (Vorrang: Leerstand, Abwesend,
   Plan kühl, Wunsch), mit Absenkung in der kühlen Phase und Aufheizen vor dem Ende der Phase, in der Zeitzone der
   Anlage und über die Sommerzeit hinweg; es meldet die Art des Solls und den nächsten Wechsel. Ohne Wochenplan bleibt

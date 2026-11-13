@@ -55,18 +55,24 @@ _PLAN_SUCHTAGE = 8
 class SollErgebnis:
     """`soll` None = kein Soll (Soll-Quelle aus oder Frostschutz), dann ist auch `soll_art` None.
     `naechster_wechsel`: der erste Zeitpunkt nach `jetzt` (UTC), an dem sich Soll oder `soll_art` aendern; None, wenn
-    sich nichts mehr aendert."""
+    sich nichts mehr aendert. `uhr_unklar`: die Uhr war nicht vertrauenswuerdig, obwohl eine Betriebsart gesetzt ist, die
+    deshalb ruht (Zustand fuer die Meldung, kein Text); dann ist das Soll der Wunsch und es gibt keinen naechsten
+    Wechsel."""
 
     soll: float | None
     soll_art: str | None
     naechster_wechsel: datetime | None
+    uhr_unklar: bool = False
 
 
 def soll_effektiv(jetzt: datetime, zone: str, bedienung: Mapping[str, object], konfiguration: Mapping[str, object],
-                  *, soll_quelle_aus: bool = False) -> SollErgebnis:
+                  *, uhr_vertrauenswuerdig: bool, soll_quelle_aus: bool = False) -> SollErgebnis:
     """Soll des Kreises zu `jetzt`; `bedienung` ist der Eintrag des Kreises (`modus`, `raum_soll`, `wochenplan`,
     `abwesend`, `leerstand`, `uebersteuerung`), `konfiguration` der des Kreises (`absenkung_k`, `aufheizdauer_min`).
-    `soll_quelle_aus`: die Soll-Quelle steht auf aus oder Frostschutz."""
+    `uhr_vertrauenswuerdig`: das Urteil der Uhr (`wallclock.vertrauenswuerdig`), ohne Vorgabe, damit es nie vergessen
+    wird; nur ein echtes True gilt. Sonst ruhen Wochenplan, Abwesenheit, Leerstand und Uebersteuerung: das Soll ist der
+    Wunsch (die warme Richtung), `uhr_unklar` zeigt, dass dabei etwas ruht. Die Wanduhr bestimmt dann nichts, auch
+    nicht die Gueltigkeit eines Leerstands. `soll_quelle_aus`: die Soll-Quelle steht auf aus oder Frostschutz."""
     if not isinstance(jetzt, datetime) or jetzt.utcoffset() is None:
         raise ValueError("jetzt braucht eine Zeitzone")
     _zone_pruefen(zone)
@@ -77,6 +83,9 @@ def soll_effektiv(jetzt: datetime, zone: str, bedienung: Mapping[str, object], k
         raise ValueError("bedienung hat keinen brauchbaren Wunsch")
     if soll_quelle_aus:
         return SollErgebnis(soll=None, soll_art=None, naechster_wechsel=None)
+    if uhr_vertrauenswuerdig is not True:
+        return SollErgebnis(soll=float(wunsch), soll_art=SOLL_ART_WUNSCH, naechster_wechsel=None,
+                            uhr_unklar=_betriebsart_gesetzt(bedienung))
     rechnung = _Rechnung(ZoneInfo(zone), bedienung, konfiguration, float(wunsch), jetzt)
     zustand = rechnung.zustand(jetzt)
     return SollErgebnis(soll=zustand.soll, soll_art=zustand.art,
@@ -101,6 +110,16 @@ def anstieg_vom_kunden(vorher_art: str | None, jetzt_art: str | None) -> bool:
     if jetzt_art == SOLL_ART_UEBERSTEUERT:
         return True
     return jetzt_art == SOLL_ART_WUNSCH and vorher_art in (SOLL_ART_WUNSCH, None)
+
+
+def _betriebsart_gesetzt(bedienung: Mapping[str, object]) -> bool:
+    """Ist eine Betriebsart gesetzt, die ohne vertrauenswuerdige Uhr ruht? Rein nach der Form, nie nach der Wanduhr:
+    ein lesbarer Wochenplan, oder eine Abwesenheit bzw. ein Leerstand im passenden Modus, oder eine Uebersteuerung."""
+    modus = bedienung.get("modus")
+    return (_wochenplan_lesen(bedienung.get("wochenplan"))[1] is None
+            or (modus == "abwesend" and isinstance(bedienung.get("abwesend"), Mapping))
+            or (modus == "leerstand" and isinstance(bedienung.get("leerstand"), Mapping))
+            or isinstance(bedienung.get("uebersteuerung"), Mapping))
 
 
 def _zone_pruefen(zone: object) -> None:

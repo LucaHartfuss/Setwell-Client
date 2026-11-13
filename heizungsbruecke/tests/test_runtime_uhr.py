@@ -177,3 +177,27 @@ def test_nach_dem_sprung_gibt_die_naechste_synchrone_antwort_das_vertrauen_zurue
     assert vertrauen() is False
     clock.advance(20)  # Zwischenspeicher abgelaufen, der Zeitdienst meldet die (nun richtige) Uhr als synchron
     assert vertrauen() is True and abfrage.aufrufe == 2
+
+
+def test_ein_wanduhrsprung_loest_keinen_falschen_wechsel_aus_und_nach_der_synchronitaet_gilt_der_plan(monkeypatch):
+    from smartheat_core.plan import soll_effektiv
+    ZONE = "Europe/Berlin"
+    bedienung = {"kreis": 1, "modus": "manuell", "raum_soll": 21.0,
+                 "wochenplan": [{"tag": tag, "warm_ab": "06:30", "kuehl_ab": "22:30"} for tag in range(1, 8)]}
+    konfiguration = {"absenkung_k": 3, "aufheizdauer_min": {"plan": 0, "weg": 0}}
+    vertrauen, clock, wand, abfrage = _vertrauen(monkeypatch)  # Wand: Mittwoch 2026-11-11 12:00 UTC (warm)
+
+    def soll():
+        return soll_effektiv(wand.jetzt, ZONE, bedienung, konfiguration, uhr_vertrauenswuerdig=vertrauen())
+
+    assert (soll().soll, soll().soll_art, soll().uhr_unklar) == (21.0, "wunsch", False)
+    abfrage.antwort = False
+    clock.advance(10)
+    wand.jetzt += timedelta(hours=11)  # Sprung in die kuehle Phase (23:00 Winterzeit), obwohl nur 10 s vergingen
+    sprung = soll()
+    assert (sprung.soll, sprung.soll_art, sprung.naechster_wechsel, sprung.uhr_unklar) == (21.0, "wunsch", None, True)
+    abfrage.antwort = True
+    clock.advance(30)  # Zwischenspeicher abgelaufen: der Zeitdienst meldet die richtige Uhr als synchron
+    wand.jetzt += timedelta(seconds=30)
+    zurueck = soll()
+    assert (zurueck.soll, zurueck.soll_art, zurueck.uhr_unklar) == (18.0, "absenkung", False)
