@@ -5,6 +5,10 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät rechnet jetzt das geltende Soll aus Wochenplan, Abwesenheit und Leerstand (Vorrang: Leerstand, Abwesend,
+  Plan kühl, Wunsch), mit Absenkung in der kühlen Phase und Aufheizen vor dem Ende der Phase, in der Zeitzone der
+  Anlage und über die Sommerzeit hinweg; es meldet die Art des Solls und den nächsten Wechsel. Ohne Wochenplan bleibt
+  das Soll der Wunsch. Noch ohne Wirkung: die Rechnung wird erst mit der Verdrahtung in die Hosts angewendet.
 - Das Gerät kennt jetzt die Grenzen der kommenden Betriebsarten (Absenkung nie unter 16 °C, Leerstand nie unter
   15 °C und höchstens 365 Tage, jede Phase mindestens 60 Minuten, Abwesenheits-Vorschlag 17 °C bzw. 19 °C je
   Verteilsystem). Noch ohne Wirkung: sie werden erst mit dem Wochenplan angewendet.

@@ -32,6 +32,13 @@ _.expires_rule  # Feld von wire.Command: Server geraete/device_protocol.py werte
 _.soll_effektiv  # smartheat_core/plan.py: noch ohne Aufrufer in den Hosts (tests/test_core_plan.py)
 _.soll_art  # smartheat_core/plan.py SollErgebnis: Feld wird mit der Verdrahtung in die Telemetrie gelesen
 _.naechster_wechsel  # smartheat_core/plan.py SollErgebnis: Feld wird mit dem Wochenplan vom Wecker gelesen
+_.wochenplan_fehler  # smartheat_core/plan.py: Formpruefung des Wochenplans, der Dokument-Pruefer des Hosts ruft sie mit der Verdrahtung
+_.anstieg_vom_kunden  # smartheat_core/plan.py: Eingang des Boosts (anstieg_vom_kunden), mit der Verdrahtung gerufen
+_.SOLL_ART_ABSENKUNG  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_AUFHEIZEN  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_ABWESEND  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_LEERSTAND  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_UEBERSTEUERT  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
 
 # --- Einstieg fuer Hosts mit mehreren Heizkreisen (sie rufen ihn bei einem neuen Konfigurationsdokument; Tests treiben ihn) ---
 _.konfiguration_geaendert  # smartheat_runtime/kreise.py Laufzeit.konfiguration_geaendert: Wiederaufnahme nach Abo-Wechsel
