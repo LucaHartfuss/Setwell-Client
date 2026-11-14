@@ -5,9 +5,11 @@ import urllib.parse
 import urllib.request
 
 import pytest
+from fake_vicare import server as fake_server
 from fake_vicare.server import DEFAULT, FakeVicare
 
 from smartheat_core import hausmodell
+from smartheat_gateway.drivers.simulation import ERZEUGER as ERZEUGER_DES_TREIBERS
 
 IDS = ("2012345", "7637415000000001", "0")
 FEATURES = f"/iot/v2/features/installations/{IDS[0]}/gateways/{IDS[1]}/devices/{IDS[2]}/features"
@@ -109,14 +111,17 @@ def prop(items, feature, name):
     return items[feature]["properties"][name]["value"]
 
 
+VIESSMANN = ERZEUGER_DES_TREIBERS["viessmann_vicare"]
+
+
 def kern(schritte, *, slope=1.4, shift=0.0, soll=20.0, aussen=5.0):
-    """Direktlauf des Kerns mit den Eingaengen, die der Fake aus seinen Features bildet."""
+    """Direktlauf des Kerns mit den Eingaengen, die der Fake aus seinen Features bildet: die Verschiebung der Kurve ist
+    das Niveau allein, das Raum-Soll ist der Mindestvorlauf und damit das Raum-Soll der Formel."""
     zustand = hausmodell.Anlagenzustand(room=20.0, burner_hours=1000.0)
-    erzeuger = hausmodell.Potenzgesetz(a=2.54, b=0.78)
     letzter = None
     for _ in range(schritte):
         letzter = hausmodell.anlage_schritt(
-            zustand, hausmodell.HOUSES["H1"], erzeuger, (slope, soll + shift, 16.0), aussen, 0.0, 12.0, soll,
+            zustand, hausmodell.HOUSES["H1"], VIESSMANN, (slope, shift, 16.0), aussen, 0.0, 12.0, soll,
             hausmodell.Betriebsflags(), None)
     return zustand, letzter
 
@@ -132,8 +137,29 @@ def test_the_room_sensor_follows_the_heating_curve_of_the_core(modell):
     items = features(base, token)
     zustand, _ = kern(12 * 12)
     assert prop(items, ROOM, "value") == round(zustand.room, 2) != 20.0
-    assert prop(items, SUPPLY, "value") == round(max(hausmodell.Potenzgesetz(2.54, 0.78).flow(1.4, 20.0, 5.0), 20.0), 1)
+    assert prop(items, SUPPLY, "value") == round(max(VIESSMANN.flow(1.4, 0.0, 5.0, 20.0), 20.0), 1)
     assert prop(items, "heating.sensors.temperature.outside", "value") == 5
+
+
+def test_the_fake_calculates_with_the_generator_of_the_simulation_driver():
+    """Der Fake-Container kennt den Treiber nicht und fuehrt die Werte selbst; sie duerfen nicht auseinanderlaufen."""
+    assert fake_server.ERZEUGER == VIESSMANN
+
+
+@pytest.mark.parametrize("slope, shift, soll", [(1.4, 0.0, 20.0), (2.2, 6.0, 23.0)])
+def test_the_supply_equals_a_direct_run_of_the_core_with_the_viessmann_generator(modell, slope, shift, soll):
+    """Steigung und Niveau aus der Kurve, das Raum-Soll aus dem Normalprogramm: das Raum-Soll geht nur einmal in die
+    Formel ein (als Mindestvorlauf), nicht noch einmal in der Verschiebung."""
+    server, base, token, clock = modell
+    assert command(base, token, CURVE, "setCurve", {"shift": shift, "slope": slope}) == 200
+    assert command(base, token, NORMAL, "setTemperature", {"targetTemperature": soll}) == 200
+    clock.advance(6 * 3600)
+    items = features(base, token)
+    zustand, letzter = kern(6 * 12, slope=slope, shift=shift, soll=soll)
+    erwartet = round(max(VIESSMANN.flow(slope, shift, 5.0, soll), soll), 1)
+    assert letzter.geliefert
+    assert prop(items, SUPPLY, "value") == erwartet
+    assert prop(items, ROOM, "value") == round(zustand.room, 2)
 
 
 def test_a_higher_curve_heats_the_room_more(modell):
@@ -164,8 +190,8 @@ def test_a_command_acts_from_its_moment_on(modell):
     erster, _ = kern(6 * 12)
     zustand = erster
     for _ in range(6 * 12):
-        hausmodell.anlage_schritt(zustand, hausmodell.HOUSES["H1"], hausmodell.Potenzgesetz(2.54, 0.78),
-                                  (3.5, 20.0, 16.0), 5.0, 0.0, 12.0, 20.0, hausmodell.Betriebsflags(), None)
+        hausmodell.anlage_schritt(zustand, hausmodell.HOUSES["H1"], VIESSMANN,
+                                  (3.5, 0.0, 16.0), 5.0, 0.0, 12.0, 20.0, hausmodell.Betriebsflags(), None)
     assert prop(features(base, token), ROOM, "value") == round(zustand.room, 2)
 
 
