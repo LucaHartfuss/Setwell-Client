@@ -1,8 +1,9 @@
 """Status-Ereignis des HA-Add-ons: smartheat_status Schema 4 = die Felder der Anlage aus dem Laufzeit-Status
 (Schema 2, smartheat_runtime.status, unveraendert fuer Gateway und up/status), Geraet (ID, Zustand, Verbindung),
-Anlagenname, Version des Konfigurationsdokuments und dessen kritische Mindestversion der Integration, Hinweise fuer die
-Reparatur-Hinweise der Integration, die Ziele des Push (`benachrichtigung`, nur Handy-Dienste, hoechstens 10) und die
-stummgeschalteten Hinweis-Kategorien (`hinweise_aus`) der Bindung, dazu `kreise`: je Kreis der Konfiguration
+Anlagenname, Version des Konfigurationsdokuments und dessen kritische Mindestversion der Integration, die Meldungen
+des Geraets (`meldungen`: Schluessel, Code, Parameter, Stufe; den Wortlaut bildet die Integration), die Ziele des Push
+(`benachrichtigung`, nur Handy-Dienste, hoechstens 10), die stummgeschalteten Hinweis-Kategorien (`hinweise_aus`) der
+Bindung und die Push-Regeln der Person (`push_regeln`), dazu `kreise`: je Kreis der Konfiguration
 Name, Raum (Ist, wirksamer Soll aus dem Soll-Speicher), die Kreisfelder der Laufzeit (Boost, Abo, Hebel, Zustand,
 Kaelteschutz ...) und die Felder des Anzeige-Dokuments. Nie der Uebernahme-Code (der steht nur in der Discovery):
 ins Ereignis kommen nur die benannten Felder, nie ein ganzes Objekt der Quellen. Der Kreisname ist ein
@@ -16,10 +17,10 @@ import time
 from collections.abc import Callable, Mapping
 
 from heizungsbruecke import dokument as ha_dokument
-from heizungsbruecke.ha_sinks import EVENT_TYPE
+from heizungsbruecke.ha_sinks import EVENT_TYPE, meldung_daten
 from heizungsbruecke.version import ADDON_VERSION
 from smartheat_core import kreisansicht, meldungen
-from smartheat_core.config_check import HA_DIENST, HA_HINWEISE
+from smartheat_core.config_check import HA_DIENST, HA_HINWEISE, PUSH_REGELN_FELDER, push_regeln_lesen
 from smartheat_device.documents import Dokument
 from smartheat_device.host import Anzeige
 from smartheat_runtime import status
@@ -28,8 +29,8 @@ from smartheat_runtime.dokument_config import ConfigError
 logger = logging.getLogger(__name__)
 
 EVENT_SCHEMA = 4
-GERAET_FIELDS = ("geraet_id", "geraet_zustand", "server_verbunden", "geraet_hinweise", "anlage_name",
-                 "konfig_version", "mindest_integration", "benachrichtigung", "hinweise_aus")
+GERAET_FIELDS = ("geraet_id", "geraet_zustand", "server_verbunden", "meldungen", "anlage_name",
+                 "konfig_version", "mindest_integration", "benachrichtigung", "hinweise_aus", "push_regeln")
 #: Hoechstzahl der Notify-Dienste im Ereignis: was darueber liegt, geht nie hinaus (die Integration pusht an diese Ziele).
 MAX_ZIELE = 10
 #: Form der kritischen Mindestversion der Integration im Ereignis (wortgleich mit der Pruefung der Integration): drei
@@ -41,7 +42,6 @@ MINDEST_INTEGRATION_RE = re.compile(
 LOKAL_KREIS_FIELDS = ("name", "raum_soll", "raum_ist", "einlernphase_tag", "testphase_bis", "befunde")
 EVENT_FIELDS = (*status.ANLAGE_FELDER, *GERAET_FIELDS, "kreise")
 KREIS_EVENT_FIELDS = ("kreis", *LOKAL_KREIS_FIELDS, *status.KREIS_FELDER)
-HINWEIS_FIELDS = ("key", "stufe", "text")
 KONFIGURATION_ABGELEHNT = "konfiguration_abgelehnt"
 #: HA nicht erreichbar: so lange Pause bis zum naechsten Versuch des Takts (wie discovery.RETRY_SECONDS: Log nicht fuellen).
 WIEDERHOLEN_SECONDS = 60
@@ -50,32 +50,24 @@ ZUSTAND_MELDUNGEN = {
     "update_noetig": meldungen.PREFIX + "update_noetig",
     "gesperrt": meldungen.PREFIX + "gesperrt",
 }
-#: Das Ereignis (Vertrag mit der Integration) kennt die Stufen kritisch/warnung/info; die Stufe des Codes wird abgebildet.
-EREIGNIS_STUFE = {"rot": "kritisch", "orange": "warnung", "gelb": "info"}
 
 
-def _hinweis(key: str, meldung: meldungen.Meldung) -> dict:
-    return dict(zip(HINWEIS_FIELDS, (key, EREIGNIS_STUFE[meldung.stufe], meldungen.text(meldung)), strict=True))
-
-
-def hinweise(anzeige: Anzeige) -> list[dict]:
-    """Hinweise der Anzeige als {key, stufe, text}: Hinweise des Servers, eigene Meldungen des Geraets, abgelehnte
-    Konfiguration und die Zustaende update_noetig/gesperrt, alle aus Codes der Meldungstabelle gerendert (was keine
-    gueltige Meldung ist, entfaellt). Bei update_noetig mit abgelehnter Konfiguration stehen bewusst beide Hinweise da
-    (Brief-Test): der Grund der Ablehnung und die Handlungsanweisung."""
+def meldungen_liste(anzeige: Anzeige) -> list[dict]:
+    """Meldungen der Anzeige als {key, code, params, stufe} (Code und Parameter, nie ein Text; die Integration bildet
+    den Wortlaut): Hinweise des Servers, eigene Meldungen des Geraets, abgelehnte Konfiguration und die Zustaende
+    update_noetig/gesperrt (was keine gueltige Meldung der Tabelle ist, entfaellt). Bei update_noetig mit abgelehnter
+    Konfiguration stehen bewusst beide Meldungen da: der Grund der Ablehnung und die Handlungsanweisung."""
     result = []
-    for h in anzeige.hinweise:
-        meldung = meldungen.aus_dict({feld: h.get(feld) for feld in ("code", "params", "stufe")}
-                                     ) if isinstance(h, dict) and h.get("key") else None
+    for eintrag in (*anzeige.hinweise, *anzeige.meldungen):
+        meldung = meldungen.aus_dict({feld: eintrag.get(feld) for feld in ("code", "params", "stufe")}
+                                     ) if isinstance(eintrag, dict) and eintrag.get("key") else None
         if meldung is not None:
-            result.append(_hinweis(str(h["key"]), meldung))
-    result += [dict(zip(HINWEIS_FIELDS, (str(m["key"]), "warnung", m.get("text") or ""), strict=True))
-               for m in anzeige.meldungen if isinstance(m, dict) and m.get("key")]
+            result.append(meldung_daten(str(eintrag["key"]), meldung))
     abgelehnt = meldungen.aus_dict(anzeige.konfiguration_abgelehnt)
     if abgelehnt is not None:
-        result.append(_hinweis(KONFIGURATION_ABGELEHNT, abgelehnt))
+        result.append(meldung_daten(KONFIGURATION_ABGELEHNT, abgelehnt))
     if anzeige.zustand in ZUSTAND_MELDUNGEN:
-        result.append(_hinweis(anzeige.zustand, meldungen.neu(ZUSTAND_MELDUNGEN[anzeige.zustand])))
+        result.append(meldung_daten(anzeige.zustand, meldungen.neu(ZUSTAND_MELDUNGEN[anzeige.zustand])))
     return result
 
 
@@ -105,6 +97,13 @@ def _ziele(konf: Mapping | None) -> tuple[list[str], list[str]]:
     dienste = list(dict.fromkeys(d for d in bindung.benachrichtigung if HA_DIENST.fullmatch(d)))
     kategorien = list(dict.fromkeys(h for h in bindung.hinweise_aus if h in HA_HINWEISE))
     return dienste[:MAX_ZIELE], kategorien
+
+
+def _push_regeln(wert) -> dict[str, int]:
+    """Die Push-Regeln des Dokuments (Ruhezeit und Tageslimit), je Feld mit dem Standard des Geraets bei Ungueltigem
+    oder Fehlendem."""
+    regeln = push_regeln_lesen(wert)
+    return {feld: getattr(regeln, feld) for feld in PUSH_REGELN_FELDER}
 
 
 def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[int], float | None],
@@ -138,7 +137,9 @@ def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[i
         dienste, kategorien = _ziele(konf)
         return {"anlage_name": name if isinstance(name, str) else None, "konfig_version": _version(dokument_konf),
                 "mindest_integration": _mindest_integration(konf), "benachrichtigung": dienste,
-                "hinweise_aus": kategorien, "kreise": kreise}
+                "hinweise_aus": kategorien,
+                "push_regeln": _push_regeln(konf.get("push_regeln") if isinstance(konf, Mapping) else None),
+                "kreise": kreise}
     return sicht
 
 
@@ -196,11 +197,12 @@ class GeraetStatus:
         return {**self._laufzeit, "schema": EVENT_SCHEMA, "geraet_id": self._geraet_id,
                 "geraet_zustand": anzeige.zustand if anzeige is not None else "startet",
                 "server_verbunden": anzeige.server_ok if anzeige is not None else False,
-                "geraet_hinweise": hinweise(anzeige) if anzeige is not None else [],
+                "meldungen": meldungen_liste(anzeige) if anzeige is not None else [],
                 "anlage_name": lokal["anlage_name"], "konfig_version": lokal["konfig_version"],
                 "mindest_integration": lokal["mindest_integration"],
                 "benachrichtigung": list(lokal.get("benachrichtigung") or ()),
-                "hinweise_aus": list(lokal.get("hinweise_aus") or ()), "kreise": kreise}
+                "hinweise_aus": list(lokal.get("hinweise_aus") or ()),
+                "push_regeln": dict(lokal.get("push_regeln") or _push_regeln(None)), "kreise": kreise}
 
     def _senden(self, *, force: bool) -> None:
         with self._senden_lock:

@@ -5,6 +5,12 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Status-Ereignis `smartheat_status` trägt statt `geraet_hinweise` (Schlüssel, Stufe, Text) die Liste `meldungen`
+  mit `key`, `code`, `params`, `kreis` (nur bei Kreismeldungen) und `stufe` (`rot`, `orange`, `gelb`), ohne Text und ohne
+  Raum- oder Entity-Namen, sowie die Push-Regeln `push_regeln`. Zu jedem Übergang einer Meldung (neu, aktualisiert,
+  geschlossen) feuert das Add-on das neue Ereignis `smartheat_meldung` mit `schema`, `geraet_id`, `key`, `code`, `params`,
+  `kreis`, `stufe` und `offen`. Der bisherige Push und die Dauermeldung von Home Assistant bleiben bis zur Auswertung in
+  der Integration unverändert.
 - Störungen des Wärmeerzeugers: Das Gerät liest über die Rolle `fault_codes` die Fehlercodes der Anlage (Attribut
   `diagnostic_trouble_codes` der Entity `binary_sensor.<anlage>_trouble_codes` der Integration `mypyllant`, deren Option
   `fetch_dtc` standardmäßig aus ist). Steht eine Kennung 15 Minuten ununterbrochen an, meldet das Gerät `erzeuger.stoerung`

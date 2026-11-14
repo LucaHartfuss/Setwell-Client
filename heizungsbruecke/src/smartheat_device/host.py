@@ -52,7 +52,7 @@ class Anzeige:
     device_state: str | None  # zuletzt bekannter Uebernahmestatus (Bootstrap)
     eingerichtet: bool
     hinweise: tuple[dict, ...]  # Befehl hinweis: {key, code, params, stufe}
-    meldungen: tuple[dict, ...]  # eigene Meldungen des Geraets (wunsch_begrenzt, soll_quelle_aus): {key, text}
+    meldungen: tuple[dict, ...]  # eigene Meldungen des Geraets (wunsch_begrenzt, soll_quelle_aus): {key, text, code, params, stufe}
     konfiguration_abgelehnt: dict | None  # zuletzt abgelehnte Konfiguration als Meldung {code, params, stufe}
 
     @property

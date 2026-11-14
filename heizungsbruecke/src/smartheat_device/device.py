@@ -297,7 +297,7 @@ class Device:
             zustand=self.zustand(), server_ok=(link := self.link) is not None and link.connected,
             device_state=bootstrap.device_state(self._dir), eingerichtet=self.documents.eingerichtet(),
             hinweise=self.hinweise.alle(),
-            meldungen=tuple({"key": key, "text": meldungen.text(meldung)}
+            meldungen=tuple({"key": key, "text": meldungen.text(meldung), **meldungen.zu_dict(meldung)}
                             for key, meldung in sorted(self._eigene.items())),
             konfiguration_abgelehnt=(
                 meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))

@@ -824,7 +824,8 @@ def test_a_wish_is_limited_applied_buffered_and_sent_after_hello(tmp_path):
     world.device.schritt()
     assert world.link.of("up/wish") == []
     assert world.host.anzeigen_liste[-1].meldungen == (
-        {"key": "wunsch_begrenzt", "text": "Thermostat auf 14 °C gestellt, SmartHeat regelt auf 15 °C"},)
+        {"key": "wunsch_begrenzt", "text": "Thermostat auf 14 °C gestellt, SmartHeat regelt auf 15 °C",
+         **meldungen.zu_dict(wish.begrenzt_meldung(14.0, 15.0, "thermostat"))},)
     world.link.sent.clear()
     world.link.verbinden()
     world.device.schritt()
@@ -1011,7 +1012,8 @@ def test_setpoint_source_off_is_shown_and_cleared(tmp_path):
     world.device.soll_quelle_aus(True, 21.0)
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ({"key": "soll_quelle_aus", "text": (
-        "Thermostat ist aus, SmartHeat regelt weiter auf 21 °C; Heizung aus über die Sommersperre bzw. im Portal")},)
+        "Thermostat ist aus, SmartHeat regelt weiter auf 21 °C; Heizung aus über die Sommersperre bzw. im Portal"),
+        **meldungen.zu_dict(wish.soll_quelle_aus_meldung(21.0))},)
     world.device.soll_quelle_aus(False)
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ()
@@ -1058,7 +1060,9 @@ def test_setpoint_source_off_without_a_value_keeps_the_message_open(tmp_path):
     world.device.soll_quelle_aus(True)
     world.clock.now += 10
     world.device.schritt()
-    assert world.host.anzeigen_liste[-1].meldungen == ({"key": "soll_quelle_aus", "text": ohne_wert},)
+    assert world.host.anzeigen_liste[-1].meldungen == ({
+        "key": "soll_quelle_aus", "text": ohne_wert,
+        **meldungen.zu_dict(wish.soll_quelle_aus_meldung(None))},)
     (item,) = world.link.of("up/notifications")[-1]["items"]
     assert (item["key"], item["offen"], item["code"], item["params"]) == (
         "soll_quelle_aus", True, "meldung.soll_quelle_aus_unbekannt", {})
@@ -1076,7 +1080,8 @@ def test_setpoint_source_off_without_a_value_opens_the_message_without_a_value(t
     world.device.soll_quelle_aus(True)
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ({"key": "soll_quelle_aus", "text": (
-        "Thermostat ist aus, SmartHeat regelt weiter; Heizung aus über die Sommersperre bzw. im Portal")},)
+        "Thermostat ist aus, SmartHeat regelt weiter; Heizung aus über die Sommersperre bzw. im Portal"),
+        **meldungen.zu_dict(wish.soll_quelle_aus_meldung(None))},)
 
 
 # --- Status und Meldungen ---
