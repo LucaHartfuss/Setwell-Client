@@ -959,6 +959,23 @@ def test_open_critical_notifications_are_recreated_when_the_ha_connection_comes_
     assert env.ha.pushes == pushes_before
 
 
+def test_ein_offener_zustand_ohne_ablage_wird_beim_start_neu_gemeldet_mit_ablage_nicht_doppelt(env):
+    """Der Zustand `abo` steht offen, aber die Ablage der Meldung fehlt (Bestand vor den Codes): der Start, der ihn
+    bestaetigt, meldet ihn mit Push und offener Meldung und legt die Ablage an; der naechste Start schweigt."""
+    _quiet_backup(env, notify_states={"abo": "inaktiv"})
+    env.abo["status"] = entitlement.INACTIVE
+
+    _start(env)
+
+    assert len(env.ha.pushes) == 1 and len(env.ha.persistent) == 1
+    assert "abo" in _backup(env)["notify_meldungen"]
+    pushes, persistent = list(env.ha.pushes), list(env.ha.persistent)
+
+    _start(env)
+
+    assert env.ha.pushes == pushes and env.ha.persistent == persistent
+
+
 def test_successful_start_clears_an_earlier_configuration_error(env):
     _quiet_backup(env)
     save_backup(env.paths["BACKUP_PATH"], {**_backup(env), "notify_states": {"konfiguration": "fehler:alt"}})

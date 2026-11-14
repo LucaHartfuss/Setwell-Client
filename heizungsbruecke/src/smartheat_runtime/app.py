@@ -26,6 +26,8 @@ from smartheat_runtime import (
     datentraeger,
     delivery,
     entitlement,
+    erzeugerstoerung,
+    kontingent,
     kreiszustand,
     regulation,
     roles,
@@ -571,6 +573,7 @@ def _on_telemetry(rt: Runtime, event: Event) -> None:
         energy=telemetry.energy_normalizer(rt.store, rt.override.binding.description.energy_counters),
         einheiten=rt.override.binding.description.energie, kreis=rt.config.kreis,
         testphase_ohne=testphase.aktiv(rt), kaelteschutz=state.kaelteschutz_art or telemetry.KAELTESCHUTZ_AUS,
+        erzeuger_stoerung=erzeugerstoerung.kennung(rt),
     )
 
 
@@ -595,7 +598,8 @@ def _on_health(rt: Runtime, event: Event) -> None:
     if rt.store.state.abo_finished:
         abo.ende_festhalten(rt)  # ein gescheitertes Speichern des Endes wird im Takt wiederholt
         return
-    checks = [battery.check_batteries, room_sensors.check_room_sensors, aussentemperatur.check]
+    checks = [battery.check_batteries, room_sensors.check_room_sensors, aussentemperatur.check, erzeugerstoerung.check,
+              kontingent.check]
     # Ohne Setwell (Testphase, Kreis ausser Betrieb) gibt es nichts durchzusetzen: ein Eingriff von Hand ist dann der
     # Normalfall.
     if not (testphase.aktiv(rt) or kreiszustand.ausser_betrieb(rt)):

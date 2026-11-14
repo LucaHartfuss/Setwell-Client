@@ -387,6 +387,33 @@ def test_run_telemetry_tick_passes_datenfehler_through():
     assert mqtt_client.publish_telemetry.call_args.args[0]["datenfehler"] == {"source": "local", "detail": ["dat"]}
 
 
+def test_die_telemetrie_traegt_die_erzeugerstoerung_oder_null():
+    mqtt_client = MagicMock(spec=MqttChannel)
+    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False, kreis=1)
+    assert mqtt_client.publish_telemetry.call_args.args[0]["erzeuger_stoerung"] is None  # Feld da, keine Stoerung
+
+    telemetry.publish_telemetry(
+        mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False, kreis=1,
+        erzeuger_stoerung="f_28")
+    assert mqtt_client.publish_telemetry.call_args.args[0]["erzeuger_stoerung"] == "f_28"
+
+
+def test_der_tick_reicht_die_erzeugerstoerung_durch_aber_nicht_bei_nur_raeumen():
+    manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
+    ha_api = MagicMock(spec=SignalSource)
+    ha_api.get_state.return_value = 20.5
+    mqtt_client = MagicMock(spec=MqttChannel)
+
+    telemetry.run_telemetry_tick(
+        manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1, erzeuger_stoerung="f_28")
+    assert mqtt_client.publish_telemetry.call_args.args[0]["erzeuger_stoerung"] == "f_28"
+
+    telemetry.run_telemetry_tick(
+        manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=2, nur_raeume=True,
+        erzeuger_stoerung="f_28")
+    assert "erzeuger_stoerung" not in mqtt_client.publish_telemetry.call_args.args[0]
+
+
 def test_run_telemetry_tick_survives_exception_without_propagating(monkeypatch, caplog):
     manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
     ha_api = MagicMock(spec=SignalSource)

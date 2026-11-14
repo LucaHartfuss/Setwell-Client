@@ -9,6 +9,25 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
   und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
   keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+- Eine Störung des Wärmeerzeugers (`erzeuger.stoerung`) hat die Stufe `rot` statt `orange`: Die Integration meldet sie
+  sofort, auch in der Ruhezeit, und erinnert, solange sie offen ist. Wartungshinweise (`erzeuger.hinweis`) bleiben `gelb`,
+  die Bestätigung nach 15 Minuten ändert sich nicht.
+- Das Status-Ereignis `smartheat_status` trägt statt `geraet_hinweise` (Schlüssel, Stufe, Text) die Liste `meldungen`
+  mit `key`, `code`, `params`, `kreis` (nur bei Kreismeldungen) und `stufe` (`rot`, `orange`, `gelb`), ohne Text und ohne
+  Raum- oder Entity-Namen, sowie die Push-Regeln `push_regeln`. Zu jedem Übergang einer Meldung (neu, aktualisiert,
+  geschlossen) feuert das Add-on das neue Ereignis `smartheat_meldung` mit `schema`, `geraet_id`, `key`, `code`, `params`,
+  `kreis`, `stufe` und `offen`. Der bisherige Push und die Dauermeldung von Home Assistant bleiben bis zur Auswertung in
+  der Integration unverändert. Das Ereignis kommt je Übergang genau einmal (bei einer kritischen Meldung nicht mehr
+  zusätzlich vom Push) und auch dann, wenn Home Assistant die offene Meldung nicht anlegen kann.
+- Eine offene kritische Meldung ohne gültige gespeicherte Meldung (Bestand aus einer älteren Version) wird bei der
+  nächsten Prüfung, die den Zustand bestätigt, einmal neu gemeldet, statt für immer still offen zu bleiben.
+- Störungen des Wärmeerzeugers: Das Gerät liest über die Rolle `fault_codes` die Fehlercodes der Anlage (Attribut
+  `diagnostic_trouble_codes` der Entity `binary_sensor.<anlage>_trouble_codes` der Integration `mypyllant`, deren Option
+  `fetch_dtc` standardmäßig aus ist). Steht eine Kennung 15 Minuten ununterbrochen an, meldet das Gerät `erzeuger.stoerung`
+  (Wartungshinweise `erzeuger.hinweis`), je Kreis höchstens 8 offene Meldungen; fällt sie weg, schließt die Meldung ohne
+  Push. Wechselt eine offene Kennung zwischen Wartungshinweis und Störung, schließt die alte Meldung ohne Push, und die
+  neue Art zählt ihre eigenen 15 Minuten. Die Telemetrie trägt je Kreis das neue Feld `erzeuger_stoerung` (älteste offene Störung als Kennung oder `null`).
+  Es geht nur die normalisierte Kennung auf den Draht, nie ein Herstellertext, und das Gerät deutet sie nicht.
 - Das Gerät prüft die Typen seiner Dokumente strenger: `mindest_software` muss ein Versionstext `X.Y.Z` sein, `ts` der
   Bedienung ein nichtleerer Text, `ursprungswerte` ein Objekt aus höchstens 16 Namen mit Wahrheitswerten, Zahlen oder
   kurzen Texten, und in einer leeren Konfiguration müssen auch `anlage_name`, `weg`, `tagestick`, `kreise`,
@@ -88,6 +107,14 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   Meldungszustand leer: ein noch bestehender Anlass wird einmal neu gemeldet, der Notbetrieb wird aus dem
   Failsafe-Zustand wieder gesät. Offene Hinweise in Home Assistant, die vor dem Update gemeldet wurden, räumt das Gerät
   danach nicht mehr selbst ab. Rückweg: die Sicherung zurückspielen.
+- `up/notifications` trägt je Meldung `code`, `params` und `stufe` statt `kategorie` und `text`, dazu optional `kreis`.
+  Auf den Draht gehen nur Parameter des Katalogs; Namen (Entity, Raum, Anlage) und Freitext bleiben lokal und füllen nur
+  den Text in Home Assistant. Ein Textparameter geht nur als Code, sonst als `unbekannt`. Ein Schlüssel mit Namen
+  oder Kreis wird zu `<art>:<Prüfsumme>`; der Kreis geht als eigenes Feld. Schließt das Gerät eine Meldung, die es nicht
+  mehr kennt, steht `code` auf `null`. Der Server von vor diesem Stand liest das neue Format nicht.
+- Beim Start schaltet nur noch eine Kategorie aus der Liste der Hinweise stumm. Ein gespeichertes Dokument von vor dem
+  Streichen von `raumfuehler` hätte sonst Raumfühler-Ausfälle still unterdrückt, ohne dass der Status es zeigt; das
+  Gerät verwirft solche Einträge und schreibt nur ihre Zahl ins Log.
 
 ## 1.1.0
 

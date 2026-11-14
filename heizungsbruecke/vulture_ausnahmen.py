@@ -43,6 +43,8 @@ _.delta  # Contract-Check 89 (tools/contracts/raum_delta.json) rechnet Server un
 # --- Feldlisten des Status-Ereignisses (V5) und des flachen Kreis-Ereignisses (V1): Leser auf der Gegenseite ---
 _.EVENT_FIELDS  # geraet_status/status/geraet_nachweis: Contract-Check 14 und 88 vergleichen sie mit der Integration bzw. der Fixture
 _.KREIS_EVENT_FIELDS  # geraet_status: Contract-Check 14 und 88 vergleichen die Kreisfelder mit STATUS_KREIS_FIELDS der Integration
+_.MELDUNG_FIELDS  # ha_sinks: Contract-Check 14 vergleicht die Felder einer Meldung (Status `meldungen`, Ereignis) mit der Integration
+_.MELDUNG_EVENT_FIELDS  # ha_sinks: Contract-Check 14 vergleicht die Felder des Ereignisses `smartheat_meldung` mit der Integration
 
 # --- Hausmodell-Kern (smartheat_core/hausmodell.py): woertliche Kopie der Quelle im Server, Leser auf der Gegenseite der Kopie ---
 # Die Kopie bleibt unveraendert (der Vertragscheck des Dev-Roots vergleicht sie zeichengleich); der Server nutzt den ganzen Kern
@@ -64,7 +66,5 @@ _.kritische_mindestversion_abgelaufen  # smartheat_runtime/entitlement.py: Haken
 # --- Stand des Add-ons (supervisor.py): die Meldung an den Server liest den Schalter erst mit der Statusmeldung der Version; bis dahin ruft nur der Test ---
 _.addon_auto_update  # supervisor.py: liest den Schalter "Automatisch aktualisieren" (nur lesen), noch ohne Aufrufer in den Hosts (tests/test_supervisor.py)
 
-# --- Push-Regeln der Person (smartheat_core/config_check.py, V1): der Leser im Laufzeitpfad kommt mit der Verdrahtung des Benachrichtigers; bis dahin ruft nur der Test ---
-_.push_regeln_lesen  # smartheat_core/config_check.py: liest push_regeln des Dokuments mit Standard je Feld (tests/test_core_push_regeln.py), noch ohne Aufrufer in den Hosts
-_.PUSH_REGELN_FELDER  # smartheat_core/config_check.py: gepinnte Feldliste der Kopie, gleich der in wire.py (tests/test_core_push_regeln.py, tests/test_core_vertrag_pin.py)
+# --- Push-Regeln der Person (V1): die Kopie der Feldliste in wire.py ---
 _.PUSH_REGELN_FIELDS  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py push_regeln_gueltig) und im Vertragscheck

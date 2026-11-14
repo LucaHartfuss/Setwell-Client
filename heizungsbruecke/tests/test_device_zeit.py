@@ -13,6 +13,7 @@ from device_helpers import WALL, FakeHost, World
 from fakes import FakeHa
 
 from heizungsbruecke import geraet_nachweis
+from smartheat_core import meldungen
 from smartheat_device import bootstrap, device, identity, wire
 
 VERSATZ = 86_400.0
@@ -35,7 +36,7 @@ def _welt_mit_versatz(tmp_path) -> World:
 def test_status_und_meldung_tragen_die_fachliche_zeit(tmp_path):
     welt = _welt_mit_versatz(tmp_path)
     welt.verbinden()
-    welt.device.meldung("heizung", "Text", offen=True, stufe="gelb")
+    welt.device.meldung("heizung", meldungen.neu("meldung.notbetrieb"), offen=True)
     welt.device.schritt()
     [meldung] = welt.link.of("up/notifications")[-1]["items"]
     assert welt.link.of("up/status")[-1]["ts"] == _iso(WALL + VERSATZ)

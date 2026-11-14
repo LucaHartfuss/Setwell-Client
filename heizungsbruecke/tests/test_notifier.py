@@ -144,7 +144,7 @@ class _RaisingPushSink:
     def __init__(self) -> None:
         self.shown: list = []
 
-    def push(self, key: str, meldung) -> None:
+    def push(self, key: str, meldung, *, begleitet: bool = False) -> None:
         raise RuntimeError("Push kaputt")
 
     def show(self, key: str, meldung) -> None:
@@ -239,6 +239,50 @@ def test_republish_persistent_recreates_open_critical_notifications_without_push
     )
     ha_api.send_notification.assert_not_called()
     ha_api.dismiss_persistent_notification.assert_not_called()
+
+
+def _offen_ohne_ablage(make_store, ablagen):
+    """Ein Speicher mit einem offenen kritischen Zustand, dessen Ablage fehlt oder ungueltig ist (Bestand vor der
+    Umstellung auf Codes, beschaedigter Eintrag)."""
+    return make_store(backup={"notify_states": {"datenfehler": "lokal:dat"}, "notify_meldungen": ablagen})
+
+
+@pytest.mark.parametrize("ablagen", [{}, {"datenfehler": {"code": "gibt.es.nicht", "params": {}}}, {"datenfehler": "text"}])
+def test_ein_offener_kritischer_zustand_ohne_gueltige_ablage_wird_bei_der_naechsten_pruefung_neu_gemeldet(
+        make_store, ha_api, ablagen):
+    """Ohne Ablage ueberspringt republish_persistent den Schluessel, und der Server sieht ihn nie: die naechste
+    Pruefung, die denselben Zustand bestaetigt, meldet ihn mit Push und offener Meldung und legt die Ablage an."""
+    store = _offen_ohne_ablage(make_store, ablagen)
+    notifier = _notifier(store, ha_api)
+
+    assert notifier.notify("datenfehler", "lokal:dat", DATENFEHLER, critical=True) is True
+
+    ha_api.send_notification.assert_called()
+    ha_api.create_persistent_notification.assert_called_once()
+    assert store.state.notify_meldungen == {"datenfehler": meldungen.zu_dict(DATENFEHLER)}
+    ha_api.reset_mock()
+    assert notifier.notify("datenfehler", "lokal:dat", DATENFEHLER, critical=True) is False
+    ha_api.send_notification.assert_not_called()
+    ha_api.create_persistent_notification.assert_not_called()
+
+
+def test_ein_offener_kritischer_zustand_mit_gueltiger_ablage_wird_nicht_doppelt_gemeldet(make_store, ha_api):
+    store = _offen_ohne_ablage(make_store, {"datenfehler": meldungen.zu_dict(DATENFEHLER)})
+    notifier = _notifier(store, ha_api)
+
+    assert notifier.notify("datenfehler", "lokal:dat", DATENFEHLER, critical=True) is False
+
+    ha_api.send_notification.assert_not_called()
+    ha_api.create_persistent_notification.assert_not_called()
+
+
+def test_ein_nicht_kritischer_zustand_hat_nie_eine_ablage_und_wird_nicht_neu_gemeldet(make_store, ha_api):
+    store = make_store(backup={"notify_states": {"batterie:sensor.x": "niedrig"}})
+    notifier = _notifier(store, ha_api)
+
+    assert notifier.notify("batterie:sensor.x", "niedrig", BATTERIE, critical=False) is False
+
+    ha_api.send_notification.assert_not_called()
 
 
 def test_republish_persistent_skips_seeded_state_without_message(make_store, ha_api):
@@ -410,7 +454,7 @@ class _ScheiternderSink:
     def __init__(self, *, push_fehler: bool = False, show_fehler: bool = False) -> None:
         self._push_fehler, self._show_fehler = push_fehler, show_fehler
 
-    def push(self, key: str, meldung) -> None:
+    def push(self, key: str, meldung, *, begleitet: bool = False) -> None:
         if self._push_fehler:
             raise RuntimeError("Push kaputt")
 

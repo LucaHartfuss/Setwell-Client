@@ -78,6 +78,16 @@ class _MissingEntities(Exception):
     pass
 
 
+def _stumm_schaltbar(hinweise_aus: tuple[str, ...]) -> tuple[str, ...]:
+    """Nur Kategorien aus `HA_HINWEISE` schalten Hinweise stumm. Ein gespeichertes Dokument wird beim Start vor der
+    Pruefung gelesen und kann eine inzwischen gestrichene Kategorie (z. B. `raumfuehler`) tragen; sie bliebe sonst
+    stumm, ohne dass der Status es zeigt. Im Log steht nur die Zahl der verworfenen Eintraege."""
+    erlaubt = tuple(h for h in hinweise_aus if h in config_check.HA_HINWEISE)
+    if len(erlaubt) != len(hinweise_aus):
+        logger.warning("Hinweise stummschalten: %d unbekannte Kategorien verworfen", len(hinweise_aus) - len(erlaubt))
+    return erlaubt
+
+
 class HaHost:
     """Host der Laufzeit im HA-Add-on: Konfiguration aus dem Konfigurationsdokument des
     Geraetekerns (geraet), Signale ueber die HA-API mit dem Soll-Speicher als Raum-Soll, Hersteller-Bindings und
@@ -131,8 +141,8 @@ class HaHost:
             anlage_budget_path=config.anlage_budget_path(), kreis=self.kreis,
             zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
             abgelehnt_source=self._geraet.konfiguration_abgelehnt)
-        vorab =self._bindung_oder_none()
-        boot = dataclasses.replace(boot, notify_hints_off=vorab.hinweise_aus if vorab else ())
+        vorab = self._bindung_oder_none()
+        boot = dataclasses.replace(boot, notify_hints_off=_stumm_schaltbar(vorab.hinweise_aus) if vorab else ())
         if not boot.configured and not boot.signed_off:
             logger.info(NOT_CONFIGURED_HINT)
         return boot
@@ -236,7 +246,7 @@ class HaHost:
         self.raum = RaumPublisher(lambda raum: self._geraet.raum_merken(self.kreis, raum), self.signals, self.store, manifest.refs.get("room_actual"),
                                   lambda: wallclock.now().isoformat())
         runtime = dataclasses.replace(
-            runtime, notify_hints_off=b.hinweise_aus,
+            runtime, notify_hints_off=_stumm_schaltbar(b.hinweise_aus),
             battery_refs=tuple(
                 BatteryRef(entity_id, BATTERY_LOW_FLAG if entity_id.startswith("binary_sensor.") else BATTERY_PERCENT)
                 for entity_id in b.batterien if entity_id not in ungelesen))

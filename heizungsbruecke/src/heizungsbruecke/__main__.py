@@ -242,6 +242,7 @@ def verdrahten(geraet: HaDeviceHost, device, ha_api, supervisor) -> GeraetStatus
     status = GeraetStatus(ha_api, device.identity.device_id, lokal,
                           laufzeit_merken=lambda event: setattr(geraet, "runtime_status_event", event))
     geraet.status_sink = status
+    geraet.geraet_id = device.identity.device_id
     geraet.discovery = Discovery(supervisor, config.DEVICE_DATA_DIR / DEVICE_DIR / "discovery.json")
     geraet.claim_code = lambda: device.identity.claim_code
     return status

@@ -52,7 +52,7 @@ class Notifier:
         """True bei einem Zustandswechsel. Jeder Kanal ist best effort; ein Schreibfehler des
         Zustands verhindert die Meldung nicht (sie kaeme sonst nie an). Ohne Push (nur Log):
         abgeschaltete Hinweis-Kategorien und, mit silent_ok, der Wechsel auf "ok"."""
-        if state == self.state(key):
+        if state == self.state(key) and not self._ablage_fehlt(key, state, critical):
             return False
         states = dict(self._store.state.notify_states)
         ablagen = dict(self._store.state.notify_meldungen)
@@ -77,12 +77,19 @@ class Notifier:
         muted = (not critical and category(key) in self._hints_off) or (silent_ok and state == STATE_OK)
         if not muted:
             try:
-                self._sink.push(key, meldung)
+                self._sink.push(key, meldung, begleitet=critical)
             except Exception:
                 logger.warning("Push-Benachrichtigung '%s' konnte nicht gesendet werden", lesbar(key))
         if critical:
             self._update_persistent(key, state, meldung)
         return True
+
+    def _ablage_fehlt(self, key: str, state: str, critical: bool) -> bool:
+        """Ein offener kritischer Zustand ohne gueltige Ablage (Bestand vor den Codes, beschaedigter Eintrag): republish
+        ueberspringt ihn, der Kunde und der Server haben ihn nie als Meldung gesehen. Bestaetigt die Pruefung ihn, gilt
+        er als neu (Push, offene Meldung, Ablage); danach ist er unveraendert."""
+        return (critical and state != STATE_OK
+                and meldungen.aus_dict(self._store.state.notify_meldungen.get(key)) is None)
 
     def refresh_persistent(self, key: str, meldung: Meldung) -> None:
         """Legt die HA-Benachrichtigung eines unveraenderten, nicht-"ok" Zustands mit dem

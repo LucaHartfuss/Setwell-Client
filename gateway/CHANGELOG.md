@@ -6,6 +6,13 @@
   auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
   und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
   keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+- Die Meldung zum erschoepften Abfragekontingent der Quelle kommt als Code (`meldung.kontingent_erschoepft`, Entwarnung
+  `meldung.kontingent_frei`) ohne Parameter statt als Freitext; der Treiber meldet nur noch den Zustand
+  (`kontingent_erschoepft()`).
+
+- Die Telemetrie traegt je Kreis das neue Feld `erzeuger_stoerung` (Kennung der aeltesten offenen Stoerung des
+  Waermeerzeugers oder `null`). Kein Treiber des Gateways liefert Stoerungen: das Feld bleibt `null`, es entsteht keine
+  Meldung `erzeuger.stoerung`.
 - Das Geraet prueft die Typen seiner Dokumente strenger (`mindest_software` als Versionstext, `ts` der Bedienung,
   `ursprungswerte`, die Felder einer leeren Konfiguration) und lehnt Befehle mit unbekanntem `schema` mit
   `ungueltige_nutzlast` ab. Der Server schreibt alle diese Felder schon richtig.
@@ -39,6 +46,9 @@
 - Die erlaubte eigene Zone fuer Geraete-API- und Portal-Adresse im Image (`SHG_OWN_ZONES` in `own_url.sh`) ist jetzt
   `setwell.de` (vorher `hartfussha.org`, die Domain bleibt privat). Es gilt nur diese eine Zone, keine Mischliste:
   ein Image mit Adressen unter `hartfussha.org` wird beim Bau abgelehnt. Bereits gebaute Images behalten ihre Adressen.
+- Meldungen an den Server (`up/notifications`) tragen Code, Parameter und Stufe statt Kategorie und Text; das
+  Diagnose- und LED-Verhalten bleibt gleich. Namen und Freitext verlassen das Geraet nicht. Ein Gateway dieses Standes
+  braucht einen Server mit dem neuen Format.
 
 ## 0.9.0
 

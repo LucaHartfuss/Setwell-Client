@@ -23,7 +23,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -31,6 +31,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -78,7 +83,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -86,6 +91,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -149,7 +159,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -157,6 +167,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -204,7 +219,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -212,6 +227,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -258,7 +278,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -301,7 +322,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -309,6 +330,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -424,7 +450,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -432,6 +458,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -561,7 +592,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -569,6 +600,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -699,7 +735,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -707,6 +743,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -843,7 +884,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -851,6 +892,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -901,7 +947,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -909,6 +955,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -1046,7 +1097,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -1054,6 +1105,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -1213,7 +1269,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -1221,6 +1277,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -1360,7 +1421,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -1368,6 +1429,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -1498,7 +1564,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -1506,6 +1572,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -1555,7 +1626,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -1633,7 +1705,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -1641,6 +1713,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -1772,7 +1849,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -1780,6 +1857,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -1872,7 +1954,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -1880,6 +1962,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2028,7 +2115,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2036,6 +2123,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2116,7 +2208,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2124,6 +2216,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2281,7 +2378,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2289,6 +2386,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2387,7 +2489,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2395,6 +2497,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2508,7 +2615,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2516,6 +2623,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2565,7 +2677,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2589,7 +2702,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2597,6 +2710,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2646,7 +2764,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2670,7 +2789,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2678,6 +2797,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2727,7 +2851,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2751,7 +2876,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2759,6 +2884,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2808,7 +2938,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2832,7 +2963,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2840,6 +2971,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2889,7 +3025,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2913,7 +3050,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -2921,6 +3058,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -2970,7 +3112,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2994,7 +3137,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3002,6 +3145,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3051,7 +3199,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3075,7 +3224,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3083,6 +3232,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3132,7 +3286,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3156,7 +3311,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3164,6 +3319,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3213,7 +3373,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3257,7 +3418,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3265,6 +3426,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3323,7 +3489,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3331,6 +3497,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3380,7 +3551,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3404,7 +3576,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3412,6 +3584,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3539,7 +3716,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3547,6 +3724,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3596,7 +3778,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3628,7 +3811,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3636,6 +3819,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3768,7 +3956,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3776,6 +3964,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3828,7 +4021,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3836,6 +4029,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3892,7 +4090,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3900,6 +4098,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -3949,7 +4152,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3975,7 +4179,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -3983,6 +4187,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4115,7 +4324,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4123,6 +4332,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4192,7 +4406,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4200,6 +4414,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4345,7 +4564,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4353,6 +4572,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4499,7 +4723,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4507,6 +4731,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4563,7 +4792,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4571,6 +4800,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4717,7 +4951,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4725,6 +4959,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4824,7 +5063,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4832,6 +5071,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -4974,7 +5218,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -4982,6 +5226,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
@@ -5047,7 +5296,7 @@
      "geraet_id": "shg-0000000000000001",
      "geraet_zustand": "startet",
      "server_verbunden": false,
-     "geraet_hinweise": [],
+     "meldungen": [],
      "anlage_name": "Testanlage",
      "konfig_version": 1,
      "mindest_integration": null,
@@ -5055,6 +5304,11 @@
       "notify.mobile_app_handy"
      ],
      "hinweise_aus": [],
+     "push_regeln": {
+      "ruhe_von": 22,
+      "ruhe_bis": 7,
+      "tageslimit": 5
+     },
      "kreise": [
       {
        "kreis": 1,
