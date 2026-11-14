@@ -722,6 +722,19 @@ def test_ein_dokument_waehrend_der_aufnahme_wird_danach_nachgezogen(env, monkeyp
     assert 1 not in laufzeit._in_aufnahme and 1 not in laufzeit._nachholen
 
 
+def test_eine_kritische_mindestversion_waehrend_der_aufnahme_wird_danach_nachgezogen(env, monkeypatch):
+    laufzeit = _laufzeit(Anlage(env), env)
+    aufnahme, frei, starts = _aufnahme_haengt(laufzeit, 1, monkeypatch)
+
+    laufzeit.kritisch_geaendert()  # Kreis 1 wird schon aufgenommen: er merkt sich den Wechsel, Kreis 2 startet sofort
+    assert starts.count(1) == 1
+    frei.set()
+    aufnahme.join(10)
+
+    assert not aufnahme.is_alive() and starts.count(1) == 2  # der Wechsel wurde nach der Aufnahme nachgezogen
+    assert 1 not in laufzeit._in_aufnahme and 1 not in laufzeit._nachholen
+
+
 def test_ohne_laufzeitrelevante_aenderung_waehrend_der_aufnahme_wird_nichts_nachgezogen(env, monkeypatch):
     laufzeit = _laufzeit(Anlage(env), env)
     aufnahme, frei, starts = _aufnahme_haengt(laufzeit, 1, monkeypatch)
