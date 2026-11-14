@@ -32,7 +32,7 @@ known-first-party = ["smartheat_core", "smartheat_device", "smartheat_runtime", 
 
 [tool.pyright]
 include = ["src"]
-extraPaths = ["../heizungsbruecke/src"]
+extraPaths = ["src", "../heizungsbruecke/src"]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
 

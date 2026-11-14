@@ -2,6 +2,31 @@
 
 ## Unveroeffentlicht
 
+- Die Meldung zum erschoepften Abfragekontingent der Quelle kommt als Code (`meldung.kontingent_erschoepft`, Entwarnung
+  `meldung.kontingent_frei`) ohne Parameter statt als Freitext; der Treiber meldet nur noch den Zustand
+  (`kontingent_erschoepft()`).
+
+- Die Telemetrie traegt je Kreis das neue Feld `erzeuger_stoerung` (Kennung der aeltesten offenen Stoerung des
+  Waermeerzeugers oder `null`). Kein Treiber des Gateways liefert Stoerungen: das Feld bleibt `null`, es entsteht keine
+  Meldung `erzeuger.stoerung`.
+- Das Geraet prueft die Typen seiner Dokumente strenger (`mindest_software` als Versionstext, `ts` der Bedienung,
+  `ursprungswerte`, die Felder einer leeren Konfiguration) und lehnt Befehle mit unbekanntem `schema` mit
+  `ungueltige_nutzlast` ab. Der Server schreibt alle diese Felder schon richtig.
+- Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard; Ruhezeit 22 bis 7 Uhr, Tageslimit 1 bis 5,
+  Standard 5; ungültige Werte liest das Geraet als Standard) und neue optionale Leserolle `fault_codes` im Geraetekern.
+  Der Hinweis `raumfuehler` entfaellt aus `hinweise_aus`. Ein Dokument ohne `push_regeln` oder mit `raumfuehler` lehnt das
+  Geraet ab.
+- Hinweise des Geräts und der Grund der Laufzeitstörung kommen als Code mit Parametern; die Diagnoseseite setzt den Text
+  aus `lokale_texte.json` zusammen (je Hinweis ein Eintrag `hinweis.<name>`, Parameterwerte erscheinen dort nicht).
+- Meldungen entstehen im Geraetekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der
+  Host zusammen (Wortlaut unveraendert). Der Meldungszustand je Kreis heisst jetzt `notify_meldungen`; die alten Felder
+  `notify_states` und `notify_messages` entfernt einmalig `python -m smartheat_device.meldungszustand_migration
+  --device-dir <Ordner> --release <Version>` (Sicherung `backup.json.pre-<Version>` als Rueckweg). Danach beginnt der
+  Meldungszustand leer, ein noch bestehender Anlass wird einmal neu gemeldet.
+- Neuer Befehl `weg_pruefen` im Geraete-Vertrag (Geraetekern); das Gateway lehnt ihn vorerst mit `nicht_unterstuetzt` ab.
+  Die Anmeldephase `password` und das Feld `ciphertext` des Befehls `driver_login` entfallen, weil kein Treiber sie nutzt.
+- Lehnt der Server einen Snapshot ab, liest das Gateway (gemeinsamer Client-Kern) nur noch den kurzen Code der Antwort und
+  zeigt ihn als „Code ...“; Freitext und Werte der Serverantwort gelangen nicht mehr in Meldung, Speicher oder Log.
 - Das Manifest nennt die Art der Aenderung (`art`: `sicherheit`, `funktion` oder `treiberfix`) und ein Ablaufdatum
   (`ablauf`, UTC). Der Updater installiert ein abgelaufenes Manifest nicht (Ergebnis `manifest_abgelaufen`, nicht in der
   Liste der abgelehnten Manifeste, eine neu signierte Fassung derselben Version bleibt annehmbar), ebenso keines mit
@@ -17,6 +42,9 @@
 - Die erlaubte eigene Zone fuer Geraete-API- und Portal-Adresse im Image (`SHG_OWN_ZONES` in `own_url.sh`) ist jetzt
   `setwell.de` (vorher `hartfussha.org`, die Domain bleibt privat). Es gilt nur diese eine Zone, keine Mischliste:
   ein Image mit Adressen unter `hartfussha.org` wird beim Bau abgelehnt. Bereits gebaute Images behalten ihre Adressen.
+- Meldungen an den Server (`up/notifications`) tragen Code, Parameter und Stufe statt Kategorie und Text; das
+  Diagnose- und LED-Verhalten bleibt gleich. Namen und Freitext verlassen das Geraet nicht. Ein Gateway dieses Standes
+  braucht einen Server mit dem neuen Format.
 
 ## 0.9.0
 

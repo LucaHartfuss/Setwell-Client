@@ -278,6 +278,32 @@ def test_the_sign_off_marker_binds_to_the_installation_and_is_private(tmp_path):
     assert dc.abmelden(pfad, "andere") is True and not dc.abgemeldet(pfad, KONF)
 
 
+def test_the_release_wish_rides_in_the_sign_off_marker_and_is_cleared_once_delivered(tmp_path):
+    pfad = tmp_path / "runtime" / "abgemeldet.json"
+    assert not dc.entfernen_gewuenscht(pfad, KONF)  # keine Markierung
+    assert dc.abmelden(pfad, "kunde3") is True
+    assert not dc.entfernen_gewuenscht(pfad, KONF)  # einfaches Abmelden wuenscht nichts
+    assert dc.abmelden(pfad, "kunde3", freigeben=True) is False  # schon abgemeldet: kein Neustart
+    assert json.loads(pfad.read_text()) == {"anlage": "kunde3", "freigeben": True}
+    assert dc.entfernen_gewuenscht(pfad, KONF)
+    assert not dc.entfernen_gewuenscht(pfad, {**KONF, "anlage": "andere"}) and not dc.entfernen_gewuenscht(pfad, None)
+    assert pfad.stat().st_mode & 0o777 == 0o600
+    assert dc.abmelden(pfad, "kunde3") is False  # eine erneute einfache Zeile nimmt den Wunsch nicht zurueck
+    assert dc.entfernen_gewuenscht(pfad, KONF)
+    assert dc.entfernen_erledigt(pfad, "andere") is False and dc.entfernen_gewuenscht(pfad, KONF)
+    assert dc.entfernen_erledigt(pfad, "kunde3") is True
+    assert not dc.entfernen_gewuenscht(pfad, KONF) and dc.abgemeldet(pfad, KONF)
+    assert dc.entfernen_erledigt(pfad, "kunde3") is False  # nichts mehr zu loeschen
+
+
+def test_a_fresh_sign_off_with_release_sets_both_and_restarts(tmp_path):
+    pfad = tmp_path / "runtime" / "abgemeldet.json"
+    assert dc.abmelden(pfad, "kunde3", freigeben=True) is True
+    assert dc.abgemeldet(pfad, KONF) and dc.entfernen_gewuenscht(pfad, KONF)
+    assert dc.abmeldung_aufheben(pfad, "kunde3") is True  # folgt das Geraet wieder dem Server, verfaellt der Wunsch mit
+    assert not dc.entfernen_gewuenscht(pfad, KONF)
+
+
 def test_the_sign_off_marker_is_lifted_only_for_its_own_installation(tmp_path):
     """abmeldung_aufheben entfernt nur die Markierung der genannten Anlage."""
     pfad = tmp_path / "runtime" / "abgemeldet.json"

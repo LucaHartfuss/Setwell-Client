@@ -55,7 +55,8 @@ MAX_MESSAGE_BYTES = 120 * 1024  # AN-10: 120 KB zugestellt, 130 KB abgelehnt
 SESSION_EXPIRY_SECONDS = 3600  # AN-9: Hoechstwert von IoT Core
 DEVICE_SUBSCRIPTION = "down/#"  # AN-6: die Policy erlaubt nur diesen Filter
 UP_TOPICS = (
-    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "telemetry",
+    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "up/entfernt",
+    "telemetry",
 )
 DOWN_TOPICS = ("down/config", "down/operation", "down/display", "down/command", "down/setpoints")
 
@@ -73,7 +74,9 @@ ZUSTAENDE = (
 )
 RAUM_FIELDS = ("ist", "soll", "soll_quelle", "ts")
 NOTIFICATIONS_FIELDS = ("schema", "items")
-NOTIFICATION_FIELDS = ("key", "kategorie", "stufe", "text", "offen", "ts")
+NOTIFICATION_FIELDS = ("key", "code", "params", "stufe", "offen", "ts")
+# kreis: Kreisnummer; quelle/roh: nur bei erzeuger.*, Hersteller und Roh-Code der Anlage (`[a-z0-9_]`, hoechstens 32)
+NOTIFICATION_OPTIONAL = ("kreis", "quelle", "roh")
 STUFEN = ("rot", "orange", "gelb")  # Dringlichkeit einer Meldung; rot und orange gehen als Push hinaus, gelb nie
 INVENTORY_FIELDS = ("schema", "command_id", "teil", "teile", "daten")
 INVENTUR_FILTER_FIELDS = ("plattformen", "domaenen", "geraeteklassen", "dienste")
@@ -102,6 +105,10 @@ ERROR_FIELDS = ("grund", "details")
 WISH_FIELDS = ("schema", "wish_id", "kreis", "basis_version", "ts", "uhr_synchron", "werte")
 WISH_OPTIONAL = ("roh", "herkunft", "durch")  # fehlt = nicht begrenzt bzw. unbekannt
 WISH_WERTE = ("raum_soll",)
+#: Das Geraet verlaesst das Konto (nach der lokalen Abmeldung): die Wahl des Nutzers beim Entfernen der Verbindung. `freigeben`
+#: bittet den Server, das Geraet aus dem Konto zu loesen; `behalten` laesst es dort (der Server fuehrt es weiter als abgemeldet).
+ENTFERNT_FIELDS = ("schema", "wahl", "ts")
+ENTFERNT_WAHLEN = ("behalten", "freigeben")
 HERKUNFT = ("thermostat", "soll_entity", "ha")
 DURCH = ("nutzer", "automation")
 
@@ -112,7 +119,7 @@ DOKUMENT_TOPICS = {"konfiguration": "down/config", "bedienung": "down/operation"
 #: Bindung, Raeume, Abo), je Raum `KONFIGURATION_RAUM_FIELDS`. `profil` und die Raumfuehler-Liste gibt es nicht mehr.
 KONFIGURATION_FIELDS = (
     "schema", "version", "anlage", "anlage_name", "weg", "kreise", "tagestick", "mindest_software",
-    "mindest_integration", "software", "bindungsparameter",
+    "mindest_integration", "software", "bindungsparameter", "push_regeln",
 )
 KONFIGURATION_KREIS_FIELDS = ("kreis", "name", "bindung", "raeume", "hebelsatz", "verteilsystem", "abo")
 #: ursprungswerte: fehlt = keine Ursprungswerte auf dem Server; zustand: fehlt = in_betrieb (der Server sendet ihn nur an ein
@@ -148,9 +155,15 @@ HA_ROLLEN = (
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",
     "system_water_pressure", "efficiency_ratio", "generator_hours", "generator_starts", "generator_state",
     "energy_electrical_heating", "energy_electrical_dhw", "energy_primary_heating", "energy_primary_dhw",
-    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total",
+    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total", "fault_codes",
 )
-HA_HINWEISE = ("raumfuehler", "batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: Hinweise, die die Person abschalten darf; die Hinweise des Raumfuehlers gehoeren nicht dazu.
+HA_HINWEISE = ("batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: push_regeln der Konfiguration: null (Standard des Geraets) oder genau diese Felder; Ruhezeit in ganzen Stunden
+#: (von und bis verschieden), Pushes je Tag. Ein Wert ausserhalb liest das Geraet als Standard, es lehnt nicht ab.
+PUSH_REGELN_FIELDS = ("ruhe_von", "ruhe_bis", "tageslimit")
+PUSH_STUNDEN = (0, 23)
+PUSH_TAGESLIMIT = (1, 5)
 TREIBER_FIELDS = ("id", "parameter")
 SOFTWARE_FIELDS = ("version", "manifest_url", "manifest_sha256", "signature")
 ABO = ("aktiv", "inaktiv")
@@ -180,7 +193,6 @@ SOFTWARE_ERRORS = (
     "manifest_ungueltig", "signatur_ungueltig", "updater_zu_alt", "version_zu_alt", "start_fehlgeschlagen",
     "ungesund", "server_unerreichbar",
 )
-HINWEIS_STUFEN = ("info", "warnung", "kritisch")
 MELDUNGEN = ("wunsch_begrenzt", "soll_quelle_aus", "geraet_doppelt", "update_noetig", "gesperrt")
 
 COMMAND_FIELDS = ("schema", "command_id", "kind", "payload", "expires_at")
@@ -204,7 +216,7 @@ COMMANDS: dict[str, Command] = {
     "zigbee_permit_join": Command(("seconds",), (), 60, ("zigbee_nicht_bereit",)),
     "zigbee_devices": Command((), ("devices",), 60, ("zigbee_nicht_bereit",)),
     "driver_login": Command(
-        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code", "ciphertext"),
+        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code"),
         ("code_challenge", "code_challenge_method"), 120,
         ("treiber_unbekannt", "login_nicht_noetig", "login_fehlgeschlagen", "anlage_nicht_erreichbar"),
     ),
@@ -215,13 +227,16 @@ COMMANDS: dict[str, Command] = {
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
     "claim_state": Command(("device_state",), (), 24 * 3600),
     "diagnostics": Command((), (), 300),
-    "hinweis": Command(("key", "stufe", "text"), (), 24 * 3600),
+    # Liest an der Anbindung, ob der gewaehlte Weg dieselbe Anlage meint (Nutzlast: der Weg aus `WEGE`).
+    "weg_pruefen": Command(("weg",), ("ergebnis",), 3600, ("weg_unbekannt", "weg_mehrfach")),
+    "hinweis": Command(("key", "code", "params", "stufe"), (), 24 * 3600),
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
     "finish": ("phase", "driver_id", "code", "redirect_uri"),
-    "password": ("phase", "driver_id", "ciphertext"),
 }
+#: Ergebnisse von `weg_pruefen`.
+WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
 # Spec Stufe 3 S5 6.1 (G-6): Fehler tragen Code und details, keine Texte. details nur mit diesen Schluesseln: `feld`
 # aus PRUEF_FELDER, `regel` aus PRUEF_REGELN, die uebrigen endliche Zahlen; freie Texte gibt es darin nicht.
 DETAIL_FIELDS = ("feld", "regel", "min", "max", "wert", "anzahl")

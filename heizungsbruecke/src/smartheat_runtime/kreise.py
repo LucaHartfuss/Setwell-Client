@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import NoReturn, Protocol
 
 from smartheat_core import kreisansicht
+from smartheat_core.meldungen import Meldung
 from smartheat_runtime import app, dokument_config, kreiszustand
 from smartheat_runtime.app import STATUS_ABO_BEENDET, Host, IdleBridge
 from smartheat_runtime.ports import StatusSink
@@ -54,11 +55,11 @@ class _KreisMeldesenke:
     def __init__(self, senke, kreis: int) -> None:
         self._senke, self._praefix = senke, f"kreis-{kreis}:"
 
-    def push(self, key: str, message: str) -> None:
-        self._senke.push(self._praefix + key, message)
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
+        self._senke.push(self._praefix + key, meldung, begleitet=begleitet)
 
-    def show(self, key: str, message: str) -> None:
-        self._senke.show(self._praefix + key, message)
+    def show(self, key: str, meldung: Meldung) -> None:
+        self._senke.show(self._praefix + key, meldung)
 
     def withdraw(self, key: str) -> None:
         self._senke.withdraw(self._praefix + key)

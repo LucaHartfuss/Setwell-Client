@@ -224,16 +224,16 @@ class ViCareCloudDriver:
             raise DriverError("nicht_angemeldet")
         raise ValueError("Treiber-Cache veraltet")
 
-    def kontingent_meldung(self) -> str | None:
-        """Kundentext, solange das Kontingent erschoepft (oder die Sperre nach HTTP 429 aktiv) und der Cache veraltet
-        ist; mit frischem Cache stoert die Sperre niemanden, mit dem Ende der Sperre ist die Meldung weg."""
+    def kontingent_erschoepft(self) -> bool:
+        """True, solange das Kontingent erschoepft (oder die Sperre nach HTTP 429 aktiv) und der Cache veraltet ist;
+        mit frischem Cache stoert die Sperre niemanden, mit dem Ende der Sperre ist die Meldung weg."""
         try:
             self._fresh()
         except QuotaExhausted:
-            return QUOTA_TEXT
+            return True
         except (DriverError, ValueError):
             pass
-        return None
+        return False
 
     @staticmethod
     def _role(cache: Mapping[str, float | str], role: str) -> float | str:

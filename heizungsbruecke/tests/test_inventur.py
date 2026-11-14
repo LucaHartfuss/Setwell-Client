@@ -285,6 +285,19 @@ def test_positivliste_laesst_nur_heizungsdaten_durch():
         assert verboten not in ids
 
 
+@pytest.mark.parametrize(("klasse", "erlaubt"), [("problem", True), ("battery", True), ("door", False), (None, False)])
+def test_binaersensor_besteht_nur_mit_klasse_problem_oder_battery(klasse, erlaubt):
+    """Die Stoerungsanzeige des Erzeugers (binary_sensor, Klasse problem) besteht die Positivliste, Tuer und Co. nicht."""
+    ha = FakeHa()
+    ha.states = {"binary_sensor.a": "off", "number.curve": 1}
+    if klasse:
+        ha.states["binary_sensor.a::device_class"] = klasse
+    ha.registry = [{"entity_id": "binary_sensor.a", "platform": "mypyllant"},
+                   {"entity_id": "number.curve", "platform": "mypyllant"}]
+    ids = {e["entity_id"] for e in inventur.inventur(ha, {"plattformen": ["mypyllant"]})["entities"]}
+    assert ("binary_sensor.a" in ids) is erlaubt
+
+
 def test_positivliste_begrenzt_die_dienste():
     assert inventur.inventur(_ha_weit(), WEIT)["dienste"] == ["notify.mobile_app_handy"]
 

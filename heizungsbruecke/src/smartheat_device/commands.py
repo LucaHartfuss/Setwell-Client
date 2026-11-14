@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from smartheat_core import dateien
+from smartheat_core import dateien, meldungen
 from smartheat_core.logtext import lesbar
 from smartheat_device import fehler, nachrichten, wire
 
@@ -46,11 +46,6 @@ INVENTUR_BESTAETIGUNG_SECONDS = 60.0
 #: Eine feste Zahl, weil das Register expires_at bewusst nicht gegen die eigene Uhr prueft (Modul-Doku oben); drei
 #: Versuche decken einen kurzen Ausfall ab, ohne bei dauerhaft ausbleibendem PUBACK endlos weiterzusenden.
 INVENTUR_VERSUCHE_MAX = 3
-HINWEIS_KEY_MAX_CHARS = 64
-#: Obergrenze fuer verschiedene Hinweis-Schluessel: der Server sendet nur die Meldungen aus wire.MELDUNGEN (5),
-#: die Datei bleibt so auch bei einem boesartigen Server klein. Ueberschreiben und Loeschen gehen immer.
-HINWEIS_MAX_SCHLUESSEL = 32
-HINWEIS_TEXT_MAX_CHARS = 1000
 #: Arten, deren Pflichtfelder die Phase bestimmt (Command.payload ist dort die Vereinigung aller Phasen,
 #: wire.DRIVER_LOGIN_PHASES): die Annahme prueft nur fremde Felder, die Phasenregel steht im Handler des Hosts.
 PHASENBEFEHLE = ("driver_login",)
@@ -201,6 +196,8 @@ class CommandRegister:
                 return Failed("ungueltige_nutzlast", fehler.details(feld, "fehlt"))
         if fremd := fehler.fremdes_feld(message, wire.COMMAND_FIELDS):
             return Failed("ungueltige_nutzlast", fremd)
+        if message["schema"] not in wire.SCHEMATA:
+            return Failed("ungueltige_nutzlast", fehler.details("schema", "unbekannt"))
         payload = message["payload"]
         handler = self._handlers.get(kind)
         if handler is None:
@@ -307,36 +304,49 @@ class CommandRegister:
         dateien.schreiben_json(self._path, [[cid, *value] for cid, value in self._done.items()], modus=dateien.PRIVAT)
 
 
-def _valid_hint(key, value) -> bool:
-    return (isinstance(key, str) and isinstance(value, dict) and value.get("stufe") in wire.HINWEIS_STUFEN
-            and isinstance(value.get("text"), str))
+def _gespeicherter_hinweis(key, ablage) -> dict | None:
+    """Ablage eines Hinweises (Code, Parameter, Stufe) oder None, wenn sie nicht zum Schluessel passt (alte Datei)."""
+    meldung = meldungen.aus_dict(ablage)
+    if key in wire.MELDUNGEN and meldung is not None and meldung.code == meldungen.PREFIX + key:
+        return meldungen.zu_dict(meldung)
+    return None
 
 
 class Hinweise:
-    """Befehl hinweis: der Server setzt oder loescht einen Hinweis am Geraet (key, stufe, text; leerer Text
-    = loeschen), z. B. geraet_doppelt. Anzeigen macht der Host (Gateway: Seite, HA: Reparatur-Hinweis, 5c)."""
+    """Befehl hinweis: der Server setzt oder loescht einen Hinweis am Geraet (key aus wire.MELDUNGEN, code, params,
+    stufe; code None = loeschen), z. B. geraet_doppelt. Code, Parameter und Stufe prueft die Meldungstabelle des
+    Geraets. Anzeigen macht der Host (Gateway: Seite, HA: Reparatur-Hinweis, 5c)."""
 
     def __init__(self, device_dir: Path) -> None:
         self._path = device_dir / HINWEISE_FILE
         raw = dateien.lesen_json(self._path)
-        self._items: dict[str, dict] = (
-            {key: value for key, value in raw.items() if _valid_hint(key, value)} if isinstance(raw, dict) else {})
+        items = {key: _gespeicherter_hinweis(key, value) for key, value in raw.items()} if isinstance(raw, dict) else {}
+        self._items: dict[str, dict] = {key: value for key, value in items.items() if value is not None}
 
     def handler(self, payload: dict) -> Outcome:
-        key, stufe, text = payload.get("key"), payload.get("stufe"), payload.get("text")
-        if not (isinstance(key, str) and 0 < len(key) <= HINWEIS_KEY_MAX_CHARS):
-            raise InvalidPayload("key", "ungueltig")
-        if stufe not in wire.HINWEIS_STUFEN:
-            raise InvalidPayload("stufe", "unbekannt")
-        if not isinstance(text, str) or len(text) > HINWEIS_TEXT_MAX_CHARS:
-            raise InvalidPayload("text", "ungueltig")
-        if text:
-            if key not in self._items and len(self._items) >= HINWEIS_MAX_SCHLUESSEL:
-                raise InvalidPayload("key", "ungueltig")
-            self._items[key] = {"stufe": stufe, "text": text}
+        key, code, params, stufe = (payload.get(feld) for feld in ("key", "code", "params", "stufe"))
+        if key not in wire.MELDUNGEN:  # auch ein Nicht-Text, ein leerer oder ein langer Schluessel
+            raise InvalidPayload("key", "unbekannt")
+        items = dict(self._items)
+        if code is None:
+            if stufe is not None:
+                raise InvalidPayload("stufe", "ungueltig")
+            if params != {}:
+                raise InvalidPayload("params", "ungueltig")
+            items.pop(key, None)
         else:
-            self._items.pop(key, None)
-        dateien.schreiben_json(self._path, self._items, modus=dateien.PRIVAT)
+            if code != meldungen.PREFIX + key:
+                raise InvalidPayload("code", "unbekannt")
+            if stufe != meldungen.TABELLE[code].stufe or not isinstance(stufe, str):
+                raise InvalidPayload("stufe", "ungueltig")
+            if not isinstance(params, dict):
+                raise InvalidPayload("params", "ungueltig")
+            try:
+                items[key] = meldungen.zu_dict(meldungen.Meldung(code, params, stufe))
+            except ValueError:
+                raise InvalidPayload("params", "ungueltig") from None
+        dateien.schreiben_json(self._path, items, modus=dateien.PRIVAT)
+        self._items = items
         return Done({})
 
     def alle(self) -> tuple[dict, ...]:

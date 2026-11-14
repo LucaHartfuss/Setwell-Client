@@ -20,6 +20,7 @@ from smartheat_gateway.drivers.vicare_cloud.driver import QUOTA, ViCareCloudDriv
 from smartheat_gateway.paths import Paths
 from smartheat_gateway.quota import QuotaExhausted
 from smartheat_runtime import delivery
+from smartheat_runtime.texts import HA_TEXTS
 
 PARAMETER = {"installation_id": 2012345, "gateway_serial": "7637415000000001", "device_id": "0", "heizkreis": 0,
              "poll_seconds": 300.0}
@@ -210,15 +211,15 @@ def test_the_quota_notice_exists_only_while_the_quota_is_exhausted_and_the_cache
     """Ein erschoepftes Kontingent mit frischem Cache stoert den Kunden nicht; erst veraltete Daten ohne Aussicht auf
     eine Abfrage werden gemeldet, und mit dem Ende der Sperre (hier: das Fenster rutscht weiter) ist die Meldung weg."""
     server, driver, paths, clock = env
-    assert driver.kontingent_meldung() is None
+    assert driver.kontingent_erschoepft() is False
     for _ in range(1200 - len(driver._guard._load()["aufrufe"])):
         driver._guard.take()
-    assert driver.kontingent_meldung() is None  # Cache noch frisch
+    assert driver.kontingent_erschoepft() is False  # Cache noch frisch
     clock.advance(3 * 300 + 1)
-    assert driver.kontingent_meldung() == vicare_driver.QUOTA_TEXT
+    assert driver.kontingent_erschoepft() is True
     jetzt = driver._guard._now()
     driver._guard._now = lambda: jetzt + 86400 + 1  # alle Aufrufe liegen ausserhalb des Fensters
-    assert driver.kontingent_meldung() is None
+    assert driver.kontingent_erschoepft() is False
 
 
 @pytest.mark.parametrize(("alter_s", "frisch"), [(899, True), (900, True), (901, False)])
@@ -244,7 +245,7 @@ def test_an_expired_login_is_not_logged_in_and_writes_nothing(env):
     assert error.value.grund == "nicht_angemeldet" and driver.physical_writes == 0 and server.commands == []
     # Lokale Meldung: der Kunde liest einen deutschen Satz, nie den nackten Code.
     schreibfehler = DeviceWriteError("curve", "treiber:curve", error.value)
-    text = delivery.notification_text(delivery.NOTIFY_DATENFEHLER_WRITE, (str(schreibfehler),), {})
+    text = HA_TEXTS.text(delivery.notification_meldung(delivery.NOTIFY_DATENFEHLER_WRITE, (str(schreibfehler),), {}))
     assert "Anmeldung" in text and "erneuern" in text and "nicht_angemeldet" not in text
 
 

@@ -1,7 +1,9 @@
 """Lokale Befehle der Integration ueber das stdin des Add-ons: loescht der Nutzer den
 HA-Eintrag, schreibt die Integration `entfernen <geraet_id>` an das Add-on; das Geraet meldet sich dann wie bei
-sign_off ab. Beginnt die Einrichtung per Geraetecode, schreibt sie `nachweis <geraet_id>`; das Add-on antwortet mit
-dem Ereignis smartheat_nachweis (geraet_nachweis). Erlaubt sind genau diese beiden Formen mit der eigenen Geraete-ID;
+sign_off ab. Hat der Nutzer dabei gewaehlt, das Geraet aus dem Konto zu loesen, schreibt sie `entfernen <geraet_id>
+freigeben`; das Geraet meldet sich ab und gibt danach die Wahl an den Server weiter. Beginnt die Einrichtung per
+Geraetecode, schreibt sie `nachweis <geraet_id>`; das Add-on antwortet mit dem Ereignis smartheat_nachweis
+(geraet_nachweis). Erlaubt sind genau diese drei Formen mit der eigenen Geraete-ID;
 jede andere Zeile (fremde ID, unbekannt,
 zu lang, kein UTF-8) endet in genau einer WARNING mit dem Grund, nie mit dem Zeileninhalt (der Absender ist nicht
 vertrauenswuerdig und der Inhalt koennte Zugangsdaten tragen). Reine Standardbibliothek; der Zeilenleser laeuft in
@@ -17,8 +19,10 @@ logger = logging.getLogger(__name__)
 #: vergleichen sie.
 BEFEHL_ENTFERNEN = "entfernen"
 BEFEHL_NACHWEIS = "nachweis"
+BEFEHL_FREIGEBEN = "freigeben"  # nur als Zusatz von entfernen
 BEFEHLE = (BEFEHL_ENTFERNEN, BEFEHL_NACHWEIS)
 ZEILE_FORMAT = "{befehl} {geraet_id}\n"
+ZEILE_FORMAT_FREIGEBEN = "{befehl} {geraet_id} {zusatz}\n"
 #: Laengste Zeile in Bytes ohne Zeilenende; laengere werden verworfen (gueltige Zeilen sind ASCII und kuerzer).
 ZEILE_MAX = 200
 
@@ -29,8 +33,8 @@ GRUND_ZU_LANG = "zu_lang"
 
 
 def zeile_pruefen(inhalt: bytes, geraet_id: str) -> tuple[str | None, str | None]:
-    """(Befehl, None), wenn inhalt (eine Zeile ohne Zeilenende) genau ein Befehl mit der eigenen Geraete-ID ist; sonst
-    (None, Grund) mit kein_utf8, unbekannt oder andere_geraete_id."""
+    """(Befehl, None), wenn inhalt (eine Zeile ohne Zeilenende) genau ein Befehl mit der eigenen Geraete-ID ist
+    (`entfernen` mit Zusatz: BEFEHL_FREIGEBEN); sonst (None, Grund) mit kein_utf8, unbekannt oder andere_geraete_id."""
     try:
         text = inhalt.decode("utf-8")
     except UnicodeDecodeError:
@@ -38,8 +42,13 @@ def zeile_pruefen(inhalt: bytes, geraet_id: str) -> tuple[str | None, str | None
     for befehl in BEFEHLE:
         if text + "\n" == ZEILE_FORMAT.format(befehl=befehl, geraet_id=geraet_id):
             return befehl, None
+    if text + "\n" == ZEILE_FORMAT_FREIGEBEN.format(befehl=BEFEHL_ENTFERNEN, geraet_id=geraet_id,
+                                                    zusatz=BEFEHL_FREIGEBEN):
+        return BEFEHL_FREIGEBEN, None
     teile = text.split(" ")
     if len(teile) == 2 and teile[0] in BEFEHLE and teile[1]:
+        return None, GRUND_ANDERE_ID
+    if len(teile) == 3 and teile[0] == BEFEHL_ENTFERNEN and teile[1] and teile[2] == BEFEHL_FREIGEBEN:
         return None, GRUND_ANDERE_ID
     return None, GRUND_UNBEKANNT
 
@@ -52,9 +61,10 @@ def _rest_verwerfen(quelle: BinaryIO) -> None:
             return
 
 
-def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachweis: Callable[[], None]) -> None:
+def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachweis: Callable[[], None],
+          freigeben: Callable[[], None]) -> None:
     """Zeilen aus quelle lesen bis EOF (still) oder bis ein Lesefehler (eine WARNING mit der Fehlerart); jede Zeile
-    wird geprueft, ein Treffer ruft entfernen() bzw. nachweis()."""
+    wird geprueft, ein Treffer ruft entfernen(), freigeben() (entfernen mit Zusatz) bzw. nachweis()."""
     try:
         while True:
             zeile = quelle.readline(ZEILE_MAX + 1)
@@ -76,6 +86,8 @@ def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachw
             befehl, grund = zeile_pruefen(inhalt, geraet_id)
             if befehl == BEFEHL_ENTFERNEN:
                 entfernen()
+            elif befehl == BEFEHL_FREIGEBEN:
+                freigeben()
             elif befehl == BEFEHL_NACHWEIS:
                 nachweis()
             else:
@@ -84,8 +96,9 @@ def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachw
         logger.warning("stdin: Lesen gescheitert (%s), der lokale Befehl entfaellt", type(error).__name__)
 
 
-def starten(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None],
-            nachweis: Callable[[], None]) -> threading.Thread:
-    thread = threading.Thread(target=lesen, args=(quelle, geraet_id, entfernen, nachweis), name="stdin", daemon=True)
+def starten(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachweis: Callable[[], None],
+            freigeben: Callable[[], None]) -> threading.Thread:
+    thread = threading.Thread(target=lesen, args=(quelle, geraet_id, entfernen, nachweis, freigeben), name="stdin",
+                              daemon=True)
     thread.start()
     return thread

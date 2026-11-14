@@ -153,10 +153,11 @@ class GatewayWorld:
     def bedienung_senden(self, inhalt: dict, version: int) -> None:
         self.server("down/operation", {"schema": 2, "version": version, **inhalt})
 
-    def answer(self, levers: dict, status: str = "ok", reason=None) -> None:
+    def answer(self, levers: dict, status: str = "ok", code=None) -> None:
         seq = self.link.of("up/snapshot")[-1]["seq"]
         self.server("down/setpoints", {"schema": 5, "kreis": 1, "seq": seq,
-                                       "ts": "2026-01-15T00:00:00+01:00", "status": status, "reason": reason,
+                                       "ts": "2026-01-15T00:00:00+01:00", "status": status, "code": code,
+                                       "params": None if code is None else {},
                                        "levers": levers, "learned": {}})
 
     def status(self) -> dict | None:
