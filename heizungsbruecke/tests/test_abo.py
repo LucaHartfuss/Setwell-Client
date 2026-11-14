@@ -46,14 +46,16 @@ class Rekorder:
 
 
 def _runtime(tmp_path, store, entity_ids=BOTH_ROLES, notify_services=("notify.mobile_app_handy",), clock=None,
-             abo_source=lambda: entitlement.UNKNOWN):
-    """`abo_source` ist die Abo-Quelle des Konfigurationsdokuments (Rueckruf des Hosts, RuntimeConfig)."""
+             abo_source=lambda: entitlement.UNKNOWN, update_noetig_source=lambda: False):
+    """`abo_source` ist die Abo-Quelle des Konfigurationsdokuments (Rueckruf des Hosts, RuntimeConfig),
+    `update_noetig_source` die der kritischen Mindestversion."""
     manifest = ChannelManifest(refs=entity_ids)
     ha_api = MagicMock(spec=HomeAssistantApi)
     ha_api.get_attribute.side_effect = ValueError("kein Wertebereich")  # wie eine Entity ohne min/max
     return SimpleNamespace(
         manifest=manifest, signals=ha_api, ha_api=ha_api, store=store, mqtt_client=MagicMock(spec=MqttChannel),
-        config=runtime_config(entitlement_path=tmp_path / "entitlement_state.json", abo_source=abo_source),
+        config=runtime_config(entitlement_path=tmp_path / "entitlement_state.json", abo_source=abo_source,
+                              update_noetig_source=update_noetig_source),
         override=LeverPipeline(store, HaPlantBinding(ha_api, manifest, VAILLANT_MYPYLLANT), SAFETY),
         notifier=Notifier(store, HaNotifySink(ha_api, list(notify_services))),
         status=StatusReporter(
@@ -119,7 +121,7 @@ def test_enter_inactive_survives_failing_channels(make_store, tmp_path):
 
 
 def test_enter_inactive_with_failing_entitlement_persist_still_enters_mode(make_store, tmp_path, monkeypatch, caplog):
-    def _failing(path, now):
+    def _failing(path, now, **optionen):
         raise OSError("Datentraeger kaputt")
 
     monkeypatch.setattr("smartheat_runtime.entitlement.mark_inactive", _failing)
@@ -353,3 +355,115 @@ def test_ende_festhalten_wiederholt_das_speichern_bis_es_gelingt(make_store, tmp
     assert abo.ende_festhalten(rt) is True
     assert entitlement.ist_beendet(rt.config.entitlement_path)
     assert abo.ende_festhalten(rt) is True  # schon gespeichert: nichts mehr zu tun
+
+
+# --- kritische Mindestversion: derselbe Notbetrieb wie beim inaktiven Abo, andere Quelle, keine Abo-Texte -----------
+
+def _kritisch(tmp_path, store, abo_status=entitlement.ACTIVE, **optionen):
+    return _runtime(tmp_path, store, abo_source=lambda: abo_status, update_noetig_source=lambda: True, **optionen)
+
+
+def test_unter_kritischer_mindestversion_geht_der_notbetrieb_an_ohne_abo_meldung(make_store, tmp_path):
+    rt = _kritisch(tmp_path, make_store())
+
+    abo.enter_inactive(rt, ABO_NOW)
+
+    assert rt.store.state.abo_inactive_since == ABO_NOW
+    assert rt.store.state.delivery.notbetrieb is True
+    rt.mqtt_client.stop.assert_called_once()  # Snapshots und Telemetrie ruhen
+    rt.ha_api.send_notification.assert_not_called()  # die Abo-Meldung waere hier falsch
+    rt.ha_api.create_persistent_notification.assert_not_called()
+    assert entitlement.ist_kritisch(rt.config.entitlement_path)
+    assert entitlement.load_inactive_since(rt.config.entitlement_path) == ABO_NOW
+
+
+def test_ist_auch_das_abo_inaktiv_gilt_der_abo_anlass_mit_seiner_meldung(make_store, tmp_path):
+    rt = _kritisch(tmp_path, make_store(), abo_status=entitlement.INACTIVE)
+
+    abo.enter_inactive(rt, ABO_NOW)
+
+    assert not entitlement.ist_kritisch(rt.config.entitlement_path)
+    rt.ha_api.send_notification.assert_called_once_with("notify.mobile_app_handy", HA_TEXTS.text(abo.inactive_meldung(ABO_NOW)))
+
+
+def test_kritisch_mit_unklarer_uhr_zaehlt_nicht_und_beginnt_nachtraeglich(make_store, tmp_path, monkeypatch):
+    monkeypatch.setattr("smartheat_core.wallclock._now", lambda: ABO_NOW)
+    rt = _kritisch(tmp_path, make_store())
+    _ohne_uhr(rt)
+
+    abo.enter_inactive(rt, ABO_NOW)
+    abo.frist_nachholen(rt)
+
+    assert not rt.config.entitlement_path.exists()  # kein Zaehler auf falscher Uhr
+    assert rt.store.state.abo_inactive_since is None and rt.frist_offen is True
+    rt.mqtt_client.stop.assert_not_called()
+
+    rt.uhr_vertrauen = lambda: True
+    abo.frist_nachholen(rt)
+
+    assert rt.store.state.abo_inactive_since == ABO_NOW and rt.frist_offen is False
+    assert entitlement.ist_kritisch(rt.config.entitlement_path)
+
+
+def test_kritisch_neustart_mitten_in_der_frist_behaelt_den_gespeicherten_beginn(make_store, tmp_path):
+    entitlement.mark_inactive(tmp_path / "entitlement_state.json", ABO_NOW - timedelta(days=12), kritisch=True)
+    rt = _kritisch(tmp_path, make_store())
+    _ohne_uhr(rt)  # nach dem Neustart ist die Uhr noch unklar
+
+    abo.enter_inactive(rt, ABO_NOW)
+
+    assert rt.store.state.abo_inactive_since == ABO_NOW - timedelta(days=12)  # der Zaehler laeuft weiter
+    assert rt.store.state.delivery.notbetrieb is True and rt.frist_offen is False
+    rt.ha_api.send_notification.assert_not_called()
+
+
+def _kritisch_abgelaufen(tmp_path, make_store, monkeypatch, tage):
+    monkeypatch.setattr("smartheat_core.wallclock._now", lambda: ABO_NOW)
+    entitlement.mark_inactive(tmp_path / "entitlement_state.json", ABO_NOW - timedelta(days=tage), kritisch=True)
+    rt = _kritisch(tmp_path, make_store(backup={"restore_point": {"curve": 0.4, "room_setpoint": 1.0}}))
+    rt.store.update(abo_inactive_since=ABO_NOW - timedelta(days=tage))
+    return rt
+
+
+def test_kritisch_nach_tag_31_stellt_die_ursprungswerte_wieder_her_und_beendet_ohne_abo_meldung(
+        make_store, tmp_path, monkeypatch):
+    rt = _kritisch_abgelaufen(tmp_path, make_store, monkeypatch, tage=31)
+
+    abo.check_grace_end(rt)
+
+    assert rt.store.state.abo_finished is True and entitlement.ist_beendet(rt.config.entitlement_path)
+    assert EV_SOLL_ENDE in _posted(rt)
+    assert rt.ha_api.set_number_value.call_count > 0  # dieselbe Rueckstellung wie beim Abo-Ende
+    assert rt.idle is True
+    rt.ha_api.send_notification.assert_not_called()  # weder "Abo beendet" noch eine Abo-Meldung
+
+
+def test_kritisch_vor_tag_30_beendet_nichts(make_store, tmp_path, monkeypatch):
+    rt = _kritisch_abgelaufen(tmp_path, make_store, monkeypatch, tage=29)
+
+    abo.check_grace_end(rt)
+
+    assert rt.store.state.abo_finished is False and not entitlement.ist_beendet(rt.config.entitlement_path)
+    rt.ha_api.set_number_value.assert_not_called()
+
+
+def test_kritisch_nach_tag_31_mit_unklarer_uhr_beendet_nichts(make_store, tmp_path, monkeypatch):
+    rt = _kritisch_abgelaufen(tmp_path, make_store, monkeypatch, tage=31)
+    _ohne_uhr(rt)
+
+    abo.check_grace_end(rt)
+
+    assert rt.store.state.abo_finished is False
+    rt.ha_api.set_number_value.assert_not_called()
+
+
+def test_nach_dem_update_ist_ein_aktives_abo_nach_der_frist_wieder_normalbetrieb(make_store, tmp_path, monkeypatch):
+    rt = _kritisch_abgelaufen(tmp_path, make_store, monkeypatch, tage=31)
+    rt.config = runtime_config(entitlement_path=tmp_path / "entitlement_state.json",
+                               abo_source=lambda: entitlement.ACTIVE, update_noetig_source=lambda: False)
+    rt.neustart = MagicMock()
+
+    abo.check_grace_end(rt)
+
+    rt.neustart.assert_called_once()  # die Quelle ist nicht mehr kritisch: kein Ende, Neustart im Normalbetrieb
+    assert rt.store.state.abo_finished is False

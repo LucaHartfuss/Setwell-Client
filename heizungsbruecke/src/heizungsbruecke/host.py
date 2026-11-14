@@ -209,6 +209,7 @@ class HaHost:
                 self._konfiguration, rastung_pfad=config.RASTUNG_PATH,
                 entitlement_path=config.entitlement_path(self.kreis), kreis=self.kreis,
                 abo_source=lambda: self._geraet.abo_status(self.kreis),
+                update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
                 zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis))
             # Ohne gueltige Bindungsparameter kein Start
             description = dokument_config.beschreibung(self._konfiguration, self.kreis)

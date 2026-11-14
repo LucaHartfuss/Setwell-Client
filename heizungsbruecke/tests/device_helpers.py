@@ -90,6 +90,7 @@ class FakeHost:
         self.synchron: bool | None = True
         self.konfigurationen, self.bedienungen, self.software, self.anzeigen_liste = [], [], [], []
         self.updates: list = []
+        self.kritisch_geaendert: list = []
         self.status: dict | None = {"status": "regelt"}
         self.raum_werte: dict[int, dict | None] = {}  # Raum je weiterem Kreis
         self.raum_wert: dict | None = {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t0"}
@@ -147,6 +148,9 @@ class FakeHost:
 
     def updates_soll(self, updates):
         self.updates.append(updates)
+
+    def update_noetig_geaendert(self, kritisch):
+        self.kritisch_geaendert.append(kritisch)
 
     def runtime_status(self):
         return self.status

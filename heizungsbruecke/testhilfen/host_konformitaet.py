@@ -42,6 +42,9 @@ class KonformDevice:
     def abo_status(self, kreis=None):
         return dokument_config.abo_status(self.konf, kreis)
 
+    def update_noetig_kritisch(self):
+        return False
+
     def wunsch(self, wert, *, herkunft, durch=None, kreis=1):
         self.wuensche.append((wert, herkunft, durch))
         return min(max(float(wert), 15.0), 25.0)

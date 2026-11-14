@@ -38,8 +38,9 @@ def enter_inactive(rt: Runtime, now: datetime) -> None:
         logger.warning("Abo inaktiv, die Uhr ist nicht vertrauenswuerdig - die Frist beginnt, sobald sie es ist.")
         return
     rt.frist_offen = False
+    kritisch = entitlement.kritisch_allein(rt.config)
     try:
-        since, newly_set = entitlement.mark_inactive(rt.config.entitlement_path, now)
+        since, newly_set = entitlement.mark_inactive(rt.config.entitlement_path, now, kritisch=kritisch)
     except Exception:
         # Ein Schreibfehler (Datentraeger) darf den Notbetrieb nicht verhindern.
         logger.exception(
@@ -55,7 +56,8 @@ def enter_inactive(rt: Runtime, now: datetime) -> None:
         except Exception:
             logger.exception("MQTT-Verbindung konnte nicht sauber beendet werden")
     if newly_set:
-        rt.notifier.notify("abo", "inaktiv", inactive_meldung(since), critical=True)
+        if not kritisch:  # die kritische Mindestversion meldet die Oberflaeche ueber den Geraetezustand, nicht als Abo
+            rt.notifier.notify("abo", "inaktiv", inactive_meldung(since), critical=True)
     else:
         logger.warning(
             "Abo weiterhin inaktiv (seit %s) - Notbetrieb laeuft bis %s.",
@@ -92,7 +94,8 @@ def finish_grace(rt: Runtime, *, always_restore: bool, final_notice: bool) -> bo
         ende_festhalten(rt)
     rt.worker.post(Event(EV_SOLL_ENDE))
     if final_notice:
-        rt.notifier.notify("abo", "beendet", meldungen.neu("meldung.abo_beendet"), critical=True)
+        if not entitlement.ist_kritisch(rt.config.entitlement_path):
+            rt.notifier.notify("abo", "beendet", meldungen.neu("meldung.abo_beendet"), critical=True)
     else:
         logger.info("Abo-inaktiv-Frist ist bereits abgelaufen - Add-on bleibt ohne weitere Eingriffe im Ruhezustand.")
     return True

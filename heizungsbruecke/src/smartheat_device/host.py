@@ -121,6 +121,11 @@ class DeviceHost(Protocol):
         jeder Konfiguration, auch einer abgelehnten (Updater)."""
         ...
 
+    def update_noetig_geaendert(self, kritisch: bool) -> None:
+        """Die kritische Mindestversion (Feld update_noetig mit Datum) gilt jetzt bzw. nicht mehr, nach jeder
+        Konfiguration, auch einer abgelehnten: die Laufzeit nimmt die Kreise ohne Prozessneustart wieder auf."""
+        ...
+
     def runtime_status(self) -> dict | None: ...
 
     def entfernen_wahl(self) -> str | None:

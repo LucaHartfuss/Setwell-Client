@@ -897,6 +897,10 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     # Ein Kreis ausser Betrieb hat weder Abo noch Server: keine Abo-Abfrage, keine Frist, kein Abo-inaktiv-Modus.
     # Seine MQTT-Verbindung dient nur den Raumwerten der Schutz-Telemetrie.
     ausser = kreiszustand.ausser_betrieb(rt)
+    if not config.update_noetig_source():
+        # Beginn und Ende aus einer kritischen Mindestversion gelten nicht weiter, sobald das Geraet sie nicht mehr meldet
+        # (Update eingespielt, Eintrag entfernt): der Kreis regelt wieder, auch nach dem Ende der 30 Tage.
+        entitlement.kritisch_aufheben(config.entitlement_path)
     abo_status = entitlement.UNKNOWN if ausser else entitlement.query(config)
     if abo_status == entitlement.ACTIVE:
         entitlement.clear(config.entitlement_path)

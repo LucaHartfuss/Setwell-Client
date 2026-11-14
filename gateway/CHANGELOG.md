@@ -2,6 +2,14 @@
 
 ## Unveroeffentlicht
 
+- Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
+  Notbetrieb mit unveraenderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
+  30 Tage zaehlen lokal ab dem ersten Empfang mit vertrauenswuerdiger Uhr und ueberstehen Neustarts (eine unklare Uhr zaehlt
+  nicht). Danach stellt die Laufzeit die urspruenglichen Werte wieder her wie beim Abo-Ende. Ein Update auf die
+  Mindestversion oder ein Konfigurationsstand ohne `update_noetig` hebt den Zustand ohne Neustart der Laufzeit auf, auch
+  nach den 30 Tagen. Der Beginn steht mit dem Zusatz `kritisch` in der Datei der Abo-Frist (`entitlement_state.json` je
+  Kreis; neues Feld, keine Migration). Die Abo-Meldungen erscheinen dabei nicht.
+
 - Der Updater des Gateways achtet auf die Einstellung `updates` des Kunden: ein signiertes Angebot, dessen Art
   (`sicherheit`, `funktion`, `treiberfix`) die Einstellung nicht erlaubt, wird nicht installiert und einmal mit dem Grund
   `einstellung_aus` gemeldet (kein Eintrag unter den abgelehnten Angeboten, es gilt wieder, sobald die Einstellung es

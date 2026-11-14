@@ -196,6 +196,18 @@ def test_wiederaufnahme_nimmt_nur_den_betroffenen_kreis_neu_auf(env, monkeypatch
     assert not fehler
 
 
+def test_eine_aenderung_der_kritischen_mindestversion_nimmt_jeden_kreis_neu_auf(env):
+    anlage = Anlage(env)
+    laufzeit = _laufzeit(anlage, env)
+    _, fehler = _lauf_im_thread(laufzeit)
+    eins, zwei = laufzeit.kreise()[1], laufzeit.kreise()[2]
+
+    laufzeit.kritisch_geaendert()
+
+    assert laufzeit.kreise()[1] is not eins and laufzeit.kreise()[2] is not zwei
+    assert not fehler
+
+
 def test_ein_laufender_kreis_wird_nicht_wiederaufgenommen(env):
     anlage = Anlage(env)
     laufzeit = _laufzeit(anlage, env)

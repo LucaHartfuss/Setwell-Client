@@ -58,12 +58,13 @@ def bindung(konfiguration, kreis: int | None = None) -> GatewayBindung:
 
 
 def parse_dokument(konfiguration, paths: Paths, abo_source: Callable[[], str], kreis: int | None = None,
-                   zustand_source: Callable[[], str] | None = None) -> tuple[RuntimeConfig, GatewayBindung]:
+                   zustand_source: Callable[[], str] | None = None,
+                   update_noetig_source: Callable[[], bool] | None = None) -> tuple[RuntimeConfig, GatewayBindung]:
     """Laufzeitkonfiguration und Bindung des Heizkreises `kreis` (ohne Angabe des ersten)."""
     nummer = dokument_config.kreisnummer(konfiguration, kreis)
     runtime = dokument_config.runtime_config(
         konfiguration, rastung_pfad=paths.rastung, entitlement_path=paths.entitlement(nummer), abo_source=abo_source,
-        kreis=kreis, zustand_source=zustand_source)
+        kreis=kreis, zustand_source=zustand_source, update_noetig_source=update_noetig_source)
     return runtime, bindung(konfiguration, kreis)
 
 

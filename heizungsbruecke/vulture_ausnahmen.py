@@ -60,9 +60,6 @@ _.burner_starts  # Server: tests/generic (Brennerzaehler im Anlagenzustand); der
 _.brenner  # Server: tests/generic (Feld des Anlagenschritts); der Simulationstreiber liest es nicht
 _.leistung  # Server: tests/generic (Feld des Anlagenschritts); der Simulationstreiber liest es nicht
 
-# --- Kritische Mindestversion (smartheat_runtime/entitlement.py): der Zeitpunkt "wirksam ab" kommt mit dem Versionspruefer; bis dahin ruft nur der Test ---
-_.kritische_mindestversion_abgelaufen  # smartheat_runtime/entitlement.py: Haken fuer das Ende der Regelung 30 Tage nach dem lokalen ersten Empfang (tests/test_entitlement.py), noch ohne Aufrufer in den Hosts
-
 # --- Update-Felder des Dokumentspeichers (smartheat_device/documents.py): der Versionspruefer liest sie; bis dahin ruft nur der Test ---
 _.update_noetig_ab  # smartheat_device/documents.py: Zeitpunkt, ab dem die Mindestversion Pflicht ist (tests/test_device_documents.py), noch ohne Aufrufer in den Hosts
 _.updates  # smartheat_device/documents.py: Update-Zulassung je Art (tests/test_device_documents.py), noch ohne Aufrufer in den Hosts

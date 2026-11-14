@@ -185,6 +185,25 @@ class GeraetHostBasis:
     def abo_status(self, kreis: int | None = None) -> str:
         return self.device.abo_status(kreis) if self.device is not None else dokument_config.abo_status(None)
 
+    def update_noetig_kritisch(self) -> bool:
+        return self.device.update_noetig_kritisch() if self.device is not None else False
+
+    def update_noetig_geaendert(self, kritisch: bool) -> None:
+        """Die Kreise nehmen den Notbetrieb der kritischen Mindestversion auf bzw. verlassen ihn ohne Prozessneustart
+        (im Hintergrund wie die Konfigurationsaenderung); ohne Laufzeit oder bei einem Fehler startet der Prozess neu."""
+        laufzeit = self._laufzeit
+        if laufzeit is None:
+            self.neustart_anfordern()
+            return
+        self._konfig_hintergrund.submit(lambda: self._laufzeit_kritisch(laufzeit))
+
+    def _laufzeit_kritisch(self, laufzeit) -> None:
+        try:
+            laufzeit.kritisch_geaendert()
+        except Exception:
+            logger.exception("Die Laufzeit konnte die kritische Mindestversion nicht anwenden, Neustart")
+            self.neustart_anfordern()
+
     def wunsch(self, wert: float, herkunft: str | None = None, durch: str | None = None, kreis: int = KREIS) -> float:
         """Bedienwunsch fuer den Kreis `kreis` (HA: Soll-Entity oder smartheat_wunsch; Gateway: Thermostat): begrenzt
         vom Geraetekern, der ihn sendet; ohne Geraet unveraendert."""

@@ -121,8 +121,9 @@ class FakeGeraet:
     uhr_synchron = geraet_host.HaDeviceHost.uhr_synchron
 
     def __init__(self, konfiguration, *, bedienung=None, dirty=False, abo=entitlement.ACTIVE, ha=None, log=None,
-                 start_markierung=None, clock=time.monotonic):
+                 start_markierung=None, clock=time.monotonic, kritisch=False):
         self._konfiguration, self._bedienung, self._dirty, self._abo = konfiguration, bedienung, dirty, abo
+        self._kritisch = kritisch  # bool oder eine Funktion: gilt die kritische Mindestversion fuer dieses Geraet
         self.start_markierung = start_markierung  # die beim Start gelesene Aufraeum-Markierung (aufraeumen.entscheiden)
         self._supervisor, self._clock, self._uhr = Supervisor(), clock, None  # Zustand fuer uhr_synchron
         self.wuensche, self.aus, self.status = [], [], []
@@ -172,6 +173,9 @@ class FakeGeraet:
     def abo_status(self, kreis=None):
         return self._abo() if callable(self._abo) else self._abo
 
+    def update_noetig_kritisch(self):
+        return self._kritisch() if callable(self._kritisch) else self._kritisch
+
     def konfiguration_abgelehnt(self):
         return self.abgelehnt
 
@@ -206,7 +210,7 @@ class FakeGeraet:
 
 def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedienung=None, log=None,
                  verbunden=True, leer_mit_markierung=False, ursprungswerte=None, neustart=None, zeit_synchron=True,
-                 abgelehnt=False, **option_overrides):
+                 abgelehnt=False, kritisch=False, **option_overrides):
     """Startet die Laufzeit auf dem Dokument aus den Test-Optionen (options, z. B. runtime_helpers.OPTIONS; plus
     Overrides). Liefert (bridge, geraet); die gesendeten Nachrichten stehen in geraet.sent, der Kanal in geraet.channel.
     Ohne bedienung ist die Bedienung des Servers der Wert, den die Soll-Entity gerade zeigt (wie nach einem Wunsch,
@@ -219,7 +223,8 @@ def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedi
     ursprungswerte: Feld `ursprungswerte` der Konfiguration.
     neustart: Rueckruf des Hosts fuer app.start; ohne ihn zaehlt geraet.neustarts die Neustarts.
     zeit_synchron: was der Zeitdienst des Hosts dem Supervisor meldet (dt_synchronized).
-    abgelehnt: der Geraetekern hat die zuletzt gelieferte Konfiguration abgelehnt."""
+    abgelehnt: der Geraetekern hat die zuletzt gelieferte Konfiguration abgelehnt.
+    kritisch: gilt die kritische Mindestversion (bool oder eine Funktion, die sie liefert)."""
     options = {**options, **option_overrides}
     konfiguration = konfiguration_aus_optionen(options)
     if ursprungswerte is not None:
@@ -237,7 +242,7 @@ def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedi
         angezeigt = env.ha.states.get(options["entity_room_target"], 21.0)
         bedienung = {"raum_soll": angezeigt if isinstance(angezeigt, int | float) else 21.0}
     geraet = FakeGeraet(konfiguration, abo=abo, ha=env.ha, bedienung=bedienung, log=log,
-                        start_markierung=start_markierung, clock=env.clock)
+                        start_markierung=start_markierung, clock=env.clock, kritisch=kritisch)
     geraet.zeitdienst_setzen(zeit_synchron)
     geraet.abgelehnt = abgelehnt
     geraet.sent.connected = verbunden
@@ -287,6 +292,9 @@ class FakeDevice:
 
     def abo_status(self, kreis=None):
         return dokument_config.abo_status(self.konf, kreis)
+
+    def update_noetig_kritisch(self):
+        return False
 
     def start(self):
         self.order.append("start")
@@ -349,11 +357,15 @@ class Doc:
 
 
 class Device:
-    def __init__(self, konf=None, bed=None, dirty=False):
+    def __init__(self, konf=None, bed=None, dirty=False, kritisch=False):
         self.wuensche, self.aus, self.konf, self.bed, self.dirty = [], [], konf, bed, dirty
+        self.kritisch = kritisch
         self.wunsch_kreise = []
         self.meldungen = []
         self.documents = self
+
+    def update_noetig_kritisch(self):
+        return self.kritisch
 
     def wunsch(self, wert, *, herkunft, durch=None, kreis=1):
         self.wuensche.append((wert, herkunft, durch))

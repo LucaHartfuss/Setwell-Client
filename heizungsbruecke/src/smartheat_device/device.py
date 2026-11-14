@@ -277,6 +277,11 @@ class Device:
         """abo_source der Laufzeit (dokument_config.runtime_config): das Abo des Kreises, ohne Angabe des ersten."""
         return dokument_config.abo_status(self.konfiguration(), kreis)
 
+    def update_noetig_kritisch(self) -> bool:
+        """update_noetig_source der Laufzeit: ob eine kritische Mindestversion mit Datum gilt (das Datum allein, so
+        gespeichert wie `documents.update_noetig_ab`); sie loest den Notbetrieb mit der 30-Tage-Frist aus."""
+        return self.documents.update_noetig_ab is not None
+
     def zustand(self) -> str:
         """Scheitert der Rueckruf runtime_status, gilt die Laufzeit als startend (_LAUFZEIT_UNBEKANNT)."""
         status, gescheitert = self._host_wert("runtime_status", self.host.runtime_status)
@@ -577,6 +582,7 @@ class Device:
         es deshalb zurueck und prueft alle PRUEFUNG_WIEDERHOLEN_SECONDS erneut. Eine neue Zustellung ersetzt es."""
         self._zurueckgehalten.pop(art, None)
         alt = self.documents.inhalt(art)
+        kritisch_vorher = self.update_noetig_kritisch()
         try:
             ergebnis = self.documents.empfangen(art, body)
         except config_check.NichtPruefbar:
@@ -614,6 +620,8 @@ class Device:
             self._host_rufen("software_soll", self.host.software_soll, angebot.software)
         if art == KONFIGURATION:  # die Einstellung des Kunden zu Updates, ebenso auch aus einer abgelehnten Konfiguration
             self._host_rufen("updates_soll", self.host.updates_soll, self.documents.updates)
+            if (kritisch := self.update_noetig_kritisch()) != kritisch_vorher:  # auch aus einer abgelehnten Konfiguration
+                self._host_rufen("update_noetig_geaendert", self.host.update_noetig_geaendert, kritisch)
 
     def _zurueckgehaltene_pruefen(self, now: float) -> None:
         if not self._zurueckgehalten or now < self._pruefung_at:

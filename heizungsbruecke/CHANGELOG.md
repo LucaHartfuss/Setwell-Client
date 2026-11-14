@@ -5,6 +5,15 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
+  Notbetrieb mit unveränderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
+  30 Tage zählen lokal ab dem ersten Empfang mit vertrauenswürdiger Uhr und überstehen Neustarts (eine unklare Uhr zählt
+  nicht). Danach stellt die Laufzeit die ursprünglichen Werte wieder her wie beim Abo-Ende. Ein Update auf die
+  Mindestversion oder ein Konfigurationsstand ohne `update_noetig` hebt den Zustand ohne Neustart des Add-ons auf, auch
+  nach den 30 Tagen. Der Zustand `update_noetig` geht dem Zustand „keine Verbindung“ vor. Neuer Rückruf
+  `update_noetig_geaendert` des Geräts an den Host; der Beginn steht mit dem Zusatz `kritisch` in
+  `entitlement_state.json` (neues Feld, keine Migration). Die Abo-Meldungen erscheinen dabei nicht.
+
 - Neue Meldung `meldung.updates_veraltet` (Stufe `orange`, Parameter `grund`: `ablauf` oder `kein_angebot`) und ein
   Rückruf `updates_soll` des Geräts an den Host: nach jeder Konfiguration (auch einer abgelehnten) gibt das Gerät die
   Einstellung `updates` an den Host weiter. Der Home-Assistant-Host ignoriert sie (kein Updater).

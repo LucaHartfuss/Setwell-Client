@@ -1391,6 +1391,42 @@ def test_an_invalid_updates_field_keeps_the_last_setting_for_the_host(tmp_path):
     assert world.host.updates[-1] == UPDATES
 
 
+def test_a_date_in_update_noetig_makes_the_state_critical_and_tells_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    assert world.device.update_noetig_kritisch() is False
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    assert world.device.update_noetig_kritisch() is True
+    assert world.host.kritisch_geaendert == [True]
+    world.empfangen("down/config", _konfiguration(version=2, update_noetig=1900000000))
+    assert world.host.kritisch_geaendert == [True]  # unveraendert: nichts zu melden
+
+
+def test_removing_the_date_ends_the_critical_state_and_tells_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    world.empfangen("down/config", _konfiguration(version=2, update_noetig=None))
+    assert world.device.update_noetig_kritisch() is False
+    assert world.host.kritisch_geaendert == [True, False]
+
+
+def test_update_noetig_null_without_a_date_tells_the_host_nothing(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=None))
+    assert world.device.update_noetig_kritisch() is False
+    assert world.host.kritisch_geaendert == []
+
+
+def test_the_critical_state_survives_a_restart_of_the_device(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    neu = World(tmp_path)
+    assert neu.device.update_noetig_kritisch() is True
+
+
 def test_the_updates_setting_reaches_the_host_from_a_rejected_configuration(tmp_path):
     world = World(tmp_path)
     world.verbinden()

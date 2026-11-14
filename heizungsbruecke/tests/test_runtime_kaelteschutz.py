@@ -744,6 +744,18 @@ def test_in_der_kulanzfrist_ohne_abo_greift_der_kaelteschutz(make_store, wall, u
     assert _lauft(rt) and rt.store.state.kaelteschutz_art == "soll"
 
 
+def test_unter_kritischer_mindestversion_bleibt_die_frostnaehe_gesichert_bis_zum_ende_der_frist(make_store, wall, uhr):
+    """Der Zustand der kritischen Mindestversion ist der der Abo-Kulanzfrist (Notbetrieb, Beginn gesetzt): der
+    Kaelteschutz greift bei Frostnaehe weiter (nach dem Ende der Regelung nicht mehr: siehe oben)."""
+    rt = _neu(make_store, wall, uhr, {1: 4.0}, notbetrieb=True)
+    rt.store.update(abo_inactive_since=START)
+    _pruefen(rt)
+
+    _lauf(rt, 3 * STUNDE)
+
+    assert _lauft(rt) and rt.store.state.kaelteschutz_art == "frost" and _writes(rt) == EMERGENCY
+
+
 def test_im_notbetrieb_bleibt_der_notfall_boost_und_der_kaelteschutz_haelt_ihn_nach_dem_ende_des_notbetriebs(
     make_store, wall, uhr,
 ):

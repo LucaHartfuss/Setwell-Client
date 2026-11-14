@@ -83,3 +83,6 @@ class RuntimeConfig:
     # Zustand des Kreises aus dem laufenden Konfigurationsdokument (kreisansicht.ZUSTAENDE); die Laufzeit liest ihn bei
     # jedem Check frisch, ein Wechsel loest keinen Neustart aus. Ohne Quelle gilt der Betrieb.
     zustand_source: Callable[[], str] = _in_betrieb
+    # Ob die Software unter einer kritischen Mindestversion mit Datum liegt (smartheat_device update_noetig_ab): der
+    # Kreis geht dann in den Notbetrieb wie bei inaktivem Abo, mit derselben 30-Tage-Frist. Ohne Quelle: nie.
+    update_noetig_source: Callable[[], bool] = lambda: False
