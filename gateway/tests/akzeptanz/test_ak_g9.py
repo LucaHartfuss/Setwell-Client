@@ -89,7 +89,7 @@ def test_ende_waehrend_des_boosts_stellt_zurueck(welt, ende):
         welt.runde(100)
         welt.runde(300)
         assert welt.status()[-1] == "abo_beendet"
-        assert any("Abo seit 30 Tagen inaktiv" in m["text"] and m["offen"] for m in welt.meldungen())
+        assert any(m["code"] == "meldung.abo_beendet" and m["offen"] for m in welt.meldungen())  # "Abo seit 30 Tagen inaktiv"
     assert _vaillant(welt) == URSPRUNG_VAILLANT  # der Boost ist beendet, alle Hebel stehen wie vor dem ersten Schreiben
     if ende != "leere_konfiguration":
         assert welt.letzter_status()["runtime_status"]["boost"] == "keiner"

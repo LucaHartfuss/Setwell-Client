@@ -24,7 +24,7 @@ ABSTAND_DER_APP = {"vaillant_vrc720": 2700, "viessmann_vicare": 1500}
 EINSCHWINGEN = 2700  # die Anlage meldet eigene Schreibvorgaenge erst nach der Wartezeit (Vaillant 2100 s)
 SCHRITT = 300
 RAUM = 22.0  # warm genug: kein Boost
-LIMIT_TEXT = "Abrufkontingent"  # nur die Limit-Meldung nennt das Kontingent der Hersteller-Cloud
+LIMIT_CODE = "meldung.manueller_eingriff_limit"  # die Meldung, dass heute nicht mehr zurueckgesetzt wird
 
 #: Kontingent der Viessmann-Cloud je Anlage: hoechstens so viele Aufrufe in jedem Zeitfenster dieser Laenge (Sekunden)
 CLOUD_AUFRUFE = 1200
@@ -33,7 +33,7 @@ CLOUD_SPERRE = 600  # Retry-After der Cloud (Sekunden)
 CLOUD_DROSSEL_BEI = 4  # der wievielte Aufruf mit 429 beantwortet wird
 CLOUD_TAKT = 60  # Sekunden Weltzeit je Runde; der Treiber fragt in jeder Runde einmal ab
 CLOUD_RUNDEN = 1450  # etwas mehr als das Fenster, damit das Kontingent nach dem Ablauf der ersten Aufrufe wieder frei wird
-CLOUD_TEXT = "Abfragekontingent bei Viessmann"  # die Meldung zum erschoepften Kontingent nennt Cloud und Kontingent
+CLOUD_CODE = "meldung.kontingent_erschoepft"  # die Meldung zum erschoepften Kontingent der Hersteller-Cloud
 
 
 def _geschrieben(welt) -> object:
@@ -65,10 +65,11 @@ def test_ak_g7_01_app_verstellt_die_kurve_achtmal_am_tag(welt, satz):
     assert len(versuche) == VERSUCHE_AM_TAG[satz]  # nicht mehr Rueckschreibversuche am Tag
     assert all(spaeter - frueher >= ABSTAND_MINDESTENS for frueher, spaeter in zip(versuche, versuche[1:], strict=False))
     assert welt.anlagenstand()["hebel"]["curve"] != 0.8  # die Verstellung der App bleibt stehen
-    texte = [meldung["text"] for meldung in welt.meldungen()]
-    limit = [text for text in texte if LIMIT_TEXT in text]
+    meldungen = welt.meldungen()
+    limit = [meldung for meldung in meldungen if meldung["code"] == LIMIT_CODE]
     assert len(limit) == 1  # genau eine Meldung, dass heute nicht mehr zurueckgesetzt wird
-    assert texte[-1] == limit[0]  # sie kam nach dem letzten Versuch, danach nichts mehr
+    assert limit[0]["params"] == {}  # der verstellte Hebel (`was`) ist ein lokaler Parameter und geht nie auf den Draht
+    assert meldungen[-1] == limit[0]  # sie kam nach dem letzten Versuch, danach nichts mehr
 
 
 @pytest.fixture
@@ -113,5 +114,5 @@ def test_ak_g7_02_cloud_sperrt_und_das_kontingent_haelt(welt, cloud):
     assert len(zeiten) > CLOUD_AUFRUFE  # nach dem Ablauf der ersten Aufrufe fragt das Gateway wieder ab
     for nr in range(len(zeiten) - CLOUD_AUFRUFE):  # in keinem 24-h-Fenster mehr als 1200: der 1201. Aufruf geht nicht hinaus
         assert zeiten[nr + CLOUD_AUFRUFE] - zeiten[nr] >= CLOUD_FENSTER
-    texte = [meldung["text"] for meldung in welt.meldungen()]
-    assert any(CLOUD_TEXT in text for text in texte), f"keine Meldung zum erschoepften Kontingent: {texte}"
+    codes_der_meldungen = [meldung["code"] for meldung in welt.meldungen()]
+    assert CLOUD_CODE in codes_der_meldungen, f"keine Meldung zum erschoepften Kontingent: {codes_der_meldungen}"
