@@ -363,6 +363,39 @@ def test_a_withdrawn_offer_is_replayed_as_null(world):
     assert _soll_software(world) is None  # null = kein Angebot fuer den Updater (kanal.desired() -> {})
 
 
+UPDATES = {"funktion": "aus", "sicherheit": "automatisch"}
+
+
+def _soll_updates(world):
+    return json.loads(world.paths.updates_soll.read_text()) if world.paths.updates_soll.exists() else "fehlt"
+
+
+def test_the_updates_setting_is_given_to_the_updater_and_replayed_after_a_restart(world):
+    world.start_runtime()
+    world.connect()
+    world.konfiguration_senden(konfiguration(updates=UPDATES), 1)
+    assert _soll_updates(world) == UPDATES
+    world.paths.updates_soll.unlink()
+    _neustart(world)
+    assert _soll_updates(world) == UPDATES
+
+
+def test_a_lost_withdrawal_of_the_updates_setting_is_replayed_as_null(world):
+    world.start_runtime()
+    world.connect()
+    world.konfiguration_senden(konfiguration(updates=UPDATES), 1)
+    world.konfiguration_senden(konfiguration(updates=None), 2)
+    assert _soll_updates(world) is None
+    dateien.schreiben_json(world.paths.updates_soll, UPDATES, modus=dateien.LESBAR)  # Schreiben von null verloren
+    _neustart(world)
+    assert _soll_updates(world) is None
+
+
+def test_no_updates_replay_without_a_stored_configuration(world):
+    world.start_runtime()
+    assert _soll_updates(world) == "fehlt"
+
+
 def test_a_stored_configuration_without_a_remembered_offer_is_not_replayed(world):
     """Kein Kompatibilitaetspfad: eine gespeicherte Konfiguration mit software, aber ohne software_angebot in
     dokumente.json, ruft den Updater beim Start nicht."""

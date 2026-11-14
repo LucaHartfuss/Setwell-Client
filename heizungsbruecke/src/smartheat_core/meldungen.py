@@ -158,6 +158,10 @@ TABELLE: dict[str, Vorlage] = _ERZEUGER | {
             "Bitte die Kopie stoppen; SmartHeat regelt weiter."),
         "update_noetig": _vorlage(
             "rot", (), "Das Add-on ist zu alt für den SmartHeat-Dienst. Bitte das Add-on aktualisieren."),
+        "updates_veraltet": _vorlage(
+            "orange", ("grund",),
+            "Die installierte Software wird nicht mehr aktuell gehalten (Grund {grund}). Bitte die Einstellung zu "
+            "Updates prüfen."),
         "gesperrt": _vorlage(
             "rot", (), "Dieses Gerät ist beim SmartHeat-Dienst gesperrt. Bitte den Support kontaktieren."),
         "konfiguration_abgelehnt": _vorlage(

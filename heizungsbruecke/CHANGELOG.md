@@ -5,6 +5,10 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Neue Meldung `meldung.updates_veraltet` (Stufe `orange`, Parameter `grund`: `ablauf` oder `kein_angebot`) und ein
+  Rückruf `updates_soll` des Geräts an den Host: nach jeder Konfiguration (auch einer abgelehnten) gibt das Gerät die
+  Einstellung `updates` an den Host weiter. Der Home-Assistant-Host ignoriert sie (kein Updater).
+
 - Das Gerät liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
   Soll-Software (auch aus einer abgelehnten Konfiguration; Unlesbares blockiert nie und lässt den gemerkten Wert stehen),
   merkt sie in `dokumente.json` (ältere Dateien ohne die Schlüssel starten ohne gemerkten Wert) und meldet

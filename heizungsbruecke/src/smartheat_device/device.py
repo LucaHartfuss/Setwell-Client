@@ -612,6 +612,8 @@ class Device:
             # dasselbe Angebot, das der Speicher merkt, auch aus einer abgelehnten Konfiguration (ein Update kann der
             # Ausweg sein); ein ungueltiges laesst das vorherige stehen (R15, documents.angebot_aus)
             self._host_rufen("software_soll", self.host.software_soll, angebot.software)
+        if art == KONFIGURATION:  # die Einstellung des Kunden zu Updates, ebenso auch aus einer abgelehnten Konfiguration
+            self._host_rufen("updates_soll", self.host.updates_soll, self.documents.updates)
 
     def _zurueckgehaltene_pruefen(self, now: float) -> None:
         if not self._zurueckgehalten or now < self._pruefung_at:

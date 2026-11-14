@@ -1366,6 +1366,60 @@ def test_a_failing_software_callback_still_answers_and_hands_over(tmp_path, capl
     assert "RuntimeError" in caplog.text and "geheimer Parameter" not in caplog.text
 
 
+UPDATES = {"funktion": "aufschub", "sicherheit": "automatisch"}
+
+
+def test_the_updates_setting_of_a_configuration_reaches_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    assert world.host.updates == [UPDATES]
+
+
+def test_a_configuration_without_updates_hands_the_host_no_setting(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration())
+    assert world.host.updates == [None]
+
+
+def test_an_invalid_updates_field_keeps_the_last_setting_for_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    world.empfangen("down/config", _konfiguration(version=2, updates={"funktion": "morgen", "sicherheit": "aus"}))
+    assert world.host.updates[-1] == UPDATES
+
+
+def test_the_updates_setting_reaches_the_host_from_a_rejected_configuration(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(hebelsatz="gibt_es_nicht", updates=UPDATES))
+    assert world.link.of("up/result")[0]["ok"] is False
+    assert world.host.updates == [UPDATES]
+
+
+def test_a_dokument_other_than_a_configuration_never_touches_the_updates_setting(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/operation", _bedienung(version=3))
+    assert world.host.updates == []
+
+
+class UpdatesFehlerHost(FakeHost):
+    def updates_soll(self, updates):
+        raise RuntimeError("geheimer Parameter")
+
+
+def test_a_failing_updates_callback_still_answers_and_hands_over(tmp_path, caplog):
+    world = World(tmp_path, UpdatesFehlerHost())
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
+    assert len(world.host.konfigurationen) == 1 and world.host.software == [None]
+    assert "RuntimeError" in caplog.text and "geheimer Parameter" not in caplog.text
+
+
 class FaehigkeitenFehlerHost(FakeHost):
     def __init__(self) -> None:
         super().__init__()

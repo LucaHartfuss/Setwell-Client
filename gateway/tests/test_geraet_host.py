@@ -387,6 +387,23 @@ def test_the_software_target_is_written_for_the_updater(welt):
     assert json.loads(welt.paths.software_soll.read_text()) is None
 
 
+def test_the_updates_setting_is_written_for_the_updater(welt):
+    updates = {"funktion": "aufschub", "sicherheit": "automatisch"}
+    welt.host.updates_soll(updates)
+    assert json.loads(welt.paths.updates_soll.read_text()) == updates
+    assert oct(welt.paths.updates_soll.stat().st_mode & 0o777) == "0o644"  # der Updater (root) liest
+    welt.host.updates_soll(None)
+    assert json.loads(welt.paths.updates_soll.read_text()) is None
+
+
+def test_an_unchanged_updates_setting_is_not_written_again(welt):
+    updates = {"funktion": "aus", "sicherheit": "aus"}
+    welt.host.updates_soll(updates)
+    os.utime(welt.paths.updates_soll, (1, 1))
+    welt.host.updates_soll(updates)
+    assert welt.paths.updates_soll.stat().st_mtime == 1
+
+
 def test_software_results_are_sent_in_order_and_acknowledged(welt, clock):
     dateien.schreiben_json(welt.paths.software_meldungen, {"meldungen": [
         {"seq": 2, "version": "0.6.2", "result": "rollback", "reason": "ungesund"},

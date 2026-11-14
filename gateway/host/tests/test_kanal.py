@@ -116,6 +116,67 @@ def test_file_names_match_the_device_core_and_the_gateway_paths():
     assert paths.software_soll.name == kanal.SOLL_FILE
     assert paths.software_meldungen.name == kanal.MELDUNGEN_FILE
     assert paths.software_quittung.name == kanal.QUITTUNG_FILE
+    assert paths.updates_soll.name == kanal.UPDATES_FILE
+    assert paths.updates_veraltet.name == kanal.FRISCHE_FILE
+
+
+# --- Einstellung updates und Frische-Meldung ---
+
+EINSTELLUNG = {"funktion": "aufschub", "sicherheit": "automatisch"}
+WARNUNG = {"code": "meldung.updates_veraltet", "params": {"grund": "ablauf"}, "stufe": "orange"}
+
+
+def test_die_einstellung_updates_ist_die_der_laufzeit(tmp_path):
+    _write(tmp_path / "updates_soll.json", EINSTELLUNG)
+    assert kanal.LokalerKanal(tmp_path).updates() == EINSTELLUNG
+
+
+@pytest.mark.parametrize("inhalt", [None, "null"])
+def test_ohne_einstellung_gilt_keine_einschraenkung(tmp_path, inhalt):
+    if inhalt is not None:
+        (tmp_path / "updates_soll.json").write_text(inhalt)
+    assert kanal.LokalerKanal(tmp_path).updates() is None
+
+
+@pytest.mark.parametrize("inhalt", ["{kaputt", "[1]", '"aus"', '{"funktion": "aus"}',
+                                    '{"funktion": "aus", "sicherheit": "aufschub"}',
+                                    '{"funktion": "morgen", "sicherheit": "aus"}',
+                                    '{"funktion": "aus", "sicherheit": "aus", "x": 1}'])
+def test_eine_unlesbare_einstellung_ist_ein_kanalfehler(tmp_path, inhalt):
+    (tmp_path / "updates_soll.json").write_text(inhalt)
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).updates()
+
+
+def test_die_frische_meldung_liegt_fuer_die_laufzeit_lesbar_bereit(tmp_path):
+    kanal.LokalerKanal(tmp_path).updates_veraltet(WARNUNG)
+    datei = tmp_path / "updates_veraltet.json"
+    assert json.loads(datei.read_text()) == {"meldung": WARNUNG}
+    assert datei.stat().st_mode & 0o777 == 0o644
+
+
+def test_keine_warnung_loescht_die_meldung_und_schreibt_ohne_anlass_nichts(tmp_path):
+    k = kanal.LokalerKanal(tmp_path)
+    k.updates_veraltet(None)
+    assert not (tmp_path / "updates_veraltet.json").exists()
+    k.updates_veraltet(WARNUNG)
+    k.updates_veraltet(None)
+    assert json.loads((tmp_path / "updates_veraltet.json").read_text()) == {"meldung": None}
+
+
+def test_eine_unveraenderte_frische_meldung_wird_nicht_neu_geschrieben(tmp_path):
+    k = kanal.LokalerKanal(tmp_path)
+    k.updates_veraltet(WARNUNG)
+    datei = tmp_path / "updates_veraltet.json"
+    os.utime(datei, (1, 1))
+    k.updates_veraltet(WARNUNG)
+    assert datei.stat().st_mtime == 1
+
+
+def test_eine_nicht_schreibbare_frische_meldung_ist_ein_kanalfehler(tmp_path):
+    (tmp_path / "datei").write_text("kein Ordner")
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path / "datei").updates_veraltet(WARNUNG)
 
 
 # --- Container-schreibbarer Datenordner: Symlinks, FIFOs, riesige Dateien (Root liest und schreibt dort) ---
@@ -150,6 +211,13 @@ def _symlink(path: Path) -> None:
 
 def _huge(path: Path) -> None:
     path.write_text(json.dumps({"version": "0.6.1", "fuell": "x" * 200_000}))
+
+
+@pytest.mark.parametrize("plant", [_fifo, _symlink, _huge])
+def test_eine_unsichere_einstellungsdatei_ist_ein_kanalfehler(tmp_path, plant):
+    plant(tmp_path / "updates_soll.json")
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).updates()
 
 
 @pytest.mark.parametrize(("groesse", "erlaubt"), [(65535, True), (65536, True), (65537, False)])

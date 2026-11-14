@@ -89,6 +89,7 @@ class FakeHost:
         self.version = version
         self.synchron: bool | None = True
         self.konfigurationen, self.bedienungen, self.software, self.anzeigen_liste = [], [], [], []
+        self.updates: list = []
         self.status: dict | None = {"status": "regelt"}
         self.raum_werte: dict[int, dict | None] = {}  # Raum je weiterem Kreis
         self.raum_wert: dict | None = {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t0"}
@@ -143,6 +144,9 @@ class FakeHost:
 
     def software_soll(self, software):
         self.software.append(software)
+
+    def updates_soll(self, updates):
+        self.updates.append(updates)
 
     def runtime_status(self):
         return self.status

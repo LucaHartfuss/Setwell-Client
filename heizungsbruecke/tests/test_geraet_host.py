@@ -157,6 +157,12 @@ def test_software_is_ignored(tmp_path, monkeypatch):
     assert not any(tmp_path.iterdir())
 
 
+def test_the_updates_setting_is_ignored(tmp_path, monkeypatch):
+    host, _, _ = _host(tmp_path, monkeypatch)
+    host.updates_soll({"funktion": "aus", "sicherheit": "aus"})  # Updates kommen ueber Supervisor und Add-on-Store
+    assert not any(tmp_path.iterdir())
+
+
 def test_foreign_commands_are_not_supported(tmp_path, monkeypatch):
     host, _, _ = _host(tmp_path, monkeypatch)
     register = _register(host, tmp_path)

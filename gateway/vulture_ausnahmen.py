@@ -30,6 +30,9 @@ _.request_queue_size  # smartheat_gateway/diagnose.py: Attribut von socketserver
 # --- Bespiel-Station (AP-05b) und Tests: erzeugt das Feld passwort von werk.json ---
 _.passwort_eintrag  # smartheat_gateway/anmeldung.py: Aufrufer sind die Station (AP-05b) und gateway/tests/test_anmeldung.py
 
+# --- Pfad der Frische-Meldung: der Host-Updater schreibt die Datei, die Laufzeit liest sie erst mit der Anzeige ---
+_.updates_veraltet  # smartheat_gateway/paths.py: Pfad von data/updates_veraltet.json, Leser (Laufzeit) folgt
+
 # --- Signalhandler: signal.signal ruft handler(signum, frame) ---
 _.signum  # smartheat_gateway/runtime_main.py _terminate
 _.frame  # smartheat_gateway/runtime_main.py _terminate

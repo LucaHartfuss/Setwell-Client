@@ -145,6 +145,9 @@ class HaDeviceHost(GeraetHostBasis):
     def software_soll(self, software: dict | None) -> None:
         """HA-Add-ons aktualisiert der Supervisor; die Faehigkeit updater fehlt."""
 
+    def updates_soll(self, updates: dict | None) -> None:
+        """Ebenso: ohne Updater gibt es nichts, was die Einstellung zu Updates liest."""
+
     def runtime_status(self) -> dict | None:
         return self.runtime_status_event
 

@@ -303,6 +303,11 @@ class GatewayDeviceHost(GeraetHostBasis):
             # 0644: der Updater (root) liest
             dateien.schreiben_json(self.paths.software_soll, software, modus=dateien.LESBAR)
 
+    def updates_soll(self, updates: dict | None) -> None:
+        if dateien.lesen_json(self.paths.updates_soll) != updates or not self.paths.updates_soll.exists():
+            # 0644: der Updater (root) liest
+            dateien.schreiben_json(self.paths.updates_soll, updates, modus=dateien.LESBAR)
+
     def runtime_status(self) -> dict | None:
         return self.zustand.status
 

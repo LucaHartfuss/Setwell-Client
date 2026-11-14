@@ -94,14 +94,20 @@ def software_soll_nachholen(geraet: GatewayDeviceHost, device: Device) -> None:
     nicht erneut zu. Gemerkt ist das zuletzt gueltige Angebot, auch aus einer abgelehnten
     Konfiguration; ein zurueckgezogenes (software null) geht als null weiter (der Updater liest es als "kein Angebot"),
     damit keine zurueckgezogene Version aus einer alten software_soll.json installiert wird. Ohne gemerktes Angebot
-    (dokumente.json ohne software_angebot) wird der Updater nicht gerufen."""
+    (dokumente.json ohne software_angebot) wird der Updater nicht gerufen. Mit einer gespeicherten Konfiguration
+    geht ebenso die gemerkte Einstellung zu Updates (auch null) an den Updater."""
     angebot = device.documents.software_angebot()
-    if angebot is None:
-        return
+    if angebot is not None:
+        try:
+            geraet.software_soll(angebot.software)
+        except Exception as error:  # ein Schreibfehler darf den Start nicht verhindern; der naechste versucht es erneut
+            logger.error("Soll-Software nicht nachgeholt (%s)", type(error).__name__)
+    if device.documents.inhalt(KONFIGURATION) is None:
+        return  # ohne gespeicherte Konfiguration gibt es keine Einstellung des Kunden
     try:
-        geraet.software_soll(angebot.software)
-    except Exception as error:  # ein Schreibfehler darf den Start nicht verhindern; der naechste versucht es erneut
-        logger.error("Soll-Software nicht nachgeholt (%s)", type(error).__name__)
+        geraet.updates_soll(device.documents.updates)  # ebenso die Einstellung zu Updates, auch null
+    except Exception as error:
+        logger.error("Einstellung zu Updates nicht nachgeholt (%s)", type(error).__name__)
 
 
 def start(paths: Paths, bus, mirror: ZigbeeMirror, geraet: GatewayDeviceHost, device: Device, clock=time.monotonic,

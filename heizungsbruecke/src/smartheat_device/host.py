@@ -116,6 +116,11 @@ class DeviceHost(Protocol):
         """Feld software jeder Konfiguration mit bekanntem Schema, auch einer abgelehnten (Updater)."""
         ...
 
+    def updates_soll(self, updates: dict | None) -> None:
+        """Einstellung des Kunden zu Updates (Feld updates, wie das Dokumentenlager sie merkt; None = keine), nach
+        jeder Konfiguration, auch einer abgelehnten (Updater)."""
+        ...
+
     def runtime_status(self) -> dict | None: ...
 
     def entfernen_wahl(self) -> str | None:

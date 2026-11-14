@@ -190,6 +190,14 @@ def test_ein_wert_in_codeform_bleibt_auf_dem_draht():
     assert meldungen.draht(meldungen.neu("meldung.abo_inaktiv", ende="2026-12-31"))["params"] == {"ende": "2026-12-31"}
 
 
+@pytest.mark.parametrize("grund", ["ablauf", "kein_angebot"])
+def test_die_meldung_updates_veraltet_hat_stufe_orange_und_den_parameter_grund(grund):
+    meldung = meldungen.neu("meldung.updates_veraltet", grund=grund)
+    assert (meldung.stufe, meldungen.TABELLE["meldung.updates_veraltet"].params) == ("orange", ("grund",))
+    assert meldungen.aus_dict(meldungen.zu_dict(meldung)) == meldung
+    assert meldungen.text(meldung)
+
+
 def test_die_erzeugermeldungen_haben_die_stufen_rot_und_gelb_und_den_kennungsparameter():
     stoerung = meldungen.neu("erzeuger.stoerung", roh_text="f_28", quelle="mypyllant")
     hinweis = meldungen.neu("erzeuger.hinweis", roh_text="3", quelle="mypyllant")

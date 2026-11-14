@@ -1,7 +1,9 @@
 """Lokaler Kanal des Updaters: ersetzt die signierten HTTPS-Anfragen an die Geraete-API. Die Laufzeit (Geraetekern) schreibt die Soll-Software aus dem Konfigurationsdokument nach
 data/software_soll.json; der Updater schreibt seine Ergebnisse nach data/software_meldungen.json (fortlaufende seq, die
 letzten MELDUNGEN_MAX), die Laufzeit sendet sie als up/result (dokument "software") und quittiert die zuletzt gesendete
-seq in data/software_quittung.json. Je Datei genau ein Schreiber.
+seq in data/software_quittung.json. Die Einstellung des Kunden zu Updates schreibt die Laufzeit nach
+data/updates_soll.json; die Frische-Warnung legt der Updater in data/updates_veraltet.json ab. Je Datei genau ein
+Schreiber.
 
 Erreichbarkeit fuer die Gesundheitspruefung: TCP-Verbindung zum Broker aus data/device/endpoint.json (Netz und DNS;
 unabhaengig vom neuen Bundle). Standardbibliothek; smartheat_device ist auf dem Host nicht installiert, die Dateinamen
@@ -21,6 +23,12 @@ from smartheat_host.lesen import read_bytes, read_json
 SOLL_FILE = "software_soll.json"
 MELDUNGEN_FILE = "software_meldungen.json"
 QUITTUNG_FILE = "software_quittung.json"
+UPDATES_FILE = "updates_soll.json"
+FRISCHE_FILE = "updates_veraltet.json"
+# smartheat_device.wire.UPDATES_FUNKTIONEN und UPDATES_SICHERHEIT (smartheat_device ist auf dem Host nicht installiert;
+# der Vertragstest im Host haelt die Werte gleich)
+UPDATES_FUNKTIONEN = ("automatisch", "aufschub", "aus")
+UPDATES_SICHERHEIT = ("automatisch", "aus")
 ENDPOINT_FILE = "endpoint.json"  # smartheat_device.bootstrap.ENDPOINT_FILE, unter data/device/
 MELDUNGEN_MAX = 20
 
@@ -49,6 +57,34 @@ class LokalerKanal:
         if not isinstance(raw, dict):
             raise KanalFehler("Soll-Software ist kein Objekt")
         return raw
+
+    def updates(self) -> dict | None:
+        """Einstellung des Kunden zu Updates (funktion, sicherheit); None: keine bekannt, also keine Einschraenkung.
+        Eine unlesbare oder unsinnige Datei ist vorlaeufig (KanalFehler): der Updater installiert dann nichts."""
+        try:
+            raw = json.loads(read_bytes(self._data / UPDATES_FILE))
+        except FileNotFoundError:
+            return None  # die Laufzeit hat noch keine Konfiguration mit Einstellung geschrieben
+        except (OSError, ValueError) as error:
+            raise KanalFehler(f"Einstellung zu Updates unlesbar ({type(error).__name__})") from None
+        if raw is None:
+            return None
+        if not (isinstance(raw, dict) and set(raw) == {"funktion", "sicherheit"}
+                and raw["funktion"] in UPDATES_FUNKTIONEN and raw["sicherheit"] in UPDATES_SICHERHEIT):
+            raise KanalFehler("Einstellung zu Updates hat nicht die Vertragsform")
+        return raw
+
+    def updates_veraltet(self, meldung: dict | None) -> None:
+        """Die Frische-Meldung (Ablage der Meldungsform) bzw. None fuer keine Warnung; nur bei Aenderung geschrieben.
+        Ohne Datei und ohne Warnung bleibt der Ordner unberuehrt."""
+        neu = {"meldung": meldung}
+        try:
+            alt = read_json(self._data / FRISCHE_FILE)
+            if alt == neu or (alt is None and meldung is None):
+                return
+            dateien.schreiben_json(self._data / FRISCHE_FILE, neu, modus=dateien.LESBAR)  # 0644: die Laufzeit liest
+        except OSError as error:
+            raise KanalFehler(f"Frische-Meldung nicht schreibbar ({type(error).__name__})") from None
 
     def update_result(self, version: str, result: str, reason: str) -> None:
         raw = read_json(self._data / MELDUNGEN_FILE)

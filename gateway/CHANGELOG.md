@@ -2,6 +2,16 @@
 
 ## Unveroeffentlicht
 
+- Der Updater des Gateways achtet auf die Einstellung `updates` des Kunden: ein signiertes Angebot, dessen Art
+  (`sicherheit`, `funktion`, `treiberfix`) die Einstellung nicht erlaubt, wird nicht installiert und einmal mit dem Grund
+  `einstellung_aus` gemeldet (kein Eintrag unter den abgelehnten Angeboten, es gilt wieder, sobald die Einstellung es
+  erlaubt); `einmalig` hebt das auf. Die Laufzeit legt die Einstellung in der neuen Datei `data/updates_soll.json` ab
+  (neue Datei, keine Migration; ohne sie gilt keine Einschraenkung, eine unlesbare Datei laesst den Updater abwarten).
+  Ausserdem warnt der Updater in `data/updates_veraltet.json` (neue Datei), wenn das Manifest der laufenden Version in
+  weniger als 60 Tagen ablaeuft oder seit 90 Tagen kein hoeheres Angebot kam (Meldung `meldung.updates_veraltet`; nie ohne
+  verlaessliche Uhr, nie bei ausgeschalteten Sicherheitsupdates). Neues Feld in `updater/state.json`: `aus_gemeldet`;
+  die Zaehlung der Frische steht in der neuen Datei `updater/frische.json` (ohne sie beginnt die Zaehlung neu).
+
 - Das Geraet liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
   Soll-Software (Unlesbares blockiert nie) und merkt sie in `dokumente.json`; das `hello` des Gateways traegt
   `auto_update` und `integration_version` nie.
