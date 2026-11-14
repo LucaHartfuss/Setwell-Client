@@ -607,3 +607,11 @@ def test_an_operation_in_the_idle_state_is_not_posted_to_the_worker(welt, caplog
         welt.host.bedienung_uebernommen(bedienung(22.5))
         leerlauf.run_pending()
     assert "Kein Handler" not in caplog.text
+
+
+def test_das_gateway_hat_keine_integration_und_meldet_nie_integration_veraltet():
+    """Die Meldung zur veralteten Integration gibt es nur im HA-Host: das Gateway hat weder ein Lebenszeichen der
+    Integration noch einen Code dafuer."""
+    assert not hasattr(gh.GatewayDeviceHost, "integration_stand")
+    quellen = Path(gh.__file__).parent
+    assert not [p.name for p in quellen.rglob("*.py") if "integration_veraltet" in p.read_text()]

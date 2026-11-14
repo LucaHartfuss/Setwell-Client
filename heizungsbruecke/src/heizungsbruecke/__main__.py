@@ -39,7 +39,7 @@ from typing import BinaryIO
 from heizungsbruecke import config, derived_sensors, geraet_nachweis, stdin_befehl
 from heizungsbruecke.discovery import Discovery
 from heizungsbruecke.geraet_host import HaDeviceHost
-from heizungsbruecke.geraet_status import GeraetStatus, lokale_sicht
+from heizungsbruecke.geraet_status import GeraetStatus, KritischesEnde, lokale_sicht
 from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.host import HaAnlagenHost
 from heizungsbruecke.supervisor import SupervisorApi
@@ -238,7 +238,7 @@ def verdrahten(geraet: HaDeviceHost, device, ha_api, supervisor) -> GeraetStatus
         return dokument.inhalt if dokument is not None else None
 
     lokal = lokale_sicht(lambda: device.documents.aktuell(KONFIGURATION), _raum_soll, lambda kreis: (geraet.raum(kreis) or {}).get("ist"),
-                         anzeige_inhalt)
+                         anzeige_inhalt, kritisch_ende=KritischesEnde(device.update_noetig_kritisch, config.entitlement_path))
     status = GeraetStatus(ha_api, device.identity.device_id, lokal,
                           laufzeit_merken=lambda event: setattr(geraet, "runtime_status_event", event))
     geraet.status_sink = status

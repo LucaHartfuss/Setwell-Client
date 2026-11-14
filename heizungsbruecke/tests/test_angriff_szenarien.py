@@ -40,7 +40,8 @@ FLUT_SCHLUESSEL = ("geraet_doppelt", "update_noetig", "gesperrt")
 
 
 def _hinweis(key, **aendern):
-    return {"key": key, "code": f"meldung.{key}", "params": {}, "stufe": "rot", **aendern}
+    params = {"ende": "2026-12-01"} if key == "update_noetig" else {}  # nur diese Meldung traegt ein Datum
+    return {"key": key, "code": f"meldung.{key}", "params": params, "stufe": "rot", **aendern}
 
 
 

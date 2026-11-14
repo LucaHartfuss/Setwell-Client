@@ -125,7 +125,8 @@ def test_hints_messages_rejection_and_update_become_meldungen_with_code_and_para
     assert keys["wunsch_begrenzt"]["code"] == "meldung.wunsch_begrenzt"
     assert keys["wunsch_begrenzt"]["params"] == {"roh": 15.0, "begrenzt": 18.0}
     assert keys["konfiguration_abgelehnt"]["params"] == {"grund": "ungueltig"}
-    assert keys["update_noetig"]["code"] == "meldung.update_noetig"
+    # ohne bekannten Beginn der Frist (Uhr unklar) gilt die Fassung ohne Datum
+    assert keys["update_noetig"]["code"] == "meldung.update_noetig_unbekannt"
 
 
 @pytest.mark.parametrize("stufe", ["rot", "orange", "gelb"])

@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Die Meldung `update_noetig` des Geraets (gemeinsame Tabelle) traegt unter einer kritischen Mindestversion das Datum
+  der urspruenglichen Werte, ohne bekannten Beginn gilt die Fassung `update_noetig_unbekannt`. Die Meldung zur
+  veralteten Integration gibt es nur im Add-on, nie am Gateway.
+
 - Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
   Notbetrieb mit unveraenderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
   30 Tage zaehlen lokal ab dem ersten Empfang mit vertrauenswuerdiger Uhr und ueberstehen Neustarts (eine unklare Uhr zaehlt

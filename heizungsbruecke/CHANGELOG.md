@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Unter einer kritischen Mindestversion nennt die Meldung `update_noetig` das Datum, an dem das Gerät die
+  ursprünglichen Werte wieder einstellt (Beginn der lokalen Frist plus 30 Tage); ohne bekannten Beginn (unklare Uhr)
+  erscheint die Fassung ohne Datum. Ist die Integration veraltet, zeigt das Add-on in Home Assistant die Meldung
+  „Integration veraltet“, bis sie aktuell ist oder ihr Lebenszeichen 15 Minuten fehlt.
+
 - Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
   Notbetrieb mit unveränderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
   30 Tage zählen lokal ab dem ersten Empfang mit vertrauenswürdiger Uhr und überstehen Neustarts (eine unklare Uhr zählt

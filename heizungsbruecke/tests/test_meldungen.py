@@ -26,12 +26,30 @@ def test_jede_stufe_der_tabelle_steht_im_vertrag():
 
 
 @pytest.mark.parametrize(("name", "params"), [
-    ("geraet_doppelt", {}), ("update_noetig", {}), ("gesperrt", {}), ("konfiguration_abgelehnt", {"grund": "ungueltig"}),
+    ("geraet_doppelt", {}), ("update_noetig", {"ende": "2026-12-01"}), ("update_noetig_unbekannt", {}),
+    ("gesperrt", {}), ("konfiguration_abgelehnt", {"grund": "ungueltig"}),
 ])
 def test_die_hinweise_des_geraets_sind_codes_der_stufe_rot(name, params):
     meldung = meldungen.neu(f"meldung.{name}", **params)
     assert meldung.stufe == "rot" and meldungen.text(meldung)
     assert meldungen.aus_dict(meldungen.zu_dict(meldung)) == meldung
+
+
+def test_update_noetig_nennt_das_datum_der_ursprungswerte_und_die_fassung_ohne_datum_keines():
+    mit = meldungen.text(meldungen.neu("meldung.update_noetig", ende="2026-12-01"))
+    ohne = meldungen.text(meldungen.neu("meldung.update_noetig_unbekannt"))
+    assert "01.12.2026" in mit and "Add-on" in mit
+    assert not any(ziffer in ohne for ziffer in "0123456789") and "Add-on" in ohne
+    with pytest.raises(ValueError):
+        meldungen.neu("meldung.update_noetig")  # das Datum ist Pflicht, die Fassung ohne Datum ein eigener Code
+    with pytest.raises(ValueError):
+        meldungen.neu("meldung.update_noetig", ende="01.12.2026")  # nur ein ISO-Datum
+
+
+def test_integration_veraltet_ist_orange_ohne_parameter():
+    meldung = meldungen.neu("meldung.integration_veraltet")
+    assert meldung.stufe == "orange" and meldung.params == {}
+    assert "Integration" in meldungen.text(meldung)
 
 
 def test_jeder_schluessel_der_hinweise_hat_einen_code_in_der_tabelle():

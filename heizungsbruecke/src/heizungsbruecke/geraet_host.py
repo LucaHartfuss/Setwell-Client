@@ -23,6 +23,7 @@ from heizungsbruecke.geraet_status import GeraetStatus
 from heizungsbruecke.ha_sinks import GeraetUndHaSink, HaNotifySink
 from heizungsbruecke.integration_stand import IntegrationStand
 from heizungsbruecke.version import ADDON_VERSION
+from smartheat_core import meldungen
 from smartheat_device import fehler, nachrichten, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Outcome, Waiting
 from smartheat_device.geraet_host_basis import SIGN_OFF_WAIT_SECONDS, GeraetHostBasis, abmeldung_abwarten
@@ -39,6 +40,8 @@ UHR_CACHE_SECONDS = 60
 AUTO_UPDATE_CACHE_SECONDS = 60
 INVENTUR_SECONDS = 120
 _FREMD = ("zigbee_permit_join", "zigbee_devices", "driver_login")
+#: Schluessel der Meldung zur veralteten Integration (Kennung der Persistent Notification in HA).
+INTEGRATION_VERALTET = "integration_veraltet"
 
 
 def _nicht_unterstuetzt(payload: dict) -> Failed:
@@ -59,6 +62,7 @@ class HaDeviceHost(GeraetHostBasis):
         self.claim_code: Callable[[], str | None] = lambda: None  # Uebernahme-Code des Geraets (__main__.verdrahten)
         self.runtime_status_event: dict | None = None  # letztes Status-Ereignis der Laufzeit (laufzeit_merken)
         self.integration_stand = IntegrationStand()  # Lebenszeichen der Integration (geraet_trigger.build)
+        self._integration_veraltet_offen = False  # Meldung zur veralteten Integration in HA offen (_integration_pruefen)
         self._raeume: dict[int, dict | None] = {}  # je Kreis der Raum des letzten Takts
         self._uhr: tuple[float, bool | None] | None = None
         self._auto_update: tuple[float, bool | None] | None = None
@@ -171,6 +175,24 @@ class HaDeviceHost(GeraetHostBasis):
                                              self.claim_code() if anzeige.code_zeigen else None)
             except Exception as error:
                 logger.warning("Discovery nicht aktualisiert (%s)", type(error).__name__)
+        try:
+            self._integration_pruefen()
+        except Exception as error:
+            logger.warning("Meldung zur Integration nicht gesetzt (%s)", type(error).__name__)
+
+    def _integration_pruefen(self) -> None:
+        """Offen, solange die Integration veraltet ist, sonst zu (auch nach Ablauf der Frist des Lebenszeichens).
+        Nur diese Persistent Notification: die Integration kann sie nicht selbst zeigen, der Server erfaehrt nichts.
+        Schlaegt HA fehl, bleibt der Stand unveraendert und der naechste Takt versucht es erneut."""
+        veraltet = self.integration_stand.veraltet(self._clock())
+        if veraltet == self._integration_veraltet_offen:
+            return
+        sink = HaNotifySink(self._ha, [])
+        if veraltet:
+            sink.show(INTEGRATION_VERALTET, meldungen.neu("meldung.integration_veraltet"))
+        else:
+            sink.withdraw(INTEGRATION_VERALTET)
+        self._integration_veraltet_offen = veraltet
 
     # --- Befehle ---
 
