@@ -1,6 +1,8 @@
 """Stoerungen des Waermeerzeugers: das Geraet liest die Kennungen, die die Quelle (Rolle fault_codes) meldet, und macht
 je Kennung eine offene Meldung (`erzeuger.stoerung`, ein Wartungshinweis `erzeuger.hinweis`), sobald sie 15 Minuten
 ununterbrochen ansteht. Faellt die Kennung weg, schliesst die Meldung ohne Push; kehrt sie zurueck, zaehlt die Zeit neu.
+Wechselt die Art einer offenen Kennung (Wartungshinweis zu Stoerung oder zurueck), schliesst die alte Meldung ohne Push,
+und die neue Art zaehlt ihre eigenen 15 Minuten.
 Je Kreis sind hoechstens 8 Meldungen offen. Die Telemetrie nennt die aelteste offene Stoerung (`erzeuger_stoerung`), ein
 Hinweis zaehlt dort nicht.
 
@@ -128,6 +130,28 @@ def _lesen(rt, ref: str) -> dict[str, Meldung] | None:
     return anstehend
 
 
+def _stufen_abgleichen(rt, stand: Stand, anstehend: Mapping[str, Meldung]) -> Stand:
+    """Gleicht die offenen Meldungen mit dem ab, was jetzt ansteht. Fehlt einer offenen Kennung die gueltige Ablage
+    (Bestand ohne Codes), meldet der Notifier sie mit der echten Meldung neu. Wechselt sonst die Art (Wartungshinweis zu
+    Stoerung oder zurueck), schliesst die alte Meldung ohne Push und die neue Art zaehlt ihre eigenen 15 Minuten."""
+    offen = dict(stand.offen)
+    seit = dict(stand.anstehen.seit)
+    geoeffnet = set(stand.anstehen.offen)
+    for kennung in sorted(stand.offen):
+        neu = anstehend.get(kennung)
+        if neu is None:
+            continue
+        schluessel = f"{KEY}:{kennung}"
+        if rt.notifier.notify(schluessel, STATE_OFFEN, neu, critical=True):
+            offen[kennung] = neu
+        elif neu.code != stand.offen[kennung].code:
+            rt.notifier.notify(schluessel, STATE_OK, stand.offen[kennung], critical=True, silent_ok=True)
+            del offen[kennung]
+            seit.pop(kennung, None)
+            geoeffnet.discard(kennung)
+    return Stand(Anstehen(seit, frozenset(geoeffnet)), offen)
+
+
 def check(rt) -> None:
     ref = rt.manifest.refs.get("fault_codes")
     stand = _stand(rt)
@@ -138,6 +162,7 @@ def check(rt) -> None:
         if gelesen is None:
             return
         anstehend = gelesen
+    stand = _stufen_abgleichen(rt, stand, anstehend)
     anstehen, wechsel = lebensdauer_schritt(stand.anstehen, anstehend, rt.clock())
     offen = {kennung: meldung for kennung, meldung in stand.offen.items() if kennung in anstehen.offen}
     for kennung in sorted(wechsel.geschlossen):

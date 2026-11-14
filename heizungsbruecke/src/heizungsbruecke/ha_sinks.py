@@ -37,7 +37,7 @@ class HaNotifySink:
         self._ha_api = ha_api
         self._services = list(services)
 
-    def push(self, key: str, meldung: Meldung) -> None:
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
         message = HA_TEXTS.text(meldung)
         for service in self._services:
             try:
@@ -91,9 +91,11 @@ class GeraetUndHaSink:
         except Exception as fehler:
             logger.warning("Meldungs-Ereignis konnte nicht gefeuert werden: %s", type(fehler).__name__)
 
-    def push(self, key: str, meldung: Meldung) -> None:
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
         self._geraet.push(key, meldung)
         self._ha.push(key, meldung)
+        if begleitet:
+            return  # show bzw. withdraw im selben Uebergang feuert das Ereignis
         with self._lock:
             offen = key in self._offen
         self._ereignis(key, meldung, offen=offen)
@@ -102,12 +104,16 @@ class GeraetUndHaSink:
         self._geraet.show(key, meldung)
         with self._lock:
             self._offen[key] = meldung
-        self._ha.show(key, meldung)
-        self._ereignis(key, meldung, offen=True)
+        try:
+            self._ha.show(key, meldung)
+        finally:
+            self._ereignis(key, meldung, offen=True)
 
     def withdraw(self, key: str) -> None:
         self._geraet.withdraw(key)
         with self._lock:
             meldung = self._offen.pop(key, None)
-        self._ha.withdraw(key)
-        self._ereignis(key, meldung, offen=False)
+        try:
+            self._ha.withdraw(key)
+        finally:
+            self._ereignis(key, meldung, offen=False)

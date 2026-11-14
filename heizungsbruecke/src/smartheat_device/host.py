@@ -28,7 +28,7 @@ class MeldungSink:
         self._offen: dict[str, Meldung] = {}
         self._lock = threading.Lock()
 
-    def push(self, key: str, meldung: Meldung) -> None:
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
         with self._lock:
             offen = key in self._offen
         self._melden(key, meldung, offen=offen)

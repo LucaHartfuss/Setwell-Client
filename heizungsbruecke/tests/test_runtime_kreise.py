@@ -29,7 +29,7 @@ class Senke:
     def publish(self, event):
         self.ereignisse.append(event)
 
-    def push(self, key, meldung):
+    def push(self, key, meldung, *, begleitet=False):
         self.schluessel.append(key)
         self.meldungen.append(meldung)
 

@@ -53,7 +53,7 @@ class Senke:
     def publish(self, event):
         self.ereignisse.append(event)
 
-    def push(self, key, meldung):
+    def push(self, key, meldung, *, begleitet=False):
         self.meldungen.append(HA_TEXTS.text(meldung))
 
     def show(self, key, meldung):

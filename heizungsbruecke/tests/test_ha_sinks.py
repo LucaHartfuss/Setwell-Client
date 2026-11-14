@@ -7,6 +7,7 @@ from fakes import FREMDTEXT, FREMDTEXT_IM_LOG, FailingServiceHa, FakeHa, logzeil
 from heizungsbruecke.ha_sinks import EREIGNIS_MELDUNG, MELDUNG_SCHEMA, GeraetUndHaSink, HaNotifySink, notification_id
 from smartheat_core import meldungen
 from smartheat_device.host import MeldungSink
+from smartheat_runtime.notifier import STATE_OK, Notifier
 
 ABO = meldungen.neu("meldung.abo_beendet")
 TEXT = meldungen.text(ABO)
@@ -70,6 +71,38 @@ def test_jeder_uebergang_feuert_ein_ereignis_mit_code_params_stufe_und_offen():
         {"schema": MELDUNG_SCHEMA, "geraet_id": "geraet-1", "key": "abo", "code": ABO.code, "params": {}, "stufe": stufe,
          "offen": offen} for offen in (True, False, False)]
     assert MELDUNG_SCHEMA == 1
+
+
+def test_der_notifier_feuert_je_uebergang_genau_ein_ereignis_mit_dem_richtigen_offen(make_store):
+    """Push, show und withdraw gehoeren beim Notifier zu einem Uebergang: das Ereignis kommt einmal, nicht je Aufruf
+    (sonst widersprechen sich zwei Ereignisse im Feld `offen`)."""
+    ha, gemeldet = FakeHa(), []
+    notifier = Notifier(make_store(), _kombiniert(ha, gemeldet=gemeldet))
+    rot = meldungen.neu("meldung.geraet_doppelt")
+
+    notifier.notify("doppelt", "offen", rot, critical=True)
+    assert [(e["code"], e["offen"]) for e in _ereignisse(ha)] == [(rot.code, True)]
+
+    notifier.notify("doppelt", STATE_OK, rot, critical=True)
+    assert [(e["code"], e["offen"]) for e in _ereignisse(ha)] == [(rot.code, True), (rot.code, False)]
+
+    notifier.notify("hinweis", "x", ABO, critical=False)  # ein Hinweis ohne offene Meldung: ein Ereignis, nicht offen
+    assert [(e["key"], e["offen"]) for e in _ereignisse(ha)][2:] == [("hinweis", False)]
+
+    notifier.notify("still", "offen", rot, critical=True)
+    notifier.notify("still", STATE_OK, rot, critical=True, silent_ok=True)  # ohne Push schliesst das Ereignis allein
+    assert [(e["key"], e["offen"]) for e in _ereignisse(ha)][3:] == [("still", True), ("still", False)]
+
+
+def test_ein_ereignis_geht_auch_dann_raus_wenn_die_offene_meldung_in_ha_scheitert(make_store):
+    class HaOhnePersistent(FakeHa):
+        def create_persistent_notification(self, *args, **kwargs):
+            raise RuntimeError("HA startet")
+
+    ha = HaOhnePersistent()
+    notifier = Notifier(make_store(), _kombiniert(ha))
+    notifier.notify("doppelt", "offen", meldungen.neu("meldung.geraet_doppelt"), critical=True)
+    assert [e["offen"] for e in _ereignisse(ha)] == [True]
 
 
 def test_ein_push_eines_offenen_keys_ist_offen_und_die_entwarnung_traegt_den_code_der_offenen_meldung():

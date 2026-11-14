@@ -93,7 +93,7 @@ class FakeNotifySink:
         """(Schluessel, Code) je Push."""
         return [(key, meldung.code) for key, meldung in self.push_meldungen]
 
-    def push(self, key: str, meldung: Meldung) -> None:
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
         self.pushes.append((key, meldungen.text(meldung)))
         self.push_meldungen.append((key, meldung))
 

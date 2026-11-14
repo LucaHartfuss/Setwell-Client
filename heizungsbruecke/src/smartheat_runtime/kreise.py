@@ -55,8 +55,8 @@ class _KreisMeldesenke:
     def __init__(self, senke, kreis: int) -> None:
         self._senke, self._praefix = senke, f"kreis-{kreis}:"
 
-    def push(self, key: str, meldung: Meldung) -> None:
-        self._senke.push(self._praefix + key, meldung)
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
+        self._senke.push(self._praefix + key, meldung, begleitet=begleitet)
 
     def show(self, key: str, meldung: Meldung) -> None:
         self._senke.show(self._praefix + key, meldung)

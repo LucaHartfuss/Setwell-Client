@@ -93,7 +93,7 @@ class Sent:
 
 
 class _NullSink:
-    def push(self, key, message):
+    def push(self, key, message, *, begleitet=False):
         pass
 
     def show(self, key, message):

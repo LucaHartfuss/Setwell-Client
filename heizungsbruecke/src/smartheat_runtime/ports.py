@@ -69,8 +69,10 @@ class StatusSink(Protocol):
 class NotifySink(Protocol):
     """Meldungen an den Kunden. Entprellung, Hinweis-Schalter und offene Meldungen fuehrt der Notifier."""
 
-    def push(self, key: str, meldung: Meldung) -> None:
-        """Einmalige Nachricht (HA: alle Notify-Dienste). Fehler einzelner Kanaele behandelt der Sink selbst."""
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
+        """Einmalige Nachricht (HA: alle Notify-Dienste). Fehler einzelner Kanaele behandelt der Sink selbst.
+        `begleitet`: auf den Push folgt im selben Uebergang `show` bzw. `withdraw`; ein Sink, der je Uebergang ein
+        Ereignis meldet, laesst es dann dem Aufruf danach."""
         ...
 
     def show(self, key: str, meldung: Meldung) -> None:

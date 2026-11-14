@@ -232,6 +232,53 @@ def test_nach_einem_neustart_bleibt_die_offene_meldung_ohne_neue_wartezeit_und_s
     assert danach.notifier.state("erzeuger_stoerung:f_28") == STATE_OK
 
 
+@pytest.mark.parametrize(("vorher_hinweis", "code_danach"), [(True, "erzeuger.stoerung"), (False, "erzeuger.hinweis")])
+def test_ein_stufenwechsel_der_offenen_kennung_schliesst_die_meldung_und_zaehlt_neu(
+        make_store, vorher_hinweis, code_danach):
+    """Aus dem Wartungshinweis wird eine Stoerung (und umgekehrt): die offene Meldung traegt sonst die falsche Stufe.
+    Die alte Meldung schliesst ohne Push, die neue Art braucht ihre eigenen 15 Minuten."""
+    rt = _rt(make_store)
+    _setzen(rt, _stoerung("f_28", hinweis=vorher_hinweis))
+    erzeugerstoerung.check(rt)
+    rt.clock.advance(BESTAETIGUNG)
+    erzeugerstoerung.check(rt)
+    pushes = len(rt.kunde.pushes)
+
+    _setzen(rt, _stoerung("f_28", hinweis=not vorher_hinweis))
+    erzeugerstoerung.check(rt)
+    assert rt.kunde.offen == {} and rt.kunde.withdrawn == ["erzeuger_stoerung:f_28"]
+    assert rt.notifier.state("erzeuger_stoerung:f_28") == STATE_OK
+    assert len(rt.kunde.pushes) == pushes
+
+    rt.clock.advance(BESTAETIGUNG - 1)
+    erzeugerstoerung.check(rt)
+    assert rt.kunde.offen == {}
+    rt.clock.advance(1)
+    erzeugerstoerung.check(rt)
+    assert _offen(rt) == {"erzeuger_stoerung:f_28": code_danach}
+    assert len(rt.kunde.pushes) == pushes + 1
+
+
+def test_eine_offene_kennung_ohne_gueltige_ablage_wird_nach_dem_neustart_mit_der_echten_meldung_neu_gemeldet(make_store):
+    store = make_store()
+    vorher = _rt(make_store, store=store)
+    _setzen(vorher, _stoerung("f_28", hinweis=True))
+    erzeugerstoerung.check(vorher)
+    vorher.clock.advance(BESTAETIGUNG)
+    erzeugerstoerung.check(vorher)
+    store.update(notify_meldungen={})  # Bestand ohne Ablage
+
+    danach = _rt(make_store, store=store)
+    _setzen(danach, _stoerung("f_28", hinweis=True))
+    erzeugerstoerung.check(danach)
+
+    assert _offen(danach) == {"erzeuger_stoerung:f_28": "erzeuger.hinweis"} and len(danach.kunde.pushes) == 1
+    assert store.state.notify_meldungen["erzeuger_stoerung:f_28"] == meldungen.zu_dict(
+        meldungen.neu("erzeuger.hinweis", roh_text="f_28", quelle=QUELLE))
+    erzeugerstoerung.check(danach)
+    assert len(danach.kunde.pushes) == 1 and danach.kunde.withdrawn == []
+
+
 def test_ein_wegfall_waehrend_des_neustarts_schliesst_die_gespeicherte_meldung(make_store):
     store = make_store()
     vorher = _rt(make_store, store=store)

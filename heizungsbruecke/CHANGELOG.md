@@ -10,12 +10,16 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   Raum- oder Entity-Namen, sowie die Push-Regeln `push_regeln`. Zu jedem Übergang einer Meldung (neu, aktualisiert,
   geschlossen) feuert das Add-on das neue Ereignis `smartheat_meldung` mit `schema`, `geraet_id`, `key`, `code`, `params`,
   `kreis`, `stufe` und `offen`. Der bisherige Push und die Dauermeldung von Home Assistant bleiben bis zur Auswertung in
-  der Integration unverändert.
+  der Integration unverändert. Das Ereignis kommt je Übergang genau einmal (bei einer kritischen Meldung nicht mehr
+  zusätzlich vom Push) und auch dann, wenn Home Assistant die offene Meldung nicht anlegen kann.
+- Eine offene kritische Meldung ohne gültige gespeicherte Meldung (Bestand aus einer älteren Version) wird bei der
+  nächsten Prüfung, die den Zustand bestätigt, einmal neu gemeldet, statt für immer still offen zu bleiben.
 - Störungen des Wärmeerzeugers: Das Gerät liest über die Rolle `fault_codes` die Fehlercodes der Anlage (Attribut
   `diagnostic_trouble_codes` der Entity `binary_sensor.<anlage>_trouble_codes` der Integration `mypyllant`, deren Option
   `fetch_dtc` standardmäßig aus ist). Steht eine Kennung 15 Minuten ununterbrochen an, meldet das Gerät `erzeuger.stoerung`
   (Wartungshinweise `erzeuger.hinweis`), je Kreis höchstens 8 offene Meldungen; fällt sie weg, schließt die Meldung ohne
-  Push. Die Telemetrie trägt je Kreis das neue Feld `erzeuger_stoerung` (älteste offene Störung als Kennung oder `null`).
+  Push. Wechselt eine offene Kennung zwischen Wartungshinweis und Störung, schließt die alte Meldung ohne Push, und die
+  neue Art zählt ihre eigenen 15 Minuten. Die Telemetrie trägt je Kreis das neue Feld `erzeuger_stoerung` (älteste offene Störung als Kennung oder `null`).
   Es geht nur die normalisierte Kennung auf den Draht, nie ein Herstellertext, und das Gerät deutet sie nicht.
 - Das Gerät prüft die Typen seiner Dokumente strenger: `mindest_software` muss ein Versionstext `X.Y.Z` sein, `ts` der
   Bedienung ein nichtleerer Text, `ursprungswerte` ein Objekt aus höchstens 16 Namen mit Wahrheitswerten, Zahlen oder
