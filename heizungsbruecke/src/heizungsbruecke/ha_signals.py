@@ -5,11 +5,15 @@ from collections.abc import Callable
 
 import requests
 
-from smartheat_runtime.ports import SignalNotFound, SourceUnavailable
+from smartheat_runtime.ports import SignalNotFound, SourceUnavailable, Stoerung
 from smartheat_runtime.soll_speicher import TargetStore
 
 #: Referenz des Raum-Solls in der Manifest-Rolle room_target: der Wert kommt aus dem Soll-Speicher, nicht aus HA.
 SOLL_REF = "smartheat:raum_soll"
+#: Die Stoerungsquelle der Anlage: Integration mypyllant, Attribut und Art eines Wartungshinweises.
+HERSTELLER = "mypyllant"
+DTC_ATTRIBUT = "diagnostic_trouble_codes"
+DTC_WARTUNG = "MAINTENANCE"
 
 
 class HaSignalSource:
@@ -27,6 +31,23 @@ class HaSignalSource:
 
     def device_key(self, ref: str) -> str:
         return ref.partition("::")[0]
+
+    def get_stoerungen(self, ref: str) -> tuple[Stoerung, ...]:
+        """Stoerungen aus dem Attribut `diagnostic_trouble_codes` der Entity (mypyllant, Option `fetch_dtc`):
+        `[{serial_number, article_number, codes: [{code, type, title, description, occurrence_timestamp}]}]`. Nur
+        Kennung und Art werden gelesen, nie Titel oder Beschreibung; `type` MAINTENANCE ist ein Hinweis. Fehlt das
+        Attribut oder hat es eine fremde Form, steht nichts an."""
+        roh = _translated(lambda r: self._ha_api.get_attribute_roh(r.partition("::")[0], DTC_ATTRIBUT), ref)
+        if not isinstance(roh, list):
+            return ()
+        gefunden: list[Stoerung] = []
+        for anlage in roh:
+            codes = anlage.get("codes") if isinstance(anlage, dict) else None
+            for eintrag in codes if isinstance(codes, list) else ():
+                kennung = eintrag.get("code") if isinstance(eintrag, dict) else None
+                if isinstance(kennung, str) and kennung:
+                    gefunden.append(Stoerung(HERSTELLER, kennung, eintrag.get("type") == DTC_WARTUNG))
+        return tuple(gefunden)
 
 
 class GeraetSignale:
@@ -54,6 +75,9 @@ class GeraetSignale:
 
     def device_key(self, ref: str) -> str:
         return ref if ref == SOLL_REF else self._ha.device_key(ref)
+
+    def get_stoerungen(self, ref: str) -> tuple[Stoerung, ...]:
+        return self._ha.get_stoerungen(ref)
 
 
 def _translated(read, ref: str):

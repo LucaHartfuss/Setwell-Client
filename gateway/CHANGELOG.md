@@ -2,6 +2,9 @@
 
 ## Unveroeffentlicht
 
+- Die Telemetrie traegt je Kreis das neue Feld `erzeuger_stoerung` (Kennung der aeltesten offenen Stoerung des
+  Waermeerzeugers oder `null`). Kein Treiber des Gateways liefert Stoerungen: das Feld bleibt `null`, es entsteht keine
+  Meldung `erzeuger.stoerung`.
 - Das Geraet prueft die Typen seiner Dokumente strenger (`mindest_software` als Versionstext, `ts` der Bedienung,
   `ursprungswerte`, die Felder einer leeren Konfiguration) und lehnt Befehle mit unbekanntem `schema` mit
   `ungueltige_nutzlast` ab. Der Server schreibt alle diese Felder schon richtig.

@@ -229,11 +229,13 @@ class Device:
         """Meldung der Laufzeit (NotifySink des Hosts): Upsert je key ueber up/notifications. Auf den Draht gehen
         Code, Parameter des Katalogs und Stufe der Meldung (meldungen.draht), nie ein Text oder Name; der Key wird zu
         einem Draht-Key ohne Namen, ein Kreispraefix zum Feld kreis (nachrichten.draht_key). Ohne Meldung (None) kann
-        nur geschlossen werden."""
+        nur geschlossen werden. Eine Erzeugermeldung traegt zusaetzlich `quelle` und `roh` (meldungen.erzeuger_angaben)."""
         draht_key, kreis = nachrichten.draht_key(key)
         draht = meldungen.draht(meldung) if meldung is not None else {"code": None, "params": {}, "stufe": None}
+        angaben = meldungen.erzeuger_angaben(meldung) if meldung is not None else {}
         self._inbox.put(("meldung", nachrichten.meldung(key=draht_key, offen=offen, ts=_iso(self._wall()),
-                                                        kreis=kreis, **draht)))
+                                                        kreis=kreis, quelle=angaben.get("quelle"),
+                                                        roh=angaben.get("roh"), **draht)))
 
     def im_geraete_thread(self, aufgabe: Callable[[], None]) -> None:
         """Eine Aufgabe des Hosts (z. B. lokales Abmelden ueber stdin) im Geraete-Thread ausfuehren lassen: aus

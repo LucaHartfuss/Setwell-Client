@@ -1132,6 +1132,31 @@ def test_notifications_are_batched_and_sent_again_after_a_reconnect(tmp_path):
     assert [i["key"] for i in world.link.of("up/notifications")[-1]["items"]] == [fuehler_key]
 
 
+def test_eine_erzeugermeldung_traegt_quelle_und_roh_auf_dem_draht_andere_meldungen_nicht(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    stoerung = meldungen.neu("erzeuger.stoerung", roh_text="f_28", quelle="mypyllant")
+    world.device.meldung("kreis-2:erzeuger_stoerung:f_28", stoerung, offen=True)
+    world.device.meldung("notbetrieb", meldungen.neu("meldung.notbetrieb"), offen=True)
+    world.device.schritt()
+    (batch,) = world.link.of("up/notifications")
+    erzeuger, andere = batch["items"]
+    assert (erzeuger["code"], erzeuger["params"], erzeuger["stufe"]) == ("erzeuger.stoerung", {"roh_text": "f_28"}, "orange")
+    assert (erzeuger["quelle"], erzeuger["roh"], erzeuger["kreis"], erzeuger["offen"]) == ("mypyllant", "f_28", 2, True)
+    assert erzeuger["key"].startswith("erzeuger_stoerung:") and "f_28" not in erzeuger["key"]
+    assert "quelle" not in andere and "roh" not in andere
+
+
+def test_das_schliessen_einer_erzeugermeldung_geht_ohne_quelle_und_roh_auf_den_draht(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.meldung("erzeuger_stoerung:f_28", None, offen=False)
+    world.device.schritt()
+    (batch,) = world.link.of("up/notifications")
+    (item,) = batch["items"]
+    assert (item["code"], item["offen"]) == (None, False) and "quelle" not in item and "roh" not in item
+
+
 # --- Rettungsweg ---
 
 def test_three_auth_failures_take_the_rescue_path_and_reconnect_with_a_new_certificate(tmp_path):

@@ -26,6 +26,9 @@ STANDARD_PRAEFIX = "Heizungsbrücke"
 STANDARD_TRAEGER = "des Home-Assistant-Systems"
 _DATUM_PARAMS = frozenset({"ende"})
 _CODE_ART = re.compile(r"[a-z][a-z0-9_]{0,63}")
+ERZEUGER_PREFIX = "erzeuger."
+_KENNUNG = re.compile(r"[a-z0-9_]{1,32}")
+_KENNUNG_PARAM = "roh_text"
 _UNBEKANNT = "unbekannt"
 _QUELLE = {"thermostat": "Thermostat"}
 _QUELLE_STANDARD = "Wunschtemperatur"
@@ -130,7 +133,21 @@ def _soll_quelle_aus_unbekannt(p: Mapping[str, Param], u: Umgebung) -> str:
 _BUDGET = ("SmartHeat: Das Tageslimit von {limit} Schreibvorgängen an der Heizung ist erreicht. Neue Werte werden "
            "gespeichert und morgen geschrieben (Schonung des Gerätespeichers).")
 
-TABELLE: dict[str, Vorlage] = {
+#: Störungen und Hinweise des Wärmeerzeugers: `roh_text` ist die normalisierte Herstellerkennung (nie ein Text des
+#: Herstellers), `quelle` der Herstellerschlüssel der Anlage; beide gehen als Felder `roh` und `quelle` auf den Draht
+#: (`erzeuger_angaben`), der Server ordnet den Wortlaut zu. Die Codes liegen außerhalb von `meldung.`.
+_ERZEUGER = {
+    "erzeuger.stoerung": _vorlage(
+        "orange", ("roh_text", "quelle"),
+        "SmartHeat: Der Wärmeerzeuger meldet eine Störung (Kennung {roh_text}). Bitte die Anlage prüfen.",
+        lokal=("quelle",)),
+    "erzeuger.hinweis": _vorlage(
+        "gelb", ("roh_text", "quelle"),
+        "SmartHeat: Der Wärmeerzeuger meldet einen Hinweis (Kennung {roh_text}), zum Beispiel eine Wartung.",
+        lokal=("quelle",)),
+}
+
+TABELLE: dict[str, Vorlage] = _ERZEUGER | {
     PREFIX + name: vorlage for name, vorlage in {
         "wunsch_begrenzt": Vorlage("orange", ("roh", "begrenzt"), _wunsch_begrenzt, ("herkunft",), ("herkunft",)),
         "soll_quelle_aus": Vorlage("orange", ("wirksam",), _soll_quelle_aus),
@@ -306,10 +323,25 @@ def draht(meldung: Meldung) -> dict[str, Any]:
     for name, wert in meldung.params.items():
         if name in vorlage.lokal:
             continue
-        if isinstance(wert, str) and name not in _DATUM_PARAMS and not _CODE_ART.fullmatch(wert):
+        if isinstance(wert, str) and name not in _DATUM_PARAMS and not _form(name).fullmatch(wert):
             wert = _UNBEKANNT
         params[name] = wert
     return {"code": meldung.code, "params": params, "stufe": meldung.stufe}
+
+
+def _form(name: str) -> re.Pattern[str]:
+    """Erlaubte Form eines Textparameters auf dem Draht: Herstellerkennungen dürfen mit einer Ziffer beginnen."""
+    return _KENNUNG if name == _KENNUNG_PARAM else _CODE_ART
+
+
+def erzeuger_angaben(meldung: Meldung) -> dict[str, str]:
+    """Die Felder `quelle` und `roh` einer Erzeugermeldung (`up/notifications`); bei jeder anderen Meldung leer. Beides
+    in der Form `[a-z0-9_]{1,32}`, sonst `unbekannt`: nie ein Herstellertext (S-5, S-12)."""
+    if not meldung.code.startswith(ERZEUGER_PREFIX):
+        return {}
+    quelle, roh = (str(meldung.params[name]) for name in ("quelle", _KENNUNG_PARAM))
+    return {"quelle": quelle if _KENNUNG.fullmatch(quelle) else _UNBEKANNT,
+            "roh": roh if _KENNUNG.fullmatch(roh) else _UNBEKANNT}
 
 
 def zu_dict(meldung: Meldung) -> dict[str, Any]:

@@ -190,6 +190,42 @@ def test_ein_wert_in_codeform_bleibt_auf_dem_draht():
     assert meldungen.draht(meldungen.neu("meldung.abo_inaktiv", ende="2026-12-31"))["params"] == {"ende": "2026-12-31"}
 
 
+def test_die_erzeugermeldungen_haben_die_stufen_orange_und_gelb_und_den_kennungsparameter():
+    stoerung = meldungen.neu("erzeuger.stoerung", roh_text="f_28", quelle="mypyllant")
+    hinweis = meldungen.neu("erzeuger.hinweis", roh_text="3", quelle="mypyllant")
+    assert (stoerung.stufe, hinweis.stufe) == ("orange", "gelb")
+    assert meldungen.TABELLE["erzeuger.stoerung"].params == ("roh_text", "quelle")
+    assert meldungen.TABELLE["erzeuger.stoerung"].lokal == ("quelle",)
+    assert "f_28" in meldungen.text(stoerung) and "mypyllant" not in meldungen.text(stoerung)
+
+
+@pytest.mark.parametrize("code", ["erzeuger.stoerung", "erzeuger.hinweis"])
+@pytest.mark.parametrize("kennung", ["f_28", "3", "a" * 32, "0"])
+def test_die_kennung_geht_in_codeform_auf_den_draht_auch_mit_ziffer_vorn(code, kennung):
+    meldung = meldungen.neu(code, roh_text=kennung, quelle="mypyllant")
+    assert meldungen.draht(meldung)["params"] == {"roh_text": kennung}  # kein "unbekannt" fuer 3 oder 0
+
+
+@pytest.mark.parametrize("kennung", ["F.28", "sensor.bad_temp", "a" * 33, "Stoerung im Kessel", ""])
+def test_eine_kennung_ausserhalb_der_form_geht_nie_als_text_auf_den_draht(kennung):
+    meldung = meldungen.neu("erzeuger.stoerung", roh_text=kennung, quelle="mypyllant")
+    assert meldungen.draht(meldung)["params"] == {"roh_text": "unbekannt"}
+    assert meldungen.erzeuger_angaben(meldung)["roh"] == "unbekannt"
+
+
+def test_die_erzeugerangaben_tragen_quelle_und_roh_nur_bei_erzeugermeldungen():
+    meldung = meldungen.neu("erzeuger.hinweis", roh_text="w_1", quelle="mypyllant")
+    assert meldungen.erzeuger_angaben(meldung) == {"quelle": "mypyllant", "roh": "w_1"}
+    assert meldungen.erzeuger_angaben(meldungen.neu("meldung.notbetrieb")) == {}
+    fremd = meldungen.neu("erzeuger.stoerung", roh_text="f_1", quelle="Vaillant GmbH")
+    assert meldungen.erzeuger_angaben(fremd) == {"quelle": "unbekannt", "roh": "f_1"}
+
+
+def test_eine_erzeugermeldung_ueberlebt_die_ablage_im_zustand():
+    meldung = meldungen.neu("erzeuger.stoerung", roh_text="f_28", quelle="mypyllant")
+    assert meldungen.aus_dict(meldungen.zu_dict(meldung)) == meldung
+
+
 def test_jeder_drahtparameter_ist_eine_zahl_ein_code_oder_ein_datum():
     code_art, datum = re.compile(r"[a-z][a-z0-9_]{0,63}"), re.compile(r"\d{4}-\d{2}-\d{2}")
     for code, vorlage in meldungen.TABELLE.items():

@@ -258,7 +258,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -1531,7 +1532,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2529,7 +2531,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2610,7 +2613,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2691,7 +2695,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2772,7 +2777,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2853,7 +2859,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -2934,7 +2941,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3015,7 +3023,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3096,7 +3105,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3177,7 +3187,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3344,7 +3355,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3557,7 +3569,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [
@@ -3907,7 +3920,8 @@
      "outdoor_temp": 5.0,
      "flow_setpoint": 35.0,
      "testphase_ohne": false,
-     "kaelteschutz": "aus"
+     "kaelteschutz": "aus",
+     "erzeuger_stoerung": null
     }
    ],
    [

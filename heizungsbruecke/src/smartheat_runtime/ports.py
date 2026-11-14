@@ -1,6 +1,7 @@
 """Ports des hostneutralen Kerns: die einzigen Stellen, an denen die Laufzeit die Aussenwelt beruehrt.
 Die Anlage ist smartheat_core.binding.PlantBinding, die Wanduhr smartheat_core.wallclock; die monotone Uhr wird als
 Callable[[], float] uebergeben."""
+from dataclasses import dataclass
 from typing import Protocol
 
 from smartheat_core.meldungen import Meldung
@@ -22,6 +23,15 @@ class SourceUnavailable(OSError):
     die Runde ohne Meldung."""
 
 
+@dataclass(frozen=True)
+class Stoerung:
+    """Eine anstehende Meldung des Wärmeerzeugers: Herstellerschlüssel der Quelle (HA: `mypyllant`), die Kennung wie
+    geliefert (die Laufzeit normalisiert sie) und ob es nur ein Hinweis ist (Wartung). Nie ein Text des Herstellers."""
+    quelle: str
+    kennung: str
+    hinweis: bool = False
+
+
 class SignalSource(Protocol):
     """Werte ueber hostspezifische Referenzen lesen (HA: Entity-ID bzw. `entity::attribut`). Ein ungueltiger Wert
     (nicht verfuegbar, keine Zahl, Attribut fehlt) wirft SignalUngueltig (ein ValueError), KeyError oder TypeError."""
@@ -37,6 +47,11 @@ class SignalSource(Protocol):
     def device_key(self, ref: str) -> str:
         """Geraet hinter einer Referenz, fuer Meldeschluessel und Kundentexte (HA: Entity-ID ohne ::attribut,
         Gateway: IEEE-Adresse bzw. treiber:<rolle>)."""
+        ...
+
+    def get_stoerungen(self, ref: str) -> tuple[Stoerung, ...]:
+        """Anstehende Stoerungen und Hinweise des Waermeerzeugers hinter der Referenz (HA: Attribut der Entity); leer,
+        wenn die Quelle keine kennt oder keine ansteht. Fehler der Quelle wie bei get_raw_state."""
         ...
 
 

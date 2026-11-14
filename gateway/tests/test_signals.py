@@ -129,6 +129,12 @@ def test_the_gateway_has_no_unit(world):
     assert not isinstance(caught.value, SignalUngueltig)  # Programmfehler, kein ungueltiger Wert
 
 
+def test_das_gateway_hat_keine_quelle_fuer_erzeugerstoerungen_und_meldet_nichts(world):
+    _, _, source = world
+    assert source.get_stoerungen("treiber:fault_codes") == ()
+    assert source.get_stoerungen("zigbee:0x0000000000000001:state") == ()
+
+
 def test_bool_battery_flag_reads_like_ha(world):
     _, z2m, source = world
     z2m.report(SECOND, battery_low=True)

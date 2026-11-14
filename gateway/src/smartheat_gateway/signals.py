@@ -6,7 +6,7 @@ import re
 
 from smartheat_gateway.bus import Bus
 from smartheat_gateway.zigbee import ZigbeeMirror
-from smartheat_runtime.ports import SignalNotFound, SignalUngueltig, SourceUnavailable
+from smartheat_runtime.ports import SignalNotFound, SignalUngueltig, SourceUnavailable, Stoerung
 from smartheat_runtime.room_mean import room_mean
 
 REF_ROOM_TARGET = "soll:room_target"
@@ -88,3 +88,7 @@ class GatewaySignalSource:
     def device_key(self, ref: str) -> str:
         match = _ZIGBEE.fullmatch(ref)
         return match.group(1) if match else ref
+
+    def get_stoerungen(self, ref: str) -> tuple[Stoerung, ...]:
+        """Kein Treiber des Gateways liefert Stoerungen des Waermeerzeugers: es steht nie etwas an."""
+        return ()
