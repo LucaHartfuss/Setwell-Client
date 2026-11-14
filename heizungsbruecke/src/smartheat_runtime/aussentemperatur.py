@@ -9,6 +9,7 @@ Ist keine Aussentemperatur zugeordnet, gibt es nichts zu pruefen. Nicht kritisch
 Freitext (V1, device_checks des Servers), kein Vertrag."""
 import logging
 
+from smartheat_core import meldungen
 from smartheat_core.logtext import lesbar
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.plausibility import OUTDOOR_TEMP_RANGE, is_plausible
@@ -19,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 KEY = "aussentemperatur"
 STATE_FAILED = "ausgefallen"
-FAILED_MESSAGE = "SmartHeat: Die Außentemperatur liefert keine gültigen Werte. Bitte die Quelle der Außentemperatur prüfen."
-OK_MESSAGE = "SmartHeat: Die Außentemperatur liefert wieder Werte."
 
 
 def check(rt) -> None:
@@ -41,9 +40,9 @@ def check(rt) -> None:
         value = None
     if is_plausible(value, OUTDOOR_TEMP_RANGE):
         rt.store.update(outdoor_misses=0)
-        rt.notifier.notify(KEY, STATE_OK, OK_MESSAGE, critical=False)
+        rt.notifier.notify(KEY, STATE_OK, meldungen.neu("meldung.aussentemperatur_ok"), critical=False)
         return
     misses = min(rt.store.state.outdoor_misses + 1, FAILED_ROUNDS)
     rt.store.update(outdoor_misses=misses)
     if misses >= FAILED_ROUNDS:
-        rt.notifier.notify(KEY, STATE_FAILED, FAILED_MESSAGE, critical=False)
+        rt.notifier.notify(KEY, STATE_FAILED, meldungen.neu("meldung.aussentemperatur_ausgefallen"), critical=False)

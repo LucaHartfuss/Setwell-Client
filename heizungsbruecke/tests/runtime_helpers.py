@@ -115,7 +115,7 @@ class _Link:
         """Der Link des Geraets ist (wieder) verbunden (Geraete-Thread)."""
         self._geraet.channel.verbunden()
 
-    def answer(self, seq, status="ok", curve=0.95, shift=23.0, reason=None, schema=5, heat_limit=16.0, min_flow=20.5,
+    def answer(self, seq, status="ok", curve=0.95, shift=23.0, code=None, schema=5, heat_limit=16.0, min_flow=20.5,
                levers=None, kreis=1):
         """Server-Antwort (Schema 5) ueber den Link einspeisen. levers=None baut die Hebel aus curve/shift/heat_limit/min_flow
         (ein Wert _OMIT laesst den Hebel weg); schema=_OMIT bzw. levers=_OMIT: Feld fehlt."""
@@ -126,7 +126,8 @@ class _Link:
                 ) if value is not _OMIT
             }
         payload = {
-            "schema": schema, "kreis": kreis, "seq": seq, "ts": "x", "status": status, "reason": reason, "levers": levers,
+            "schema": schema, "kreis": kreis, "seq": seq, "ts": "x", "status": status, "code": code,
+            "params": None if code is None else {}, "levers": levers,
             "learned": {"curve": 1.0, "heat_limit": 16.0},
         }
         if schema is _OMIT:
@@ -136,7 +137,7 @@ class _Link:
         self._geraet.channel.setpoints(payload)
 
     def answer_raw(self, seq, **fields):
-        payload = {"schema": 5, "kreis": 1, "seq": seq, "ts": "x", "status": "ok", "reason": None,
+        payload = {"schema": 5, "kreis": 1, "seq": seq, "ts": "x", "status": "ok", "code": None, "params": None,
                    "levers": {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0, "min_flow": 20.5},
                    "learned": None, **fields}
         self._geraet.channel.setpoints(payload)

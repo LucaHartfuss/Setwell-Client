@@ -48,6 +48,7 @@ from smartheat_gateway import config as gateway_config
 from smartheat_gateway.drivers import registry
 from smartheat_gateway.drivers.base import KIND_CLOUD
 from smartheat_gateway.paths import Paths
+from smartheat_gateway.texts import SHG_TEXTS
 from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime import dokument_config
@@ -188,6 +189,7 @@ class GatewayDeviceHost(GeraetHostBasis):
     host = "gateway"
     version = GATEWAY_VERSION
     wunsch_herkunft = "thermostat"
+    texts = SHG_TEXTS
 
     def __init__(self, paths: Paths, mirror: ZigbeeMirror, *, host_dir: Path,
                  clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = fachliche_epoche,

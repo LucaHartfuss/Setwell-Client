@@ -1,7 +1,10 @@
 """Ports des hostneutralen Kerns: die einzigen Stellen, an denen die Laufzeit die Aussenwelt beruehrt.
 Die Anlage ist smartheat_core.binding.PlantBinding, die Wanduhr smartheat_core.wallclock; die monotone Uhr wird als
 Callable[[], float] uebergeben."""
+from dataclasses import dataclass
 from typing import Protocol
+
+from smartheat_core.meldungen import Meldung
 
 
 class SignalNotFound(LookupError):
@@ -25,6 +28,15 @@ class QuelleErschoepft(SourceUnavailable):
     der Kundentext zum Kontingent; die Meldung dazu gibt kontingent.check, die Ueberwachungen beenden die Runde still."""
 
 
+@dataclass(frozen=True)
+class Stoerung:
+    """Eine anstehende Meldung des Wärmeerzeugers: Herstellerschlüssel der Quelle (HA: `mypyllant`), die Kennung wie
+    geliefert (die Laufzeit normalisiert sie) und ob es nur ein Hinweis ist (Wartung). Nie ein Text des Herstellers."""
+    quelle: str
+    kennung: str
+    hinweis: bool = False
+
+
 class SignalSource(Protocol):
     """Werte ueber hostspezifische Referenzen lesen (HA: Entity-ID bzw. `entity::attribut`). Ein ungueltiger Wert
     (nicht verfuegbar, keine Zahl, Attribut fehlt) wirft SignalUngueltig (ein ValueError), KeyError oder TypeError."""
@@ -42,6 +54,11 @@ class SignalSource(Protocol):
         Gateway: IEEE-Adresse bzw. treiber:<rolle>)."""
         ...
 
+    def get_stoerungen(self, ref: str) -> tuple[Stoerung, ...]:
+        """Anstehende Stoerungen und Hinweise des Waermeerzeugers hinter der Referenz (HA: Attribut der Entity); leer,
+        wenn die Quelle keine kennt oder keine ansteht. Fehler der Quelle wie bei get_raw_state."""
+        ...
+
 
 class StatusSink(Protocol):
     def publish(self, event: dict) -> None:
@@ -52,11 +69,13 @@ class StatusSink(Protocol):
 class NotifySink(Protocol):
     """Meldungen an den Kunden. Entprellung, Hinweis-Schalter und offene Meldungen fuehrt der Notifier."""
 
-    def push(self, key: str, message: str) -> None:
-        """Einmalige Nachricht (HA: alle Notify-Dienste). Fehler einzelner Kanaele behandelt der Sink selbst."""
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
+        """Einmalige Nachricht (HA: alle Notify-Dienste). Fehler einzelner Kanaele behandelt der Sink selbst.
+        `begleitet`: auf den Push folgt im selben Uebergang `show` bzw. `withdraw`; ein Sink, der je Uebergang ein
+        Ereignis meldet, laesst es dann dem Aufruf danach."""
         ...
 
-    def show(self, key: str, message: str) -> None:
+    def show(self, key: str, meldung: Meldung) -> None:
         """Offene kritische Meldung anlegen oder ersetzen (HA: persistent_notification). Darf werfen."""
         ...
 

@@ -8,7 +8,7 @@ from bindung_beispiele import VAILLANT_MYPYLLANT
 from fakes import FREMDTEXT, FREMDTEXT_IM_LOG, FakeNotifySink, logzeilen, runtime_config
 
 from heizungsbruecke.ha_binding import HaPlantBinding
-from smartheat_core import enforce, wallclock, write_budget
+from smartheat_core import enforce, meldungen, wallclock, write_budget
 from smartheat_core.pipeline import LeverPipeline
 from smartheat_core.safety import LocalSafety
 from smartheat_core.zahlen import ist_endliche_zahl
@@ -136,7 +136,7 @@ def _curve_writes(rt):
     return [w for w in rt.signals.writes if w[0] == "number.curve"]
 
 
-# Kundentexte der Meldung `manueller_eingriff` (enforce.MESSAGE, LIMIT_MESSAGE) als Literal.
+# Kundentexte der Meldungen `manueller_eingriff` und `manueller_eingriff_limit` als Literal.
 def _meldung(was):
     return (f"SmartHeat: Die Heizungseinstellung wurde in der App verstellt ({was}) und zurückgesetzt. "
             "Einstellungen bitte nur über das Raumthermostat.")
@@ -186,6 +186,20 @@ def test_manual_curve_change_is_written_back_and_reported(make_store, clock):
     assert rt.signals.writes == [("number.curve", 0.9)]
     assert rt.store.state.manual_override_pending["levers"]["curve"] == 1.3
     assert rt.kunde.pushes == [("manueller_eingriff", _meldung("Heizkurve"))]
+
+
+def test_the_reset_is_reported_as_a_code_with_the_lever_label(make_store, clock):
+    rt = _rt(make_store, clock, Ha(curve=1.3))
+    _rounds(rt)
+    assert rt.kunde.push_meldungen == [("manueller_eingriff", meldungen.neu("meldung.manueller_eingriff", was="Heizkurve"))]
+
+
+def test_the_limit_is_reported_as_a_code_with_the_lever_label(make_store, clock):
+    rt = _rt(make_store, clock, Ha(curve=1.3))
+    rt.store.update(write_budget={"enforce:curve": {"day": TODAY.isoformat(), "count": 6, "last": 0.0}})
+    _rounds(rt)
+    assert rt.kunde.push_meldungen == [
+        ("manueller_eingriff", meldungen.neu("meldung.manueller_eingriff_limit", was="Heizkurve"))]
 
 
 def test_heat_limit_changed_in_the_app_is_written_back_and_reported(make_store, clock):
@@ -679,7 +693,7 @@ def test_return_to_learned_values_is_reported_quietly_and_not_critical(make_stor
     assert rt.kunde.pushes == [("manueller_eingriff", _meldung("Heizkurve"))]  # still: kein Push
     assert rt.kunde.shown == {} and rt.kunde.withdrawn == []  # nicht kritisch: keine offene Meldung angefasst
     assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "smartheat_runtime.notifier"] == [
-        (logging.INFO, "SmartHeat: Die Heizungseinstellung steht wieder auf den gelernten Werten.")]
+        (logging.INFO, "Meldung meldung.manueller_eingriff_ok")]  # das Log nennt nur den Code
 
 
 def test_reset_message_is_not_critical(make_store, clock):

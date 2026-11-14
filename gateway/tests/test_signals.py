@@ -68,11 +68,11 @@ def test_an_exhausted_driver_quota_is_an_unavailable_source_with_the_driver_text
 
 def test_the_quota_notice_of_the_driver_reaches_the_runtime(world):
     _, _, source = world
-    assert source.kontingent_meldung() is None
-    source._driver.kontingent_meldung = lambda: "weg"
-    assert source.kontingent_meldung() == "weg"
+    assert source.kontingent_erschoepft() is False
+    source._driver.kontingent_erschoepft = lambda: True
+    assert source.kontingent_erschoepft() is True
     source._driver = None
-    assert source.kontingent_meldung() is None  # Treiber noch nicht geladen
+    assert source.kontingent_erschoepft() is False  # Treiber noch nicht geladen
 
 
 def test_one_dead_sensor_keeps_the_mean_none_is_invalid(world):
@@ -152,6 +152,12 @@ def test_the_gateway_has_no_unit(world):
     assert not isinstance(caught.value, SignalUngueltig)  # Programmfehler, kein ungueltiger Wert
 
 
+def test_das_gateway_hat_keine_quelle_fuer_erzeugerstoerungen_und_meldet_nichts(world):
+    _, _, source = world
+    assert source.get_stoerungen("treiber:fault_codes") == ()
+    assert source.get_stoerungen("zigbee:0x0000000000000001:state") == ()
+
+
 def test_bool_battery_flag_reads_like_ha(world):
     _, z2m, source = world
     z2m.report(SECOND, battery_low=True)
@@ -181,10 +187,10 @@ class RecordingSink:
     def __init__(self) -> None:
         self.pushed: list[tuple[str, str]] = []
 
-    def push(self, key: str, message: str) -> None:
-        self.pushed.append((key, message))
+    def push(self, key: str, meldung, *, begleitet: bool = False) -> None:
+        self.pushed.append((key, SHG_TEXTS.text(meldung)))
 
-    def show(self, key: str, message: str) -> None:
+    def show(self, key: str, meldung) -> None:
         pass
 
     def withdraw(self, key: str) -> None:

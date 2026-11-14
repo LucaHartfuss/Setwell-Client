@@ -113,6 +113,15 @@ def _liste(titel: str, eintraege: list[str]) -> str:
     return f"<h2>{html.escape(titel)}</h2><ul>{items}</ul>"
 
 
+def _hinweis_text(hinweis: dict, texte: dict[str, str]) -> str:
+    """Text eines Hinweises (`{key, code, params, stufe}`) aus den lokalen Texten `hinweis.<key>`; ohne Eintrag oder
+    bei einer unlesbaren Form der Code selbst."""
+    schluessel, code = hinweis.get("key"), hinweis.get("code")
+    if isinstance(schluessel, str) and code == f"meldung.{schluessel}" and schluessel in texte:
+        return texte[schluessel]
+    return str(code)
+
+
 def render_html(data: dict, sprache: str = lokale_texte.STANDARD) -> str:
     """Die Seite in `sprache` (de oder en, sonst die Standardsprache); alle festen Texte stehen in lokale_texte.json."""
     sprache = sprache if sprache in lokale_texte.SPRACHEN else lokale_texte.STANDARD
@@ -129,9 +138,15 @@ def render_html(data: dict, sprache: str = lokale_texte.STANDARD) -> str:
         _row(t["label.zigbee_stick"], data["zigbee_stick"], t), _row(t["label.regelung"], data["laufzeit"], t),
     ])
     abgelehnt = data.get("konfiguration_abgelehnt")
-    hinweise = _liste(t["abschnitt.hinweise"], [eintrag.get("text", "") for eintrag in data.get("hinweise", [])])
+    hinweis_texte = lokale_texte.gruppe(sprache, "hinweis")
+    hinweise = _liste(t["abschnitt.hinweise"], [_hinweis_text(eintrag, hinweis_texte)
+                                                 for eintrag in data.get("hinweise", []) if isinstance(eintrag, dict)])
     meldungen = _liste(t["abschnitt.meldungen"], [eintrag.get("text", "") for eintrag in data.get("meldungen", [])])
-    ablehnung = (f"<h2>{html.escape(t['abschnitt.abgelehnt'])}</h2><p>{html.escape(abgelehnt)}</p>" if abgelehnt else "")
+    ablehnung = ""
+    if isinstance(abgelehnt, dict):
+        grund = (abgelehnt.get("params") or {}).get("grund")
+        satz = hinweis_texte["konfiguration_abgelehnt"] + (f" ({t['label.ablehnung_code']}: {grund})" if grund else "")
+        ablehnung = f"<h2>{html.escape(t['abschnitt.abgelehnt'])}</h2><p>{html.escape(satz)}</p>"
     claim = ""
     uebernehmen = html.escape(t["abschnitt.uebernehmen"])
     code_hinweise = lokale_texte.gruppe(sprache, "code_hinweis")

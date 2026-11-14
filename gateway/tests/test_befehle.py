@@ -274,7 +274,7 @@ def test_erkennung_traegt_die_sicherheitswarnungen_je_anlage(ctx):
 def _login_nutzlast(phase="begin", **aenderung) -> dict:
     """Nutzlast des Befehls driver_login mit genau den Feldern der Phase (wire.DRIVER_LOGIN_PHASES)."""
     werte = {"driver_id": "simulation", "client_id": "c", "redirect_uri": "https://portal.test/cb", "scope": "s",
-             "code": "x", "ciphertext": "y"}
+             "code": "x"}
     return {"phase": phase, **{feld: werte[feld] for feld in wire.DRIVER_LOGIN_PHASES[phase] if feld != "phase"},
             **aenderung}
 

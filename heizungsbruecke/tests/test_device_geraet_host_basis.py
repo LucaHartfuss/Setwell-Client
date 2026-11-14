@@ -74,6 +74,28 @@ def _angefordert(host: _Host) -> bool:
     return kinds == [EV_RELOAD]
 
 
+def test_die_wahl_beim_entfernen_kommt_aus_der_abmelde_markierung_und_gilt_bis_zur_zustellung(tmp_path):
+    host = _Host(tmp_path / "a.json")
+    assert host.entfernen_wahl() is None  # kein Geraetekern verbunden
+    host.verbinden(SimpleNamespace(konfiguration=lambda: EINGERICHTET))
+    assert host.entfernen_wahl() is None  # keine Markierung
+    dokument_config.abmelden(host.abgemeldet_pfad(), "t1")
+    assert host.entfernen_wahl() is None  # einfaches Abmelden wuenscht nichts
+    dokument_config.abmelden(host.abgemeldet_pfad(), "t1", freigeben=True)
+    assert host.entfernen_wahl() == "freigeben"
+    host.entfernen_erledigt()
+    assert host.entfernen_wahl() is None and dokument_config.abgemeldet(host.abgemeldet_pfad(), EINGERICHTET)
+
+
+def test_die_wahl_beim_entfernen_gilt_nur_fuer_die_aktuelle_anlage(tmp_path):
+    host = _Host(tmp_path / "a.json")
+    host.verbinden(SimpleNamespace(konfiguration=lambda: EINGERICHTET))
+    dokument_config.abmelden(host.abgemeldet_pfad(), "andere", freigeben=True)
+    assert host.entfernen_wahl() is None
+    host.entfernen_erledigt()  # fremde Anlage: nichts zu loeschen
+    assert dokument_config.entfernen_gewuenscht(host.abgemeldet_pfad(), {"anlage": "andere"})
+
+
 def test_leere_konfiguration_nach_keiner_startet_nicht_neu(tmp_path):
     """Im Ruhezustand "nicht eingerichtet" liest die Laufzeit kein Laufzeitfeld; ein Neustart risse den
     Befehl mit, der gleich nach dem Erstkontakt laeuft. Auch leer nach leer mit anderem Laufzeitfeld nicht."""

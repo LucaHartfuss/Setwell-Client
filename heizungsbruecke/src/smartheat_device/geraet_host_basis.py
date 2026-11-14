@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from smartheat_core import dateien
+from smartheat_core.meldungen import Meldung
 from smartheat_device.commands import Done, Waiting
 from smartheat_device.hintergrund import Hintergrund
 from smartheat_device.host import Anzeige, MeldungSink
@@ -23,6 +24,7 @@ from smartheat_runtime import aufraeumen, dokument_config
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
 from smartheat_runtime.soll_speicher import KREIS, SOURCE_PORTAL, raum_soll_von
 from smartheat_runtime.status import STATUS_ABGEMELDET
+from smartheat_runtime.texts import HA_TEXTS, HostTexts
 from smartheat_runtime.worker import Event, RegulationWorker
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ class GeraetHostBasis:
     version: str
     #: herkunft eines Bedienwunschs ohne eigene Angabe (HA: Soll-Entity, Gateway: Thermostat)
     wunsch_herkunft: str
+    #: Absender und Datentraeger-Traeger der Meldungstexte (Gateway: eigene Texte)
+    texts: HostTexts = HA_TEXTS
 
     def __init__(self) -> None:
         self.device = None  # smartheat_device.device.Device, nach dem Anlegen per verbinden()
@@ -138,9 +142,9 @@ class GeraetHostBasis:
             for worker in self._workers.values():
                 worker.post(Event(EV_RELOAD))
 
-    def _melden(self, key: str, text: str, *, offen: bool, stufe: str) -> None:
+    def _melden(self, key: str, meldung: Meldung | None, *, offen: bool) -> None:
         if self.device is not None:
-            self.device.meldung(key, text, offen=offen, stufe=stufe)
+            self.device.meldung(key, meldung, offen=offen)
 
     # --- Sicht der Laufzeit ---
 
@@ -193,6 +197,19 @@ class GeraetHostBasis:
         if dokument_config.eingerichtet(alt) and not dokument_config.eingerichtet(neu):
             assert alt is not None
             aufraeumen.markieren(self.aufraeumen_pfad(), alt)  # vor dem Speichern
+
+    def entfernen_wahl(self) -> str | None:
+        """"freigeben", solange die Abmelde-Markierung der aktuellen Anlage den Wunsch traegt, das Geraet aus dem Konto zu
+        loesen und der Server ihn noch nicht bestaetigt hat; sonst None."""
+        if dokument_config.entfernen_gewuenscht(self.abgemeldet_pfad(), self.konfiguration()):
+            return "freigeben"
+        return None
+
+    def entfernen_erledigt(self) -> None:
+        """Der Server hat die Wahl bestaetigt: nur den Wunsch loeschen, die Abmelde-Markierung bleibt."""
+        anlage = (self.konfiguration() or {}).get("anlage")
+        if anlage is not None:
+            dokument_config.entfernen_erledigt(self.abgemeldet_pfad(), anlage)
 
     def konfiguration_uebernommen(self, alt: dict | None, neu: dict) -> None:
         """Neustart bei laufzeitrelevanter Aenderung und wenn eine neue, nicht leere Konfiguration derselben Anlage die

@@ -95,9 +95,18 @@ class FakeHost:
         self.treiber_details: dict | None = None
         self.handlers: dict = {}
         self.ursprung: dict = {}
+        self.entfernen: str | None = None  # Wahl des Nutzers beim Entfernen ("freigeben" oder keine)
+        self.entfernen_zugestellt = 0
 
     def ursprungswerte(self):
         return dict(self.ursprung)
+
+    def entfernen_wahl(self):
+        return self.entfernen
+
+    def entfernen_erledigt(self):
+        self.entfernen = None
+        self.entfernen_zugestellt += 1
 
     def faehigkeiten(self):
         return {"drivers": ["simulation"], "zigbee": True, "updater": True}

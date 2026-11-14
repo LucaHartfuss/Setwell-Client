@@ -462,6 +462,43 @@ def test_die_mindest_integration_ist_leer_oder_ein_text():
         assert _geprueft(_gw(_gw_kreis(1), mindest_integration=falsch), LOCK) == _ungueltig("mindest_integration")
 
 
+def test_die_mindest_software_ist_ein_versionstext():
+    assert _geprueft(_gw(_gw_kreis(1), mindest_software="1.2.3"), LOCK) is None
+    for falsch in (None, "", 5, True, "neu", "1.2", "1.2.3-rc1", ["1.2.3"]):
+        assert _geprueft(_gw(_gw_kreis(1), mindest_software=falsch), LOCK) == _ungueltig("mindest_software"), falsch
+
+
+def test_ursprungswerte_sind_ein_objekt_aus_namen_und_zahlen_wahrheitswerten_oder_texten():
+    for gut in ({}, {"heat_limit": 18.0, "stufe": 2, "an": True, "modus": "heizen"}, {"a": 1e12, "b": -1e12},
+                {"n" * 64: "t" * 64}, {f"h{i}": 1.0 for i in range(16)}):
+        assert _geprueft(_gw(_gw_kreis(1, ursprungswerte=gut)), LOCK) is None, gut
+    for falsch in (None, [], "x", 5, {"": 1.0}, {1: 2.0}, {"a": None}, {"a": [1.0]}, {"a": {"b": 1}},
+                   {"a": float("nan")}, {"a": float("inf")}, {"a": 10**400}, {"a": 1e12 + 1}, {"a": -1e12 - 1},
+                   {"n" * 65: 1.0}, {"a": "t" * 65}, {"a": ""}, {f"h{i}": 1.0 for i in range(17)}):
+        assert _geprueft(_gw(_gw_kreis(1, ursprungswerte=falsch)), LOCK) == _ungueltig("ursprungswerte"), falsch
+
+
+def test_die_felder_einer_leeren_konfiguration_haben_den_richtigen_typ():
+    leer = konfig_form.nach_form({"anlage": None, "mindest_software": "1.0.0"})
+    assert _geprueft(leer, LOCK) is None
+    assert _geprueft({"anlage": None}, LOCK) is None  # was fehlt, ist Sache der Form des Dokuments
+    for feld, falsch in (("anlage_name", 5), ("anlage_name", ""), ("weg", 7), ("kreise", "x"), ("kreise", None),
+                         ("mindest_software", None), ("mindest_software", "neu"), ("mindest_integration", 5),
+                         ("mindest_integration", ""), ("bindungsparameter", []), ("bindungsparameter", "x")):
+        assert _geprueft({**leer, feld: falsch}, LOCK) == _ungueltig(feld), (feld, falsch)
+    for falsch in (5, "25:00"):
+        assert _geprueft({**leer, "tagestick": falsch}, LOCK) == _ungueltig("tagestick", "format"), falsch
+
+
+def test_die_textgrenzen_einer_leeren_konfiguration_sind_die_des_vollen_dokuments():
+    leer = konfig_form.nach_form({"anlage": None, "mindest_software": "1.0.0"})
+    assert _geprueft({**leer, "anlage_name": "n" * cc.NAME_MAX_CHARS}, LOCK) is None
+    assert _geprueft({**leer, "anlage_name": "n" * (cc.NAME_MAX_CHARS + 1)}, LOCK) == _ungueltig("anlage_name")
+    for feld in ("weg", "mindest_integration"):
+        assert _geprueft({**leer, feld: "t" * cc.TEXT_MAX_CHARS}, LOCK) is None, feld
+        assert _geprueft({**leer, feld: "t" * (cc.TEXT_MAX_CHARS + 1)}, LOCK) == _ungueltig(feld), feld
+
+
 def test_dieselben_treiberparameter_in_anderer_schluesselfolge_sind_dasselbe_schreibziel():
     erster, zweiter = _gw_kreis(1), _gw_kreis(2)
     erster["bindung"]["treiber"]["parameter"] = {"heizkreis": 1, "zone": 2}
