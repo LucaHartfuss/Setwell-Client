@@ -231,6 +231,7 @@ ROLLEN_FORM: dict[str, tuple[tuple[str, str | None], ...]] = {
     **{f"energy_{kanal}": (("sensor", "energy"),) for kanal in ENERGIE_KANAELE},
     "operating_mode": (_FREI,), "efficiency_ratio": (_FREI,), "generator_hours": (_FREI,),
     "generator_starts": (_FREI,), "generator_state": (_FREI,),
+    "fault_codes": (("binary_sensor", None),),
     "fuehler": (_TEMPERATUR, ("climate", None)),
     "batterien": (("sensor", "battery"), ("binary_sensor", "battery")),
 }

@@ -16,6 +16,7 @@ from smartheat_runtime.notifier import Notifier
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.state import StateStore
 from smartheat_runtime.status import StatusReporter
+from smartheat_runtime.texts import HA_TEXTS
 
 MANIFEST = ChannelManifest(refs={
     "curve_current": "number.hk", "shift_current": "number.normal", "heat_limit": "number.swu",
@@ -52,11 +53,11 @@ class Senke:
     def publish(self, event):
         self.ereignisse.append(event)
 
-    def push(self, key, message):
-        self.meldungen.append(message)
+    def push(self, key, meldung, *, begleitet=False):
+        self.meldungen.append(HA_TEXTS.text(meldung))
 
-    def show(self, key, message):
-        self.meldungen.append(message)
+    def show(self, key, meldung):
+        self.meldungen.append(HA_TEXTS.text(meldung))
 
     def withdraw(self, key):
         pass
@@ -148,7 +149,7 @@ def test_abmelden_schreibt_bei_anderer_anlage_nichts_und_meldet_den_code(tmp_pat
     assert bridge.reason == "abgemeldet"
     assert ha.writes == []
     assert store.state.boost_active
-    assert GRUND_ANDERE_ANLAGE in bridge.status.event()["grund"]
+    assert bridge.status.event()["grund"] == {"code": "status.grund_andere_anlage", "params": {}}
     assert any("Boost-Werten" in text for text in senke.meldungen)
     assert any(GRUND_ANDERE_ANLAGE in text for text in senke.meldungen)
 
@@ -160,6 +161,39 @@ def test_abmelden_ohne_teile_nennt_nicht_den_code_der_anderen_anlage(tmp_path, c
 
     assert any("Boost-Werten" in text for text in senke.meldungen)
     assert not any(GRUND_ANDERE_ANLAGE in text for text in senke.meldungen)
+
+
+def test_abmelden_mit_ungueltiger_konfiguration_nennt_den_grund_als_code(tmp_path, clock):
+    store, ha, senke, notifier, status_ = _aufbau(tmp_path, plant_id=NEU)
+
+    bridge = app._sign_off(None, store, notifier, status_, clock, 60.0, neustart=lambda: None, anlage="t1")
+
+    assert bridge.status.event()["grund"] == {"code": "status.grund_konfiguration_ungueltig", "params": {}}
+
+
+def test_scheitert_das_abmelden_nennt_der_grund_die_wartezeit_bis_zum_naechsten_versuch(tmp_path, clock):
+    store, ha, senke, notifier, status_ = _aufbau(tmp_path, plant_id=NEU)
+
+    def kaputt(entity_id, value):
+        raise OSError("weg")
+
+    ha.set_number_value = kaputt
+
+    bridge = app._sign_off(_teile(ha, NEU), store, notifier, status_, clock, 60.0, neustart=lambda: None,
+                           anlage="t1")
+
+    assert bridge.status.event()["grund"] == {"code": "status.grund_zuruecksetzen_scheitert",
+                                              "params": {"sekunden": 60}}
+
+
+def test_ein_startfehler_meldet_nur_den_code_nicht_den_text(tmp_path, clock):
+    store, ha, senke, notifier, status_ = _aufbau(tmp_path, plant_id=NEU)
+
+    bridge = app._fail_start(notifier, status_, clock, "Entity number.geheim fehlt", neustart=lambda: None)
+
+    assert bridge.status.event()["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
+    assert "number.geheim" not in str(bridge.status.event())
+    assert any("number.geheim" in text for text in senke.meldungen)  # die Meldung des Kunden nennt sie weiter
 
 
 @pytest.mark.parametrize("gleich", [True, False])

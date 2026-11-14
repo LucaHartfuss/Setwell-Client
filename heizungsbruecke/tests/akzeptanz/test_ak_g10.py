@@ -40,7 +40,7 @@ SONDERWERTE = (math.nan, INF, -INF)
 #: Werte, die kein Server senden duerfte: Extreme, falsche Typen, Text
 UNSINN = (1e308, -1e308, 1.7976931348623157e308, 5e-324, -0.0, 0.0, 10**30, -(10**30), 2**63, True, False, None, "21.5",
           "NaN", "Infinity", [], [21.0], {}, {"wert": 1.0})
-HUELLEN = ({}, {"fremd": 1}, {"learned": {"alles": [1, 2, 3]}}, {"reason": "x" * 400}, {"seq2": "fremd", "ts": 7})
+HUELLEN = ({}, {"fremd": 1}, {"learned": {"alles": [1, 2, 3]}}, {"code": "x" * 400}, {"seq2": "fremd", "ts": 7})
 
 
 def _mitte(bereich: tuple[float, float], schritt: float) -> float:

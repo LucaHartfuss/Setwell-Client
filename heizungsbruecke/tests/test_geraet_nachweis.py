@@ -121,7 +121,7 @@ class _Geraet:
 def _anhaengen(ident, daten: bytes, ha, uhr=lambda: 1_700_000_123.4):
     import io
     geraet = _Geraet(ident)
-    host = SimpleNamespace(lokal_abmelden=lambda: None)
+    host = SimpleNamespace(lokal_abmelden=lambda: None, lokal_freigeben=lambda: None)
     main_module.stdin_anhaengen(host, geraet, io.BytesIO(daten), ha, uhr).join(timeout=2)
     return geraet
 

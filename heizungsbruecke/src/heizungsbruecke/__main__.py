@@ -242,6 +242,7 @@ def verdrahten(geraet: HaDeviceHost, device, ha_api, supervisor) -> GeraetStatus
     status = GeraetStatus(ha_api, device.identity.device_id, lokal,
                           laufzeit_merken=lambda event: setattr(geraet, "runtime_status_event", event))
     geraet.status_sink = status
+    geraet.geraet_id = device.identity.device_id
     geraet.discovery = Discovery(supervisor, config.DEVICE_DATA_DIR / DEVICE_DIR / "discovery.json")
     geraet.claim_code = lambda: device.identity.claim_code
     return status
@@ -286,13 +287,14 @@ def stdin_quelle() -> BinaryIO | None:
 
 def stdin_anhaengen(geraet: HaDeviceHost, device, quelle: BinaryIO, ha_api,
                     uhr: Callable[[], float] = echte_epoche) -> threading.Thread:
-    """Lokale Befehle `entfernen <eigene Geraete-ID>` und `nachweis <eigene Geraete-ID>` aus quelle lesen; `entfernen`
-    meldet das Geraet im Geraete-Thread ab (HaDeviceHost.lokal_abmelden ueber das Postfach, nie nebenlaeufig zum
-    Befehlsregister), `nachweis` sendet das signierte Ereignis smartheat_nachweis ueber ha_api (Zeit aus uhr). Eine fremde
-    Geraete-ID bewirkt nichts."""
+    """Lokale Befehle `entfernen <eigene Geraete-ID> [freigeben]` und `nachweis <eigene Geraete-ID>` aus quelle lesen;
+    `entfernen` meldet das Geraet im Geraete-Thread ab (HaDeviceHost.lokal_abmelden bzw. mit `freigeben`
+    lokal_freigeben ueber das Postfach, nie nebenlaeufig zum Befehlsregister), `nachweis` sendet das signierte Ereignis
+    smartheat_nachweis ueber ha_api (Zeit aus uhr). Eine fremde Geraete-ID bewirkt nichts."""
     return stdin_befehl.starten(quelle, device.identity.device_id,
                                 lambda: device.im_geraete_thread(geraet.lokal_abmelden),
-                                lambda: geraet_nachweis.senden(ha_api, device.identity, uhr))
+                                lambda: geraet_nachweis.senden(ha_api, device.identity, uhr),
+                                lambda: device.im_geraete_thread(geraet.lokal_freigeben))
 
 
 def _ruhen() -> None:

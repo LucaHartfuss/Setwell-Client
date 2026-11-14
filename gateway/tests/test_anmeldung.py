@@ -249,13 +249,15 @@ def test_siebzehnte_sitzung_verdraengt_die_aelteste(uhr):
 
 
 def test_pruefe_mit_echtem_scrypt():
-    """Kein Fake: Parameter n=131072, r=8, p=1, Hash 32 Byte, Salz 16 Byte; richtig und falsch; unter 5 s."""
-    beginn = time.monotonic()
+    """Kein Fake: Parameter n=131072, r=8, p=1, Hash 32 Byte, Salz 16 Byte; richtig und falsch; unter 5 s Rechenzeit.
+    Gemessen wird die Rechenzeit des Prozesses, nicht die Wanduhr: parallele Testlaeufe auf derselben Maschine
+    verlaengern die Wanduhr, nicht den Aufwand von scrypt."""
+    beginn = time.process_time()
     eintrag = passwort_eintrag("abc DEF 123", SALZ)
     assert pruefe(eintrag, "abc DEF 123") is True
     assert pruefe(eintrag, "abc DEF 124") is False
     assert pruefe(eintrag, "") is False
-    assert time.monotonic() - beginn < 5
+    assert time.process_time() - beginn < 5
     erwartet = hashlib.scrypt(b"abc DEF 123", salt=SALZ, n=131072, r=8, p=1, maxmem=268435456, dklen=32)
     assert eintrag == {"verfahren": "scrypt", "n": 131072, "r": 8, "p": 1, "salz": base64.b64encode(SALZ).decode(),
                        "hash": base64.b64encode(erwartet).decode()}

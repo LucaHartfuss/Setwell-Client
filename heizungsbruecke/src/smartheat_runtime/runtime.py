@@ -14,6 +14,7 @@ from smartheat_runtime.texts import HA_TEXTS, HostTexts
 if TYPE_CHECKING:
     from smartheat_core.pipeline import LeverPipeline
     from smartheat_runtime.budget_store import ZustandsSpeicher
+    from smartheat_runtime.erzeugerstoerung import Stand
     from smartheat_runtime.notifier import Notifier
     from smartheat_runtime.ports import MqttChannel, SignalSource, TriggerSource
     from smartheat_runtime.roles import ChannelManifest
@@ -101,5 +102,8 @@ class Runtime:
     # Datenfehler (SignalUngueltig, ein Fuehler ohne gueltigen Wert) des lokalen Checks in diesem Prozess schon als WARNING
     # geloggt, bis zum naechsten erfolgreichen Check (app._run_local_check). Nicht persistiert.
     local_check_data_fault_logged: bool = False
+    # Stoerungen des Waermeerzeugers (erzeugerstoerung.Stand): Zaehlung und offene Meldungen; None bis zur ersten Pruefung.
+    # Nicht persistiert: die offenen Meldungen stellt die Pruefung aus dem Meldezustand wieder her.
+    erzeuger: Stand | None = None
     # Kundentexte des Hosts; Standard = HA-Texte.
     texts: HostTexts = HA_TEXTS

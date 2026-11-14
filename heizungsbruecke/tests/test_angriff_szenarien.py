@@ -35,7 +35,13 @@ from smartheat_device.documents import DocumentStore
 HEBELSATZ = "vaillant_vrc720"
 BEREICHE = TABELLE[(HEBELSATZ, HK)][0]  # lokale Grenzen je Hebel, Literal aus test_regel4_werte.py
 ENTITIES = SAETZE[HEBELSATZ][2]  # Entity -> Hebel
-HINWEIS_STUFE = "info"
+#: Hinweise ohne Parameter (rot): die Schluessel, deren Nutzlast die Flut gueltig bauen kann
+FLUT_SCHLUESSEL = ("geraet_doppelt", "update_noetig", "gesperrt")
+
+
+def _hinweis(key, **aendern):
+    return {"key": key, "code": f"meldung.{key}", "params": {}, "stufe": "rot", **aendern}
+
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +114,7 @@ class Anlage:
         """Gueltige Serverantwort auf den letzten Tick."""
         werte = {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0, "min_flow": 20.5, **hebel}
         self.senden("down/setpoints", {"schema": 5, "kreis": 1, "seq": self.snapshots()[-1]["seq"], "ts": "x", "status": "ok",
-                                       "reason": None, "levers": werte, "learned": None})
+                                       "code": None, "params": None, "levers": werte, "learned": None})
 
     def stand(self) -> dict:
         state = self.bridge.store.state
@@ -148,35 +154,33 @@ def _flut() -> tuple[list[dict], list[str]]:
     zufall = random.Random(20261018)
     einzeln: list[dict] = []
     for nr in range(700):  # gueltig: Hinweis mit wenigen Schluesseln (die Datei waechst nicht mit der Flut)
-        einzeln.append(_befehl(f"f{len(einzeln):04d}", "hinweis",
-                               {"key": f"flut{nr % 8}", "stufe": HINWEIS_STUFE, "text": f"Text {nr}"}))
+        einzeln.append(_befehl(f"f{len(einzeln):04d}", "hinweis", _hinweis(FLUT_SCHLUESSEL[nr % 3])))
     for _ in range(300):
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "diagnostics", {}))
     for _ in range(200):
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "reboot_everything", {}))  # unbekannte Art
     for nr in range(200):
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "diagnostics", {}, fremd=nr))  # fremdes Feld
-    for nr in range(150):  # Nutzlast: Liste, fremdes Feld, zu langer Text
-        payload = [[], {"key": "k", "stufe": HINWEIS_STUFE, "text": "t", "fremd": 1},
-                   {"key": "k", "stufe": HINWEIS_STUFE, "text": "x" * 1001}][nr % 3]
+    for nr in range(150):  # Nutzlast: Liste, fremdes Feld, Code eines anderen Schluessels
+        payload = [[], _hinweis("gesperrt", fremd=1), _hinweis("gesperrt", code="meldung.update_noetig")][nr % 3]
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "hinweis", payload))
     for _ in range(150):  # eine Art, die HA nicht kann
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "zigbee_permit_join", {"seconds": 30}))
     assert len(einzeln) == 1700
     ohne_id = []
-    for nr in range(100):  # gueltig bis auf die ID: liefe er, bliebe der Hinweis "ohne-id" stehen
+    for nr in range(100):  # gueltig bis auf die ID: liefe er, stuende der Hinweis wunsch_begrenzt in der Datei
         ohne_id.append(_befehl([None, 123, "", "x" * 65, "a\ud800b", ["f0000"], {"id": 1}, True, 1.5, "\udfff"][nr % 10],
-                               "hinweis", {"key": "ohne-id", "stufe": HINWEIS_STUFE, "text": "Angriff"}))
+                               "hinweis", _hinweis("wunsch_begrenzt", params={"roh": 30, "begrenzt": 25}, stufe="orange")))
         if nr % 25 == 0:
             del ohne_id[-1]["command_id"]  # und ganz ohne
     reihe = [(nachricht, True) for nachricht in einzeln] + [(nachricht, False) for nachricht in ohne_id]
     zufall.shuffle(reihe)
     gueltige = [nachricht["command_id"] for nachricht, gueltig in reihe if gueltig]  # Reihenfolge des ersten Auftretens
-    for _ in range(200):  # Duplikate: dieselbe ID, andere Nutzlast ("dup-attack"), kurz nach dem Original
+    for _ in range(200):  # Duplikate: dieselbe ID, andere Nutzlast (soll_quelle_aus), kurz nach dem Original
         quelle = zufall.choice([i for i, (_, gueltig) in enumerate(reihe) if gueltig])
         ziel = min(len(reihe), quelle + 1 + zufall.randint(0, 80))
         reihe.insert(ziel, (_befehl(reihe[quelle][0]["command_id"], "hinweis",
-                                    {"key": "dup-attack", "stufe": HINWEIS_STUFE, "text": "zweiter Lauf"}), False))
+                                    _hinweis("soll_quelle_aus", params={"wirksam": 5}, stufe="orange")), False))
     assert len(reihe) == FLUT_ANZAHL
     return [nachricht for nachricht, _ in reihe], gueltige
 
@@ -265,7 +269,7 @@ def test_eine_befehlsflut_haelt_die_regelung_nicht_an_und_den_speicher_bei_500(
 
     # nichts davon lief mit der falschen Nutzlast: weder das Duplikat noch der Befehl ohne gueltige ID
     schluessel = {eintrag["key"] for eintrag in anlage.device.hinweise.alle()}
-    assert schluessel == {f"flut{nr}" for nr in range(8)}
+    assert schluessel == set(FLUT_SCHLUESSEL)
 
     # Geraete-Thread und Regel-Worker liefen durch: kein Fehler mit Ausnahme, auch sonst keiner im Log
     fehler = _fehler_im_log(caplog)
@@ -350,7 +354,7 @@ def _kaputte_bedienungen() -> list:
 def _kaputte_antworten(seq: str) -> list:
     """Kaputte down/setpoints zum offenen Tick seq."""
     def mit(**aenderung):
-        return {"schema": 5, "kreis": 1, "seq": seq, "ts": "x", "status": "ok", "reason": None,
+        return {"schema": 5, "kreis": 1, "seq": seq, "ts": "x", "status": "ok", "code": None, "params": None,
                 "levers": {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0}, "learned": None, **aenderung}
 
     return [
@@ -362,8 +366,8 @@ def _kaputte_antworten(seq: str) -> list:
         ("falsches Schema", mit(schema=3)),
         ("fremder Kreis", mit(kreis=2)),
         ("Kreis als Text", mit(kreis="1")),
-        ("Surrogat im Grund", mit(reason="a\ud800b")),
-        ("Uebergroesse", mit(reason=_grosser_text())),
+        ("Surrogat im Grund", mit(status="rejected", code="a\ud800b", params={})),
+        ("Uebergroesse", mit(status="rejected", code=_grosser_text(), params={})),
         ("Riesenzahl", mit(levers={"curve": 10**400, "room_setpoint": 23.0, "heat_limit": 16.0})),
         ("unbekannter Status", mit(status="gift")),
         ("gelernte Werte Text", mit(learned={"curve": "x", "heat_limit": float("nan")})),

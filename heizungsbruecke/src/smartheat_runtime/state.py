@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from smartheat_core import write_budget
+from smartheat_core import meldungen, write_budget
 from smartheat_core.emergency_boost import KaelteschutzZustand
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime import backup_store
@@ -38,7 +38,9 @@ _TEXT_FIELDS = (
 )
 #: Die Arten eines Kaelteschutz-Laufs (emergency_boost.KaelteschutzEntscheidung.art ohne "aus").
 _KAELTESCHUTZ_ARTEN = ("soll", "frost")
-_TEXT_MAP_FIELDS = ("notify_states", "notify_messages")
+_TEXT_MAP_FIELDS = ("notify_states",)
+#: Offene kritische Meldungen je Schluessel als {code, params, stufe} (meldungen.zu_dict).
+_MELDUNG_MAP_FIELDS = ("notify_meldungen",)
 _LEVER_MAP_FIELDS = ("restore_point", "originals", "learned")
 _OVERRIDE_FIELDS = ("manual_override", "manual_override_pending")
 # Lebensdauerzaehler, zurueckgestellte Serverwerte, Hilfs-Ursprungswerte, Energie-Normalisierung. Fehlen sie in
@@ -46,10 +48,11 @@ _OVERRIDE_FIELDS = ("manual_override", "manual_override_pending")
 # bleibt gleich).
 _PLAN3B_FIELDS = ("lifetime_writes", "deferred_levers", "aux_originals", "energy_state")
 BACKUP_FIELDS = (
-    _NUMBER_FIELDS + _FLAG_FIELDS + _TEXT_FIELDS + _TEXT_MAP_FIELDS + _LEVER_MAP_FIELDS + _OVERRIDE_FIELDS
-    + ("write_budget",) + _PLAN3B_FIELDS + ("kaelteschutz_zaehlung",)
+    _NUMBER_FIELDS + _FLAG_FIELDS + _TEXT_FIELDS + _TEXT_MAP_FIELDS + _MELDUNG_MAP_FIELDS + _LEVER_MAP_FIELDS
+    + _OVERRIDE_FIELDS + ("write_budget",) + _PLAN3B_FIELDS + ("kaelteschutz_zaehlung",)
 )
-_OMITTED_WHEN_EMPTY = _TEXT_MAP_FIELDS + _LEVER_MAP_FIELDS + ("write_budget",) + _PLAN3B_FIELDS + _OMITTED_FLAGS
+_OMITTED_WHEN_EMPTY = (_TEXT_MAP_FIELDS + _MELDUNG_MAP_FIELDS + _LEVER_MAP_FIELDS + ("write_budget",) + _PLAN3B_FIELDS
+                       + _OMITTED_FLAGS)
 #: Raster, auf das der Zeitpunkt der letzten Kaelteschutz-Pruefung beim Schreiben abgerundet wird: die Datei aendert
 #: sich hoechstens alle fuenf Minuten, nicht bei jeder Pruefung. Die Abrundung verkuerzt die Luecke nach einem Neustart
 #: um hoechstens diese Spanne, die Zaehlung beginnt dann eher von vorn (nie zu spaet einen Lauf).
@@ -99,9 +102,9 @@ class BridgeState:
     delivery: DeliveryState = field(default_factory=DeliveryState)
     # Zuletzt gemeldeter Zustand je Meldeschluessel (notifier.py); fehlender Schluessel = "ok".
     notify_states: dict = field(default_factory=dict)
-    # Letzter Meldetext je nicht-"ok" kritischem Schluessel: damit legt der notifier die
+    # Letzte Meldung (Code, Parameter, Stufe) je nicht-"ok" kritischem Schluessel: damit legt der notifier die
     # HA-Benachrichtigung nach einem HA-Neustart neu an (HA haelt sie nur im Speicher).
-    notify_messages: dict = field(default_factory=dict)
+    notify_meldungen: dict = field(default_factory=dict)
     # Zeitpunkt (ISO) der letzten Serverantwort auf einen offenen Tick (Status letzte_serverantwort).
     last_ack_at: str | None = None
     # Durchsetzung (enforce.py): aktiver Eingriff {levers, erkannt, rollen, signatur, gemeldet} bis
@@ -236,6 +239,17 @@ def _parse_backup(raw: dict, path: Path) -> tuple[dict, dict]:
             values[key] = dict(mapping)
         else:
             _invalid(key)
+    for key in _MELDUNG_MAP_FIELDS:
+        if key not in raw:
+            continue
+        mapping = raw[key]
+        if isinstance(mapping, dict) and all(isinstance(k, str) for k in mapping):
+            pruefung = {k: meldungen.aus_dict(v) for k, v in mapping.items()}
+            gueltig = {k: meldung for k, meldung in pruefung.items() if meldung is not None}
+            if len(gueltig) == len(pruefung):
+                values[key] = {k: meldungen.zu_dict(meldung) for k, meldung in gueltig.items()}
+                continue
+        _invalid(key)
     for key in _LEVER_MAP_FIELDS:
         if key not in raw:
             continue

@@ -52,6 +52,10 @@ KREIS_ZUSTAENDE = kreisansicht.ZUSTAENDE  # Kopie aus wire.KREIS_ZUSTAENDE (test
 GATEWAY_RAUMFUEHLER = re.compile(r"zigbee:0x[0-9a-f]{16}:(temperature|local_temperature)|treiber:room_temperature")
 IEEE = re.compile(r"0x[0-9a-f]{16}")
 TAGESTICK = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+MINDEST_VERSION = re.compile(r"\d+\.\d+\.\d+")  # wie der Vergleich der Software-Version (smartheat_device.documents)
+URSPRUNG_MAX_HEBEL = 16  # Kopie aus wire.URSPRUNG_MAX_HEBEL (test_core_vertrag_pin.py)
+URSPRUNG_HEBEL_MAX_CHARS = 64  # Kopie aus wire.URSPRUNG_HEBEL_MAX_CHARS (test_core_vertrag_pin.py)
+URSPRUNG_WERT_MAX = 1e12  # Kopie aus wire.URSPRUNG_WERT_MAX (test_core_vertrag_pin.py)
 #: Intervalle (nur E2E, Umgebung SMARTHEAT_E2E_INTERVALLE, smartheat_runtime.dokument_config; kein
 #: Dokumentfeld); die Grenzen stehen nur hier, die Laufzeit uebernimmt jeden Wert darin (ein Test startet sie an
 #: beiden Grenzen). Obergrenze Telemetrie (Regel 4): der Server wertet Luecken ab
@@ -95,9 +99,15 @@ HA_ROLLEN = (
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",
     "system_water_pressure", "efficiency_ratio", "generator_hours", "generator_starts", "generator_state",
     "energy_electrical_heating", "energy_electrical_dhw", "energy_primary_heating", "energy_primary_dhw",
-    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total",
+    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total", "fault_codes",
 )
-HA_HINWEISE = ("raumfuehler", "batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: Die Hinweise des Raumfuehlers fehlen hier mit Absicht: sie lassen sich nicht abschalten.
+HA_HINWEISE = ("batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: Push-Regeln der Person (Kopie aus smartheat_device.wire: PUSH_REGELN_FIELDS, PUSH_STUNDEN, PUSH_TAGESLIMIT, ebenfalls
+#: in test_core_vertrag_pin.py gehalten): Ruhezeit in ganzen Stunden und Pushes je Tag.
+PUSH_REGELN_FELDER = ("ruhe_von", "ruhe_bis", "tageslimit")
+PUSH_STUNDEN = (0, 23)
+PUSH_TAGESLIMIT = (1, 5)
 #: Referenzen wie die bisherigen entity_*-Optionen des Add-ons (entity_id oder entity_id::attribut); als Attribut
 #: lesen und schreiben die Rollen nur die Temperaturen (sonst liesse sich jedes Attribut einer Entity binden,
 #: etwa Laengen- und Breitengrad einer Zone). Die Form je Rolle prueft der Host mit der Inventur, hier nur der Aufbau.
@@ -144,6 +154,35 @@ def ist_leer(inhalt) -> bool:
     return isinstance(inhalt, Mapping) and inhalt.get("anlage") is None
 
 
+@dataclass(frozen=True)
+class PushRegeln:
+    """Ruhezeit (ganze Stunden, `ruhe_von` bis `ruhe_bis`, ueber Mitternacht erlaubt) und Pushes je Tag."""
+    ruhe_von: int
+    ruhe_bis: int
+    tageslimit: int
+
+
+PUSH_STANDARD = PushRegeln(ruhe_von=22, ruhe_bis=7, tageslimit=5)
+
+
+def _ganz(wert, bereich: tuple[int, int]) -> int | None:
+    if isinstance(wert, int) and not isinstance(wert, bool) and bereich[0] <= wert <= bereich[1]:
+        return wert
+    return None
+
+
+def push_regeln_lesen(wert) -> PushRegeln:
+    """Die Push-Regeln aus dem Dokument. Ungueltiges lehnt das Dokument nie ab: eine Ruhezeit mit fehlender, falsch
+    getypter oder ausserhalb liegender Stunde oder mit gleichem Anfang und Ende gilt als Standard, ebenso ein ungueltiges
+    Tageslimit; beides unabhaengig voneinander."""
+    roh = wert if isinstance(wert, Mapping) else {}
+    von, bis = _ganz(roh.get("ruhe_von"), PUSH_STUNDEN), _ganz(roh.get("ruhe_bis"), PUSH_STUNDEN)
+    if von is None or bis is None or von == bis:
+        von, bis = PUSH_STANDARD.ruhe_von, PUSH_STANDARD.ruhe_bis
+    limit = _ganz(roh.get("tageslimit"), PUSH_TAGESLIMIT)
+    return PushRegeln(von, bis, PUSH_STANDARD.tageslimit if limit is None else limit)
+
+
 def _text(value, limit: int = TEXT_MAX_CHARS) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit
 
@@ -154,6 +193,27 @@ def _zahl(wert) -> bool:
 
 def _nummer(wert) -> bool:
     return isinstance(wert, int) and not isinstance(wert, bool) and 1 <= wert <= KREIS_NUMMER_MAX
+
+
+def _ursprungswert(wert) -> bool:
+    """Zahl (endlich, hoechstens URSPRUNG_WERT_MAX), Wahrheitswert oder kurzer Text: was der Server speichert."""
+    if isinstance(wert, bool):
+        return True
+    if isinstance(wert, int | float):
+        return _zahl(wert) and abs(wert) <= URSPRUNG_WERT_MAX
+    return _text(wert, URSPRUNG_HEBEL_MAX_CHARS)
+
+
+def _ursprungswerte_ok(werte) -> bool:
+    return (isinstance(werte, Mapping) and len(werte) <= URSPRUNG_MAX_HEBEL
+            and all(_text(name, URSPRUNG_HEBEL_MAX_CHARS) and _ursprungswert(wert) for name, wert in werte.items()))
+
+
+def mindest_software_pruefen(neu: Mapping) -> dict | None:
+    """details, wenn `mindest_software` kein Versionstext (x.y.z) ist, sonst None. Der Server schreibt immer eine Version;
+    ein anderer Wert (auch null) blockierte bisher nie und ging unbemerkt durch."""
+    wert = neu.get("mindest_software")
+    return None if isinstance(wert, str) and MINDEST_VERSION.fullmatch(wert) else befund("mindest_software", "ungueltig")
 
 
 def _raum_aufbau(raum, gesehen: set[int]) -> dict | None:
@@ -216,6 +276,8 @@ def _kreis_aufbau(eintrag, vorige: int) -> dict | None:
         return befund("abo", "unbekannt")
     if "zustand" in eintrag and eintrag["zustand"] not in KREIS_ZUSTAENDE:
         return befund("zustand", "unbekannt")  # fehlt der Wert, gilt in_betrieb (kreisansicht.zustand)
+    if "ursprungswerte" in eintrag and not _ursprungswerte_ok(eintrag["ursprungswerte"]):
+        return befund("ursprungswerte", "ungueltig")
     abfrage = eintrag["bindung"].get("abfrage_s")
     if abfrage is not None and not (isinstance(abfrage, int) and not isinstance(abfrage, bool)
                                     and ABFRAGE_S[0] <= abfrage <= ABFRAGE_S[1]):
@@ -246,6 +308,8 @@ def _aufbau(neu: Mapping) -> dict | None:
     tick = neu.get("tagestick")
     if not isinstance(tick, str) or not TAGESTICK.fullmatch(tick):
         return befund("tagestick", "format")
+    if problem := mindest_software_pruefen(neu):
+        return problem
     if neu.get("mindest_integration") is not None and not _text(neu["mindest_integration"]):
         return befund("mindest_integration", "ungueltig")
     kreise = neu.get("kreise")
@@ -260,6 +324,24 @@ def _aufbau(neu: Mapping) -> dict | None:
         vorige = eintrag["kreis"]
     if len({eintrag["hebelsatz"] for eintrag in kreise}) > 1:  # anlagenweit ein Hebelsatz
         return befund("hebelsatz", "ungueltig")
+    return None
+
+
+def _leer_aufbau(neu: Mapping) -> dict | None:
+    """details des ersten Feldes der leeren Konfiguration (`anlage` ist null) mit falschem Typ, sonst None. Der Server
+    schreibt dort null (Namen, Weg, Tagestick, Parameter) bzw. eine leere Kreisliste; ein Textfeld hat den Typ des
+    vollen Dokuments oder ist null. Was fehlt, gehoert zur Form des Dokuments, nicht hierher."""
+    for feld in ("anlage_name", "weg", "mindest_integration"):
+        if neu.get(feld) is not None and not _text(neu[feld], NAME_MAX_CHARS if feld == "anlage_name" else TEXT_MAX_CHARS):
+            return befund(feld, "ungueltig")
+    if neu.get("tagestick") is not None and not (isinstance(neu["tagestick"], str) and TAGESTICK.fullmatch(neu["tagestick"])):
+        return befund("tagestick", "format")
+    if "mindest_software" in neu and (problem := mindest_software_pruefen(neu)):
+        return problem
+    if "kreise" in neu and neu["kreise"] != []:  # eine Anlage ohne Einrichtung hat keine Kreise
+        return befund("kreise", "ungueltig")
+    if neu.get("bindungsparameter") is not None:  # ohne Einrichtung gibt es keine Parameter
+        return befund("bindungsparameter", "ungueltig")
     return None
 
 
@@ -409,7 +491,8 @@ def _pruefen(neu: Mapping, rastung: Rastung | None, *, host: str,
     if not isinstance(neu, Mapping):
         return Ablehnung(UNGUELTIG)
     if ist_leer(neu):
-        return None
+        problem = _leer_aufbau(neu)
+        return None if problem is None else Ablehnung(UNGUELTIG, problem)
     problem = _aufbau(neu)
     if problem is not None:
         return Ablehnung(UNGUELTIG, problem)

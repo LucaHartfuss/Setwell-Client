@@ -41,6 +41,7 @@ from runtime_helpers import (
 )
 from strategien import JSON_WERT, SURROGATTEXT, WEG, ersetze, pfade
 
+from smartheat_core import meldungen
 from smartheat_core.safety import LOCAL_SAFETY
 from smartheat_device import bootstrap, wire
 from smartheat_device import commands as cmd
@@ -297,12 +298,11 @@ _NICHT_ENDLICH = [float("nan"), float("inf"), float("-inf"), 10**400, -(10**400)
 _FORMEN = [lambda zahl: zahl, lambda zahl: [zahl], lambda zahl: {"x": zahl}, lambda zahl: {"x": [zahl]}]
 
 
-#: Felder, die der Leser nicht auf Typ und Zahl prueft (offene-punkte.md TO-client-kern-T8): `mindest_software`
-#: und `ts` liest im Geraet keine Stelle als Zahl; `ursprungswerte` liest nur die Pipeline und filtert dort jede nicht
-#: endliche Zahl (`ist_endliche_zahl`, Rueckweg auf den lokalen Wert) und klemmt auf die lokalen Grenzen. Eine leere Konfiguration ist "immer gueltig" (nur `anlage` None zaehlt):
-#: sie fehlt in dieser Aufzaehlung ganz.
-UNGEPRUEFT = {"konfiguration": ("mindest_software", "ursprungswerte"),
-              "konfiguration_mit_ursprung": ("mindest_software", "ursprungswerte"), "bedienung": ("ts",)}
+#: Felder, die der Leser nicht ablehnt: `push_regeln` lehnt das Dokument nie ab, der Leser
+#: (`config_check.push_regeln_lesen`) nimmt nur ganze Zahlen im Bereich und sonst den Standard. Alles andere prueft der
+#: Leser auf Typ und Zahl, auch die leere Konfiguration und `ursprungswerte`.
+UNGEPRUEFT = {"konfiguration": ("push_regeln",), "konfiguration_mit_ursprung": ("push_regeln",),
+              "konfiguration_leer": ("push_regeln",), "bedienung": ()}
 
 
 @pytest.mark.parametrize("dokument", [d for d in DOKUMENTE if d[0] in UNGEPRUEFT], ids=list(UNGEPRUEFT))
@@ -315,7 +315,6 @@ def test_nicht_endliche_zahl_an_jeder_stelle_wird_abgelehnt_oder_nie_gespeichert
     zaehler = 0
     for pfad in pfade(gut):
         if (not pfad or pfad[0] in ("version", "schema", *UNGEPRUEFT[name])
-                or pfad[:3] == ("kreise", 0, "ursprungswerte")
                 or pfad[:5] == ("kreise", 0, "bindung", "treiber", "parameter")):
             continue
         for zahl in _NICHT_ENDLICH:
@@ -348,7 +347,7 @@ def test_text_mit_einzelnem_surrogat_wird_abgelehnt_oder_ist_speicherbar(stelle,
 
 COMMAND_FELDER = ("schema", "command_id", "kind", "payload", "expires_at")  # Namen aus dem Vertrag als Literal, nicht der Konstante
 BEFEHLE = [
-    ("diagnostics", {}), ("hinweis", {"key": "k", "stufe": "info", "text": "t"}), ("sign_off", {}),
+    ("diagnostics", {}), ("hinweis", {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}), ("sign_off", {}),
     ("zigbee_permit_join", {"seconds": 30}), ("claim_state", {"device_state": "uebernommen"}),
     ("inventory", {"stunden": 1}), ("inventory", {"stunden": 1, "filter": {}}),
 ]
@@ -372,11 +371,11 @@ def _utf8_speicherbar(wert) -> bool:
 
 def _soll_laufen(nachricht) -> bool:
     """Unabhaengige Aussage der Annahmeregeln (Befehle: genau die Felder des Vertrags, die Nutzlast ein Objekt mit allen
-    Pflichtfeldern der Art und sonst nur deren optionalen Feldern). Schreibt das HEUTIGE Verhalten fest, kein Sollwert:
-    der Wert von `schema` prueft die Annahme nicht (Dokumente pruefen ihn gegen wire.SCHEMATA), Restpunkt
-    TO-client-kern-T8; kommt die Pruefung, wird das Orakel angepasst."""
+    Pflichtfeldern der Art und sonst nur deren optionalen Feldern, `schema` einer der Vertragswerte)."""
     command_id, kind, payload = nachricht.get("command_id"), nachricht.get("kind"), nachricht.get("payload")
     if not (isinstance(command_id, str) and 0 < len(command_id) <= 64) or set(nachricht) != set(COMMAND_FELDER):
+        return False
+    if nachricht["schema"] not in wire.SCHEMATA:
         return False
     if not _utf8_speicherbar(nachricht):
         return False
@@ -428,6 +427,17 @@ def test_befehl_mit_fremdem_feld_fuehrt_keinen_handler_aus(befehl, fremd, im_pay
         _ergebnisse_sind_wohlgeformt(sent)
 
 
+@given(st.sampled_from(BEFEHLE), JSON_WERT)
+def test_befehl_mit_beliebigem_schema_laeuft_nur_mit_einem_vertragswert(befehl, schema):
+    kind, payload = befehl
+    nachricht = {**_command(kind, payload=payload), "schema": schema}
+    with tempfile.TemporaryDirectory() as verzeichnis:
+        sent, aufrufe = Sent(), []
+        _register(verzeichnis, sent, aufrufe).empfangen(nachricht)
+        assert len(aufrufe) == int(schema in wire.SCHEMATA and not isinstance(schema, bool))
+        _ergebnisse_sind_wohlgeformt(sent)
+
+
 @pytest.mark.parametrize(("kind", "payload"), BEFEHLE, ids=[f"{kind}-{i}" for i, (kind, _) in enumerate(BEFEHLE)])
 def test_gueltiger_befehl_ueberlebt_den_json_rundweg(tmp_path, kind, payload):
     ergebnisse = []
@@ -451,22 +461,24 @@ def test_command_id_beliebigen_textes_wird_abgelehnt_oder_ausgefuehrt_ohne_ausna
         _ergebnisse_sind_wohlgeformt(sent)
 
 
-@given(JSON_WERT, JSON_WERT, JSON_WERT | st.just(WEG), st.sampled_from(["key", "stufe", "text"]))
-def test_hinweis_mit_beliebigen_werten_speichert_nur_gueltige_hinweise(schluessel, stufe, text, feld):
+@given(JSON_WERT, JSON_WERT, JSON_WERT | st.just(WEG), JSON_WERT, st.sampled_from(["key", "code", "params", "stufe"]))
+def test_hinweis_mit_beliebigen_werten_speichert_nur_gueltige_hinweise(schluessel, code, params, stufe, feld):
     """Der eingebaute Befehl hinweis (jedes Geraet): was ankommt, ist ein Hinweis aus dem Vertrag oder abgelehnt."""
     with tempfile.TemporaryDirectory() as verzeichnis:
         sent = Sent()
         register = cmd.CommandRegister(Path(verzeichnis), sent)
         hinweise = cmd.Hinweise(Path(verzeichnis))
         register.register("hinweis", hinweise.handler)
-        payload = {"key": schluessel, "stufe": stufe, **({} if text is WEG else {"text": text})}
-        payload[feld] = {"key": schluessel, "stufe": stufe, "text": None if text is WEG else text}[feld]
+        gueltig = {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}
+        wert = {"key": schluessel, "code": code, "params": None if params is WEG else params, "stufe": stufe}
+        payload = {**gueltig, feld: wert[feld]}
         register.empfangen(_command("hinweis", payload=payload))
         _ergebnisse_sind_wohlgeformt(sent)
         for eintrag in hinweise.alle():
-            assert isinstance(eintrag["key"], str) and 0 < len(eintrag["key"]) <= 64
-            assert eintrag["stufe"] in wire.HINWEIS_STUFEN
-            assert isinstance(eintrag["text"], str) and 0 < len(eintrag["text"]) <= 1000
+            assert eintrag["key"] in wire.MELDUNGEN
+            assert eintrag["code"] == "meldung." + eintrag["key"]
+            assert eintrag["stufe"] == meldungen.TABELLE[eintrag["code"]].stufe
+            assert isinstance(eintrag["params"], dict)
         assert cmd.Hinweise(Path(verzeichnis)).alle() == hinweise.alle()  # was angenommen ist, ist auch gespeichert
 
 
@@ -492,8 +504,8 @@ def _hebel(erwartet):
 
 def _antwort(erwartet):
     return st.builds(
-        lambda extra, schema, kreis, status, reason, levers, learned: {
-            **extra, "schema": schema, "kreis": kreis, "ts": "x", "status": status, "reason": reason, "levers": levers,
+        lambda extra, schema, kreis, status, code, levers, learned: {
+            **extra, "schema": schema, "kreis": kreis, "ts": "x", "status": status, "code": code, "params": None, "levers": levers,
             "learned": learned},
         st.dictionaries(st.text(max_size=8), JSON_WERT, max_size=3),
         st.sampled_from([5, 5, 5, 5]) | JSON_WERT,

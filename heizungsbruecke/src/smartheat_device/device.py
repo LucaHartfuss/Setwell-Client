@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from smartheat_core import config_check, kreisansicht
+from smartheat_core import config_check, kreisansicht, meldungen
 from smartheat_core.logtext import lesbar
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_core.zeitquelle import echte_epoche, fachliche_epoche
@@ -34,7 +34,6 @@ from smartheat_device.host import Anzeige, DeviceHost
 from smartheat_device.laufzeit import RuntimeChannel
 from smartheat_device.link import ANMELDUNG_SCHEITERT, GESENDET, GETRENNT, NACHRICHT, VERBUNDEN, Link
 from smartheat_runtime import dokument_config
-from smartheat_runtime.notifier import category
 from smartheat_runtime.soll_speicher import KREIS
 from smartheat_runtime.worker import RegulationWorker
 
@@ -47,9 +46,8 @@ MELDUNGEN_MIN_SECONDS = 10
 MELDUNGEN_JE_NACHRICHT = 50
 SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
-#: Lokaler Hinweis bei einer abgelehnten Konfiguration (Entscheidung des Nutzers): den Text der Ablehnung
-#: bildet der Server, das Geraet nennt nur den Code.
-ABLEHNUNG_ANZEIGE = "Die Einrichtung wurde abgelehnt (Code {grund}). Die Begründung zeigt der Einrichtungsassistent."
+#: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
+ENTFERNT_WIEDERHOLUNG_SECONDS = 60
 #: Down-Topic eines Dokuments -> Dokumentart (wire.DOKUMENT_TOPICS umgekehrt)
 _DOKUMENT_ART = {topic: art for art, topic in wire.DOKUMENT_TOPICS.items()}
 _RUNNING = ("regelt", "abo_inaktiv")
@@ -134,6 +132,8 @@ class Device:
         self.befehle.register("hinweis", self.hinweise.handler)
         self.befehle.register("new_claim_code", self._new_claim_code)
         self.befehle.register("claim_state", self._claim_state)
+        # Die Wegpruefung liest an der Anbindung der Anlage; bis ein Host sie kann, lehnt das Geraet sie ab.
+        self.befehle.register("weg_pruefen", lambda _nutzlast: commands.Failed("nicht_unterstuetzt"))
         host.befehle_eintragen(self.befehle)
         self.wunsch_puffer = wish.WunschPuffer(self._dir, clock)
         self._bootstrap = bootstrap.Bootstrap(
@@ -145,12 +145,14 @@ class Device:
         self._hello_offen = False  # verbunden, hello noch nicht gesendet (Takt versucht es erneut)
         self._rettung = False
         self._kanaele: dict[int, RuntimeChannel] = {}  # je Kreis ein Kanal ueber denselben Link
-        self._eigene: dict[str, str] = {}  # eigene Meldungen des Geraets: key -> Text
+        self._eigene: dict[str, meldungen.Meldung] = {}  # eigene Meldungen des Geraets: key -> Meldung
         self._meldungen: dict[str, dict] = {}  # offene Meldungen (Geraet und Laufzeit)
         self._meldungen_neu: dict[str, dict] = {}  # geaendert, noch nicht gesendet
         self._meldungen_at: float | None = None
         self._status: dict | None = None
         self._status_at: float | None = None
+        self._entfernt_mid: int | None = None  # mid des gesendeten up/entfernt, solange das PUBACK aussteht
+        self._entfernt_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung von up/entfernt
         #: Nach hello muss ein Status hinaus; gescheitert der Rueckruf dabei, bleibt der Merker, bis
         #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
         self._status_erzwingen = False
@@ -220,14 +222,20 @@ class Device:
     def soll_quelle_aus(self, aus: bool, wirksam: float | None = None) -> None:
         """Soll-Quelle aus (Thermostat aus/Frostschutz): kein Wunsch, nur die Meldung soll_quelle_aus. Ohne
         wirksames Soll bleibt sie offen, nur ohne Wert im Text; schliessen kann sie nur aus=False."""
-        text = wish.soll_quelle_aus_text(wirksam) if aus else None
-        self._inbox.put(("eigene", wish.SOLL_QUELLE_AUS_KEY, text))
+        meldung = wish.soll_quelle_aus_meldung(wirksam) if aus else None
+        self._inbox.put(("eigene", wish.SOLL_QUELLE_AUS_KEY, meldung))
 
-    def meldung(self, key: str, text: str, *, offen: bool, stufe: str) -> None:
-        """Meldung der Laufzeit (NotifySink des Hosts): Upsert je key ueber up/notifications. Die Stufe (wire.STUFEN)
-        setzt der Aufrufer; eine unbekannte lehnt nachrichten.meldung laut ab."""
-        self._inbox.put(("meldung", nachrichten.meldung(key=key, kategorie=category(key), stufe=stufe, text=text,
-                                                        offen=offen, ts=_iso(self._wall()))))
+    def meldung(self, key: str, meldung: meldungen.Meldung | None, *, offen: bool) -> None:
+        """Meldung der Laufzeit (NotifySink des Hosts): Upsert je key ueber up/notifications. Auf den Draht gehen
+        Code, Parameter des Katalogs und Stufe der Meldung (meldungen.draht), nie ein Text oder Name; der Key wird zu
+        einem Draht-Key ohne Namen, ein Kreispraefix zum Feld kreis (nachrichten.draht_key). Ohne Meldung (None) kann
+        nur geschlossen werden. Eine Erzeugermeldung traegt zusaetzlich `quelle` und `roh` (meldungen.erzeuger_angaben)."""
+        draht_key, kreis = nachrichten.draht_key(key)
+        draht = meldungen.draht(meldung) if meldung is not None else {"code": None, "params": {}, "stufe": None}
+        angaben = meldungen.erzeuger_angaben(meldung) if meldung is not None else {}
+        self._inbox.put(("meldung", nachrichten.meldung(key=draht_key, offen=offen, ts=_iso(self._wall()),
+                                                        kreis=kreis, quelle=angaben.get("quelle"),
+                                                        roh=angaben.get("roh"), **draht)))
 
     def im_geraete_thread(self, aufgabe: Callable[[], None]) -> None:
         """Eine Aufgabe des Hosts (z. B. lokales Abmelden ueber stdin) im Geraete-Thread ausfuehren lassen: aus
@@ -289,9 +297,11 @@ class Device:
             zustand=self.zustand(), server_ok=(link := self.link) is not None and link.connected,
             device_state=bootstrap.device_state(self._dir), eingerichtet=self.documents.eingerichtet(),
             hinweise=self.hinweise.alle(),
-            meldungen=tuple({"key": key, "text": text} for key, text in sorted(self._eigene.items())),
-            konfiguration_abgelehnt=(ABLEHNUNG_ANZEIGE.format(grund=ablehnung[1]) if ablehnung is not None
-                                     else None))
+            meldungen=tuple({"key": key, "text": meldungen.text(meldung), **meldungen.zu_dict(meldung)}
+                            for key, meldung in sorted(self._eigene.items())),
+            konfiguration_abgelehnt=(
+                meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))
+                if ablehnung is not None else None))
 
     # --- Geraete-Thread ---
 
@@ -318,6 +328,7 @@ class Device:
                 self._verbunden()
             elif art == GETRENNT:
                 self._bereit = False
+                self._entfernt_mid = None  # ein neuer Client zaehlt mids wieder ab 1
                 self.wunsch_puffer.verbindung_verloren()
             elif art == ANMELDUNG_SCHEITERT:
                 self._rettung = True
@@ -326,6 +337,9 @@ class Device:
             elif art == GESENDET:
                 mid, client_nr, ok = daten
                 if self.link is not None and client_nr == self.link.client_nr:  # nie das PUBACK eines alten Clients
+                    if ok and mid == self._entfernt_mid:
+                        self._entfernt_mid = None
+                        self._host_wert("entfernen_erledigt", self.host.entfernen_erledigt)
                     if ok:
                         self.wunsch_puffer.bestaetigt(mid)
                         self.befehle.inventur_bestaetigt(mid)
@@ -360,6 +374,7 @@ class Device:
         self.befehle.pruefen()
         self._wunsch_senden()
         self._status_senden(now, force=self._status_erzwingen)
+        self._entfernt_senden(now)
         self._meldungen_senden(now)
         self._host_wert("anzeigen", self.host.anzeigen, self.anzeige())  # gescheitert: diese Anzeige entfaellt
 
@@ -657,8 +672,8 @@ class Device:
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall())
         self.wunsch_puffer.setzen(neu)
         self.documents.mark_dirty()
-        text = wish.begrenzt_text(roh, begrenzt, herkunft) if roh is not None else None
-        self._eigene_meldung(wish.BEGRENZT_KEY, text)
+        meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
+        self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:
@@ -678,16 +693,42 @@ class Device:
             self._wunsch_fehler = None
             self.wunsch_puffer.gesendet(kreis, self._publish("up/wish", body))
 
-    def _eigene_meldung(self, key: str, text: str | None) -> None:
+    def _entfernt_senden(self, now: float) -> None:
+        """Hat der Nutzer beim Entfernen gewaehlt, das Geraet aus dem Konto zu loesen, geht die Wahl erst nach hello und
+        nachdem der Status "abgemeldet" hinaus ist (der Server wirkt nur auf ein abgemeldetes Geraet). Der Host loescht
+        die Wahl erst auf das PUBACK; ohne PUBACK geht sie nach ENTFERNT_WIEDERHOLUNG_SECONDS erneut hinaus."""
+        if not self._bereit or now < self._entfernt_frei_ab:
+            return
+        if ((self._status or {}).get("runtime_status") or {}).get("status") != "abgemeldet":
+            return
+        wahl, gescheitert = self._host_wert("entfernen_wahl", self.host.entfernen_wahl)
+        if gescheitert or wahl is None:
+            return
+        try:
+            body = nachrichten.entfernt(wahl=wahl, ts=_iso(self._wall()))
+        except nachrichten.Vertragsfehler as error:
+            # Programmierfehler (nur Feldnamen im Text); je Text einmal loggen, der Takt ruft das jede Sekunde
+            if self._publish_fehler.get("up/entfernt") != str(error):
+                self._publish_fehler["up/entfernt"] = str(error)
+                logger.error("up/entfernt nicht gebaut: %s", error)
+            return
+        self._entfernt_mid = self._publish("up/entfernt", body)
+        if self._entfernt_mid is not None:
+            self._entfernt_frei_ab = now + ENTFERNT_WIEDERHOLUNG_SECONDS
+
+    def _eigene_meldung(self, key: str, meldung: meldungen.Meldung | None) -> None:
         if key not in wire.MELDUNGEN:
             raise nachrichten.Vertragsfehler("eigene Meldung: key steht nicht in MELDUNGEN")
-        if self._eigene.get(key) == text:
+        if self._eigene.get(key) == meldung:
             return
         vorher = self._eigene.pop(key, None)
-        if text is not None:
-            self._eigene[key] = text
-        self._meldung_merken(nachrichten.meldung(key=key, kategorie=key, stufe="orange", text=text or vorher or "",
-                                                 offen=text is not None, ts=_iso(self._wall())))
+        if meldung is not None:
+            self._eigene[key] = meldung
+        # geschlossen wird mit der zuletzt offenen Meldung: so bleiben Code und Stufe des Items die der Meldung
+        gesendet = meldung or vorher
+        inhalt = (meldungen.draht(gesendet) if gesendet is not None
+                  else {"code": None, "params": {}, "stufe": None})
+        self._meldung_merken(nachrichten.meldung(key=key, offen=meldung is not None, ts=_iso(self._wall()), **inhalt))
 
     def _meldung_merken(self, item: dict) -> None:
         key = item["key"]
