@@ -2,6 +2,9 @@
 
 ## Unveroeffentlicht
 
+- Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der urspruenglichen Werte geht jetzt auch an den
+  Server und erreicht Eigentuemer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurueckgenommen.
+
 - Die Meldung `update_noetig` des Geraets (gemeinsame Tabelle) traegt unter einer kritischen Mindestversion das Datum
   der urspruenglichen Werte, ohne bekannten Beginn gilt die Fassung `update_noetig_unbekannt`. Die Meldung zur
   veralteten Integration gibt es nur im Add-on, nie am Gateway.

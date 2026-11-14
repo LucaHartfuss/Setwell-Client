@@ -15,7 +15,6 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping
-from pathlib import Path
 
 from heizungsbruecke import dokument as ha_dokument
 from heizungsbruecke.ha_sinks import EVENT_TYPE, meldung_daten
@@ -24,7 +23,7 @@ from smartheat_core import kreisansicht, meldungen
 from smartheat_core.config_check import HA_DIENST, HA_HINWEISE, PUSH_REGELN_FELDER, push_regeln_lesen
 from smartheat_device.documents import Dokument
 from smartheat_device.host import Anzeige
-from smartheat_runtime import entitlement, status
+from smartheat_runtime import status
 from smartheat_runtime.dokument_config import ConfigError
 
 logger = logging.getLogger(__name__)
@@ -50,37 +49,6 @@ WIEDERHOLEN_SECONDS = 60
 ZUSTAND_MELDUNGEN = {
     "gesperrt": meldungen.PREFIX + "gesperrt",
 }
-
-
-class KritischesEnde:
-    """Datum, an dem das Geraet unter einer kritischen Mindestversion die urspruenglichen Werte wieder einstellt: der
-    lokale Beginn der Frist (Entitlement-Datei je Kreis) plus `GRACE_PERIOD`, als ISO-Datum in der Zeitzone des
-    gespeicherten Beginns, bei mehreren Kreisen das fruehere. `None` ohne kritische Mindestversion und ohne lesbaren
-    Beginn (Uhr unklar: es wurde keiner gespeichert). Die Dateien werden je `CACHE_SECONDS` hoechstens einmal gelesen
-    (eine beschaedigte Datei meldet sich so nur einmal je Fenster im Log); ohne kritische Mindestversion bleibt nichts
-    im Zwischenspeicher. Liest nur."""
-    CACHE_SECONDS = 30
-
-    def __init__(self, kritisch: Callable[[], bool], pfad: Callable[[int], Path], *,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self._kritisch, self._pfad, self._clock = kritisch, pfad, clock
-        self._gelesen: tuple[tuple[int, ...], float, str | None] | None = None
-
-    def __call__(self, kreise: list[int]) -> str | None:
-        if not self._kritisch():
-            self._gelesen = None
-            return None
-        schluessel, jetzt = tuple(kreise), self._clock()
-        if self._gelesen is not None and self._gelesen[0] == schluessel and jetzt - self._gelesen[1] < self.CACHE_SECONDS:
-            return self._gelesen[2]
-        enden = []
-        for kreis in schluessel:
-            beginn = entitlement.load_inactive_since(self._pfad(kreis))
-            if beginn is not None:
-                enden.append(entitlement.grace_end(beginn).date().isoformat())
-        ende = min(enden) if enden else None
-        self._gelesen = (schluessel, jetzt, ende)
-        return ende
 
 
 def meldungen_liste(anzeige: Anzeige, ende: str | None = None) -> list[dict]:

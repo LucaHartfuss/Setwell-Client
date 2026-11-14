@@ -73,6 +73,9 @@ class HaDeviceHost(GeraetHostBasis):
     def abgemeldet_pfad(self) -> Path:
         return config.ABGEMELDET_PATH
 
+    def entitlement_pfad(self, kreis: int) -> Path:
+        return config.entitlement_path(kreis)
+
     # --- Sicht der Laufzeit (HaHost) ---
 
     def notify_sink_fuer(self, services: list[str]) -> GeraetUndHaSink:
@@ -160,6 +163,7 @@ class HaDeviceHost(GeraetHostBasis):
 
     def anzeigen(self, anzeige: Anzeige) -> None:
         self.letzte_anzeige = anzeige
+        self.update_noetig_melden(anzeige)
         sink = self.status_sink
         if sink is not None and hasattr(sink, "anzeige"):
             try:

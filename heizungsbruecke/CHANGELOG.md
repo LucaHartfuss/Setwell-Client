@@ -5,6 +5,9 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der ursprünglichen Werte geht jetzt auch an den
+  Server und erreicht Eigentümer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurückgenommen.
+
 - Unter einer kritischen Mindestversion nennt die Meldung `update_noetig` das Datum, an dem das Gerät die
   ursprünglichen Werte wieder einstellt (Beginn der lokalen Frist plus 30 Tage); ohne bekannten Beginn (unklare Uhr)
   erscheint die Fassung ohne Datum. Ist die Integration veraltet, zeigt das Add-on in Home Assistant die Meldung

@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ from smartheat_gateway.drivers import registry
 from smartheat_gateway.triggers import EV_TARGET_INPUT
 from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import ZigbeeMirror
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, entitlement
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.soll_speicher import SOURCE_PORTAL
 from smartheat_runtime.worker import RegulationWorker
@@ -94,6 +94,22 @@ def test_runtime_messages_become_notifications(welt):
     assert welt.device.meldungen == [
         ("notbetrieb", notbetrieb, True), ("notbetrieb", notbetrieb, True),
         ("batterie:0x1", batterie, False), ("notbetrieb", notbetrieb, False)]
+
+
+def test_the_critical_minimum_version_goes_to_the_device_as_a_red_message_with_the_date(welt):
+    """Unter update_noetig geht die rote Meldung mit dem Datum der Ursprungswerte ueber den Geraetekern an den Server
+    (die Gateway-Kunden sehen sie nur dort); beim Verlassen des Zustands wird sie zurueckgenommen."""
+    welt.device.update_noetig_kritisch = lambda: True
+    pfad = welt.paths.entitlement(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    mez = timezone(timedelta(hours=1))
+    entitlement.mark_inactive(pfad, datetime(2026, 1, 1, tzinfo=mez), kritisch=True)
+    welt.host.anzeigen(_anzeige("update_noetig"))
+    welt.host.anzeigen(_anzeige("update_noetig"))
+    assert welt.device.meldungen == [("update_noetig", meldungen.neu("meldung.update_noetig", ende="2026-01-31"), True)]
+    welt.host.anzeigen(_anzeige("regelt"))
+    assert welt.device.meldungen[-1] == ("update_noetig", None, False)
+    assert len(welt.device.meldungen) == 2
 
 
 def test_the_datentraeger_message_goes_to_the_device_as_a_code(welt):

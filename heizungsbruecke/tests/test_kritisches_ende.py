@@ -7,6 +7,7 @@ from fakes import FakeClock
 
 from heizungsbruecke import geraet_status
 from smartheat_core import meldungen
+from smartheat_device.geraet_host_basis import KritischesEnde
 from smartheat_device.host import Anzeige
 from smartheat_runtime import entitlement
 
@@ -18,7 +19,7 @@ def _beginn(pfad, jahr, monat, tag, stunde=0, minute=0, sekunde=0, kritisch=True
 
 
 def _ende(tmp_path, kritisch=True, clock=None):
-    return geraet_status.KritischesEnde(lambda: kritisch, lambda kreis: tmp_path / f"kreis{kreis}.json",
+    return KritischesEnde(lambda: kritisch, lambda kreis: tmp_path / f"kreis{kreis}.json",
                                         clock=clock or FakeClock())
 
 
@@ -66,7 +67,7 @@ def test_eine_beschaedigte_datei_gibt_kein_datum_und_nur_eine_warnung_je_halbe_m
     with caplog.at_level(logging.WARNING):
         assert [ende([1]) for _ in range(5)] == [None] * 5
     assert len([r for r in caplog.records if "nicht lesbar" in r.getMessage()]) == 1
-    clock.advance(geraet_status.KritischesEnde.CACHE_SECONDS)
+    clock.advance(KritischesEnde.CACHE_SECONDS)
     with caplog.at_level(logging.WARNING):
         assert ende([1]) is None
     assert len([r for r in caplog.records if "nicht lesbar" in r.getMessage()]) == 2

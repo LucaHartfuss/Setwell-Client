@@ -223,6 +223,9 @@ class GatewayDeviceHost(GeraetHostBasis):
     def abgemeldet_pfad(self) -> Path:
         return self.paths.abgemeldet
 
+    def entitlement_pfad(self, kreis: int) -> Path:
+        return self.paths.entitlement(kreis)
+
     # --- Sicht der Laufzeit (host.GatewayHost) ---
 
     def snapshot(self) -> dict:
@@ -320,6 +323,7 @@ class GatewayDeviceHost(GeraetHostBasis):
 
     def anzeigen(self, anzeige: Anzeige) -> None:
         self.letzte_anzeige = anzeige
+        self.update_noetig_melden(anzeige)
         self._knopf_pruefen()
         self._reset_pruefen()
         try:

@@ -1,9 +1,11 @@
 """Das HA-Add-on als DeviceHost (Faehigkeiten, Uhr, Pruefung, Befehle, Dokumente, Wunsch, Raum)."""
+import dataclasses
 import io
 import json
 import logging
 import stat
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
@@ -21,7 +23,7 @@ from smartheat_device import inventory, nachrichten, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Waiting
 from smartheat_device.geraet_host_basis import EV_RELOAD
 from smartheat_device.host import Anzeige
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, entitlement
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
 from smartheat_runtime.status import STATUS_ABGEMELDET
 from smartheat_runtime.worker import RegulationWorker
@@ -335,6 +337,22 @@ def test_remembered_originals_are_handed_to_the_device_as_a_copy(tmp_path, monke
     assert gelesen == {"heat_limit": 16.0}
     gelesen["x"] = 1.0
     assert host.ursprungswerte() == {"heat_limit": 16.0}
+
+
+def test_the_critical_minimum_version_goes_to_the_device_as_a_red_message_with_the_date(tmp_path, monkeypatch):
+    """Unter update_noetig geht die rote Meldung mit dem Datum der Ursprungswerte ueber den Geraetekern an den Server
+    (Portal, Push, Mail); beim Verlassen des Zustands wird sie zurueckgenommen."""
+    host, device, _ = _host(tmp_path, monkeypatch, device=Device(kritisch=True))
+    pfad = config.entitlement_path(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    entitlement.mark_inactive(pfad, datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=1))), kritisch=True)
+    anzeige = Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
+                      hinweise=(), meldungen=(), konfiguration_abgelehnt=None)
+    host.anzeigen(anzeige)
+    host.anzeigen(anzeige)
+    assert device.meldungen == [("update_noetig", meldungen.neu("meldung.update_noetig", ende="2026-01-31"), True)]
+    host.anzeigen(dataclasses.replace(anzeige, zustand="regelt"))
+    assert device.meldungen[1:] == [("update_noetig", None, False)]
 
 
 def test_portal_operation_reaches_the_worker(tmp_path, monkeypatch):
