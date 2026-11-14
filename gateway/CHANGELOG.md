@@ -2,6 +2,18 @@
 
 ## Unveroeffentlicht
 
+- Ohne vertrauenswuerdige Uhr rueckt der Tag der Tageszaehler nach der monotonen Uhr vor (je volle 24 Stunden einer); der
+  Start-Zaehler des Kaelteschutzes haengt nicht mehr bis zum Neustart fest. Eintraege eines spaeteren Tages zaehlen als
+  heute. Ein Fehler der Plan-Eingabe oder des Uhrurteils haelt den Kaelteschutz nicht an (es gilt der Wunsch).
+
+- Ein Sprung der Uhr ueber Mitternacht setzt die Tageszaehler nicht mehr zurueck: Tageslimit des Schreibbudgets und
+  „Durchsetzen hoechstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswuerdiger Uhr, sonst bleibt der alte Tag.
+  Die Grenzwerte sind unveraendert.
+
+- Der Pruefertakt rechnet je Heizkreis das geltende Soll aus dem Wunsch und der Bedienung des Kreises (Wochenplan,
+  Abwesenheit, Leerstand, Uebersteuerung); jeder Kreis liest seinen eigenen Eintrag der Dokumente. Ohne Plan gilt wie
+  bisher der Wunsch des Thermostats.
+
 - Die Meldung zum erschoepften Abfragekontingent der Quelle kommt als Code (`meldung.kontingent_erschoepft`, Entwarnung
   `meldung.kontingent_frei`) ohne Parameter statt als Freitext; der Treiber meldet nur noch den Zustand
   (`kontingent_erschoepft()`).

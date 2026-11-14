@@ -29,10 +29,15 @@ _.ENERGIE_EINHEITEN  # Server: einrichtung/ha_pruefung.py, einrichtung/ha.py, ge
 _.WEG_ERGEBNISSE  # Server: geraete/device_protocol.py (Ergebnisse von weg_pruefen); das Geraet lehnt den Befehl noch ab
 _.expires_rule  # Feld von wire.Command: Server geraete/device_protocol.py wertet die Regel aus (expires_seconds None)
 
-# --- Soll aus der Bedienung (smartheat_core/plan.py): die Verdrahtung in beide Hosts folgt, bis dahin ruft nur der Test ---
-_.soll_effektiv  # smartheat_core/plan.py: noch ohne Aufrufer in den Hosts (tests/test_core_plan.py)
-_.soll_art  # smartheat_core/plan.py SollErgebnis: Feld wird mit der Verdrahtung in die Telemetrie gelesen
+# --- Soll aus der Bedienung (smartheat_core/plan.py): der Prueftakt rechnet es je Kreis (smartheat_runtime/plan_quelle.py) ---
 _.naechster_wechsel  # smartheat_core/plan.py SollErgebnis: Feld wird mit dem Wochenplan vom Wecker gelesen
+_.wochenplan_fehler  # smartheat_core/plan.py: Formpruefung des Wochenplans, der Dokument-Pruefer des Hosts ruft sie mit der Verdrahtung
+_.anstieg_vom_kunden  # smartheat_core/plan.py: Eingang des Boosts (anstieg_vom_kunden), mit der Verdrahtung gerufen
+_.SOLL_ART_ABSENKUNG  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_AUFHEIZEN  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_ABWESEND  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_LEERSTAND  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_UEBERSTEUERT  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
 
 # --- Einstieg fuer Hosts mit mehreren Heizkreisen (sie rufen ihn bei einem neuen Konfigurationsdokument; Tests treiben ihn) ---
 _.konfiguration_geaendert  # smartheat_runtime/kreise.py Laufzeit.konfiguration_geaendert: Wiederaufnahme nach Abo-Wechsel
@@ -66,5 +71,12 @@ _.kritische_mindestversion_abgelaufen  # smartheat_runtime/entitlement.py: Haken
 # --- Stand des Add-ons (supervisor.py): die Meldung an den Server liest den Schalter erst mit der Statusmeldung der Version; bis dahin ruft nur der Test ---
 _.addon_auto_update  # supervisor.py: liest den Schalter "Automatisch aktualisieren" (nur lesen), noch ohne Aufrufer in den Hosts (tests/test_supervisor.py)
 
+# --- Grenzen der Betriebsarten (smartheat_core/safety.py): Plan, Leerstand und Abwesenheit rufen die Pruefer mit der Verdrahtung in den Takt; bis dahin ruft nur der Test ---
+_.LEERSTAND_VORGABE_C  # smartheat_core/safety.py: Voreinstellung der Leerstandstemperatur (tests/test_core_safety.py, tests/test_regel4_werte.py)
+_.absenktemperatur  # smartheat_core/safety.py: kuehles Soll nie unter der Untergrenze, noch ohne Aufrufer im Takt
+_.leerstand_temperatur_gueltig  # smartheat_core/safety.py: Untergrenze des Leerstands, noch ohne Aufrufer im Takt
+_.leerstand_bis_gueltig  # smartheat_core/safety.py: Hoechstdauer des Leerstands, noch ohne Aufrufer im Takt
+_.phasendauer_gueltig  # smartheat_core/safety.py: Mindestdauer der Phase, noch ohne Aufrufer im Takt
+_.abwesenheit_vorschlag  # smartheat_core/safety.py: Vorschlag je Verteilsystem, noch ohne Aufrufer im Takt
 # --- Push-Regeln der Person (V1): die Kopie der Feldliste in wire.py ---
 _.PUSH_REGELN_FIELDS  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py push_regeln_gueltig) und im Vertragscheck

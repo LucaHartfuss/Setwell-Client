@@ -55,6 +55,7 @@ def _rt(make_store, ist, *, referenz=((1, 0.0),), kontroll=(), soll=21.0, vorher
     store.update(stable_target=soll)
     return SimpleNamespace(
         manifest=manifest, signals=ha_api, ha_api=ha_api, store=store, clock=time.monotonic, boost_mono_start=None, kaelteschutz_mono_start=None, soll_quelle_aus=False,
+        uhr_vertrauen=lambda: False, geltendes_soll=None,
         config=runtime_config(referenzraeume=tuple(referenz)),
         override=LeverPipeline(store, HaPlantBinding(ha_api, manifest, VAILLANT_MYPYLLANT), SAFETY),
     )

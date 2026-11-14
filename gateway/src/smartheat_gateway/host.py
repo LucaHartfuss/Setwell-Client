@@ -26,7 +26,7 @@ from smartheat_gateway.texts import SHG_TEXTS
 from smartheat_gateway.triggers import BusTriggerSource, _ZigbeeQuelle
 from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import CAP_BATTERY, CAP_BATTERY_LOW, ZigbeeMirror
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, plan_quelle
 from smartheat_runtime.app import Loaded, RestoreParts, StartFailure
 from smartheat_runtime.dokument_config import ConfigError
 from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, TriggerSource
@@ -172,7 +172,8 @@ class GatewayHost:
         try:
             runtime, bindung = gateway_config.parse_dokument(
                 self.konfiguration, self._paths, lambda: self._geraet.abo_status(self.kreis), self.kreis,
-                lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis))
+                lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
+                lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
         except (ConfigError, KeyError) as error:
             raise StartFailure(str(error), KEY_CONFIG) from error
         try:

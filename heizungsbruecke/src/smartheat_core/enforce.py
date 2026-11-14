@@ -66,7 +66,7 @@ ZONE_MODE = "zone_mode"
 
 
 def _today() -> date:
-    return wallclock.today()
+    return date.fromisoformat(write_budget.today())
 
 
 def _set_misses(rt: EnforceRuntime, misses: int) -> None:

@@ -37,6 +37,7 @@ from smartheat_runtime import (
     testphase,
     ticks,
     uhr,
+    uhr_meldung,
 )
 from smartheat_runtime.budget_store import AnlagenBudget, BudgetStore, ZustandsSpeicher
 from smartheat_runtime.delivery import ROLE_DATENTRAEGER, SOURCE_LOCAL, DataFault
@@ -584,7 +585,7 @@ def _on_health(rt: Runtime, event: Event) -> None:
         abo.ende_festhalten(rt)  # ein gescheitertes Speichern des Endes wird im Takt wiederholt
         return
     checks = [battery.check_batteries, room_sensors.check_room_sensors, aussentemperatur.check, erzeugerstoerung.check,
-              kontingent.check]
+              kontingent.check, uhr_meldung.check]
     # Ohne Setwell (Testphase, Kreis ausser Betrieb) gibt es nichts durchzusetzen: ein Eingriff von Hand ist dann der
     # Normalfall.
     if not (testphase.aktiv(rt) or kreiszustand.ausser_betrieb(rt)):
@@ -636,8 +637,14 @@ def _on_soll_ende_erledigt(rt: Runtime, event: Event) -> None:
 
 def _unless_idle(rt: Runtime, handler, event: Event) -> None:
     """Im Ruhezustand (Fristende im Betrieb) laufen alle Handler ausser dem Lebenszeichen leer;
-    sie planen sich dann auch nicht neu ein."""
+    sie planen sich dann auch nicht neu ein. Vor jedem Handler folgt der Tag der Tageszaehler der Wanduhr, aber nur
+    mit vertrauenswuerdiger Uhr (ein Uhrsprung setzt das Tageslimit nicht zurueck), sonst der monotonen Uhr. Ein Fehler
+    dabei haelt den Handler nicht an (Kaelteschutz und Watchdog laufen weiter); der Tag bleibt dann."""
     if not rt.idle:
+        try:
+            write_budget.tag_fortschreiben(rt.uhr_vertrauen, rt.clock)
+        except Exception as fehler:
+            logger.warning("Tag der Tageszaehler nicht fortgeschrieben (%s), er bleibt", type(fehler).__name__)
         handler(rt, event)
 
 

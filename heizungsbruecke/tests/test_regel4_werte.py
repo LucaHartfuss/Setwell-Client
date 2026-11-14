@@ -4,13 +4,13 @@ ausdrueckliche Freigabe des Nutzers; danach Tabelle und module/client-kern.md ("
 Die Verhaltenstabelle rechnet aus derselben Tabelle und laeuft durch die Hebel-Pipeline mit einer Attrappe nur an der
 V2-Grenze (PlantBinding)."""
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from bindung_beispiele import BINDINGS
 
 from heizungsbruecke import ha_binding
-from smartheat_core import boost, emergency_boost, write_budget
+from smartheat_core import boost, emergency_boost, safety, write_budget
 from smartheat_core.clamping import round_to_step
 from smartheat_core.pipeline import LeverPipeline
 from smartheat_core.safety import LOCAL_SAFETY
@@ -54,6 +54,7 @@ KONSTANTEN = {
     "Comfort-Boost Ausloeser": (boost._TARGET_RISE_EPSILON_K, 0.01),
     "Comfort-Boost hoechstens": (boost.COMFORT_BOOST_MAX_SECONDS, 4 * 3600),
     "Comfort-Boost unlesbar": (boost.UNREADABLE_ROOM_CHECKS, 3),
+    "Comfort-Boost bei Plananstieg nur bei Aufheizen": (boost.AUFHEIZEN_BOOST, "boost"),
     "Notfall-Boost ab": (emergency_boost.EMERGENCY_TRIGGER_K, 1.0),
     "Kaelteschutz Soll-Ausloeser": (
         (emergency_boost.KAELTESCHUTZ_SOLL_DELTA_K, emergency_boost.KAELTESCHUTZ_SOLL_DAUER),
@@ -68,6 +69,15 @@ KONSTANTEN = {
     "Kaelteschutz Ist gleich Plausibilitaet": (emergency_boost.KAELTESCHUTZ_IST_BEREICH, plausibility.ROOM_ACTUAL_RANGE),
     "Notbetrieb": ((delivery.NOTBETRIEB_AFTER_SERVER_FAILURES, delivery.ACK_TIMEOUT_SECONDS), (2, 30)),
     "Abo-Frist": (entitlement.GRACE_PERIOD, timedelta(days=30)),
+    "Betriebsarten Absenk-Untergrenze": (safety.ABSENK_UNTERGRENZE_C, 16.0),
+    "Betriebsarten Leerstand-Untergrenze": (safety.LEERSTAND_UNTERGRENZE_C, 15.0),
+    "Betriebsarten Leerstand-Voreinstellung": (safety.LEERSTAND_VORGABE_C, 16.0),
+    "Betriebsarten Temperatur hoechstens (Bedienbereich)": (safety.BEDIENBEREICH_MAX_C, 25.0),
+    "Betriebsarten Bedienbereich gleich Wunsch-Eingang": (safety.BEDIENBEREICH_MAX_C, wire.RAUM_SOLL_MAX),
+    "Betriebsarten Mindestdauer der Phase": (safety.PHASE_MINDESTDAUER, timedelta(minutes=60)),
+    "Betriebsarten Leerstand hoechstens": (safety.LEERSTAND_HOECHSTDAUER, timedelta(days=365)),
+    "Betriebsarten Abwesenheits-Vorschlag": (
+        dict(safety.ABWESENHEIT_VORSCHLAG_C), {"Heizkoerper": 17.0, "Fussbodenheizung": 19.0}),
 }
 
 
@@ -87,6 +97,24 @@ def test_keine_weiteren_saetze():
 def test_konstanten(name):
     ist, soll = KONSTANTEN[name]
     assert ist == soll, f"{R4}: {name}"
+
+
+@pytest.mark.parametrize(("pruefung", "grenze", "rand"), [
+    (safety.abwesend_temperatur_gueltig, 15.0, "unten"), (safety.abwesend_temperatur_gueltig, 25.0, "oben"),
+    (safety.leerstand_temperatur_gueltig, 15.0, "unten"), (safety.leerstand_temperatur_gueltig, 25.0, "oben"),
+    (safety.uebersteuerung_temperatur_gueltig, 16.0, "unten"),
+    (safety.uebersteuerung_temperatur_gueltig, 25.0, "oben"),
+], ids=lambda wert: getattr(wert, "__name__", str(wert)))
+def test_temperaturgrenzen_der_betriebsarten(pruefung, grenze, rand):
+    """Die Grenze gilt, ein halbes Grad dahinter nicht."""
+    assert pruefung(grenze), R4
+    assert not pruefung(grenze - 0.5 if rand == "unten" else grenze + 0.5), R4
+
+
+def test_abwesend_bis_hoechstens_365_tage_voraus():
+    jetzt = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
+    assert safety.abwesend_bis_gueltig(jetzt + timedelta(days=365), jetzt), R4
+    assert not safety.abwesend_bis_gueltig(jetzt + timedelta(days=365, minutes=1), jetzt), R4
 
 
 # --- Verhaltenstabelle ---

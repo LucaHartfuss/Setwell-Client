@@ -14,6 +14,7 @@ from hypothesis import HealthCheck, settings
 
 import heizungsbruecke.__main__ as main_module
 from heizungsbruecke import config
+from smartheat_core import write_budget
 from smartheat_runtime import telemetry
 from smartheat_runtime.backup_store import save_backup
 from smartheat_runtime.state import StateStore
@@ -41,6 +42,15 @@ def _telemetrie_warnzustand_zuruecksetzen():
     yield
     telemetry._EINHEIT_GEWARNT.clear()
     telemetry._AUSFALL_GEWARNT.clear()
+
+
+@pytest.fixture(autouse=True)
+def _tag_der_tageszaehler_zuruecksetzen():
+    """Der Tag der Tageszaehler ist prozessweit (folgt der Wanduhr nur bei vertrauenswuerdiger Uhr): je Test frisch,
+    damit der Tag eines Tests nicht in den naechsten (oder auf einen anderen xdist-Worker-Lauf) haengen bleibt."""
+    write_budget._tag = None
+    yield
+    write_budget._tag = None
 
 
 @pytest.fixture
