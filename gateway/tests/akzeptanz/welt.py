@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from uhr import Uhr
+from welt_diagnose import Diagnose
 from welt_handgriffe import Handgriffe
 
 from smartheat_core import dateien
@@ -189,13 +190,14 @@ def _zugang_ablegen(device_dir) -> None:
     bootstrap.speichern(device_dir, bootstrap.Antwort("uebernommen", zugang))
 
 
-class Welt(Handgriffe):
+class Welt(Handgriffe, Diagnose):
     """Eine Gateway-Anlage unter Test. `starten()` ist der Prozessstart; die Zeit laeuft nur ueber `runde`."""
 
     def __init__(self, tmp_path, monkeypatch) -> None:
         self.paths = Paths(tmp_path / "data")
         self.host_dir = tmp_path / "host"
         self.host_dir.mkdir()
+        self._monkeypatch, self.diagnose_port = monkeypatch, None
         self.uhr, self.bus = Uhr(), Bus()
         self.z2m = Zigbee(self.bus)
         self.links: list[Link] = []
@@ -254,6 +256,8 @@ class Welt(Handgriffe):
         """Teardown: Hintergrund-Threads der Befehle aller Prozessstarts stoppen (kein Thread ueberlebt den Test)."""
         for geraet in self._geraete:
             geraet.hintergrund.stop(timeout=2.0)
+        if self.diagnose_port is not None:
+            self.diagnose_schliessen()
 
     def arbeiten(self) -> None:
         """Geraetekern und Worker abarbeiten; ein gewollter Neustart baut einen neuen Prozess wie Compose."""
@@ -266,6 +270,8 @@ class Welt(Handgriffe):
                 return
             except prozess.Neustart:
                 prozess.beenden(self.device, None, None)  # wie prozess.laufen: erst sauber trennen
+                if self.diagnose_port is not None:
+                    self.diagnose_schliessen()  # der Prozess endet, mit ihm der Server auf dem festen Port
                 self.starten()
         raise AssertionError("Laufzeit startet staendig neu")
 

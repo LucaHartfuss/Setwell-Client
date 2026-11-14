@@ -66,6 +66,20 @@ class Handgriffe:
         """Der Raumfuehler meldet die Raumtemperatur."""
         self.z2m.melden(SENSOR, temperature=temperatur, battery=90)
 
+    def bis_nach_tagestick(self, temperatur: float) -> None:
+        """Die Uhr steht danach nach dem Tagestick (12:00) des Tages; der Raumfuehler meldet bis dahin laufend."""
+        while self.uhr.wand().hour < 12:
+            self.raum(temperatur)
+            self.runde(1800)
+
+    def neuer_tag_mit_tick(self, temperatur: float) -> str:
+        """Genau ein Tag vergeht (Tagesbudget und Schreibabstaende gelten wieder), der Raumfuehler meldet, der Tagestick
+        sendet einen Snapshot: dessen Folgenummer. Setzt voraus, dass die Uhr nach 12:00 steht (bis_nach_tagestick)."""
+        self.runde(86400 - 300 - 2)  # der Raumfuehler ist danach veraltet
+        self.raum(temperatur)
+        self.runde(300)
+        return self.link.von("up/snapshot")[-1]["seq"]
+
     def thermostat_dreht(self, wert: float) -> None:
         """Der Bewohner dreht am Thermostat: es meldet den neuen Soll (ein Wunsch, kein Schreiben der Laufzeit)."""
         self.z2m.melden(THERMOSTAT, occupied_heating_setpoint=wert, local_temperature=23.5)
