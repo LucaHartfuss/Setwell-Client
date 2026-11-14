@@ -4,7 +4,7 @@ ausdrueckliche Freigabe des Nutzers; danach Tabelle und module/client-kern.md ("
 Die Verhaltenstabelle rechnet aus derselben Tabelle und laeuft durch die Hebel-Pipeline mit einer Attrappe nur an der
 V2-Grenze (PlantBinding)."""
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from bindung_beispiele import BINDINGS
@@ -72,6 +72,8 @@ KONSTANTEN = {
     "Betriebsarten Absenk-Untergrenze": (safety.ABSENK_UNTERGRENZE_C, 16.0),
     "Betriebsarten Leerstand-Untergrenze": (safety.LEERSTAND_UNTERGRENZE_C, 15.0),
     "Betriebsarten Leerstand-Voreinstellung": (safety.LEERSTAND_VORGABE_C, 16.0),
+    "Betriebsarten Temperatur hoechstens (Bedienbereich)": (safety.BEDIENBEREICH_MAX_C, 25.0),
+    "Betriebsarten Bedienbereich gleich Wunsch-Eingang": (safety.BEDIENBEREICH_MAX_C, wire.RAUM_SOLL_MAX),
     "Betriebsarten Mindestdauer der Phase": (safety.PHASE_MINDESTDAUER, timedelta(minutes=60)),
     "Betriebsarten Leerstand hoechstens": (safety.LEERSTAND_HOECHSTDAUER, timedelta(days=365)),
     "Betriebsarten Abwesenheits-Vorschlag": (
@@ -95,6 +97,24 @@ def test_keine_weiteren_saetze():
 def test_konstanten(name):
     ist, soll = KONSTANTEN[name]
     assert ist == soll, f"{R4}: {name}"
+
+
+@pytest.mark.parametrize(("pruefung", "grenze", "rand"), [
+    (safety.abwesend_temperatur_gueltig, 15.0, "unten"), (safety.abwesend_temperatur_gueltig, 25.0, "oben"),
+    (safety.leerstand_temperatur_gueltig, 15.0, "unten"), (safety.leerstand_temperatur_gueltig, 25.0, "oben"),
+    (safety.uebersteuerung_temperatur_gueltig, 16.0, "unten"),
+    (safety.uebersteuerung_temperatur_gueltig, 25.0, "oben"),
+], ids=lambda wert: getattr(wert, "__name__", str(wert)))
+def test_temperaturgrenzen_der_betriebsarten(pruefung, grenze, rand):
+    """Die Grenze gilt, ein halbes Grad dahinter nicht."""
+    assert pruefung(grenze), R4
+    assert not pruefung(grenze - 0.5 if rand == "unten" else grenze + 0.5), R4
+
+
+def test_abwesend_bis_hoechstens_365_tage_voraus():
+    jetzt = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
+    assert safety.abwesend_bis_gueltig(jetzt + timedelta(days=365), jetzt), R4
+    assert not safety.abwesend_bis_gueltig(jetzt + timedelta(days=365, minutes=1), jetzt), R4
 
 
 # --- Verhaltenstabelle ---

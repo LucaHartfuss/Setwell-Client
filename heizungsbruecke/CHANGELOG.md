@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Neue Grenzen für Abwesend, Leerstand und Übersteuerung im Gerät: die Temperatur darf nicht über den Bedienbereich
+  (höchstens 25 °C) steigen; Abwesend gilt höchstens 365 Tage voraus (wie der Leerstand); die Übersteuerung in der
+  kühlen Phase geht nicht unter 16 °C (Absenk-Untergrenze), Abwesend und Leerstand bleiben ab 15 °C. Ein Wert außerhalb
+  macht den Teil ungültig, das Soll fällt auf Plan bzw. Wunsch zurück.
+
 - Ohne vertrauenswürdige Uhr rückt der Tag der Tageszähler nach der monotonen Uhr vor (je volle 24 Stunden einer, nie
   zurück): der Start-Zähler, den der Kälteschutz teilt, hängt so nicht bis zum Neustart fest. Einträge eines späteren
   Tages (Uhr stand beim Start vor) zählen als heute. Ein Fehler bei der Plan-Eingabe, beim Uhrurteil oder beim

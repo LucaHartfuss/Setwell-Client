@@ -8,7 +8,7 @@ die Soll-Quelle auf aus oder Frostschutz, gibt es kein Soll (dann wirkt nur der 
 
 Die Funktion begrenzt den Wunsch nicht: der Bereich gilt am Wunsch-Eingang und in der Schreibpipeline. Alles, was
 darunter faellt, nimmt sie nie unter eine Untergrenze aus `safety.py` (Absenktemperatur, Leerstand, Abwesend,
-Uebersteuerung). Ein Teil der Bedienung, der nicht lesbar ist oder die Grenzen verletzt (Wochenplan, `abwesend`,
+Uebersteuerung) und nie ueber den Bedienbereich; Abwesend gilt zudem hoechstens 365 Tage voraus. Ein Teil der Bedienung, der nicht lesbar ist oder die Grenzen verletzt (Wochenplan, `abwesend`,
 `leerstand`, `uebersteuerung`, ein unbrauchbarer Wert der Konfiguration), gilt wie nicht gesetzt: das Soll faellt dann
 in die warme Richtung auf Plan oder Wunsch zurueck. Ob ein Dokument als Ganzes gueltig ist, entscheidet der
 Dokument-Pruefer, nicht diese Rechnung. Ein Fehler (`ValueError`) bleibt `jetzt`, `zone`, `konfiguration` und dem
@@ -17,17 +17,19 @@ Wunsch vorbehalten.
 Sommerzeit: die Zeiten des Plans sind Wanduhrzeiten der Zone. Sie werden je Tag in Zeitpunkte (UTC) umgerechnet; eine
 Zeit, die es nicht gibt (Fruehjahr), gilt ab dem ersten gueltigen Moment danach, eine doppelte (Herbst) beim ersten
 Vorkommen. Die Wochentage zaehlen nach ISO: 1 ist Montag, 7 Sonntag."""
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from smartheat_core.safety import (
-    LEERSTAND_UNTERGRENZE_C,
     absenktemperatur,
+    abwesend_bis_gueltig,
+    abwesend_temperatur_gueltig,
     leerstand_bis_gueltig,
     leerstand_temperatur_gueltig,
     phasendauer_gueltig,
+    uebersteuerung_temperatur_gueltig,
 )
 from smartheat_core.zahlen import ist_endliche_zahl
 
@@ -226,11 +228,10 @@ def _instant(wand: datetime, zone: ZoneInfo) -> datetime:
 # --- Lesen der Ueberlagerungen -------------------------------------------------------------------------------------
 
 
-def _raumtemperatur(wert: object) -> float | None:
-    """Temperatur von Abwesend oder Uebersteuerung: endlich und mindestens die Untergrenze aus `safety.py`."""
-    if ist_endliche_zahl(wert) and wert >= LEERSTAND_UNTERGRENZE_C:
-        return float(wert)
-    return None
+def _raumtemperatur(wert: object, gueltig: Callable[[object], bool]) -> float | None:
+    """Temperatur von Abwesend oder Uebersteuerung: gueltig nach der Pruefung aus `safety.py` (Untergrenze der Betriebsart,
+    Obergrenze der Bedienbereich), sonst None."""
+    return float(wert) if isinstance(wert, int | float) and gueltig(wert) else None
 
 
 @dataclass(frozen=True)
@@ -254,11 +255,11 @@ def _leerstand_lesen(wert: object, jetzt: datetime) -> _Fenster | None:
     return _Fenster(von, bis, float(temp), _zeitpunkt(wert.get("aufheizen_ab")))
 
 
-def _abwesend_lesen(wert: object) -> _Fenster | None:
+def _abwesend_lesen(wert: object, jetzt: datetime) -> _Fenster | None:
     if not isinstance(wert, Mapping):
         return None
-    bis, temp = _zeitpunkt(wert.get("bis")), _raumtemperatur(wert.get("temp"))
-    if bis is None or temp is None:
+    bis, temp = _zeitpunkt(wert.get("bis")), _raumtemperatur(wert.get("temp"), abwesend_temperatur_gueltig)
+    if bis is None or temp is None or not abwesend_bis_gueltig(bis, jetzt):
         return None
     return _Fenster(None, bis, temp, _zeitpunkt(wert.get("aufheizen_ab")))
 
@@ -266,7 +267,8 @@ def _abwesend_lesen(wert: object) -> _Fenster | None:
 def _uebersteuerung_lesen(wert: object) -> tuple[float, datetime] | None:
     if not isinstance(wert, Mapping):
         return None
-    temp, bis = _raumtemperatur(wert.get("temp")), _zeitpunkt(wert.get("bis"))
+    temp = _raumtemperatur(wert.get("temp"), uebersteuerung_temperatur_gueltig)
+    bis = _zeitpunkt(wert.get("bis"))
     return (temp, bis) if temp is not None and bis is not None else None
 
 
@@ -291,7 +293,7 @@ class _Rechnung:
                 zeiten = None
         self._zeiten = zeiten
         self._leerstand = _leerstand_lesen(bedienung.get("leerstand"), jetzt) if modus == "leerstand" else None
-        self._abwesend = _abwesend_lesen(bedienung.get("abwesend")) if modus == "abwesend" else None
+        self._abwesend = _abwesend_lesen(bedienung.get("abwesend"), jetzt) if modus == "abwesend" else None
         self._uebersteuerung = _uebersteuerung_lesen(bedienung.get("uebersteuerung"))
         aufheizdauer = konfiguration.get("aufheizdauer_min")
         if aufheizdauer is None:

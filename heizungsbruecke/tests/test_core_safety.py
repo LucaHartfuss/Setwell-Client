@@ -8,16 +8,20 @@ from smartheat_core.clamping import target_value
 from smartheat_core.safety import (
     ABSENK_UNTERGRENZE_C,
     ABWESENHEIT_VORSCHLAG_C,
+    BEDIENBEREICH_MAX_C,
     LEERSTAND_UNTERGRENZE_C,
     LEERSTAND_VORGABE_C,
     LOCAL_SAFETY,
     absenktemperatur,
+    abwesend_bis_gueltig,
+    abwesend_temperatur_gueltig,
     abwesenheit_vorschlag,
     check_invariants,
     leerstand_bis_gueltig,
     leerstand_temperatur_gueltig,
     phasendauer_gueltig,
     resolve_local_safety,
+    uebersteuerung_temperatur_gueltig,
 )
 
 
@@ -171,7 +175,7 @@ def test_absenktemperatur_verweigert_unbrauchbare_eingaben(wunsch, tiefe):
 
 
 @pytest.mark.parametrize(("temp", "erwartet"), [
-    (15.0, True), (16.0, True), (25.0, True), (14.9, False), (14.99, False), (5.0, False), (-40.0, False),
+    (15.0, True), (16.0, True), (25.0, True), (25.5, False), (40.0, False), (14.9, False), (14.99, False), (5.0, False), (-40.0, False),
     (NAN, False), (INF, False), (-INF, False), (None, False), ("16", False), (True, False),
 ])
 def test_leerstandtemperatur_mindestens_15(temp, erwartet):
@@ -321,3 +325,59 @@ def test_riesige_ganzzahlen_sind_keine_brauchbaren_zahlen_statt_eines_abbruchs(r
         absenktemperatur(riesig, 3.0)
     with pytest.raises(ValueError, match="Absenk"):
         absenktemperatur(21.0, riesig)
+    assert abwesend_temperatur_gueltig(riesig) is False
+    assert uebersteuerung_temperatur_gueltig(riesig) is False
+
+
+def test_bedienbereich_maximum_ist_das_hoechste_raum_soll_aller_profile():
+    assert max(profil.ranges["room_setpoint"][1] for profil in LOCAL_SAFETY.values()) == BEDIENBEREICH_MAX_C
+
+
+@pytest.mark.parametrize(("temp", "erwartet"), [
+    (15.0, True), (25.0, True), (14.9, False), (25.5, False), (40.0, False), (INF, False), (-INF, False), (NAN, False),
+    (None, False), ("20", False), (True, False),
+])
+def test_abwesend_temperatur_von_15_bis_zum_bedienbereich(temp, erwartet):
+    assert abwesend_temperatur_gueltig(temp) is erwartet
+
+
+@pytest.mark.parametrize(("temp", "erwartet"), [
+    (16.0, True), (25.0, True), (15.5, False), (15.0, False), (25.5, False), (40.0, False), (INF, False),
+    (-INF, False), (NAN, False), (None, False), ("20", False), (True, False),
+])
+def test_uebersteuerung_temperatur_von_16_bis_zum_bedienbereich(temp, erwartet):
+    assert uebersteuerung_temperatur_gueltig(temp) is erwartet
+
+
+@pytest.mark.parametrize(("bis", "erwartet"), [
+    (T0 + timedelta(seconds=1), True),
+    (T0 + timedelta(days=30), True),
+    (T0 + timedelta(days=365), True),  # genau 365 Tage
+    (T0 + timedelta(days=365, minutes=1), False),
+    (T0 + timedelta(days=365, seconds=1), False),
+    (T0, False),  # nicht in der Zukunft
+    (T0 - timedelta(days=1), False),
+])
+def test_abwesend_bis_zukunft_und_hoechstens_365_tage_ab_der_geraeteuhr(bis, erwartet):
+    assert abwesend_bis_gueltig(bis, T0) is erwartet
+
+
+def test_abwesend_bis_rechnet_in_absoluter_zeit_ueber_zonen():
+    berlin = ZoneInfo("Europe/Berlin")
+    jetzt = T0.astimezone(berlin)
+    assert abwesend_bis_gueltig(T0 + timedelta(days=365), jetzt) is True
+    assert abwesend_bis_gueltig((T0 + timedelta(days=365, minutes=1)).astimezone(berlin), jetzt) is False
+
+
+@pytest.mark.parametrize(("bis", "jetzt"), [
+    (T0.replace(tzinfo=None) + timedelta(days=1), T0),
+    (T0 + timedelta(days=1), T0.replace(tzinfo=None)),
+    (None, T0), (T0, None), ("2026-11-14", T0),
+])
+def test_abwesend_bis_verweigert_zeiten_ohne_zone_und_fremde_typen(bis, jetzt):
+    assert abwesend_bis_gueltig(bis, jetzt) is False
+
+
+def test_abwesend_bis_am_rand_des_zeitbereichs_ist_ungueltig_statt_ein_abbruch():
+    spaet = datetime(9999, 12, 31, 23, 0, tzinfo=ZoneInfo("Etc/GMT+5"))
+    assert abwesend_bis_gueltig(spaet, T0) is False

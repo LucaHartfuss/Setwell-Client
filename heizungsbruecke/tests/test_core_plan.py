@@ -321,6 +321,55 @@ def test_abwesend_gilt_bis_zum_ende_und_braucht_eine_gueltige_temperatur():
         assert ergebnis(jetzt, doc("abwesend", abwesend=ungueltig)).soll_art == "wunsch"
 
 
+def test_abwesend_temperatur_hoechstens_der_bedienbereich():
+    jetzt = utc("2026-11-10T12:00:00Z")
+    assert paar(ergebnis(jetzt, doc("abwesend", abwesend=abwesend(temp=25.0)))) == (25.0, "abwesend")
+    assert paar(ergebnis(jetzt, doc("abwesend", abwesend=abwesend(temp=25.5)))) == (21.0, "wunsch")
+    assert paar(ergebnis(jetzt, doc("abwesend", abwesend=abwesend(temp=40.0)))) == (21.0, "wunsch")
+
+
+def test_leerstand_temperatur_hoechstens_der_bedienbereich():
+    jetzt = utc("2026-11-05T12:00:00Z")
+    assert paar(ergebnis(jetzt, doc("leerstand", leerstand=leerstand(temp=25.0)))) == (25.0, "leerstand")
+    assert paar(ergebnis(jetzt, doc("leerstand", leerstand=leerstand(temp=25.5)))) == (21.0, "wunsch")
+
+
+def test_uebersteuerung_temperatur_von_16_bis_zum_bedienbereich():
+    kuehl = utc("2026-11-02T23:00:00Z")
+    bis = "2026-11-03T05:00:00Z"
+    assert paar(ergebnis(kuehl, doc(wochenplan=wochenplan(), uebersteuerung={"temp": 16.0, "bis": bis}))
+                ) == (16.0, "uebersteuert")
+    assert paar(ergebnis(kuehl, doc(wochenplan=wochenplan(), uebersteuerung={"temp": 25.0, "bis": bis}))
+                ) == (25.0, "uebersteuert")
+    for ungueltig in (15.5, 15.0, 25.5, 40.0):
+        erg = ergebnis(kuehl, doc(wochenplan=wochenplan(), uebersteuerung={"temp": ungueltig, "bis": bis}))
+        assert paar(erg) == (18.0, "absenkung"), ungueltig
+
+
+def test_uebersteuerung_im_leerstand_hat_dieselben_grenzen():
+    jetzt = utc("2026-11-05T12:00:00Z")
+    bis = "2026-11-05T16:00:00Z"
+    for ungueltig in (15.5, 25.5):
+        erg = ergebnis(jetzt, doc("leerstand", leerstand=leerstand(), uebersteuerung={"temp": ungueltig, "bis": bis}))
+        assert paar(erg) == (16.0, "leerstand"), ungueltig
+
+
+def test_abwesend_bis_hoechstens_365_tage_ab_der_geraeteuhr():
+    jetzt = utc("2026-11-10T12:00:00Z")
+    am_rand = abwesend(bis=text(jetzt + timedelta(days=365)))
+    assert paar(ergebnis(jetzt, doc("abwesend", abwesend=am_rand))) == (17.0, "abwesend")
+    zu_spaet = abwesend(bis=text(jetzt + timedelta(days=365, minutes=1)))
+    erg = ergebnis(jetzt, doc("abwesend", abwesend=zu_spaet))
+    assert paar(erg) == (21.0, "wunsch")
+    assert erg.naechster_wechsel is None
+
+
+def test_abwesend_zu_weit_voraus_faellt_auf_den_plan_zurueck():
+    jetzt = utc("2026-11-02T23:00:00Z")
+    zu_spaet = abwesend(bis=text(jetzt + timedelta(days=366)))
+    assert paar(ergebnis(jetzt, doc("abwesend", wochenplan=wochenplan(), abwesend=zu_spaet))) == (18.0, "absenkung")
+
+
 def test_aufheizen_vor_dem_ende_nimmt_das_soll_des_plans_zum_ende():
     bedienung = doc("abwesend", wochenplan=wochenplan(), abwesend=abwesend(bis="2026-11-10T22:00:00Z"))
     konfiguration = {"absenkung_k": 3, "aufheizdauer_min": {"plan": 0, "weg": 120}}

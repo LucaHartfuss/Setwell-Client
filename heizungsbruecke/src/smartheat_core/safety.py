@@ -104,6 +104,12 @@ LOCAL_SAFETY: dict[tuple[str, str], LocalSafety] = {
 }
 
 
+#: Obergrenze der Temperatur von Abwesend, Leerstand und Uebersteuerung: das hoechste `room_setpoint` des Bedienbereichs
+#: aller Profile (derselbe Bereich, den der Wunsch-Eingang kennt). Ein Wert darueber ist ungueltig, das Soll faellt dann
+#: auf Plan bzw. Wunsch zurueck; der Bereich des gewaehlten Hebelsatzes begrenzt beim Schreiben weiter.
+BEDIENBEREICH_MAX_C = max(profil.ranges["room_setpoint"][1] for profil in LOCAL_SAFETY.values())
+
+
 def check_invariants(safety: LocalSafety, lever_set_id: str, verteilsystem: str) -> None:
     label = f"Hebelsatz '{lever_set_id}', Verteilsystem '{verteilsystem}'"
     lever_set = LEVER_SETS.get(lever_set_id)
@@ -159,10 +165,33 @@ def absenktemperatur(wunsch_c, absenkung_k) -> float:
     return min(float(wunsch_c), max(wunsch_c - absenkung_k, ABSENK_UNTERGRENZE_C))
 
 
+def _temperatur_im_bereich(temp_c, untergrenze_c: float) -> bool:
+    return _endliche_zahl(temp_c) and untergrenze_c <= temp_c <= BEDIENBEREICH_MAX_C
+
+
 def leerstand_temperatur_gueltig(temp_c) -> bool:
-    """Die Leerstandstemperatur liegt mindestens auf LEERSTAND_UNTERGRENZE_C; die Obergrenze setzt der Bedienbereich
-    des Hebelsatzes beim Schreiben."""
-    return _endliche_zahl(temp_c) and temp_c >= LEERSTAND_UNTERGRENZE_C
+    """Die Leerstandstemperatur liegt von LEERSTAND_UNTERGRENZE_C bis BEDIENBEREICH_MAX_C."""
+    return _temperatur_im_bereich(temp_c, LEERSTAND_UNTERGRENZE_C)
+
+
+def abwesend_temperatur_gueltig(temp_c) -> bool:
+    """Die Abwesenheitstemperatur liegt von LEERSTAND_UNTERGRENZE_C bis BEDIENBEREICH_MAX_C."""
+    return _temperatur_im_bereich(temp_c, LEERSTAND_UNTERGRENZE_C)
+
+
+def uebersteuerung_temperatur_gueltig(temp_c) -> bool:
+    """Die Uebersteuerung der kuehlen Phase geht nicht unter die Absenk-Untergrenze und nicht ueber BEDIENBEREICH_MAX_C."""
+    return _temperatur_im_bereich(temp_c, ABSENK_UNTERGRENZE_C)
+
+
+def _zeiten_in_utc(*zeiten) -> tuple[datetime, ...] | None:
+    """Die Zeitpunkte in UTC; None, wenn einer keine Zone hat, kein Zeitpunkt ist oder am Rand des Bereichs liegt."""
+    if not all(isinstance(zeit, datetime) and zeit.utcoffset() is not None for zeit in zeiten):
+        return None
+    try:
+        return tuple(zeit.astimezone(UTC) for zeit in zeiten)
+    except OverflowError:  # Zeitpunkt am Rand des darstellbaren Bereichs
+        return None
 
 
 def leerstand_bis_gueltig(gesetzt: datetime, bis: datetime, jetzt: datetime) -> bool:
@@ -170,15 +199,22 @@ def leerstand_bis_gueltig(gesetzt: datetime, bis: datetime, jetzt: datetime) -> 
     ist die Geraeteuhr, vom Aufrufer uebergeben: `gesetzt` schreibt der Server, ein zu spaet gesetztes `gesetzt`
     verlaengert die Hoechstdauer ab jetzt nicht (beide Grenzen gelten zugleich). Alle drei
     Zeitpunkte brauchen eine Zone (`utcoffset()` nicht None); die Rechnung ist absolut in UTC, nie in Wandzeit."""
-    zeiten = (gesetzt, bis, jetzt)
-    if not all(isinstance(zeit, datetime) and zeit.utcoffset() is not None for zeit in zeiten):
+    zeiten = _zeiten_in_utc(gesetzt, bis, jetzt)
+    if zeiten is None:
         return False
-    try:
-        gesetzt_utc, bis_utc, jetzt_utc = (zeit.astimezone(UTC) for zeit in zeiten)
-    except OverflowError:  # Zeitpunkt am Rand des darstellbaren Bereichs
-        return False
+    gesetzt_utc, bis_utc, jetzt_utc = zeiten
     return (timedelta(0) < bis_utc - gesetzt_utc <= LEERSTAND_HOECHSTDAUER
             and timedelta(0) < bis_utc - jetzt_utc <= LEERSTAND_HOECHSTDAUER)
+
+
+def abwesend_bis_gueltig(bis: datetime, jetzt: datetime) -> bool:
+    """`bis` liegt nach `jetzt` und hoechstens LEERSTAND_HOECHSTDAUER (365 Tage) davon entfernt. `jetzt` ist die
+    Geraeteuhr, vom Aufrufer uebergeben; beide Zeitpunkte brauchen eine Zone, die Rechnung ist absolut in UTC."""
+    zeiten = _zeiten_in_utc(bis, jetzt)
+    if zeiten is None:
+        return False
+    bis_utc, jetzt_utc = zeiten
+    return timedelta(0) < bis_utc - jetzt_utc <= LEERSTAND_HOECHSTDAUER
 
 
 def phasendauer_gueltig(dauer: timedelta) -> bool:
