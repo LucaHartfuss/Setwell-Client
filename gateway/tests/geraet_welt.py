@@ -45,8 +45,8 @@ class FakeDevice:
     def soll_quelle_aus(self, aus, wirksam=None):
         self.aus.append((aus, wirksam))
 
-    def meldung(self, key, text, *, offen, stufe):
-        self.meldungen.append((key, text, offen, stufe))
+    def meldung(self, key, meldung, *, offen):
+        self.meldungen.append((key, meldung, offen))
 
     def neuer_uebernahme_code(self):
         self.code_aufrufe += 1

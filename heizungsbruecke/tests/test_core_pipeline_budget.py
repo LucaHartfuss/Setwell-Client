@@ -7,11 +7,10 @@ import pytest
 from bindung_beispiele import VAILLANT_MYPYLLANT, VIESSMANN_VICARE_BINDING, WEISHAUPT_MODBUS
 
 from heizungsbruecke.ha_binding import HaPlantBinding
-from smartheat_core import write_budget
+from smartheat_core import meldungen, write_budget
 from smartheat_core.pipeline import (
     BUDGET_KEY,
     LIFETIME_KEY,
-    START_LIMIT_MESSAGE,
     DeviceWriteError,
     LeverPipeline,
     WriteBudgetExhausted,
@@ -105,6 +104,7 @@ def test_server_values_stop_at_the_daily_limit_but_the_restore_point_is_saved(ma
     assert store.state.restore_point == {"curve": 0.8, "room_setpoint": 21.0, "heat_limit": 17.0}
     assert store.state.deferred_levers == ("curve", "room_setpoint", "heat_limit")
     assert [note[:2] for note in notes] == [("schreibbudget", DAY)]
+    assert [note[2] for note in notes] == [meldungen.neu("meldung.schreibbudget", limit=10)]
 
 
 def test_the_limit_can_be_reached_in_the_middle_of_an_answer(make_store, clock):
@@ -154,18 +154,18 @@ def test_a_boost_does_not_start_at_the_daily_limit(make_store, clock, comfort, e
     assert write_budget.get(store, write_budget.BOOST_START) is None
     assert write_budget.get(store, write_budget.EMERGENCY_START) is None
     assert _total(store) == 10
-    assert {note[:3] for note in notes} == {(BUDGET_KEY, DAY, START_LIMIT_MESSAGE.format(limit=10))}
+    assert {note[:3] for note in notes} == {(BUDGET_KEY, DAY, meldungen.neu("meldung.schreibbudget_boost", limit=10))}
     assert pipeline.comfort_start_heute_gesperrt is comfort
 
 
 def test_the_start_refusal_text_covers_both_facts_of_the_shared_daily_notice(make_store, clock):
-    # Gleicher Schluessel und Tag wie BUDGET_MESSAGE: kommt der Boost-Hinweis zuerst, darf der Hinweis auf die
+    # Gleicher Schluessel und Tag wie die Meldung `schreibbudget`: kommt der Boost-Hinweis zuerst, darf der Hinweis auf die
     # verschobenen Werte nicht fehlen (und der Text hat wie alle Hinweise das Praefix).
     notes = []
     pipeline, _, _ = _weishaupt(
         make_store, clock, backup={"restore_point": POINT, "write_budget": AT_LIMIT}, notify=lambda *args: notes.append(args))
     pipeline.set_boosts(comfort=True, emergency=False)
-    text = notes[0][2]
+    text = meldungen.text(notes[0][2])
     assert text.startswith("SmartHeat: Das Tageslimit von 10 Schreibvorgängen")
     assert "morgen geschrieben" in text and text.endswith("Ein Boost startet erst morgen wieder.")
 
@@ -278,7 +278,8 @@ def test_lifetime_hint_at_the_threshold_and_every_further_10000(make_store, cloc
     pipeline.apply_server_values({"curve": 0.8, "room_setpoint": 20.0, "heat_limit": 18.0})
     assert store.state.lifetime_writes == 50000
     assert [(key, state) for key, state, _ in notes] == [(LIFETIME_KEY, "50000")]
-    assert "50.000" in notes[0][2]
+    assert notes[0][2] == meldungen.neu("meldung.schreibzaehler", anzahl=50000)
+    assert "50.000" in meldungen.text(notes[0][2])
     store.update(lifetime_writes=59999)
     pipeline.apply_server_values({"curve": 0.85, "room_setpoint": 20.0, "heat_limit": 18.0})
     assert notes[-1][:2] == (LIFETIME_KEY, "60000")

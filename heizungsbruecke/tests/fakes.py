@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 import requests
 import websocket
 
+from smartheat_core import meldungen
+from smartheat_core.meldungen import Meldung
 from smartheat_core.safety import resolve_local_safety
 from smartheat_runtime import entitlement
 from smartheat_runtime.runtime_config import RuntimeConfig
@@ -64,23 +66,44 @@ class HaEventSink:
         self._ha_api.fire_event("smartheat_status", event)
 
 
+def meldungs_text(code: str, **params) -> str:
+    """Kundentext einer Meldung des Katalogs fuer den Standard-Host (HA)."""
+    return meldungen.text(meldungen.neu(code, **params))
+
+
+def meldungs_ablage(code: str, **params) -> dict:
+    """Ablage einer Meldung in `backup.json` (notify_meldungen)."""
+    return meldungen.zu_dict(meldungen.neu(code, **params))
+
+
 class FakeNotifySink:
     """NotifySink der Laufzeit-Tests (Grenze zum Kunden): der echte Notifier entscheidet ueber Entprellung,
-    Hinweis-Schalter und offene Meldungen; der Sink haelt nur fest, was beim Kunden ankommt."""
+    Hinweis-Schalter und offene Meldungen; der Sink haelt nur fest, was beim Kunden ankommt. `pushes` und `shown`
+    tragen den gerenderten Text (Standard-Host), `codes` und `offen` die Codes."""
 
     def __init__(self) -> None:
         self.pushes: list[tuple[str, str]] = []  # (Schluessel, Text) je Push
+        self.push_meldungen: list[tuple[str, Meldung]] = []  # (Schluessel, Meldung) je Push
         self.shown: dict[str, str] = {}  # offene kritische Meldungen je Schluessel
+        self.offen: dict[str, Meldung] = {}
         self.withdrawn: list[str] = []
 
-    def push(self, key: str, message: str) -> None:
-        self.pushes.append((key, message))
+    @property
+    def codes(self) -> list[tuple[str, str]]:
+        """(Schluessel, Code) je Push."""
+        return [(key, meldung.code) for key, meldung in self.push_meldungen]
 
-    def show(self, key: str, message: str) -> None:
-        self.shown[key] = message
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
+        self.pushes.append((key, meldungen.text(meldung)))
+        self.push_meldungen.append((key, meldung))
+
+    def show(self, key: str, meldung: Meldung) -> None:
+        self.shown[key] = meldungen.text(meldung)
+        self.offen[key] = meldung
 
     def withdraw(self, key: str) -> None:
         self.shown.pop(key, None)
+        self.offen.pop(key, None)
         self.withdrawn.append(key)
 
 

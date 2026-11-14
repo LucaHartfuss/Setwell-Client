@@ -131,7 +131,7 @@ def test_driver_lever_set_must_match_the_configured_lever_set(world):
     dokumente_schreiben(world.paths, konfiguration(hebelsatz="vaillant_vrc720"))  # Treiber simuliert viessmann_vicare
     result = world.start_runtime()
     assert isinstance(result, IdleBridge) and result.reason == "konfigurationsfehler"
-    assert "Hebelsatz" in world.status()["grund"]
+    assert world.status()["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
     assert world.host.driver is None
 
 

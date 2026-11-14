@@ -809,6 +809,33 @@ def test_get_attribute_raises_when_missing_or_empty(attributes):
         api.get_attribute("climate.heizkreis", "preset_mode")
 
 
+def test_get_attribute_roh_returns_the_json_value_unchanged_and_none_when_missing():
+    api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
+    liste = [{"serial_number": "1", "codes": [{"code": "F.28", "type": "ERROR"}]}]
+    antworten = [{"attributes": {"diagnostic_trouble_codes": liste}}, {"attributes": {}}]
+    erwartet = [liste, None]
+    for antwort, soll in zip(antworten, erwartet, strict=True):
+        mock_response = Mock(spec=requests.Response)
+        mock_response.json.return_value = antwort
+        mock_response.raise_for_status.return_value = None
+        with patch("heizungsbruecke.ha_api.requests.get", autospec=True, return_value=mock_response) as mock_get:
+            assert api.get_attribute_roh("binary_sensor.anlage_trouble_codes", "diagnostic_trouble_codes") == soll
+        mock_get.assert_called_once_with(
+            "http://supervisor/core/api/states/binary_sensor.anlage_trouble_codes",
+            headers={"Authorization": "Bearer test-token"},
+            timeout=10,
+        )
+
+
+def test_get_attribute_roh_raises_on_http_error():
+    api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
+    mock_response = Mock(spec=requests.Response)
+    mock_response.raise_for_status.side_effect = requests.HTTPError("404")
+
+    with patch("heizungsbruecke.ha_api.requests.get", autospec=True, return_value=mock_response), pytest.raises(requests.HTTPError):
+        api.get_attribute_roh("binary_sensor.x", "diagnostic_trouble_codes")
+
+
 def test_registries_use_the_ws_command_and_ignore_other_answers():
     api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
     with HaWebSocket([{"entity_id": "sensor.a"}], [{"id": "d1"}]).angeschlossen():

@@ -4,11 +4,13 @@ import logging
 import threading
 import time
 
+import pytest
 from fakes import FakeClock, FakeHa
 from geraet_helpers import Device, _host, _register, ha_konfiguration, konfiguration_aus_optionen
 from runtime_helpers import OPTIONS
 
-from heizungsbruecke import geraet_status
+from heizungsbruecke import geraet_status, ha_sinks
+from smartheat_core import meldungen
 from smartheat_device.commands import Done, Waiting
 from smartheat_device.documents import Dokument
 from smartheat_device.host import Anzeige
@@ -23,6 +25,10 @@ def _anzeige(**changes):
     base = dict(zustand="regelt", server_ok=True, device_state="uebernommen", eingerichtet=True, hinweise=(),
                 meldungen=(), konfiguration_abgelehnt=None)
     return Anzeige(**{**base, **changes})
+
+
+DOPPELT = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
+ABGELEHNT = {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "ungueltig"}, "stufe": "rot"}
 
 
 def _lokal_kreis(soll=21.5, ist=20.5, name="Wohnen"):
@@ -100,34 +106,73 @@ def test_changed_display_or_effective_target_sends_again_and_every_runtime_event
     assert len(ha.events) == 5
 
 
-def test_hints_messages_rejection_and_update_become_device_hints():
+BEGRENZT = {"key": "wunsch_begrenzt", "text": "15 °C",
+            **meldungen.zu_dict(meldungen.neu("meldung.wunsch_begrenzt", roh=15.0, begrenzt=18.0))}
+
+
+def test_hints_messages_rejection_and_update_become_meldungen_with_code_and_params():
     ha = FakeHa()
     sink, _ = _status(ha)
-    sink.anzeige(_anzeige(zustand="update_noetig", hinweise=({"key": "geraet_doppelt", "stufe": "kritisch",
-                                                               "text": "läuft doppelt"},),
-                          meldungen=({"key": "wunsch_begrenzt", "text": "15 °C"},),
-                          konfiguration_abgelehnt="Entity fehlt"))
-    keys = {h["key"]: h for h in ha.events[-1][1]["geraet_hinweise"]}
-    # update_noetig mit abgelehnter Konfiguration ergibt bewusst zwei Hinweise (Grund und Handlungsanweisung)
+    sink.anzeige(_anzeige(zustand="update_noetig", hinweise=(DOPPELT,), meldungen=(BEGRENZT,),
+                          konfiguration_abgelehnt=ABGELEHNT))
+    data = ha.events[-1][1]
+    assert "geraet_hinweise" not in data
+    keys = {m["key"]: m for m in data["meldungen"]}
+    # update_noetig mit abgelehnter Konfiguration ergibt bewusst zwei Meldungen (Grund und Handlungsanweisung)
     assert set(keys) == {"geraet_doppelt", "wunsch_begrenzt", "konfiguration_abgelehnt", "update_noetig"}
-    assert all(set(h) == set(geraet_status.HINWEIS_FIELDS) for h in keys.values())
-    assert keys["konfiguration_abgelehnt"]["text"] == "Entity fehlt"
-    assert keys["geraet_doppelt"]["stufe"] == "kritisch" and keys["wunsch_begrenzt"]["stufe"] == "warnung"
+    assert keys["geraet_doppelt"] == {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {},
+                                      "stufe": "rot"}
+    assert keys["wunsch_begrenzt"]["code"] == "meldung.wunsch_begrenzt"
+    assert keys["wunsch_begrenzt"]["params"] == {"roh": 15.0, "begrenzt": 18.0}
+    assert keys["konfiguration_abgelehnt"]["params"] == {"grund": "ungueltig"}
+    assert keys["update_noetig"]["code"] == "meldung.update_noetig"
 
 
-def test_jeder_hinweis_hat_genau_key_stufe_und_text():
-    anzeige = _anzeige(zustand="gesperrt", hinweise=({"key": "geraet_doppelt", "stufe": "kritisch", "text": "x"},),
-                       meldungen=({"key": "wunsch_begrenzt", "text": "y"},), konfiguration_abgelehnt="z")
-    eintraege = geraet_status.hinweise(anzeige)
-    assert len(eintraege) == 4 and all(set(eintrag) == {"key", "stufe", "text"} for eintrag in eintraege)  # Literal V5
+@pytest.mark.parametrize("stufe", ["rot", "orange", "gelb"])
+def test_die_stufe_des_codes_geht_unveraendert_ins_ereignis(stufe):
+    """Das Ereignis V5 traegt die Stufe des Codes (rot/orange/gelb), keine Abbildung auf andere Namen."""
+    meldung = {"rot": meldungen.neu("meldung.geraet_doppelt"),
+               "orange": meldungen.neu("meldung.soll_quelle_aus_unbekannt"),
+               "gelb": meldungen.neu("erzeuger.hinweis", roh_text="w_1", quelle="mypyllant")}[stufe]
+    assert meldung.stufe == stufe
+    eintrag = {"key": "k", **meldungen.zu_dict(meldung)}
+    assert geraet_status.meldungen_liste(_anzeige(hinweise=(eintrag,)))[0]["stufe"] == stufe
 
 
-def test_locked_device_gets_a_critical_hint_and_malformed_entries_are_dropped():
+def test_jede_meldung_hat_genau_key_code_params_und_stufe_aber_keinen_text():
+    anzeige = _anzeige(zustand="gesperrt", hinweise=(DOPPELT,), meldungen=(BEGRENZT,),
+                       konfiguration_abgelehnt=ABGELEHNT)
+    eintraege = geraet_status.meldungen_liste(anzeige)
+    assert len(eintraege) == 4 and all(set(eintrag) == {"key", "code", "params", "stufe"} for eintrag in eintraege)
+    # Literal V5: die Liste nennt `kreis` (nur wenn gesetzt), das Ereignis je Uebergang dazu schema, geraet_id und offen
+    assert ha_sinks.MELDUNG_FIELDS == ("key", "code", "params", "kreis", "stufe")
+    assert ha_sinks.MELDUNG_EVENT_FIELDS == ("schema", "geraet_id", "key", "code", "params", "kreis", "stufe", "offen")
+
+
+def test_locked_device_gets_a_red_meldung_and_malformed_entries_are_dropped():
     ha = FakeHa()
     sink, _ = _status(ha)
-    sink.anzeige(_anzeige(zustand="gesperrt", hinweise=("kaputt", {"text": "ohne key"}), meldungen=({"text": "x"},)))
-    hints = ha.events[-1][1]["geraet_hinweise"]
-    assert [h["key"] for h in hints] == ["gesperrt"] and hints[0]["stufe"] == "kritisch"
+    sink.anzeige(_anzeige(
+        zustand="gesperrt",
+        hinweise=("kaputt", {"text": "ohne key"}, {"key": "x", "text": "alt"},
+                  {**DOPPELT, "code": "meldung.erfunden"}, {**DOPPELT, "stufe": "orange"}),
+        meldungen=({"text": "x"}, {"key": "ohne_code", "text": "alt"}),
+        konfiguration_abgelehnt={"code": "meldung.erfunden"}))
+    eintraege = ha.events[-1][1]["meldungen"]
+    assert [m["key"] for m in eintraege] == ["gesperrt"] and eintraege[0]["stufe"] == "rot"
+
+
+def test_das_ereignis_traegt_push_regeln_mit_standard_ohne_dokument_und_die_gelesenen_mit_dokument():
+    ha = FakeHa()
+    sink, _ = _status(ha)  # Sicht des Helfers ohne das Feld: Standard des Geraets
+    sink.anzeige(_anzeige())
+    assert ha.events[-1][1]["push_regeln"] == {"ruhe_von": 22, "ruhe_bis": 7, "tageslimit": 5}
+    assert "push_regeln" in geraet_status.EVENT_FIELDS
+    sicht = _sicht(ha_konfiguration(push_regeln={"ruhe_von": 23, "ruhe_bis": 6, "tageslimit": 2}))
+    assert sicht["push_regeln"] == {"ruhe_von": 23, "ruhe_bis": 6, "tageslimit": 2}
+    assert _sicht(None)["push_regeln"] == {"ruhe_von": 22, "ruhe_bis": 7, "tageslimit": 5}
+    ungueltig = _sicht(ha_konfiguration(push_regeln={"ruhe_von": 5, "ruhe_bis": 5, "tageslimit": 9}))
+    assert ungueltig["push_regeln"] == {"ruhe_von": 22, "ruhe_bis": 7, "tageslimit": 5}
 
 
 def test_status_event_never_carries_the_claim_code(caplog):
@@ -139,7 +184,7 @@ def test_status_event_never_carries_the_claim_code(caplog):
         sink.publish(_runtime_event(claim_code=CODE))
         sink.anzeige(_anzeige(
             device_state="nicht_uebernommen", eingerichtet=False, zustand="nicht_uebernommen",
-            hinweise=({"key": "geraet_doppelt", "stufe": "kritisch", "text": "x", "claim_code": CODE},),
+            hinweise=({**DOPPELT, "claim_code": CODE},),
             meldungen=({"key": "wunsch_begrenzt", "text": "y", "claim_code": CODE},)))
     assert ha.events and all(CODE not in str(data) for _, data in ha.events)
     assert "claim" not in str(ha.events[-1][1]).lower() and CODE not in caplog.text

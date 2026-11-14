@@ -21,7 +21,7 @@ from heizungsbruecke.ha_binding import binding_for, binding_roles
 from heizungsbruecke.ha_signals import SOLL_REF, GeraetSignale, HaSignalSource
 from heizungsbruecke.manifest import build_manifest, entity_ref
 from heizungsbruecke.version import ADDON_VERSION
-from smartheat_core import config_check, kreisansicht, wallclock
+from smartheat_core import config_check, kreisansicht, meldungen, wallclock
 from smartheat_core.logtext import lesbar
 from smartheat_runtime import dokument_config, plan_quelle
 from smartheat_runtime.app import Loaded, Notice, RestoreParts, StartFailure
@@ -55,10 +55,6 @@ DERIVED_SENSORS_RETRY_DELAYS_SECONDS = (5, 10, 20, 40, 60, 60, 60)
 #: Raum fuer up/status (wie das Gateway): Takt im Worker zusaetzlich zu jeder Soll-Aenderung.
 EV_RAUM = "ha_raum"
 RAUM_SECONDS = 30
-ENTITY_FEHLT_MESSAGE = ("SmartHeat: {feld}: zugeordnete Entity fehlt in Home Assistant und wird bis zum nächsten Start "
-                        "nicht gelesen.")
-ENTITY_DA_MESSAGE = "SmartHeat: {feld}: zugeordnete Entity ist in Home Assistant wieder vorhanden und wird gelesen."
-SOURCE_CHANGE_MESSAGE = "SmartHeat: Die Quelle der Raumtemperatur hat sich geändert."
 NOT_CONFIGURED_HINT = (
     "Add-on ist noch nicht eingerichtet -- bitte in Home Assistant unter Einstellungen -> Geraete & Dienste -> "
     "SmartHeat einrichten. Bis dahin bleibt das Add-on im Ruhezustand."
@@ -80,6 +76,16 @@ class StartupError(Exception):
 
 class _MissingEntities(Exception):
     pass
+
+
+def _stumm_schaltbar(hinweise_aus: tuple[str, ...]) -> tuple[str, ...]:
+    """Nur Kategorien aus `HA_HINWEISE` schalten Hinweise stumm. Ein gespeichertes Dokument wird beim Start vor der
+    Pruefung gelesen und kann eine inzwischen gestrichene Kategorie (z. B. `raumfuehler`) tragen; sie bliebe sonst
+    stumm, ohne dass der Status es zeigt. Im Log steht nur die Zahl der verworfenen Eintraege."""
+    erlaubt = tuple(h for h in hinweise_aus if h in config_check.HA_HINWEISE)
+    if len(erlaubt) != len(hinweise_aus):
+        logger.warning("Hinweise stummschalten: %d unbekannte Kategorien verworfen", len(hinweise_aus) - len(erlaubt))
+    return erlaubt
 
 
 class HaHost:
@@ -135,7 +141,7 @@ class HaHost:
             anlage_budget_path=config.anlage_budget_path(), kreis=self.kreis,
             zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis))
         vorab = self._bindung_oder_none()
-        boot = dataclasses.replace(boot, notify_hints_off=vorab.hinweise_aus if vorab else ())
+        boot = dataclasses.replace(boot, notify_hints_off=_stumm_schaltbar(vorab.hinweise_aus) if vorab else ())
         if not boot.configured and not boot.signed_off:
             logger.info(NOT_CONFIGURED_HINT)
         return boot
@@ -240,19 +246,19 @@ class HaHost:
         self.raum = RaumPublisher(lambda raum: self._geraet.raum_merken(self.kreis, raum), self.signals, self.store, manifest.refs.get("room_actual"),
                                   lambda: wallclock.now().isoformat())
         runtime = dataclasses.replace(
-            runtime, notify_hints_off=b.hinweise_aus,
+            runtime, notify_hints_off=_stumm_schaltbar(b.hinweise_aus),
             battery_refs=tuple(
                 BatteryRef(entity_id, BATTERY_LOW_FLAG if entity_id.startswith("binary_sensor.") else BATTERY_PERCENT)
                 for entity_id in b.batterien if entity_id not in ungelesen))
         notices: tuple[Notice, ...] = ()
         if derived.replaced:
-            notices = (Notice("quellwechsel", derived.sources_fingerprint, SOURCE_CHANGE_MESSAGE),)
+            notices = (Notice("quellwechsel", derived.sources_fingerprint, meldungen.neu("meldung.quellwechsel")),)
         fehlend = {feld for feld, _ in ohne_zustand}
         # Jedes gebundene optionale Feld meldet seinen Zustand; mit Zustand entwarnt der Melder einen offenen
         # Hinweis (und nur diesen), sonst bliebe „fehlt“ nach der Rueckkehr stehen und ein erneutes Fehlen schwiege.
         notices += tuple(
-            Notice(f"entity_fehlt:{feld}", "fehlt", ENTITY_FEHLT_MESSAGE.format(feld=feld)) if feld in fehlend
-            else Notice(f"entity_fehlt:{feld}", STATE_OK, ENTITY_DA_MESSAGE.format(feld=feld))
+            Notice(f"entity_fehlt:{feld}", "fehlt", meldungen.neu("meldung.entity_fehlt", feld=feld)) if feld in fehlend
+            else Notice(f"entity_fehlt:{feld}", STATE_OK, meldungen.neu("meldung.entity_fehlt_ok", feld=feld))
             for feld in dokument.optionale_felder(b))
         return Loaded(config=runtime, manifest=manifest, binding=binding, plant_id=plant_id, notices=notices)
 

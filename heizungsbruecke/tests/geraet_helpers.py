@@ -93,7 +93,7 @@ class Sent:
 
 
 class _NullSink:
-    def push(self, key, message):
+    def push(self, key, message, *, begleitet=False):
         pass
 
     def show(self, key, message):
@@ -364,8 +364,8 @@ class Device:
     def abo_status(self, kreis=None):
         return "aktiv"
 
-    def meldung(self, key, text, *, offen, stufe):
-        self.meldungen.append((key, text, offen, stufe))
+    def meldung(self, key, meldung, *, offen):
+        self.meldungen.append((key, meldung, offen))
 
 
 def _paths(tmp_path, monkeypatch):
@@ -407,7 +407,7 @@ def gateway_konfiguration(**changes):
 def ha_konfiguration(**changes) -> dict:
     base = {
         "anlage": "zuhause2", "hebelsatz": "vaillant_vrc720",
-        "verteilsystem": "Heizkoerper", "tagestick": "12:07", "abo": "aktiv",
+        "verteilsystem": "Heizkoerper", "tagestick": "12:07", "abo": "aktiv", "mindest_software": "0.6.0",
         "bindungsparameter": parameter("vaillant_vrc720"), "raumfuehler": ["sensor.wohnzimmer_thermostat_temperatur"],
         "bindung": {
             "kreis": {"plattform": "mypyllant", "config_entry": "e1", "anlage": "S", "nummer": "0"},

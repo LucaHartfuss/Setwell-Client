@@ -26,6 +26,7 @@ _.run_pending  # smartheat_runtime/worker.py RegulationWorker.run_pending: Takt 
 _.MAX_CLOCK_SKEW_SECONDS  # Server: geraete/device_auth.py (Zeitfenster der Signatur); Geraet wertet nur den Status 401
 _.UNAUTHENTICATED_ERROR  # Server: geraete/devices_api.py (Text der 401-Antwort); das Geraet wertet nur den Status 401
 _.ENERGIE_EINHEITEN  # Server: einrichtung/ha_pruefung.py, einrichtung/ha.py, geraete/device_config.py; im Geraet nur gepinnt (bindungsparameter.EINHEITEN)
+_.WEG_ERGEBNISSE  # Server: geraete/device_protocol.py (Ergebnisse von weg_pruefen); das Geraet lehnt den Befehl noch ab
 _.expires_rule  # Feld von wire.Command: Server geraete/device_protocol.py wertet die Regel aus (expires_seconds None)
 
 # --- Soll aus der Bedienung (smartheat_core/plan.py): der Prueftakt rechnet es je Kreis (smartheat_runtime/plan_quelle.py) ---
@@ -48,6 +49,8 @@ _.delta  # Contract-Check 89 (tools/contracts/raum_delta.json) rechnet Server un
 # --- Feldlisten des Status-Ereignisses (V5) und des flachen Kreis-Ereignisses (V1): Leser auf der Gegenseite ---
 _.EVENT_FIELDS  # geraet_status/status/geraet_nachweis: Contract-Check 14 und 88 vergleichen sie mit der Integration bzw. der Fixture
 _.KREIS_EVENT_FIELDS  # geraet_status: Contract-Check 14 und 88 vergleichen die Kreisfelder mit STATUS_KREIS_FIELDS der Integration
+_.MELDUNG_FIELDS  # ha_sinks: Contract-Check 14 vergleicht die Felder einer Meldung (Status `meldungen`, Ereignis) mit der Integration
+_.MELDUNG_EVENT_FIELDS  # ha_sinks: Contract-Check 14 vergleicht die Felder des Ereignisses `smartheat_meldung` mit der Integration
 
 # --- Hausmodell-Kern (smartheat_core/hausmodell.py): woertliche Kopie der Quelle im Server, Leser auf der Gegenseite der Kopie ---
 # Die Kopie bleibt unveraendert (der Vertragscheck des Dev-Roots vergleicht sie zeichengleich); der Server nutzt den ganzen Kern
@@ -76,3 +79,5 @@ _.leerstand_temperatur_gueltig  # smartheat_core/safety.py: Untergrenze des Leer
 _.leerstand_bis_gueltig  # smartheat_core/safety.py: Hoechstdauer des Leerstands, noch ohne Aufrufer im Takt
 _.phasendauer_gueltig  # smartheat_core/safety.py: Mindestdauer der Phase, noch ohne Aufrufer im Takt
 _.abwesenheit_vorschlag  # smartheat_core/safety.py: Vorschlag je Verteilsystem, noch ohne Aufrufer im Takt
+# --- Push-Regeln der Person (V1): die Kopie der Feldliste in wire.py ---
+_.PUSH_REGELN_FIELDS  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py push_regeln_gueltig) und im Vertragscheck

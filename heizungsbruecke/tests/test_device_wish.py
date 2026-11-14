@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+from smartheat_core import meldungen
 from smartheat_device import nachrichten, wire, wish
 
 WALL = 1_800_000_000.0  # 2027-01-15T08:00:00+00:00
@@ -49,8 +50,7 @@ def test_a_wish_outside_the_contract_is_a_contract_error(monkeypatch, feld, wert
 
 
 def test_the_local_messages_of_the_wish_are_contract_keys():
-    assert wish.soll_quelle_aus_text(None) == (
-        "Thermostat ist aus, SmartHeat regelt weiter; Heizung aus über die Sommersperre bzw. im Portal")
+    assert wish.soll_quelle_aus_meldung(None).code == "meldung.soll_quelle_aus_unbekannt"
     assert {wish.BEGRENZT_KEY, wish.SOLL_QUELLE_AUS_KEY} <= set(wire.MELDUNGEN)
 
 
@@ -154,15 +154,20 @@ def test_a_broken_buffer_file_is_empty(tmp_path):
     assert wish.WunschPuffer(tmp_path).wunsch(1) is None
 
 
-def test_texts():
-    assert wish.begrenzt_text(14.0, 15.0, "thermostat") == "Thermostat auf 14 °C gestellt, SmartHeat regelt auf 15 °C"
-    assert wish.begrenzt_text(20.3, 20.5, "soll_entity") == (
+def test_the_local_messages_of_the_wish_are_codes_with_the_old_texts():
+    begrenzt = wish.begrenzt_meldung(14.0, 15.0, "thermostat")
+    assert (begrenzt.code, begrenzt.params) == (
+        "meldung.wunsch_begrenzt", {"roh": 14.0, "begrenzt": 15.0, "herkunft": "thermostat"})
+    assert meldungen.text(begrenzt) == "Thermostat auf 14 °C gestellt, SmartHeat regelt auf 15 °C"
+    assert meldungen.text(wish.begrenzt_meldung(20.3, 20.5, "soll_entity")) == (
         "Wunschtemperatur auf 20,3 °C gestellt, SmartHeat regelt auf 20,5 °C")
-    assert wish.soll_quelle_aus_text(21.0) == (
+    assert wish.begrenzt_meldung(20.3, 20.5, None).params == {"roh": 20.3, "begrenzt": 20.5}
+    aus = wish.soll_quelle_aus_meldung(21.0)
+    assert (aus.code, aus.params) == ("meldung.soll_quelle_aus", {"wirksam": 21.0})
+    assert meldungen.text(aus) == (
         "Thermostat ist aus, SmartHeat regelt weiter auf 21 °C; Heizung aus über die Sommersperre bzw. im Portal")
-    assert wish.soll_quelle_aus_text(None) == (
+    assert meldungen.text(wish.soll_quelle_aus_meldung(None)) == (
         "Thermostat ist aus, SmartHeat regelt weiter; Heizung aus über die Sommersperre bzw. im Portal")
-    assert {wish.BEGRENZT_KEY, wish.SOLL_QUELLE_AUS_KEY} <= set(wire.MELDUNGEN)
 
 
 def test_the_wish_carries_its_circuit():

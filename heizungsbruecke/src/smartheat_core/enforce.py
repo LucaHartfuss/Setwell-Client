@@ -28,7 +28,7 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any, Protocol
 
-from smartheat_core import wallclock, write_budget
+from smartheat_core import meldungen, wallclock, write_budget
 from smartheat_core.logtext import lesbar
 from smartheat_core.pipeline import WriteBudgetExhausted
 from smartheat_core.zahlen import GLEITKOMMA_REST, ist_endliche_zahl
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 class EnforceRuntime(Protocol):
     """Was Durchsetzen braucht: Zustand (store), Hebel-Pipeline mit Binding (override), Meldungen (notifier:
-    notify(key, state, message, critical, silent_ok=False)), monotone Uhr (clock), zone_prepared (die Zone war in diesem
+    notify(key, state, meldung, critical, silent_ok=False)), monotone Uhr (clock), zone_prepared (die Zone war in diesem
     Prozess schon einmal erfolgreich vorbereitet; vorher gehoert das Umstellen allein dem Start und dem lokalen Check)."""
 
     store: Any
@@ -63,15 +63,7 @@ RETRY_SECONDS = write_budget.INTERVAL_SECONDS
 # (0,05 = halber Schritt 0,1) folgen derselben Regel. Die Heizgrenze (Anlagenschritt 0,1) nimmt wie die
 # Steigung den halben Anlagenschritt, 0,05.
 ZONE_MODE = "zone_mode"
-MESSAGE = (
-    "SmartHeat: Die Heizungseinstellung wurde in der App verstellt ({was}) und zurückgesetzt. "
-    "Einstellungen bitte nur über das Raumthermostat."
-)
-LIMIT_MESSAGE = (
-    "SmartHeat: Die Heizungseinstellung wird immer wieder verstellt ({was}). SmartHeat setzt sie heute "
-    "nicht mehr zurück, um das Abrufkontingent der Hersteller-Cloud zu schonen, und versucht es morgen erneut."
-)
-RETURN_MESSAGE = "SmartHeat: Die Heizungseinstellung steht wieder auf den gelernten Werten."
+
 
 def _today() -> date:
     return date.fromisoformat(write_budget.today())
@@ -308,7 +300,8 @@ def check_manual_override(rt: EnforceRuntime) -> None:
             return
         if state.manual_override is not None:
             rt.store.update(manual_override=None)
-        rt.notifier.notify(KEY, STATE_OK, RETURN_MESSAGE, critical=False, silent_ok=True)
+        rt.notifier.notify(KEY, STATE_OK, meldungen.neu("meldung.manueller_eingriff_ok"), critical=False,
+                           silent_ok=True)
         return
     misses = min(state.manual_override_misses + 1, DETECTION_ROUNDS)
     _set_misses(rt, misses)
@@ -321,9 +314,10 @@ def check_manual_override(rt: EnforceRuntime) -> None:
     # nach einem gescheiterten Schreiben nicht: dann gilt hoechstens die Limit-Meldung).
     if written and record.get("gemeldet") != record["signatur"]:
         was = ", ".join(_labels(rt)[lever] for lever in sorted(written))
-        rt.notifier.notify(KEY, record["signatur"], MESSAGE.format(was=was), critical=False)
+        rt.notifier.notify(KEY, record["signatur"], meldungen.neu("meldung.manueller_eingriff", was=was),
+                           critical=False)
         rt.store.update(manual_override={**record, "gemeldet": record["signatur"]})
     if at_limit:
         limit_was = ", ".join(_labels(rt)[lever] for lever in sorted(at_limit))
-        rt.notifier.notify(KEY, f"limit:{_today().isoformat()}:{limit_was}", LIMIT_MESSAGE.format(was=limit_was),
-                           critical=False)
+        rt.notifier.notify(KEY, f"limit:{_today().isoformat()}:{limit_was}",
+                           meldungen.neu("meldung.manueller_eingriff_limit", was=limit_was), critical=False)

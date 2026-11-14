@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import requests
 import websocket
@@ -206,6 +207,16 @@ class HomeAssistantApi:
         if value in (None, ""):
             raise ValueError(f"Entity {entity_id} hat kein Attribut {attribute!r}")
         return str(value)
+
+    def get_attribute_roh(self, entity_id: str, attribute: str) -> Any:
+        """Ein Attribut unveraendert als JSON-Wert (Liste, Objekt, Text, Zahl); fehlt es, None."""
+        response = requests.get(
+            f"{self._base_url}{self._api_prefix}/states/{entity_id}",
+            headers=self._headers,
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json().get("attributes", {}).get(attribute)
 
     def create_template_sensor(self, name: str, template: str) -> str:
         """Legt einen Template-Sensor (Temperatur in °C) per Config-Entry-Flow `template` an:

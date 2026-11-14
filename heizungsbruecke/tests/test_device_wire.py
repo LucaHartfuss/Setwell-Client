@@ -84,6 +84,7 @@ _PIN_PRAEFIX = "_VERTRAG_GEPINNT"
 NUR_SERVER: set[str] = {
     "MAX_CLOCK_SKEW_SECONDS",  # nur der Server prueft das Zeitfenster der Signatur
     "UNAUTHENTICATED_ERROR",  # Text der 401-Antwort; das Geraet wertet nur den Status 401 (immer gleich)
+    "WEG_ERGEBNISSE",  # Ergebnisse von weg_pruefen; der Server prueft sie, das Geraet lehnt den Befehl noch ab
 }
 NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts importieren), nur gepinnt (P4)
     "ABO",  # config_check.ABO_WERTE
@@ -101,6 +102,9 @@ NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts i
     "KREISE_MAX",  # config_check.KREISE_MAX
     "KREIS_FIELDS",  # config_check.KREIS_FELDER
     "KREIS_OPTIONAL",  # config_check.KREIS_OPTIONAL
+    "PUSH_REGELN_FIELDS",  # config_check.PUSH_REGELN_FELDER
+    "PUSH_STUNDEN",  # config_check.PUSH_STUNDEN
+    "PUSH_TAGESLIMIT",  # config_check.PUSH_TAGESLIMIT
     "RAEUME_MAX",  # config_check.RAEUME_MAX
     "RAUM_FUEHLER_MAX",  # config_check.RAUM_FUEHLER_MAX
     "RAUM_ROLLEN",  # config_check.RAUM_ROLLEN

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from bindung_beispiele import VAILLANT_MYPYLLANT
-from fakes import FakeClock, HaEventSink, runtime_config
+from fakes import FakeClock, HaEventSink, meldungs_text, runtime_config
 
 from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.ha_binding import HaPlantBinding
@@ -65,7 +65,7 @@ def _runtime(tmp_path, store, entity_ids=BOTH_ROLES, notify_services=("notify.mo
 
 
 def test_inactive_message_contains_grace_end_date():
-    assert abo.inactive_message(ABO_NOW) == (
+    assert HA_TEXTS.text(abo.inactive_meldung(ABO_NOW)) == (
         "SmartHeat: Abo inaktiv. Die Heizung läuft noch bis 25.10.2026 im Notbetrieb weiter, "
         "danach stellt es die ursprünglichen Werte wieder ein und beendet die Steuerung."
     )
@@ -80,7 +80,7 @@ def test_enter_inactive_activates_notbetrieb_stops_mqtt_and_notifies_all_channel
     assert (rt.store.state.delivery.notbetrieb, rt.store.state.delivery.pending) == (True, None)
     assert load_backup(tmp_path / "failsafe_state.json") == {"failsafe_active": True, "datenfehler": None, "pending": None}
     rt.mqtt_client.stop.assert_called_once()
-    expected = abo.inactive_message(ABO_NOW)
+    expected = HA_TEXTS.text(abo.inactive_meldung(ABO_NOW))
     rt.ha_api.send_notification.assert_called_once_with("notify.mobile_app_handy", expected)
     rt.ha_api.create_persistent_notification.assert_called_once_with("SmartHeat", expected, "smartheat_abo")
 
@@ -132,7 +132,7 @@ def test_enter_inactive_with_failing_entitlement_persist_still_enters_mode(make_
     assert load_backup(tmp_path / "failsafe_state.json")["failsafe_active"] is True
     rt.mqtt_client.stop.assert_called_once()
     rt.ha_api.create_persistent_notification.assert_called_once_with(
-        "SmartHeat", abo.inactive_message(ABO_NOW), "smartheat_abo",
+        "SmartHeat", HA_TEXTS.text(abo.inactive_meldung(ABO_NOW)), "smartheat_abo",
     )
     assert "Datentraeger kaputt" in caplog.text
 
@@ -151,9 +151,9 @@ def test_finish_grace_mid_boost_restores_learned_values_clamped(make_store, tmp_
     backup = load_backup(tmp_path / "backup.json")
     assert (backup["boost_active"], backup["emergency_boost_active"]) == (False, False)
     assert store.state.abo_finished is True
-    rt.ha_api.send_notification.assert_called_once_with("notify.mobile_app_handy", abo.ABO_ENDED_MESSAGE)
+    rt.ha_api.send_notification.assert_called_once_with("notify.mobile_app_handy", meldungs_text("meldung.abo_beendet"))
     rt.ha_api.create_persistent_notification.assert_called_once_with(
-        "SmartHeat", abo.ABO_ENDED_MESSAGE, "smartheat_abo",
+        "SmartHeat", meldungs_text("meldung.abo_beendet"), "smartheat_abo",
     )
 
 
