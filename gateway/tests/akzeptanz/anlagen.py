@@ -59,7 +59,7 @@ _PARAMETER = {
 #: Leere Konfiguration: das Abmelden vom Dienst (Felder wie die Konfiguration, ohne Inhalt)
 LEERE_KONFIGURATION = {"anlage": None, "anlage_name": None, "weg": None, "kreise": [], "tagestick": None,
                        "mindest_software": "0.6.0", "mindest_integration": None, "software": None,
-                       "bindungsparameter": None, "push_regeln": None}
+                       "bindungsparameter": None, "push_regeln": None, "update_noetig": None, "updates": None}
 
 
 def konfiguration(satz: str = "viessmann_vicare", verteilsystem: str = "Heizkoerper", treiber: dict | None = None) -> dict:
@@ -78,4 +78,5 @@ def konfiguration(satz: str = "viessmann_vicare", verteilsystem: str = "Heizkoer
                     "hebelsatz": satz, "verteilsystem": verteilsystem, "abo": "aktiv"}],
         "tagestick": "12:00", "mindest_software": "0.6.0", "mindest_integration": None,
         "software": None, "bindungsparameter": parameter, "push_regeln": None,
+        "update_noetig": None, "updates": None,
     }
