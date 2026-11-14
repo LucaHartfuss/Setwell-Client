@@ -13,6 +13,7 @@ from typing import TypeGuard
 
 from heizungsbruecke.ha_trigger_client import HaTriggerClient
 from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import PushStand
 from smartheat_core.logtext import lesbar
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.dokument_config import ConfigError
@@ -41,8 +42,11 @@ OHNE_ZAHL_LOG_SECONDS = 3600.0
 EREIGNIS_WUNSCH = "smartheat_wunsch"
 #: Lebenszeichen der Integration (Version und gelesene Status-Schemata), gelesen in integration_stand.
 EREIGNIS_INTEGRATION = "smartheat_integration"
+#: Die Integration hat einen Push-Eintrag nach 24 h aufgegeben (Stufe und Kreis), gelesen in push_aufgegeben_lesen.
+EREIGNIS_PUSH_AUFGEGEBEN = "smartheat_push_aufgegeben"
 HERKUNFT_SOLL = "soll_entity"
 HERKUNFT_SMARTHEAT = "ha"
+_PUSH_STUFEN = ("rot", "orange")
 
 
 def durch_aus_kontext(context) -> str | None:
@@ -90,6 +94,24 @@ def _wunsch_kreis(daten) -> int | None:
     ungueltig (kein ganzzahliger Kreis ab 1), ist das Ergebnis None."""
     wert = daten.get("kreis") if isinstance(daten, dict) else None
     return wert if isinstance(wert, int) and not isinstance(wert, bool) and wert >= 1 else None
+
+
+def push_aufgegeben_lesen(daten, anlagenkreise: frozenset[int] | None = None) -> tuple[str, int | None] | None:
+    """(Stufe, Kreis) aus dem Ereignis smartheat_push_aufgegeben; None, wenn der Kern nicht lesbar ist. Pflicht sind
+    `schema` (ganze Zahl ab 1) und `stufe` (rot oder orange). Der Kreis gilt nur, wenn er eine ganze Zahl ab 1 ist und
+    (mit Anlage) zur Anlage gehoert, sonst ist die Aussage anlagenweit (Kreis None). Fremde Felder zaehlen nicht; das
+    Ereignis ist nicht vertrauenswuerdig und wirft hier nie."""
+    if not isinstance(daten, dict):
+        return None
+    schema, stufe = daten.get("schema"), daten.get("stufe")
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema < 1:
+        return None
+    if not isinstance(stufe, str) or stufe not in _PUSH_STUFEN:
+        return None
+    kreis = _wunsch_kreis(daten)
+    if kreis is not None and anlagenkreise is not None and kreis not in anlagenkreise:
+        kreis = None
+    return stufe, kreis
 
 
 def _wunschwert(value) -> float | None:
@@ -148,9 +170,10 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
           tagestick: str | None, wache_s: float, wunsch, soll_quelle_aus,
           quelle: HaSollQuelle | None = None, kreis: int = KREIS,
           anlagenkreise: frozenset[int] | None = None, integration_stand: IntegrationStand | None = None,
-          uhr: Callable[[], float] = time.monotonic) -> HaTriggerClient:
+          push_stand: PushStand | None = None, uhr: Callable[[], float] = time.monotonic) -> HaTriggerClient:
     """integration_stand: nimmt das Lebenszeichen der Integration (Ereignis smartheat_integration, anlagenweit) auf, nach
     der monotonen uhr; nur der Client, der ihn bekommt, abonniert das Ereignis (ohne Stand gibt es kein Abonnement).
+    push_stand: ebenso fuer das Ereignis smartheat_push_aufgegeben (Stufe und Kreis, nur im Stand, nie im Worker).
     kreis: der Heizkreis des Clients; ein Ereignis smartheat_wunsch gilt dem Kreis seiner Ereignisdaten (Pflicht;
     ohne gueltigen Kreis wird es verworfen) und erreicht nur den Client dieses Kreises. anlagenkreise: alle Kreise der
     Anlage; gilt ein Wunsch keinem davon, meldet das nur der Client des niedrigsten Kreises (sonst eine Meldung je Kreis). soll_ref: die echte Soll-Entity aus der Konfiguration (nicht manifest.refs["room_target"], das ist SOLL_REF).
@@ -196,6 +219,8 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
     triggers.append({"platform": "event", "event_type": EREIGNIS_WUNSCH})
     if integration_stand is not None:
         triggers.append({"platform": "event", "event_type": EREIGNIS_INTEGRATION})
+    if push_stand is not None:
+        triggers.append({"platform": "event", "event_type": EREIGNIS_PUSH_AUFGEGEBEN})
     if tagestick:
         triggers.append({"platform": "time", "at": tagestick})
 
@@ -318,6 +343,12 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
             if event.get("event_type") == EREIGNIS_INTEGRATION:
                 if integration_stand is not None:  # nur Version und Schemata; kein Wunsch, kein lokaler Check
                     integration_stand.ereignis(event.get("data"), uhr())
+                return
+            if event.get("event_type") == EREIGNIS_PUSH_AUFGEGEBEN:
+                if push_stand is not None:  # nur Stufe und Kreis; kein Wunsch, kein lokaler Check, kein Log von Inhalten
+                    gelesen = push_aufgegeben_lesen(event.get("data"), anlagenkreise)
+                    if gelesen is not None:
+                        push_stand.aufgegeben(gelesen[0], gelesen[1], uhr())
                 return
             ziel = _wunsch_kreis(event.get("data"))
             if ziel is None:

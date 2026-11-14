@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Gibt die Integration einen Push-Eintrag nach 24 Stunden ohne Zustellung auf (Ereignis `smartheat_push_aufgegeben`),
+  meldet das Add-on das als orange Meldung an den Server (Portal): eine Meldung je Stufe und Kreis, die 24 Stunden nach
+  dem letzten solchen Ereignis wieder schließt. Der Stand liegt nur im Speicher; nach einem Neustart ist die Meldung
+  zu, bis die Integration neue Einträge aufgibt.
+
 - Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der ursprünglichen Werte geht jetzt auch an den
   Server und erreicht Eigentümer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurückgenommen.
 

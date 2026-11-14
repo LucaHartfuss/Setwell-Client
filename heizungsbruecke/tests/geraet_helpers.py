@@ -20,6 +20,7 @@ from heizungsbruecke.geraet_status import GeraetStatus, lokale_sicht
 from heizungsbruecke.ha_sinks import HaNotifySink
 from heizungsbruecke.host import HaHost
 from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import PushStand
 from smartheat_device.commands import CommandRegister
 from smartheat_device.documents import Dokument
 from smartheat_device.geraet_host_basis import GeraetHostBasis
@@ -128,6 +129,7 @@ class FakeGeraet:
         self._supervisor, self._clock, self._uhr = Supervisor(), clock, None  # Zustand fuer uhr_synchron
         self.wuensche, self.aus, self.status = [], [], []
         self.integration_stand = IntegrationStand()  # wie im echten Geraete-Host
+        self.push_stand = PushStand()
         self.wunsch_kreise: list[int] = []  # der Kreis jedes Wunschs, parallel zu wuensche
         self.gemeldet: list[dict] = []  # Ursprungswerte, die die Laufzeit dem Host gab
         self.gemeldet_kreise: list[int] = []

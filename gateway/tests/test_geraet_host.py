@@ -631,3 +631,11 @@ def test_das_gateway_hat_keine_integration_und_meldet_nie_integration_veraltet()
     assert not hasattr(gh.GatewayDeviceHost, "integration_stand")
     quellen = Path(gh.__file__).parent
     assert not [p.name for p in quellen.rglob("*.py") if "integration_veraltet" in p.read_text()]
+
+
+def test_das_gateway_hat_kein_ereignis_der_integration_und_meldet_nie_push_nicht_zugestellt():
+    """Die Meldung zum aufgegebenen Push gibt es nur im HA-Host (Ereignis der Integration): das Gateway hat keinen
+    Stand dafuer und keinen Code."""
+    assert not hasattr(gh.GatewayDeviceHost, "push_stand")
+    quellen = Path(gh.__file__).parent
+    assert not [p.name for p in quellen.rglob("*.py") if "push_nicht_zugestellt" in p.read_text()]

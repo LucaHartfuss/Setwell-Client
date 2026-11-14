@@ -173,6 +173,10 @@ TABELLE: dict[str, Vorlage] = _ERZEUGER | {
             "orange", ("grund",),
             "Die installierte Software wird nicht mehr aktuell gehalten (Grund {grund}). Bitte die Einstellung zu "
             "Updates prüfen."),
+        "push_nicht_zugestellt": _vorlage(
+            "orange", ("stufe",),
+            "Eine Push-Meldung der Stufe {stufe} konnte seit 24 Stunden nicht zugestellt werden. Bitte die "
+            "Benachrichtigungen in Home Assistant prüfen."),
         "gesperrt": _vorlage(
             "rot", (), "Dieses Gerät ist beim SmartHeat-Dienst gesperrt. Bitte den Support kontaktieren."),
         "konfiguration_abgelehnt": _vorlage(

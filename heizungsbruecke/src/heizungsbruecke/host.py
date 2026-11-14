@@ -281,6 +281,7 @@ class HaHost:
             anlagenkreise=anlagenkreise,
             # das Lebenszeichen der Integration gilt der Anlage: nur der Client des kleinsten Kreises abonniert es
             integration_stand=geraet.integration_stand if self.kreis == min(anlagenkreise) else None,
+            push_stand=geraet.push_stand if self.kreis == min(anlagenkreise) else None,
             uhr=self._clock)
         if self._angleichen and quelle is not None:
             self._soll_entity_angleichen(quelle)

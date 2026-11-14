@@ -22,6 +22,7 @@ from heizungsbruecke.discovery import Discovery
 from heizungsbruecke.geraet_status import GeraetStatus
 from heizungsbruecke.ha_sinks import GeraetUndHaSink, HaNotifySink
 from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import PushStand
 from heizungsbruecke.version import ADDON_VERSION
 from smartheat_core import meldungen
 from smartheat_device import fehler, nachrichten, wire
@@ -44,6 +45,16 @@ _FREMD = ("zigbee_permit_join", "zigbee_devices", "driver_login")
 INTEGRATION_VERALTET = "integration_veraltet"
 
 
+def _push_key(stufe: str, kreis: int | None) -> str:
+    """Schluessel der Geraete-Meldung je Stufe und Kreis (ein Kreis geht als Praefix, nachrichten.draht_key)."""
+    key = f"push_nicht_zugestellt_{stufe}"
+    return key if kreis is None else f"kreis-{kreis}:{key}"
+
+
+def _push_ordnung(eintrag: tuple[str, int | None]) -> tuple[int, str]:
+    return (eintrag[1] or 0, eintrag[0])
+
+
 def _nicht_unterstuetzt(payload: dict) -> Failed:
     return Failed("nicht_unterstuetzt")
 
@@ -63,6 +74,8 @@ class HaDeviceHost(GeraetHostBasis):
         self.runtime_status_event: dict | None = None  # letztes Status-Ereignis der Laufzeit (laufzeit_merken)
         self.integration_stand = IntegrationStand()  # Lebenszeichen der Integration (geraet_trigger.build)
         self._integration_veraltet_offen = False  # Meldung zur veralteten Integration in HA offen (_integration_pruefen)
+        self.push_stand = PushStand()  # aufgegebene Push-Eintraege der Integration (geraet_trigger.build)
+        self._push_offen: set[tuple[str, int | None]] = set()  # als Geraete-Meldung offen (_push_pruefen)
         self._raeume: dict[int, dict | None] = {}  # je Kreis der Raum des letzten Takts
         self._uhr: tuple[float, bool | None] | None = None
         self._auto_update: tuple[float, bool | None] | None = None
@@ -183,6 +196,25 @@ class HaDeviceHost(GeraetHostBasis):
             self._integration_pruefen()
         except Exception as error:
             logger.warning("Meldung zur Integration nicht gesetzt (%s)", type(error).__name__)
+        try:
+            self._push_pruefen()
+        except Exception as error:
+            logger.warning("Meldung zum Push nicht gesetzt (%s)", type(error).__name__)
+
+    def _push_pruefen(self) -> None:
+        """Je (Stufe, Kreis) eine Geraete-Meldung: offen, solange die Integration binnen der Frist einen Push-Eintrag
+        dieser Stufe und dieses Kreises aufgegeben hat, sonst zu. Der Stand wird erst nach dem Melden uebernommen; schlaegt
+        es fehl, versucht der naechste Takt es erneut."""
+        if self.device is None:
+            return
+        offen = set(self.push_stand.offen(self._clock()))
+        for stufe, kreis in sorted(offen - self._push_offen, key=_push_ordnung):
+            self._melden(_push_key(stufe, kreis), meldungen.neu(meldungen.PREFIX + "push_nicht_zugestellt", stufe=stufe),
+                         offen=True)
+            self._push_offen.add((stufe, kreis))
+        for stufe, kreis in sorted(self._push_offen - offen, key=_push_ordnung):
+            self._melden(_push_key(stufe, kreis), None, offen=False)
+            self._push_offen.discard((stufe, kreis))
 
     def _integration_pruefen(self) -> None:
         """Offen, solange die Integration veraltet ist, sonst zu (auch nach Ablauf der Frist des Lebenszeichens).
