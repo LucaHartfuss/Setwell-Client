@@ -23,6 +23,11 @@ class SourceUnavailable(OSError):
     die Runde ohne Meldung."""
 
 
+class QuelleErschoepft(SourceUnavailable):
+    """Das Abfragekontingent der Quelle ist aufgebraucht (Gateway: Cloud-Treiber), die Daten sind veraltet. Der Text ist
+    der Kundentext zum Kontingent; die Meldung dazu gibt kontingent.check, die Ueberwachungen beenden die Runde still."""
+
+
 @dataclass(frozen=True)
 class Stoerung:
     """Eine anstehende Meldung des Wärmeerzeugers: Herstellerschlüssel der Quelle (HA: `mypyllant`), die Kennung wie
