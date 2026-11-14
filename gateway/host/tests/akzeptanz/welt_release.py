@@ -192,6 +192,11 @@ class ReleaseWelt:
         self.docker = tmp_path / "docker"
         self.seite = tmp_path / "seite"
         self.startauswahl = AufzeichnendeStartauswahl()
+        #: Uhr der Welt in Sekunden: der Schlaf des Updaters rueckt sie vor, echt gewartet wird nie
+        self.zeit = 0.0
+        self._gesund_ab: tuple[str, float] | None = None
+        monkeypatch.setitem(updater.Updater.__init__.__kwdefaults__, "clock", lambda: self.zeit)
+        monkeypatch.setitem(updater.Updater.__init__.__kwdefaults__, "sleep", self._schlafen)
         self.jetzt = datetime.now(UTC)
         root_schluessel, self.root_zertifikat = neue_root("Test Root", self.jetzt - ROOT_VOR)
         self.blatt = neues_blatt(root_schluessel, self.root_zertifikat, self.jetzt - BLATT_VOR, self.jetzt + BLATT_BIS)
@@ -275,6 +280,15 @@ class ReleaseWelt:
             "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "signature": signiere(schluessel, zertifikat, manifest)}))
         self._schreiben(self.docker / "gesundheit" / version, "healthy" if gesund else "unhealthy")
 
+    def gesund_ab(self, version: str, sekunden: float) -> None:
+        """Der Container von `version` meldet sich erst `sekunden` nach dem Start gesund (Uhr der Welt, Start bei 0)."""
+        self._gesund_ab = (version, sekunden)
+
+    def _schlafen(self, sekunden: float) -> None:
+        self.zeit += sekunden
+        if self._gesund_ab is not None and self.zeit >= self._gesund_ab[1]:
+            self._schreiben(self.docker / "gesundheit" / self._gesund_ab[0], "healthy")
+
     def widerrufen(self) -> None:
         """Das Release-Zertifikat gilt nicht mehr: ein neueres wurde schon angenommen, die Untergrenze liegt hinter dem
         Beginn dieses Zertifikats (und vor der Uhr des Geraets)."""
@@ -284,11 +298,12 @@ class ReleaseWelt:
     # --- Lauf ---
 
     def lauf(self) -> str:
-        """Ein Durchlauf des Updaters (`--once`); die Ausgabe nennt das Ergebnis."""
+        """Ein Durchlauf des Updaters (`--once`); die Ausgabe nennt das Ergebnis. Die Gesundheitsfrist ist die des Geraets
+        (Einstellungen ohne `health_seconds`), Uhr und Schlaf sind die der Welt."""
         ausgabe = io.StringIO()
         einstellungen = updater.Einstellungen(
             release_roots=self.tmp_path / "release-roots.pem", allow_http=True,
-            health_url=f"http://127.0.0.1:{self._server.server_port}/healthz", health_seconds=0.0,
+            health_url=f"http://127.0.0.1:{self._server.server_port}/healthz",
             compose_project="akzeptanz", env_datei=self.tmp_path / "gateway.env", startauswahl=lambda: self.startauswahl)
         with contextlib.redirect_stdout(ausgabe):
             updater.main(["--once"], einstellungen=einstellungen)

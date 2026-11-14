@@ -1,17 +1,47 @@
-"""AK-G9-04: Das neue Bundle wird in der Frist nicht gesund, das Gateway kehrt zum vorigen Bundle zurueck und dessen
-Image bleibt erhalten. Die Frist von 600 s ist ueber health_seconds=0 abgekuerzt: sie gilt beim ersten Takt als abgelaufen."""
+"""AK-G9-04: Das neue Bundle muss binnen 600 s gesund sein. Wird es gesund, ist es installiert; sonst kehrt das Gateway
+zum vorigen Bundle zurueck und dessen Image bleibt erhalten. Die Frist ist die des Geraets (Einstellungen ohne eigenen
+Wert); Uhr und Schlaf der Welt rueckt sie vor, gewartet wird nicht. Die 600 steht hier als Literal."""
 import pytest
 from welt_release import ALT, NEU, ReleaseWelt
 
+#: Fall -> (Sekunden bis der Container gesund meldet oder None fuer nie, Ergebnis des Laufs)
+FAELLE = {
+    "sofort_gesund": (0, "aktualisiert"),
+    "gesund_kurz_vor_der_frist": (590, "aktualisiert"),
+    "gesund_kurz_nach_der_frist": (610, "zurueckgerollt"),
+    "nie_gesund": (None, "zurueckgerollt"),
+}
+
 
 @pytest.mark.akzeptanz("AK-G9-04")
-def test_ungesundes_bundle_kehrt_zum_vorigen_zurueck(release_welt: ReleaseWelt):
+@pytest.mark.parametrize("fall", FAELLE)
+def test_bundle_gesund_in_der_frist_oder_rueckweg(release_welt: ReleaseWelt, fall):
     welt = release_welt
-    welt.angebot(NEU, gesund=False)
+    sekunden, ergebnis = FAELLE[fall]
+    welt.angebot(NEU, gesund=sekunden == 0)
+    if sekunden:
+        welt.gesund_ab(NEU, sekunden)
 
-    assert welt.lauf() == "zurueckgerollt"
+    assert welt.lauf() == ergebnis
 
-    # neu gestartet, dann das vorige Bundle wieder hochgefahren: dort laeuft es jetzt
+    if ergebnis == "aktualisiert":
+        # das neue Bundle laeuft und ist das aktuelle, das vorige wird nicht wieder hochgefahren
+        assert welt.hochgefahren() == [NEU]
+        assert welt.laeuft() == NEU
+        zustand = welt.zustand()
+        assert (zustand["current"], zustand["previous"]) == (NEU, ALT)
+        assert "in_progress" not in zustand  # kein Auftrag offen
+        assert NEU in welt.bundles()
+        assert ReleaseWelt.runtime_image(NEU) in welt.images()
+        assert [(m["version"], m["result"]) for m in welt.meldungen()] == [(NEU, "ok")]
+        # gewartet wurde, bis der Container gesund war, und keine Sekunde ueber die Frist
+        assert sekunden <= welt.zeit < 600
+        assert welt.lauf() == "aktuell"
+        assert welt.hochgefahren() == [NEU]
+        return
+
+    # nach der Frist: neu gestartet, dann das vorige Bundle wieder hochgefahren, dort laeuft es jetzt
+    assert 600 <= welt.zeit <= 610
     assert welt.hochgefahren() == [NEU, ALT]
     assert welt.laeuft() == ALT
     # Image des vorigen Bundles bleibt, kein Image wurde entfernt
