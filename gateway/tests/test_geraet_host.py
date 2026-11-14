@@ -72,6 +72,10 @@ def test_clock_sync_comes_from_the_host_status(welt):
     assert welt.host.uhr_synchron() is None
 
 
+def test_the_gateway_has_no_hello_fields_of_the_ha_host(welt):
+    assert welt.host.hello_felder() == {}
+
+
 def test_status_and_room_stay_in_the_process(welt):
     welt.host.status_sink.publish({"schema": 2, "status": "regelt"})
     welt.host.raum_merken(1, {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t"})
@@ -375,7 +379,7 @@ def test_operation_and_abo_for_the_runtime_host(welt):
 
 def test_the_software_target_is_written_for_the_updater(welt):
     software = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
-                "signature": "sig"}
+                "signature": "sig", "einmalig": False}
     welt.host.software_soll(software)
     assert json.loads(welt.paths.software_soll.read_text()) == software
     assert oct(welt.paths.software_soll.stat().st_mode & 0o777) == "0o644"  # der Updater (root) liest

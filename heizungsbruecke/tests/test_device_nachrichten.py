@@ -44,6 +44,32 @@ def test_hello_mit_device_state():
     assert set(nachrichten.hello(**_hello_felder(), device_state="x")) == set(wire.HELLO_FIELDS) | {"device_state"}
 
 
+@pytest.mark.parametrize(("auto_update", "integration_version"), [
+    (True, "1.2.0"), (False, None), (None, "1.2.0"), (None, None)])
+def test_hello_traegt_auto_update_und_integration_version_beim_host_ha(auto_update, integration_version):
+    body = nachrichten.hello(**(_hello_felder() | {"host": "ha"}), auto_update=auto_update,
+                             integration_version=integration_version)
+    assert set(body) == set(wire.HELLO_FIELDS) | {"auto_update", "integration_version"}
+    assert (body["auto_update"], body["integration_version"]) == (auto_update, integration_version)
+
+
+@pytest.mark.parametrize("feld", ["auto_update", "integration_version"])
+def test_hello_des_gateways_traegt_keines_der_beiden_felder(feld):
+    wert = {"auto_update": True, "integration_version": "1.2.0"}[feld]
+    with pytest.raises(nachrichten.Vertragsfehler, match=f"hello.*{feld}"):
+        nachrichten.hello(**_hello_felder(), **{feld: wert})
+    assert feld not in nachrichten.hello(**_hello_felder())
+
+
+@pytest.mark.parametrize(("feld", "wert"), [
+    ("auto_update", "GEHEIM"), ("auto_update", 1), ("integration_version", 1), ("integration_version", True),
+    ("integration_version", ["GEHEIM"])])
+def test_hello_prueft_die_neuen_felder_ohne_werte(feld, wert):
+    with pytest.raises(nachrichten.Vertragsfehler, match=f"hello.*{feld}") as fehler:
+        nachrichten.hello(**(_hello_felder() | {"host": "ha"}), **{feld: wert})
+    assert "GEHEIM" not in str(fehler.value)
+
+
 def test_hello_prueft_host_und_faehigkeiten_ohne_werte():
     with pytest.raises(nachrichten.Vertragsfehler, match="hello.*host"):
         nachrichten.hello(**(_hello_felder() | {"host": "GEHEIM-HOST"}))

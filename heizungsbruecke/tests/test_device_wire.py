@@ -44,6 +44,17 @@ def test_the_copy_ends_with_the_command_errors():
         "return COMMANDS[kind].errors + COMMON_ERRORS")
 
 
+def test_the_update_fields_are_part_of_the_contract():
+    assert {"update_noetig", "updates"} <= set(wire.KONFIGURATION_FIELDS)
+    assert wire.UPDATES_FIELDS == ("funktion", "sicherheit")
+    assert wire.UPDATES_FUNKTIONEN == ("automatisch", "aufschub", "aus")
+    assert wire.UPDATES_SICHERHEIT == ("automatisch", "aus")
+    assert wire.SOFTWARE_FIELDS[-1] == "einmalig"
+    assert wire.HELLO_OPTIONAL == ("device_state", "auto_update", "integration_version")
+    assert {"manifest_abgelaufen", "einstellung_aus"} <= set(wire.SOFTWARE_ERRORS)
+    assert wire.FELD_MINDESTVERSION == {}
+
+
 @pytest.mark.parametrize("name", [*wire.UP_TOPICS, *wire.DOWN_TOPICS])
 def test_topic_roundtrip(name):
     assert wire.parse_topic(wire.topic(DEVICE, name)) == (DEVICE, name)

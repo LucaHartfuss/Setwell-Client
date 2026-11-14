@@ -5,6 +5,13 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
+  Soll-Software (auch aus einer abgelehnten Konfiguration; Unlesbares blockiert nie und lässt den gemerkten Wert stehen),
+  merkt sie in `dokumente.json` (ältere Dateien ohne die Schlüssel starten ohne gemerkten Wert) und meldet
+  `update_noetig` auch dann, wenn eine Konfiguration wegen unbekannter Felder abgelehnt wird und ihre lesbare
+  `mindest_software` über der eigenen liegt. Das `hello` des Home-Assistant-Hosts trägt `auto_update` (Schalter
+  „Automatisch aktualisieren“ des Add-ons, nur gelesen, höchstens einmal je Minute) und `integration_version`
+  (`null` = unbekannt); ändert sich einer der Werte, geht ein neues `hello` hinaus.
 - Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
   auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
   und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,

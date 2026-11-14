@@ -80,6 +80,11 @@ class DeviceHost(Protocol):
         """Zeitdienst des Systems (Gateway: NTP); None = unbekannt, gilt als nicht synchron."""
         ...
 
+    def hello_felder(self) -> dict:
+        """Felder des hello, die nur der Host ha sendet: auto_update (Schalter fuer automatische Updates) und
+        integration_version, je None = unbekannt. Das Geraet fragt nur den Host ha; das Gateway antwortet {}."""
+        ...
+
     def treiber_pruefen(self, bindung: dict, /) -> dict | None:
         """details (smartheat_device.fehler), wenn die Treiberparameter nicht passen (config_check, Regel 6), sonst None.
         Gateway: `bindung`; HA: die ganze Konfiguration. Nur positional (config_check ruft so), daher darf

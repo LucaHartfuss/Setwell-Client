@@ -13,7 +13,15 @@ immer uebernommen. update_noetig gilt auch nach einem Dokument mit unbekanntem s
 Server schickt eine abgelehnte Version nicht erneut; gespeichert wird daher der Anlass (die mindest_software der
 abgelehnten Konfiguration bzw. die eigene Software beim unbekannten schema), und update_noetig wird gegen die laufende
 Software ausgewertet: nach einem Update endet es von selbst. Nur eine Konfiguration mit genau den Feldern des Vertrags
-setzt den Anlass neu; eine wegen fehlender oder fremder Felder abgelehnte laesst ihn stehen (V1 ist strikt, R10).
+setzt den Anlass neu (V1 ist strikt, R10). Eine wegen fehlender oder fremder Felder abgelehnte lesen wir nur so weit,
+dass eine lesbare mindest_software ueber der eigenen den Anlass setzt und update_noetig meldet (ein aelteres Geraet
+kennt die neuen Felder nicht); sonst laesst sie den Anlass stehen.
+
+update_noetig (null oder Zeitpunkt in Epoche-Sekunden) und updates (null oder funktion und sicherheit) jeder
+Konfiguration mit bekanntem Schema stehen ebenfalls in dokumente.json, auch die einer abgelehnten oder erneut
+zugestellten: sie steuern den Updater (update_noetig_ab, updates). Ohne Typzwang gelesen: was fehlt oder sich nicht lesen
+laesst, laesst den gemerkten Wert stehen und blockiert nie (im gespeicherten Dokument steht der wirksame Wert);
+Dateien ohne diese Schluessel starten ohne gemerkten Wert.
 Wirft der Treiber-Rueckruf config_check.NichtPruefbar (HA aus), laeuft empfangen durch: nichts wird gespeichert oder
 abgelehnt, das Geraet haelt das Dokument zurueck und prueft spaeter erneut (device.py). Ebenso, wenn die Vorbereitung
 vor dem Speichern einer geprueften Konfiguration scheitert (vor_speichern, der Host schreibt dort die
@@ -41,6 +49,7 @@ das Schreiben erst nach dem Ersetzen (fsync des Ordners), gilt die Rastung vom D
 manipulierte Datei (auch ein Symlink, auch das alte Format) lehnt jede eingerichtete Konfiguration ab (rastung.lesen)."""
 import copy
 import logging
+import math
 import re
 import threading
 from collections.abc import Callable
@@ -95,6 +104,46 @@ def _anlass(raw) -> tuple[str, str] | None:
 
 def _is_version(value) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _mindest_lesbar(inhalt: dict) -> str | None:
+    """Die mindest_software, die sich lesen laesst (Text der Form x.y.z); alles andere ist keine Mindestversion und
+    blockiert nie. Liest ohne Formpruefung: ein Geraet unter der Mindestversion kennt die neuen Felder nicht."""
+    mindest = inhalt.get("mindest_software")
+    return mindest if _version_tuple(mindest) is not None else None
+
+
+def _update_noetig_gelesen(payload: dict, gemerkt: int | float | None) -> int | float | None:
+    """update_noetig des Dokuments: null oder eine endliche Zahl; was fehlt oder sich nicht lesen laesst, laesst den
+    gemerkten Wert stehen (kein Typzwang, das Geraet lehnt die Konfiguration nicht deswegen ab)."""
+    if "update_noetig" not in payload:
+        return gemerkt
+    wert = payload["update_noetig"]
+    if wert is None:
+        return None
+    if isinstance(wert, (int, float)) and not isinstance(wert, bool):
+        try:
+            if math.isfinite(wert):
+                return wert
+        except OverflowError:  # eine Ganzzahl jenseits des Bereichs einer Kommazahl ist kein Zeitpunkt
+            pass
+    return gemerkt
+
+
+def _updates_form(wert) -> bool:
+    return (isinstance(wert, dict) and set(wert) == set(wire.UPDATES_FIELDS)
+            and wert["funktion"] in wire.UPDATES_FUNKTIONEN and wert["sicherheit"] in wire.UPDATES_SICHERHEIT)
+
+
+def _updates_gelesen(payload: dict, gemerkt: dict | None) -> dict | None:
+    """updates des Dokuments: null oder genau funktion und sicherheit mit Werten des Vertrags; sonst bleibt der
+    gemerkte Wert stehen."""
+    if "updates" not in payload:
+        return gemerkt
+    wert = payload["updates"]
+    if wert is None:
+        return None
+    return copy.deepcopy(wert) if _updates_form(wert) else gemerkt
 
 
 def _form(inhalt: dict, pflicht: tuple[str, ...], optional: tuple[str, ...] = ()) -> config_check.Ablehnung | None:
@@ -255,6 +304,9 @@ class DocumentStore:
         angebot = zustand.get("software_angebot")
         self._software_angebot: Angebot | None = (
             Angebot(angebot) if "software_angebot" in zustand and software_pruefen(angebot) is None else None)
+        # fehlt der Schluessel (Datei aus der Zeit davor) oder ist der Wert unlesbar: nichts gemerkt
+        self._update_noetig_ab = _update_noetig_gelesen(zustand, None)
+        self._updates = _updates_gelesen(zustand, None)
         roh = zustand.get("abgelehnt")
         abgelehnt: dict = roh if isinstance(roh, dict) else {}
         # eine Ablehnung von vor 5c traegt an Stelle 2 einen Text: sie laedt ohne details
@@ -270,6 +322,16 @@ class DocumentStore:
         if anlass[0] == SCHEMA_UNBEKANNT:
             return anlass[1] == self._software_version
         return unter_mindest(self._software_version, anlass[1])
+
+    @property
+    def update_noetig_ab(self) -> int | float | None:
+        """Zeitpunkt (Epoche-Sekunden), ab dem die kritische Mindestversion fuer dieses Geraet gilt; None = keiner."""
+        return self._update_noetig_ab
+
+    @property
+    def updates(self) -> dict | None:
+        """Einstellung des Kunden zu Updates (Kopie; None = kein Updater oder nichts gemerkt)."""
+        return copy.deepcopy(self._updates)
 
     @property
     def rastung(self) -> Rastung | None:
@@ -322,7 +384,8 @@ class DocumentStore:
 
     def _zustand_speichern(self) -> None:
         anlass = list(self._update_anlass) if self._update_anlass is not None else None
-        zustand: dict = {"update_anlass": anlass, "abgelehnt": {art: list(v) for art, v in self._abgelehnt.items()}}
+        zustand: dict = {"update_anlass": anlass, "abgelehnt": {art: list(v) for art, v in self._abgelehnt.items()},
+                         "update_noetig": self._update_noetig_ab, "updates": self._updates}
         if self._software_angebot is not None:  # ohne Schluessel: nichts gemerkt
             zustand["software_angebot"] = self._software_angebot.software
         dateien.schreiben_json(self._dir / ZUSTAND_DATEI, zustand, modus=dateien.PRIVAT)
@@ -370,18 +433,23 @@ class DocumentStore:
                 if art == KONFIGURATION:
                     self._update_anlass = (SCHEMA_UNBEKANNT, self._software_version)
                 return self._abgelehnt_mit(art, version, SCHEMA_UNBEKANNT, None)
-            vorher = self._software_angebot
+            vorher = (self._software_angebot, self._update_noetig_ab, self._updates)
             angebot = angebot_aus(art, payload)
             if angebot is not None:
                 # vor dem Ergebnis gesetzt, damit es mit Ablehnung bzw. Uebernahme in einem Schreiben steht; ein
                 # ungueltiges oder fehlendes Feld laesst das gemerkte Angebot stehen (R15)
                 self._software_angebot = angebot
+            if art == KONFIGURATION:  # ebenso die Update-Felder, auch einer abgelehnten Konfiguration
+                self._update_noetig_ab = _update_noetig_gelesen(payload, self._update_noetig_ab)
+                self._updates = _updates_gelesen(payload, self._updates)
             try:
                 ergebnis = self._empfangen_bekannt(art, version, payload)
-                if ergebnis.ok and not ergebnis.uebernommen and self._software_angebot != vorher:
+                if ergebnis.ok and not ergebnis.uebernommen and (
+                        self._software_angebot, self._update_noetig_ab, self._updates) != vorher:
                     self._zustand_speichern()  # Duplikat: schreibt sonst nichts
             except BaseException:
-                self._software_angebot = vorher  # kein Ergebnis (NichtPruefbar, Schreibfehler): auch kein Angebot
+                # kein Ergebnis (NichtPruefbar, Schreibfehler): auch kein Angebot und keine neuen Update-Felder
+                self._software_angebot, self._update_noetig_ab, self._updates = vorher
                 raise
             if angebot is None and art == KONFIGURATION and "software" in payload:
                 logger.warning("Soll-Software ungueltig, das vorherige Angebot bleibt")
@@ -399,6 +467,9 @@ class DocumentStore:
         if ablehnung is not None:
             return self._abgelehnt_mit(art, version, ablehnung.grund, ablehnung.details)
         if art == KONFIGURATION:
+            # gespeichert wird der wirksame Wert (der gelesene oder der gemerkte), nie ein unlesbarer
+            inhalt[UPDATE_NOETIG] = self._update_noetig_ab
+            inhalt["updates"] = copy.deepcopy(self._updates)
             self._vorbereiten(inhalt)
         if art == KONFIGURATION and self._rastung is None and not config_check.ist_leer(inhalt):
             self._rastung = self._rasten(inhalt)  # vor dem Dokument: ein Absturz dazwischen schadet nicht
@@ -462,6 +533,13 @@ class DocumentStore:
         ablehnung = (_form(inhalt, _ohne_huelle(wire.KONFIGURATION_FIELDS))
                      or software_pruefen(inhalt["software"]))
         if ablehnung is not None:
+            # Eine Konfiguration, die dieses Geraet nicht lesen kann (fremdes oder fehlendes Feld), verlangt ein Update,
+            # wenn ihre lesbare Mindestversion ueber der eigenen liegt; sonst bleibt der Anlass wie er war.
+            mindest = _mindest_lesbar(inhalt)
+            if mindest is not None and unter_mindest(self._software_version, mindest) \
+                    and not config_check.ist_leer(inhalt):
+                self._update_anlass = (UPDATE_NOETIG, mindest)
+                return config_check.Ablehnung(UPDATE_NOETIG)
             return ablehnung
         if problem := config_check.mindest_software_pruefen(inhalt):  # vor dem Anlass: ein Unlesbares blockiert nicht
             return config_check.Ablehnung(UNGUELTIG, problem)

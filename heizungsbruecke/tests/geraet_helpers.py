@@ -321,6 +321,13 @@ class Supervisor:
     def __init__(self, info=None, error=None):
         self.info, self.error, self.calls = info or {"dt_synchronized": True}, error, 0
         self.gemeldet: list[dict] = []
+        self.auto_update, self.auto_update_fehler, self.auto_update_aufrufe = True, None, 0
+
+    def addon_auto_update(self):
+        self.auto_update_aufrufe += 1
+        if self.auto_update_fehler:
+            raise self.auto_update_fehler
+        return self.auto_update
 
     def host_info(self):
         self.calls += 1

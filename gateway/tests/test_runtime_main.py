@@ -24,7 +24,8 @@ from smartheat_runtime.runtime import EV_RECHECK, Runtime
 from smartheat_runtime.status import STATUS_ABGEMELDET
 from smartheat_runtime.worker import Event, RegulationWorker
 
-SOFTWARE = {"version": "0.6.1", "manifest_url": "https://x.test/m.json", "manifest_sha256": "a" * 64, "signature": "s"}
+SOFTWARE = {"version": "0.6.1", "manifest_url": "https://x.test/m.json", "manifest_sha256": "a" * 64, "signature": "s",
+            "einmalig": False}
 
 
 @pytest.fixture

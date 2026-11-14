@@ -2,6 +2,9 @@
 
 ## Unveroeffentlicht
 
+- Das Geraet liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
+  Soll-Software (Unlesbares blockiert nie) und merkt sie in `dokumente.json`; das `hello` des Gateways traegt
+  `auto_update` und `integration_version` nie.
 - Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
   auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
   und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,

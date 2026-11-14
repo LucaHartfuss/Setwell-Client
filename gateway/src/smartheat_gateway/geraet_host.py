@@ -254,6 +254,10 @@ class GatewayDeviceHost(GeraetHostBasis):
         """Wege des Katalogs, die dieses Gateway ueber seine Treiber bedient (Treiber-ID -> Weg-ID)."""
         return sorted({WEG_JE_TREIBER[treiber] for treiber in registry.driver_ids()})
 
+    def hello_felder(self) -> dict:
+        """Das Gateway sendet weder auto_update noch integration_version (nur der Host ha)."""
+        return {}
+
     def uhr_synchron(self) -> bool | None:
         """Zeitdienst des Hosts (host/status.json, Dienst hoststatus); aelter als 5 min oder unlesbar = unbekannt."""
         status = dateien.lesen_json(self._host_dir / "status.json")

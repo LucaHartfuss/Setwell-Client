@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 WEG_JE_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
                     "weishaupt_modbus": "weishaupt_modbus"}
 UHR_CACHE_SECONDS = 60
+AUTO_UPDATE_CACHE_SECONDS = 60
 INVENTUR_SECONDS = 120
 _FREMD = ("zigbee_permit_join", "zigbee_devices", "driver_login")
 
@@ -60,6 +61,7 @@ class HaDeviceHost(GeraetHostBasis):
         self.integration_stand = IntegrationStand()  # Lebenszeichen der Integration (geraet_trigger.build)
         self._raeume: dict[int, dict | None] = {}  # je Kreis der Raum des letzten Takts
         self._uhr: tuple[float, bool | None] | None = None
+        self._auto_update: tuple[float, bool | None] | None = None
 
     def aufraeumen_pfad(self) -> Path:
         return config.AUFRAEUMEN_PATH
@@ -105,6 +107,21 @@ class HaDeviceHost(GeraetHostBasis):
             result = None
         self._uhr = (now, result)
         return result
+
+    def hello_felder(self) -> dict:
+        """Die Felder des hello, die nur dieser Host sendet: der Schalter fuer automatische Updates des Add-ons (nur
+        gelesen, hoechstens einmal je AUTO_UPDATE_CACHE_SECONDS; unlesbar = None) und die Version der Integration (None
+        ohne frisches Lebenszeichen)."""
+        now = self._clock()
+        if self._auto_update is None or now - self._auto_update[0] >= AUTO_UPDATE_CACHE_SECONDS:
+            try:
+                wert = self._supervisor.addon_auto_update()
+                schalter = wert if isinstance(wert, bool) else None
+            except Exception as error:
+                logger.warning("Schalter fuer automatische Updates unbekannt (%s)", type(error).__name__)
+                schalter = None
+            self._auto_update = (now, schalter)
+        return {"auto_update": self._auto_update[1], "integration_version": self.integration_stand.version(now)}
 
     def treiber_pruefen(self, konfiguration: dict) -> dict | None:
         """HA-Teil der Pruefung (config_check gibt fuer Host ha ein Dokument mit dem einen Kreis, der geprueft wird; sein

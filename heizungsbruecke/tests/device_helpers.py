@@ -97,6 +97,14 @@ class FakeHost:
         self.ursprung: dict = {}
         self.entfernen: str | None = None  # Wahl des Nutzers beim Entfernen ("freigeben" oder keine)
         self.entfernen_zugestellt = 0
+        self.hello_werte: dict = {"auto_update": True, "integration_version": "1.2.0"}
+        self.hello_felder_aufrufe = 0
+
+    def hello_felder(self):
+        self.hello_felder_aufrufe += 1
+        if isinstance(self.hello_werte, Exception):
+            raise self.hello_werte
+        return dict(self.hello_werte)
 
     def ursprungswerte(self):
         return dict(self.ursprung)

@@ -156,6 +156,7 @@ class Device:
         #: Nach hello muss ein Status hinaus; gescheitert der Rueckruf dabei, bleibt der Merker, bis
         #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
         self._status_erzwingen = False
+        self._hello_stand: dict | None = None  # Host-Felder des zuletzt gesendeten hello (ha), sonst None
         self._hello_fehler: str | None = None  # letzte Fehlerart beim Bauen von hello (je Art einmal loggen)
         self._status_fehler: str | None = None  # letzter Vertragsverstoss beim Bauen (je Text einmal loggen)
         self._wunsch_fehler: str | None = None  # dito beim Bauen von up/wish
@@ -371,6 +372,8 @@ class Device:
                     self._hello_senden()
         if self._bereit:
             self._zurueckgehaltene_pruefen(now)
+            if link is not None and link.connected:
+                self._hello_nachsenden()
         self.befehle.pruefen()
         self._wunsch_senden()
         self._status_senden(now, force=self._status_erzwingen)
@@ -461,7 +464,28 @@ class Device:
             bedienung_version=self.documents.version(BEDIENUNG), anzeige_version=self.documents.version(ANZEIGE),
             software_version=self.host.version, host=self.host.host, faehigkeiten=faehigkeiten, wege=wege,
             boot_id=self.boot_id,
-            uhr_synchron=self._uhr_synchron() is True, device_state=bootstrap.device_state(self._dir))
+            uhr_synchron=self._uhr_synchron() is True, device_state=bootstrap.device_state(self._dir),
+            **self._hello_felder_jetzt())
+
+    def _hello_felder_jetzt(self) -> dict:
+        """Die hello-Felder, die nur der Host ha sendet (auto_update, integration_version): None heisst unbekannt
+        (Rueckruf gescheitert oder Wert unbrauchbar). Der Gateway sendet beide Felder nie und fragt den Host nicht."""
+        if self.host.host != "ha":
+            return {}
+        werte, gescheitert = self._host_wert("hello_felder", self.host.hello_felder)
+        if gescheitert or not isinstance(werte, dict):
+            werte = {}
+        auto_update = werte.get("auto_update")
+        version = werte.get("integration_version")
+        return {"auto_update": auto_update if isinstance(auto_update, bool) else None,
+                "integration_version": version if nachrichten.integration_version_gueltig(version) else None}
+
+    def _hello_nachsenden(self) -> None:
+        """Aendert sich eines der Host-Felder des hello, geht ein neues hello hinaus (verbunden und bereit)."""
+        if self._hello_stand is None or self.host.host != "ha":
+            return
+        if self._hello_felder_jetzt() != self._hello_stand:
+            self._hello_senden()
 
     def _uhr_synchron(self) -> bool | None:
         """Rueckruf uhr_synchron; gescheitert gilt als None (unbekannt = nicht synchron), auch fuer Bootstrap."""
@@ -494,6 +518,7 @@ class Device:
             return
         if self._publish("up/hello", hello) is None:
             return  # schon wieder getrennt: das naechste "verbunden" schickt hello
+        self._hello_stand = {feld: hello[feld] for feld in nachrichten.HELLO_NUR_HA if feld in hello}
         self._hello_offen = False
         self._bereit = True
         now = self._clock()

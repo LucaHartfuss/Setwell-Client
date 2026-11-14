@@ -20,7 +20,7 @@ from smartheat_runtime.worker import RegulationWorker
 HINWEIS = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
 
 SOFTWARE = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
-            "signature": "sig"}
+            "signature": "sig", "einmalig": False}
 
 
 def _bedienung(version=3, raum_soll=21.0):
@@ -142,6 +142,88 @@ def test_hello_after_a_reconnect_reports_the_taken_versions(tmp_path):
     world.device.schritt()
     hello = world.link.of("up/hello")[-1]
     assert (hello["konfiguration_version"], hello["bedienung_version"]) == (4, 2)
+
+
+def _ha_welt(tmp_path, **werte):
+    host = FakeHost()
+    host.host = "ha"
+    if werte:
+        host.hello_werte = werte
+    return World(tmp_path, host)
+
+
+def test_hello_des_ha_hosts_traegt_auto_update_und_integration_version(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    (hello,) = world.link.of("up/hello")
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state", "auto_update", "integration_version"}
+    assert (hello["auto_update"], hello["integration_version"]) == (True, "1.2.0")
+
+
+def test_hello_des_gateways_traegt_beide_felder_nie_und_der_host_wird_nicht_gefragt(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    for _ in range(3):
+        world.device.schritt()
+    assert all("auto_update" not in hello and "integration_version" not in hello for hello in world.link.of("up/hello"))
+    assert world.host.hello_felder_aufrufe == 0
+
+
+def test_ein_gescheiterter_hostrueckruf_meldet_beide_felder_unbekannt_und_loggt_nichts_geheimes(tmp_path, caplog):
+    world = _ha_welt(tmp_path)
+    world.host.hello_werte = RuntimeError("GEHEIM")
+    world.verbinden()
+    hello = world.link.of("up/hello")[-1]
+    assert (hello["auto_update"], hello["integration_version"]) == (None, None)
+    assert "GEHEIM" not in caplog.text and "RuntimeError" in caplog.text
+    world.host.hello_werte = {"auto_update": False, "integration_version": "1.3.0"}
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert (hello["auto_update"], hello["integration_version"]) == (False, "1.3.0")
+    assert len(world.link.of("up/hello")) == 2
+
+
+@pytest.mark.parametrize("werte", [{"auto_update": "ja", "integration_version": 5},
+                                   {"auto_update": 1, "integration_version": ["1.2.0"]},
+                                   {"auto_update": None, "integration_version": None}, {}])
+def test_ungueltige_oder_fehlende_hostwerte_gehen_als_unbekannt_hinaus(tmp_path, werte):
+    world = _ha_welt(tmp_path)
+    world.host.hello_werte = werte
+    world.verbinden()
+    (hello,) = world.link.of("up/hello")
+    assert (hello["auto_update"], hello["integration_version"]) == (None, None)
+
+
+def test_eine_aenderung_der_werte_sendet_im_naechsten_takt_ein_neues_hello_sonst_keines(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    for _ in range(5):
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == 1
+    world.host.hello_werte = {"auto_update": True, "integration_version": None}
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert len(world.link.of("up/hello")) == 2 and hello["integration_version"] is None
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == 2
+    world.host.hello_werte = {"auto_update": False, "integration_version": None}
+    world.device.schritt()
+    assert [h["auto_update"] for h in world.link.of("up/hello")] == [True, True, False]
+
+
+def test_ohne_verbindung_geht_kein_hello_hinaus_und_das_naechste_traegt_den_aktuellen_stand(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    world.link.trennen()
+    world.host.hello_werte = {"auto_update": False, "integration_version": "2.0.0"}
+    for _ in range(3):
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == 1
+    world.link.verbinden()
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert len(world.link.of("up/hello")) == 2
+    assert (hello["auto_update"], hello["integration_version"]) == (False, "2.0.0")
 
 
 # --- Dokumente ---
@@ -759,7 +841,7 @@ def test_hello_reports_the_claim_state_the_device_knows(tmp_path):
     world.verbinden()
     (hello,) = world.link.of("up/hello")
     assert hello["device_state"] == bootstrap.device_state(world.dir) == "nicht_uebernommen"
-    assert set(hello) == set(wire.HELLO_FIELDS) | set(wire.HELLO_OPTIONAL)
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
 
 
 def test_weg_pruefen_is_refused_as_not_supported(tmp_path):

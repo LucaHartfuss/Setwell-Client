@@ -432,7 +432,7 @@ def test_ungueltige_details_des_hosts_gehen_nicht_hoch(tmp_path, caplog):
 
 
 SOFTWARE = {"version": "0.7.0", "manifest_url": "https://example.invalid/m.json", "manifest_sha256": "a" * 64,
-            "signature": "c2ln"}
+            "signature": "c2ln", "einmalig": False}
 
 
 @pytest.mark.parametrize(("fremd", "details"), [
@@ -594,19 +594,208 @@ def test_the_returned_offer_is_a_copy(tmp_path):
     assert store.software_angebot() == ANGEBOT
 
 
-def test_a_rejected_foreign_field_changes_neither_the_accepted_document_nor_the_update_trigger(tmp_path):
+def test_a_rejected_foreign_field_changes_not_the_accepted_document(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    vorher = store.aktuell("konfiguration")
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, kuenftig=1))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert store.aktuell("konfiguration") == vorher and not store.update_noetig
+    # ein gesetzter Ausloeser bleibt: die fremde Konfiguration mit niedriger Mindestversion loest ihn nicht
+    assert store.empfangen("konfiguration", _konfiguration(version=3, mindest_software="9.9.9")).grund == "update_noetig"
+    assert store.update_noetig
+    store.empfangen("konfiguration", _konfiguration(version=4, mindest_software="0.1.0", kuenftig=1))
+    assert store.update_noetig and store.aktuell("konfiguration") == vorher
+
+
+def test_a_foreign_field_with_a_too_high_minimum_reports_update_needed_instead_of_invalid(tmp_path):
+    """Ein Geraet unter der Mindestversion kennt die neuen Felder noch nicht; es meldet update_noetig, nicht ungueltig."""
     store = _store(tmp_path)
     assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
     vorher = store.aktuell("konfiguration")
     ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, mindest_software="9.9.9", kuenftig=1))
-    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
-    assert store.aktuell("konfiguration") == vorher and not store.update_noetig
-    # ein gesetzter Ausloeser bleibt ebenfalls: die fremde Konfiguration mit niedriger Mindestversion loest ihn nicht
-    abgelehnt = store.empfangen("konfiguration", _konfiguration(version=3, mindest_software="9.9.9"))
-    assert abgelehnt.grund == "update_noetig"
-    assert store.update_noetig
-    store.empfangen("konfiguration", _konfiguration(version=4, mindest_software="0.1.0", kuenftig=1))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "update_noetig")
     assert store.update_noetig and store.aktuell("konfiguration") == vorher
+    assert _store(tmp_path).update_noetig  # uebersteht den Neustart
+
+
+def test_a_missing_field_with_a_too_high_minimum_reports_update_needed(tmp_path):
+    store = _store(tmp_path)
+    inhalt = _konfiguration(mindest_software="9.9.9")
+    del inhalt["tagestick"]
+    assert store.empfangen("konfiguration", inhalt).grund == "update_noetig"
+    assert store.update_noetig
+
+
+@pytest.mark.parametrize("mindest", [None, 5, True, ["9.9.9"], {"v": "9.9.9"}, "neu", "9.9", "9.9.9-rc1", ""])
+def test_a_minimum_that_is_not_a_readable_version_text_never_blocks(tmp_path, mindest):
+    """Gegenprobe zum Lesen vor der Formpruefung: Nicht-Text und Unlesbares ist keine Mindestversion."""
+    store = _store(tmp_path)
+    ergebnis = store.empfangen("konfiguration", _konfiguration(mindest_software=mindest, kuenftig=1))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert not store.update_noetig and not _store(tmp_path).update_noetig
+
+
+def test_a_readable_minimum_not_above_the_own_version_is_no_reason(tmp_path):
+    store = _store(tmp_path, version="0.6.0")
+    assert store.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", kuenftig=1)).grund == "ungueltig"
+    assert not store.update_noetig
+
+
+def test_the_empty_configuration_is_still_taken_with_a_too_high_minimum(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _leer(mindest="9.9.9")).uebernommen
+
+
+# --- Felder update_noetig und updates ---
+
+UPDATES = {"funktion": "aufschub", "sicherheit": "automatisch"}
+UPDATES_AUS = {"funktion": "aus", "sicherheit": "aus"}
+
+
+@pytest.mark.parametrize("feld", ["update_noetig", "updates"])
+def test_a_configuration_needs_the_update_fields(tmp_path, feld):
+    inhalt = _konfiguration()
+    inhalt.pop(feld, None)
+    ergebnis = _store(tmp_path).empfangen("konfiguration", inhalt)
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert ergebnis.details["feld"] == feld and ergebnis.details["regel"] == "fehlt"
+
+
+@pytest.mark.parametrize("feld, wert", [
+    ("update_noetig", "bald"), ("update_noetig", True), ("update_noetig", float("nan")),
+    ("update_noetig", float("inf")), ("update_noetig", [1]),
+    ("updates", "aus"), ("updates", {"funktion": "aus"}), ("updates", {**UPDATES, "funktion": "morgen"}),
+    ("updates", {**UPDATES, "extra": 1})])
+def test_a_malformed_update_field_is_accepted_but_the_stored_document_holds_the_effective_value(tmp_path, feld, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000000, updates=UPDATES)).ok
+    neu = {"update_noetig": 1900000000, "updates": UPDATES, feld: wert}
+    assert store.empfangen("konfiguration", _konfiguration(version=2, **neu)).uebernommen
+    for stand in (store, _store(tmp_path)):
+        inhalt = stand.inhalt("konfiguration")
+        assert (inhalt["update_noetig"], inhalt["updates"]) == (1900000000, UPDATES)
+
+
+def test_the_update_fields_are_remembered_and_survive_a_restart(tmp_path):
+    store = _store(tmp_path)
+    assert store.update_noetig_ab is None and store.updates is None
+    assert store.empfangen("konfiguration", _konfiguration(update_noetig=1900000000, updates=UPDATES)).uebernommen
+    assert (store.update_noetig_ab, store.updates) == (1900000000, UPDATES)
+    neu = _store(tmp_path)
+    assert (neu.update_noetig_ab, neu.updates) == (1900000000, UPDATES)
+
+
+def test_the_returned_updates_are_a_copy(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(updates=UPDATES))
+    store.updates["funktion"] = "aus"
+    assert store.updates == UPDATES
+
+
+def test_null_is_remembered_as_nothing_needed_and_no_updater(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000000, updates=UPDATES))
+    assert store.empfangen("konfiguration", _konfiguration(version=2, update_noetig=None, updates=None)).uebernommen
+    assert (store.update_noetig_ab, store.updates) == (None, None)
+    assert (_store(tmp_path).update_noetig_ab, _store(tmp_path).updates) == (None, None)
+
+
+def test_the_update_fields_come_also_from_a_rejected_configuration(tmp_path):
+    """Sonst bliebe ein Geraet, das jede neue Konfiguration ablehnt, bei der alten Einstellung stehen."""
+    assert _store(tmp_path).empfangen("konfiguration", _konfiguration(version=1, updates=UPDATES)).uebernommen
+    faelle = (("update_noetig", {"mindest_software": "9.9.9"}), ("ungueltig", {"kuenftig": 1}), ("treiber_parameter", {}))
+    for nummer, (ablehnung, aenderung) in enumerate(faelle):
+        store = docs.DocumentStore(
+            tmp_path, host="gateway", software_version="0.6.0",
+            treiber_pruefen=(lambda bindung: {"feld": "p", "regel": "fehlt"}) if ablehnung == "treiber_parameter"
+            else None)
+        ergebnis = store.empfangen("konfiguration", _konfiguration(
+            version=10 + 2 * nummer, update_noetig=1900000001, updates=UPDATES_AUS, **aenderung))
+        assert (ergebnis.ok, ergebnis.grund) == (False, ablehnung), ablehnung
+        assert (store.update_noetig_ab, store.updates) == (1900000001, UPDATES_AUS), ablehnung
+        neu = _store(tmp_path)
+        assert (neu.update_noetig_ab, neu.updates) == (1900000001, UPDATES_AUS), ablehnung
+        # zuruecksetzen mit einer eigenen Version, damit die naechste Runde etwas Neues sieht
+        assert _store(tmp_path).empfangen(
+            "konfiguration", _konfiguration(version=11 + 2 * nummer, update_noetig=None, updates=UPDATES)).uebernommen
+        assert (_store(tmp_path).update_noetig_ab, _store(tmp_path).updates) == (None, UPDATES)
+
+
+def test_the_update_fields_of_an_unknown_schema_are_not_read(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", {**_konfiguration(update_noetig=1900000000, updates=UPDATES), "schema": 99})
+    assert (store.update_noetig_ab, store.updates) == (None, None)
+
+
+def test_a_redelivered_version_updates_the_remembered_fields(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, updates=UPDATES))
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000005, updates=UPDATES_AUS))
+    assert ergebnis.ok and not ergebnis.uebernommen
+    assert (store.update_noetig_ab, store.updates) == (1900000005, UPDATES_AUS)
+    assert (_store(tmp_path).update_noetig_ab, _store(tmp_path).updates) == (1900000005, UPDATES_AUS)
+
+
+def test_an_operation_does_not_change_the_update_fields(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(update_noetig=1900000000, updates=UPDATES))
+    store.empfangen("bedienung", _bedienung(updates=UPDATES_AUS, update_noetig=5))
+    assert (store.update_noetig_ab, store.updates) == (1900000000, UPDATES)
+
+
+@pytest.mark.parametrize("update_noetig", [True, False, "1900000000", [5], {"a": 1}, math.nan, math.inf])
+def test_an_unreadable_update_noetig_never_blocks_and_keeps_the_remembered_value(tmp_path, update_noetig):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000000))
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, update_noetig=update_noetig))
+    assert ergebnis.ok  # kein Typzwang: das Geraet lehnt die Konfiguration nicht deswegen ab
+    assert store.update_noetig_ab == 1900000000 and _store(tmp_path).update_noetig_ab == 1900000000
+
+
+@pytest.mark.parametrize("updates", [
+    "aus", 5, True, [], {}, {"funktion": "aus"}, {"funktion": "aus", "sicherheit": "aufschub"},
+    {"funktion": "immer", "sicherheit": "aus"}, {"funktion": "aus", "sicherheit": "aus", "extra": 1},
+    {"funktion": ["aus"], "sicherheit": "aus"}])
+def test_unreadable_updates_never_block_and_keep_the_remembered_value(tmp_path, updates):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, updates=UPDATES))
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, updates=updates))
+    assert ergebnis.ok
+    assert store.updates == UPDATES and _store(tmp_path).updates == UPDATES
+
+
+@pytest.mark.parametrize("wert", [0, 0.5, 1900000000, 1900000000.5])
+def test_update_noetig_is_remembered_as_given(tmp_path, wert):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(update_noetig=wert))
+    assert store.update_noetig_ab == wert
+
+
+def test_a_stored_state_without_the_update_fields_starts_and_takes_the_new_form(tmp_path):
+    """Dateien aus der Zeit vor den Feldern: Konfiguration ohne update_noetig und updates, dokumente.json ohne ihre
+    Schluessel. Das Geraet startet, merkt nichts und nimmt die naechste Konfiguration in der neuen Form."""
+    assert _store(tmp_path).empfangen("konfiguration", _konfiguration(version=7)).uebernommen  # schreibt auch die Rastung
+    alt = {feld: wert for feld, wert in _konfiguration(version=7).items()
+           if feld not in ("schema", "version", "update_noetig", "updates")}
+    (tmp_path / "konfiguration.json").write_text(json.dumps({"version": 7, "inhalt": alt, "dirty": False}))
+    (tmp_path / docs.ZUSTAND_DATEI).write_text(json.dumps({"update_anlass": None, "abgelehnt": {}}))
+    store = _store(tmp_path)
+    assert store.version("konfiguration") == 7 and store.inhalt("konfiguration") == alt
+    assert (store.update_noetig_ab, store.updates, store.update_noetig) == (None, None, False)
+    assert store.empfangen("konfiguration", _konfiguration(version=8, updates=UPDATES)).uebernommen
+    assert store.updates == UPDATES
+
+
+def test_the_software_offer_carries_einmalig(tmp_path):
+    store = _store(tmp_path)
+    einmalig = {**SOFTWARE, "einmalig": True}
+    assert store.empfangen("konfiguration", _konfiguration(software=einmalig)).ok
+    assert store.software_angebot() == docs.Angebot(einmalig)
+    assert docs.angebot_aus("konfiguration", {"schema": 2, "software": einmalig}) == docs.Angebot(einmalig)
+    ohne = {k: v for k, v in SOFTWARE.items() if k != "einmalig"}
+    assert docs.software_pruefen(ohne).details == {"feld": "software", "regel": "fehlt"}
+    assert docs.angebot_aus("konfiguration", {"schema": 2, "software": ohne}) is None
 
 
 def test_a_foreign_operation_field_is_rejected(tmp_path):

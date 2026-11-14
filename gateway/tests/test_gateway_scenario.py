@@ -165,7 +165,7 @@ def test_a_configuration_below_the_minimum_version_still_reaches_the_updater(wor
     major, minor, _ = GATEWAY_VERSION.split(".")
     hoeher = f"{major}.{int(minor) + 1}.0"  # immer ueber der eigenen Version, auch nach dem naechsten Versionssprung
     software = {"version": hoeher, "manifest_url": "https://x.test/m.json", "manifest_sha256": "a" * 64,
-                "signature": "s"}
+                "signature": "s", "einmalig": False}
     world.konfiguration_senden(konfiguration(mindest_software=hoeher, software=software), 1)
     ergebnis = _ergebnis(world, dokument="konfiguration", version=1)
     assert ergebnis["ok"] is False and ergebnis["error"]["grund"] == "update_noetig"

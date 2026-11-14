@@ -12,7 +12,7 @@ from fakes import FakeHa, HttpAntwort, nachricht_bytes
 from geraet_helpers import Device, Supervisor, _host, _register, bedienung_inhalt, konfiguration_aus_optionen
 from runtime_helpers import OPTIONS
 
-from heizungsbruecke import config, discovery, geraet_host, stdin_befehl
+from heizungsbruecke import config, discovery, geraet_host, geraet_status, stdin_befehl
 from heizungsbruecke.host import EV_RAUM, RAUM_SECONDS, HaHost
 from heizungsbruecke.supervisor import SupervisorApi
 from smartheat_core import meldungen
@@ -87,6 +87,35 @@ def test_clock_is_cached_for_a_minute(tmp_path, monkeypatch):
     clock.advance(61)
     host.uhr_synchron()
     assert supervisor.calls == 2
+
+
+def test_hello_felder_come_from_the_supervisor_switch_and_the_integration(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    assert host.hello_felder() == {"auto_update": True, "integration_version": None}
+    host.integration_stand.ereignis({"schema": 1, "version": "0.4.2", "v5_schemas": [geraet_status.EVENT_SCHEMA]},
+                                    clock())
+    assert host.hello_felder() == {"auto_update": True, "integration_version": "0.4.2"}
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS + 1)
+    supervisor.auto_update = False
+    assert host.hello_felder()["auto_update"] is False
+    clock.advance(900)  # die Integration hat sich 900 s nicht gemeldet
+    assert host.hello_felder()["integration_version"] is None
+
+
+def test_the_auto_update_switch_is_cached_and_unknown_when_unreadable(tmp_path, monkeypatch, caplog):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    for _ in range(5):
+        host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 1
+    supervisor.auto_update = None
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS)
+    assert host.hello_felder()["auto_update"] is None
+    supervisor.auto_update, supervisor.auto_update_fehler = True, OSError("Bearer geheim")
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS)
+    assert host.hello_felder()["auto_update"] is None
+    assert "OSError" in caplog.text and "geheim" not in caplog.text
 
 
 def test_clock_error_logs_only_the_kind(tmp_path, monkeypatch, caplog):
