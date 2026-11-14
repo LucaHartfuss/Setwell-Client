@@ -46,11 +46,11 @@ SIM_SCHRITTE = {
     "weishaupt_wwp_basis": {"room_setpoint": 0.5},
     "viessmann_vicare": {"curve": 0.1, "level": 1.0, "room_setpoint": 1.0},
 }
-# Erzeuger je Hebelsatz als Potenzgesetz des Kerns. Vaillant hat die Werte des Servermodells; fuer Viessmann und Weishaupt
-# gibt es dort noch keine gemessenen Werte, sie rechnen mit a = b = 1 (Platzhalterphysik).
+# Erzeuger je Hebelsatz im Kern. Vaillant (Potenzgesetz) und Viessmann (Polynom, Gas) haben die Werte des Servermodells;
+# fuer Weishaupt gibt es dort noch keine gemessenen Werte, es rechnet mit a = b = 1 (Platzhalterphysik).
 ERZEUGER = {
     "vaillant_vrc720": hausmodell.Potenzgesetz(a=2.54, b=0.78),
-    "viessmann_vicare": hausmodell.Potenzgesetz(a=1.0, b=1.0),
+    "viessmann_vicare": hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0),
     "weishaupt_wwp": hausmodell.Potenzgesetz(a=1.0, b=1.0),
     "weishaupt_wwp_basis": hausmodell.Potenzgesetz(a=1.0, b=1.0),
 }
@@ -196,7 +196,7 @@ class SimulationDriver:
         gemessen = self._rechne(now, wall, erzeuger, hebel, mindestvorlauf, flags)
         # Sollvorlauf aus den aktuellen Hebeln (wie der Kern ihn im Heizbetrieb bildet); geliefert wird, wenn die Anlage
         # weder ausgefallen ist noch im letzten Schritt ohne Heizbetrieb war.
-        flow = max(erzeuger.flow(hebel[0], hebel[1], outdoor), mindestvorlauf)
+        flow = max(erzeuger.flow(hebel[0], hebel[1], outdoor, mindestvorlauf), mindestvorlauf)
         delivers = flags.liefert and (self._letzter is None or self._letzter.geliefert)
         cache: dict[str, float | str] = {LEVER_ROLES[lever]: value for lever, value in levers.items()}
         cache.update({key: plant["hilfswerte"].get(key, START_AUX[key]) for key in self.description.aux_originals})
@@ -209,10 +209,11 @@ class SimulationDriver:
 
     def _kern_eingaenge(self, levers: Mapping[str, float]) -> tuple[tuple[float, float, float], float]:
         """Hebel der Anlage -> Eingaben des Kerns: (Steigung, Verschiebung, Heizgrenze) und Mindestvorlauf. Die
-        Verschiebung ist das Raum-Soll (bei Viessmann plus Niveau), der Mindestvorlauf der Hebel `min_flow`, sonst das
-        Raum-Soll; fehlt ein Hebel im Hebelsatz, gilt sein Startwert."""
+        Verschiebung ist das Raum-Soll, bei Viessmann allein das Niveau (das Raum-Soll kommt dort ueber den Mindestvorlauf
+        in die Formel); der Mindestvorlauf ist der Hebel `min_flow`, sonst das Raum-Soll; fehlt ein Hebel im Hebelsatz,
+        gilt sein Startwert."""
         raum_soll = levers.get("room_setpoint", START_LEVERS["room_setpoint"])
-        verschiebung = raum_soll + (levers.get("level", START_LEVERS["level"]) if self.lever_set_id == "viessmann_vicare" else 0.0)
+        verschiebung = levers.get("level", START_LEVERS["level"]) if self.lever_set_id == "viessmann_vicare" else raum_soll
         hebel = (levers.get("curve", START_LEVERS["curve"]), verschiebung, levers.get("heat_limit", START_LEVERS["heat_limit"]))
         return hebel, levers.get("min_flow", raum_soll)
 
