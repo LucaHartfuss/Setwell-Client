@@ -1,11 +1,11 @@
 """Massenwirkung am Gateway: was immer der Server auf down/setpoints antwortet, der Treiber bekommt nie einen Wert
-ausserhalb der lokalen Grenzen, und der Regel-Worker laeuft weiter. Rund 500 feindliche Antworten insgesamt, verteilt
-auf die acht Hebelsaetze des Simulationstreibers (feste Saat). Je Fall (Hebelsatz x Verteilsystem) gehen immer vollstaendig
+ausserhalb der lokalen Grenzen, und der Regel-Worker laeuft weiter. Rund 650 feindliche Antworten insgesamt, verteilt
+auf die acht Faelle des Simulationstreibers (feste Saat). Je Fall (Hebelsatz x Verteilsystem) gehen immer vollstaendig
 und deterministisch hinaus: die Sonderwerte und jede Grenze um einen Schritt ueber- und unterschritten (je Hebel), jeder
-Wert aus UNSINN auf allen Hebeln zugleich (darunter +-1e308), jedes fremde Feld, jeder fehlende Hebel, jede Form von
-levers ohne Objekt, jeder status, jede Schema-Variante und jede Huelle. Das sind je Fall 50 bis 68 Pflichtantworten; der
-Zufall fuellt nur bis JE_ANLAGE auf, die Pflichtfaelle werden nie gestrichen (Vaillant braucht mehr als JE_ANLAGE, daher
-insgesamt 508). Jede Antwort geht auf einen offenen Tick. Beobachtet wird die Datei der simulierten Anlage (plant.json)
+Zahlenwert aus UNSINN auf allen Hebeln zugleich (darunter +-1e308), jede Nicht-Zahl aus UNSINN auf genau einem Hebel,
+jedes fremde Feld, jeder fehlende Hebel, jede Form von levers ohne Objekt, jeder status, jede Schema-Variante und jede
+Huelle. Das sind je Fall 50 bis 98 Pflichtantworten; der Zufall fuellt nur bis JE_ANLAGE auf, die Pflichtfaelle werden
+nie gestrichen (die meisten Faelle brauchen mehr als JE_ANLAGE, daher insgesamt 648). Jede Antwort geht auf einen offenen Tick. Beobachtet wird die Datei der simulierten Anlage (plant.json)
 direkt nach dem Tick und nach jeder Antwort: jeder in dieser Runde geschriebene Hebel liegt in der Tabelle; eine
 Antwort, die kein gueltiger Server senden duerfte (Nicht-Zahl, fremder oder fehlender Hebel, falsches Schema, falscher
 status), schreibt gar nichts. Die Grenzen und Schritte stehen hier woertlich, nie aus dem Produktcode."""
