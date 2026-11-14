@@ -14,7 +14,7 @@ import pytest
 
 ORDNER = Path(__file__).resolve().parent
 #: alle Szenarien dieser Suite; jede ID hat genau einen Test mit @pytest.mark.akzeptanz("<ID>")
-IDS = ("AK-G4-04", "AK-G9-03")
+IDS = ("AK-G4-04", "AK-G9-03", "AK-G9-04", "AK-G10-03")
 #: Tests der Suite (Node-ID) und die, die bestanden haben; die Deckung der Laeufe prueft pytest_sessionfinish
 GESAMMELT: set[str] = set()
 BESTANDEN: set[str] = set()
@@ -55,8 +55,9 @@ def _importfehler() -> list[str]:
 def _signaturfehler() -> list[str]:
     """Die Attrappen nehmen nur Parameter, die das Gegenstueck kennt (subprocess.run reicht den Rest an Popen)."""
     from welt import Docker, Welt
+    from welt_release import AufzeichnendeStartauswahl
 
-    from smartheat_host import werksreset
+    from smartheat_host import startauswahl, werksreset
 
     erlaubt = set(inspect.signature(subprocess.run).parameters) | set(inspect.signature(subprocess.Popen).parameters)
     fehler = []
@@ -67,6 +68,12 @@ def _signaturfehler() -> list[str]:
     attrappe = list(inspect.signature(Welt.warte).parameters)[1:]
     if attrappe != echt:
         fehler.append(f"warte{tuple(attrappe)} weicht von werksreset.warten{tuple(echt)} ab")
+    protokoll = {n: list(inspect.signature(f).parameters)[1:] for n, f in vars(startauswahl.Startauswahl).items()
+                 if callable(f) and not n.startswith("_")}
+    attrappe_methoden = {n: list(inspect.signature(f).parameters)[1:] for n, f in vars(AufzeichnendeStartauswahl).items()
+                         if callable(f) and not n.startswith("_")}
+    if attrappe_methoden != protokoll:
+        fehler.append(f"Startauswahl-Attrappe {attrappe_methoden} weicht vom Protokoll {protokoll} ab")
     return fehler
 
 
@@ -131,3 +138,13 @@ def welt(tmp_path):
     from welt import Welt
 
     return Welt(tmp_path)
+
+
+@pytest.fixture
+def release_welt(tmp_path, monkeypatch):
+    """Geraet mit Updater-Zustand, lokaler Release-Seite und docker-Attrappe in tmp_path."""
+    from welt_release import ReleaseWelt
+
+    welt = ReleaseWelt(tmp_path, monkeypatch)
+    yield welt
+    welt.schliessen()
