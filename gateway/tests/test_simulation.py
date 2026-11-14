@@ -158,16 +158,24 @@ def test_erkennung_of_a_reader_instance_does_not_create_the_plant_file(paths, cl
 WALL = 12 * 3600.0  # feste Wanduhr; mit aussen_amplitude 0 ist die Aussentemperatur dann aussen_mittel
 AUSSEN = 5.0
 SCHRITT = hausmodell.DT
-# Abbildung Hebel -> Kern je Hebelsatz: (geschriebene Hebel, Erzeuger (a, b), (Steigung, Verschiebung, Heizgrenze), Mindestvorlauf).
-# Heizgrenze 16 und Steigung 1 gelten, wo der Hebelsatz den Hebel nicht hat.
+# Viessmann Gas mit den Werten des Servermodells (`ViessmannModel`).
+VIESSMANN_GAS = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0)
+# Abbildung Hebel -> Kern je Hebelsatz: (geschriebene Hebel, Erzeuger (a, b) oder fertiger Erzeuger, (Steigung, Verschiebung,
+# Heizgrenze), Mindestvorlauf). Heizgrenze 16 und Steigung 1 gelten, wo der Hebelsatz den Hebel nicht hat.
 ABBILDUNG = {
     "vaillant_vrc720": ({"curve": 1.4, "room_setpoint": 21.0, "heat_limit": 15.0, "min_flow": 22.0},
                         (2.54, 0.78), (1.4, 21.0, 15.0), 22.0),
     "weishaupt_wwp": ({"curve": 1.2, "room_setpoint": 21.5, "heat_limit": 14.0},
                       (1.0, 1.0), (1.2, 21.5, 14.0), 21.5),
     "weishaupt_wwp_basis": ({"room_setpoint": 22.0}, (1.0, 1.0), (1.0, 22.0, 16.0), 22.0),
-    "viessmann_vicare": ({"curve": 1.2, "room_setpoint": 19.0, "level": 3.0}, (1.0, 1.0), (1.2, 22.0, 16.0), 19.0),
+    # Viessmann: die Verschiebung ist das Niveau allein, das Raum-Soll kommt ueber den Mindestvorlauf (= Raum-Soll).
+    "viessmann_vicare": ({"curve": 1.2, "room_setpoint": 19.0, "level": 3.0}, VIESSMANN_GAS, (1.2, 3.0, 16.0), 19.0),
 }
+
+
+def _erzeuger(angabe):
+    """Potenzgesetz aus (a, b); ein fertiger Erzeuger des Kerns gilt, wie er ist."""
+    return hausmodell.Potenzgesetz(*angabe) if isinstance(angabe, tuple) else angabe
 
 
 def _sim_satz(paths, clock, hebelsatz, hebel=None, **parameter):
@@ -186,7 +194,7 @@ def _kern(erzeuger, hebel, ziel, schritte, *, raum=20.0, liefert=True, seed=None
     letzter = None
     for _ in range(schritte):
         letzter = hausmodell.anlage_schritt(
-            zustand, hausmodell.HOUSES["H1"], hausmodell.Potenzgesetz(*erzeuger), hebel, aussen, 0.0, 12.0, ziel,
+            zustand, hausmodell.HOUSES["H1"], _erzeuger(erzeuger), hebel, aussen, 0.0, 12.0, ziel,
             hausmodell.Betriebsflags(liefert=liefert), rng)
     return zustand, letzter
 
@@ -211,15 +219,15 @@ def test_driver_run_equals_direct_run_of_the_core(paths, clock, hebelsatz):
 MINDESTVORLAUF = {
     "mit_min_flow": ("vaillant_vrc720", {"curve": 0.2, "room_setpoint": 21.0, "min_flow": 60.0}, (2.54, 0.78), (0.2, 21.0, 16.0), 60.0),
     "min_flow_ungeschrieben": ("vaillant_vrc720", {"curve": 0.2, "room_setpoint": 12.0}, (2.54, 0.78), (0.2, 12.0, 16.0), 20.0),
-    # Das negative Niveau senkt die Verschiebung unter das Raum-Soll; ohne Hebel `min_flow` gilt das Raum-Soll.
-    "ohne_min_flow": ("viessmann_vicare", {"curve": 0.2, "room_setpoint": 20.0, "level": -10.0}, (1.0, 1.0), (0.2, 10.0, 16.0), 20.0),
+    # Das negative Niveau senkt den Vorlauf unter das Raum-Soll; ohne Hebel `min_flow` gilt das Raum-Soll.
+    "ohne_min_flow": ("viessmann_vicare", {"curve": 0.2, "room_setpoint": 20.0, "level": -10.0}, VIESSMANN_GAS, (0.2, -10.0, 16.0), 20.0),
 }
 
 
 @pytest.mark.parametrize("fall", sorted(MINDESTVORLAUF))
 def test_the_minimum_flow_binds_exactly_as_in_the_core(paths, clock, fall):
     hebelsatz, geschrieben, erzeuger, hebel, ziel = MINDESTVORLAUF[fall]
-    kurve = hausmodell.Potenzgesetz(*erzeuger).flow(hebel[0], hebel[1], AUSSEN)
+    kurve = _erzeuger(erzeuger).flow(hebel[0], hebel[1], AUSSEN, ziel)
     assert kurve < ziel - 1.0  # sonst unterscheidet der Fall den Mindestvorlauf nicht
     driver = _sim_satz(paths, clock, hebelsatz, geschrieben)
     clock.advance(12 * SCHRITT)
@@ -230,6 +238,38 @@ def test_the_minimum_flow_binds_exactly_as_in_the_core(paths, clock, fall):
     assert driver.read_signal("flow_temperature") == ziel
     assert driver.read_signal("room_temperature") == round(zustand.room, 2)
     assert driver.read_signal("generator_hours") == round(zustand.burner_hours, 3)
+
+
+# Viessmann: zwei Stellungen von Steigung, Niveau und Raum-Soll. Der Kern bekommt das Niveau allein als Verschiebung und das
+# Raum-Soll als Mindestvorlauf (= Raum-Soll); der Treiber darf das Raum-Soll nicht noch einmal auf die Verschiebung legen.
+VIESSMANN_STELLUNGEN = {
+    "steil_hoch": {"curve": 1.2, "level": 3.0, "room_setpoint": 19.0},
+    "flach_tief": {"curve": 0.8, "level": -2.0, "room_setpoint": 21.0},
+}
+
+
+@pytest.mark.parametrize("stellung", sorted(VIESSMANN_STELLUNGEN))
+def test_viessmann_driver_run_equals_direct_run_of_the_core_with_the_viessmann_generator(paths, clock, stellung):
+    hebel = VIESSMANN_STELLUNGEN[stellung]
+    driver = _sim_satz(paths, clock, "viessmann_vicare", hebel)
+    clock.advance(12 * SCHRITT)
+    driver.poll_once()
+    zustand, letzter = _kern(VIESSMANN_GAS, (hebel["curve"], hebel["level"], 16.0), hebel["room_setpoint"], 12)
+    assert zustand.heating and letzter.geliefert
+    assert letzter.flow > hebel["room_setpoint"] + 1.0  # die Heizkurve bindet, nicht der Mindestvorlauf
+    assert driver.read_signal("flow_setpoint") == round(letzter.flow, 1)
+    assert driver.read_signal("room_temperature") == round(zustand.room, 2)
+    assert driver.read_signal("generator_hours") == round(zustand.burner_hours, 3)
+
+
+def test_the_viessmann_flow_follows_the_formula_with_the_room_setpoint_counted_once(paths, clock):
+    """Von Hand: c = 1,2, N = 3, R = 19, T = 5 -> D = -14, poly(D) = 1,4347 - 14 * 0,021 + 196 * 247,9e-6 = 1,1892884,
+    Vorlauf = R + N - c * D * poly(D) = 19 + 3 + 16,8 * 1,1892884 = 41,98004512 (das Raum-Soll R nur einmal)."""
+    driver = _sim_satz(paths, clock, "viessmann_vicare", VIESSMANN_STELLUNGEN["steil_hoch"])
+    clock.advance(12 * SCHRITT)
+    driver.poll_once()
+    assert driver.read_signal("flow_setpoint") == pytest.approx(41.98, abs=0.051)
+    assert hausmodell.ViessmannPolynom(1.4347, 0.021, 247.9e-6, 0.0).flow(1.2, 3.0, 5.0, 19.0) == pytest.approx(41.98004512, abs=1e-9)
 
 
 def test_the_start_room_is_the_room_of_the_first_reading(paths, clock):
@@ -417,7 +457,7 @@ def _kern_folge(erzeuger, hebel, ziel, aussen_je_schritt):
     zustand = hausmodell.Anlagenzustand(room=20.0, burner_hours=1000.0)
     for aussen in aussen_je_schritt:
         hausmodell.anlage_schritt(
-            zustand, hausmodell.HOUSES["H1"], hausmodell.Potenzgesetz(*erzeuger), hebel, aussen, 0.0, 12.0, ziel,
+            zustand, hausmodell.HOUSES["H1"], _erzeuger(erzeuger), hebel, aussen, 0.0, 12.0, ziel,
             hausmodell.Betriebsflags(liefert=True), None)
     return zustand
 

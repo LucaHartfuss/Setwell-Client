@@ -1,8 +1,8 @@
 """Fake-ViCare: IAM-Token-Endpunkt und die Teile der ViCare-API, die vicare_cloud braucht, auf stdlib
 http.server. Steuerung ueber POST /__control. Nur fuer Tests und die E2E; kein Anspruch auf Vollstaendigkeit.
 
-Ohne `recordings` fuehrt der Fake das Haus H1 des Hausmodell-Kerns mit dem Vaillant-Potenzgesetz: Kurve und Soll-
-Temperatur der Features sind die Eingaenge, Vorlauf, Raumfuehler, Brennerstunden und -starts werden bei jeder Abfrage
+Ohne `recordings` fuehrt der Fake das Haus H1 des Hausmodell-Kerns mit dem Viessmann-Polynom: Steigung und Niveau der
+Kurve und die Soll-Temperatur (Raum-Soll) der Features sind die Eingaenge, Vorlauf, Raumfuehler, Brennerstunden und -starts werden bei jeder Abfrage
 aus dem Kern fortgeschrieben (5-min-Schritte der Uhr `clock`, ein Rest bleibt fuer die naechste Abfrage liegen). Die
 Aussentemperatur bleibt konstant (Feature `heating.sensors.temperature.outside`), die Tageszeit bestimmt nichts. Mit
 `recordings` bleiben die Features statisch."""
@@ -29,7 +29,10 @@ ROOM = "heating.circuits.0.sensors.temperature.room"
 OUTSIDE = "heating.sensors.temperature.outside"
 BURNER = "heating.burners.0"
 STATISTICS = "heating.burners.0.statistics"
-ERZEUGER = hausmodell.Potenzgesetz(a=2.54, b=0.78)  # Vaillant, wie der Simulationstreiber
+# Viessmann (Gas), dieselben Werte wie `ERZEUGER["viessmann_vicare"]` des Simulationstreibers. Der Fake laeuft im E2E in einem
+# Container, der nur den Kern einhaengt (nicht das Gateway-Paket): ein Import des Treibers ginge dort nicht, darum die
+# Konstante hier; `test_fake_vicare.py` haelt beide gleich.
+ERZEUGER = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0)
 HEAT_LIMIT = 16.0
 KERN_STUNDE = 12.0  # ausserhalb der Warmwasserpausen: die Tageszeit darf die Lieferung nicht bestimmen
 START_ROOM = 20.0
@@ -82,12 +85,14 @@ class FakeVicare:
 
     def _inputs(self) -> tuple[tuple[float, float, float], float, float]:
         """Eingaenge des Kerns aus den Features: (Steigung, Verschiebung, Heizgrenze), Mindestvorlauf, Aussen. Die
-        Verschiebung der Heizkurve ist das Niveau, das Soll das Raum-Soll; fehlt ein Feature, gilt der Startwert."""
+        Verschiebung der Heizkurve ist das Niveau allein; das Soll ist das Raum-Soll und geht als Mindestvorlauf
+        (zugleich als Raum-Soll der Viessmann-Formel) in den Kern, nicht noch einmal in die Verschiebung. Fehlt ein
+        Feature, gilt der Startwert."""
         by_name = {item["feature"]: item for item in self.features[DEVICE]}
         soll = _zahl(by_name.get(NORMAL), "temperature", START_ROOM)
         shift = _zahl(by_name.get(CURVE), "shift", 0.0)
         slope = _zahl(by_name.get(CURVE), "slope", 1.0)
-        return (slope, soll + shift, HEAT_LIMIT), soll, _zahl(by_name.get(OUTSIDE), "value", 5.0)
+        return (slope, shift, HEAT_LIMIT), soll, _zahl(by_name.get(OUTSIDE), "value", 5.0)
 
     def _advance(self) -> None:
         now = self._clock()
@@ -104,7 +109,7 @@ class FakeVicare:
     def _publish(self) -> None:
         """Schreibt den Stand des Kerns in die Features, die der Fake fuehrt (vorhandene; fehlt eines, bleibt es weg)."""
         hebel, minimum, outdoor = self._inputs()
-        flow = max(ERZEUGER.flow(hebel[0], hebel[1], outdoor), minimum)
+        flow = max(ERZEUGER.flow(hebel[0], hebel[1], outdoor, minimum), minimum)
         delivers = self._letzter is None or self._letzter.geliefert
         values = {
             (SUPPLY, "value"): round(flow, 1) if delivers else UNDELIVERED_SUPPLY,
