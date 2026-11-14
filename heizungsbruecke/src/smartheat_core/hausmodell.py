@@ -4,13 +4,14 @@ weder den Server noch eine Datenbank und kann so als Daten und Rechenvorschrift 
 
 Haus erster Ordnung, Heizkoerper ~ dT^n mit leistungsabhaengiger Spreizung, innere Gewinne, Sonne jeden zweiten Tag
 (1,5 kW Spitze), Fuehlerrauschen 0,1 K, optional P-Thermostatventil. Der Erzeuger ist hier ein Datensatz
-(`Potenzgesetz`), der die Rechenfolge des Servermodells (`PowerLawModel.flow`) Operation fuer Operation nachbildet; die
-Abbildung vom Servermodell auf ihn steht in `simulation.py`."""
+(`Potenzgesetz`, `ViessmannPolynom`), der die Rechenfolge des Servermodells (`PowerLawModel.flow`,
+`ViessmannModel.flow`) Operation fuer Operation nachbildet; die Abbildung vom Servermodell auf ihn steht in
+`simulation.py`."""
 import math
 import random
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 
 TARGET = 20.5
 STEP = timedelta(minutes=5)
@@ -109,6 +110,35 @@ class Potenzgesetz:
         return self.a * (curve * max(shift - outdoor, 0.0)) ** self.b + shift
 
 
+@dataclass(frozen=True)
+class ViessmannPolynom:
+    """Erzeuger als Daten: Vorlauf(T; c, N, R) = R + N + offset - c * D * (c0 + c1 * D + c2 * D^2), D = T - R, in
+    derselben Rechenfolge wie das Viessmann-Modell des Servers (`ViessmannModel.flow`). Die Hebel bedeuten hier:
+    Steigung = c (Heizkurven-Steigung), Verschiebung = N (das Niveau der Heizkurve, eine reine Parallelverschiebung
+    des Vorlaufs), Heizgrenze nur fuer die Hysterese der Anlage (die Formel kennt keine). R ist das Raum-Soll und
+    kommt als target; ohne es ist die Formel nicht definiert. Gas und Waermepumpe unterscheiden sich in c0 und offset."""
+    c0: float
+    c1: float
+    c2: float
+    offset: float
+
+    def _poly(self, delta: float) -> float:
+        return self.c0 + self.c1 * delta + self.c2 * delta ** 2
+
+    def flow(self, curve: float, shift: float, outdoor: float, target: float | None = None) -> float:
+        if target is None:
+            raise ValueError("Viessmann-Formel braucht das Raum-Soll (target)")
+        delta = outdoor - target
+        return target + shift + self.offset - curve * delta * self._poly(delta)
+
+
+class Erzeuger(Protocol):
+    """Was `anlage_schritt` vom Erzeuger braucht: den Vorlauf aus den Hebeln. target ist das Raum-Soll; nur Formeln, die
+    es enthalten (Viessmann), werten es aus."""
+
+    def flow(self, curve: float, shift: float, outdoor: float, target: float | None = None) -> float: ...
+
+
 @dataclass
 class Anlagenzustand:
     """Veraenderlicher Zustand der simulierten Anlage: Raumtemperatur, Heizbetrieb (Hysterese) und die Zaehler des
@@ -137,12 +167,13 @@ class Anlagenschritt(NamedTuple):
 
 
 def anlage_schritt(
-    zustand: Anlagenzustand, house: House, erzeuger: Potenzgesetz, hebel: tuple[float, float, float],
+    zustand: Anlagenzustand, house: House, erzeuger: Erzeuger, hebel: tuple[float, float, float],
     outdoor: float, sonne: float, hour: float, target: float, betrieb_flags: Betriebsflags,
     rng: random.Random | None,
 ) -> Anlagenschritt:
     """Ein 5-min-Schritt der Anlage und des Hauses; veraendert zustand. hebel = (Steigung, Verschiebung, Heizgrenze),
-    sonne = Einstrahlung in W. rng: die Zufallsfolge fuer das Fuehlerrauschen; sie wird genau einmal je Schritt
+    sonne = Einstrahlung in W. target = Mindestvorlauf = Raum-Soll der Regelung; es geht auch als Raum-Soll an den
+    Erzeuger (das Potenzgesetz ignoriert es, die Viessmann-Formel braucht es). rng: die Zufallsfolge fuer das Fuehlerrauschen; sie wird genau einmal je Schritt
     gezogen, ohne rng bleibt gemessen None."""
     curve, shift, heat_limit = hebel
     if zustand.heating and outdoor >= heat_limit:
@@ -150,7 +181,7 @@ def anlage_schritt(
     elif not zustand.heating and outdoor < heat_limit - HYSTERESIS_K:
         zustand.heating = True
     hot_water = any(low <= hour < high for low, high in DHW_HOURS)
-    flow = max(erzeuger.flow(curve, shift, outdoor), target) if zustand.heating and not hot_water else 0.0
+    flow = max(erzeuger.flow(curve, shift, outdoor, target), target) if zustand.heating and not hot_water else 0.0
     geliefert = flow > 0 and betrieb_flags.liefert
     power = house.radiator(flow, zustand.room) if geliefert else 0.0
     burner_on = geliefert or (hot_water and betrieb_flags.warmwasser_brenner)
