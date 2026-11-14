@@ -85,7 +85,7 @@ def test_ende_waehrend_des_boosts_stellt_zurueck(welt, ende):
         welt.runde(100)
         assert _vaillant(welt) == BOOST_VAILLANT  # die Karenzzeit: die Laufzeit regelt im Notbetrieb weiter
         assert welt.status()[-1] == "abo_inaktiv"
-        welt.uhr.wand_versatz += DREISSIG_TAGE + 10
+        welt.uhr.vor(DREISSIG_TAGE + 10)  # die Zeit vergeht wirklich, nicht nur die Wanduhr springt
         welt.runde(100)
         welt.runde(300)
         assert welt.status()[-1] == "abo_beendet"

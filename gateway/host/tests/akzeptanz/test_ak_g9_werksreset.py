@@ -42,7 +42,6 @@ def test_ak_g9_03_werksreset(welt, lage):
         assert json.loads(welt.datei("data/sim/plant.json")) == SERVERWERTE
         ergebnis = welt.werksreset(antwortzeit=None)
         assert welt.fristen == [120.0]
-        assert welt.wand - 1_800_000_000.0 == 120.0, "gewartet wurde die volle Frist"
         # nach der Frist wird trotzdem geloescht; die Anlage blieb auf den zuletzt geschriebenen Werten
         assert welt.ablauf[:1] == ["down"], "nach der Frist wird trotzdem geloescht"
         assert json.loads(welt.beim_down["plant"]) == SERVERWERTE

@@ -15,7 +15,8 @@ import pytest
 
 ORDNER = Path(__file__).resolve().parent
 #: alle Szenarien dieser Suite; jede ID hat genau einen Test mit @pytest.mark.akzeptanz("<ID>")
-IDS = ("AK-G1-02", "AK-G3-03", "AK-G7-01", "AK-G7-02", "AK-G8-02", "AK-G9-01", "AK-G9-05", "AK-G9-06", "AK-G10-01")
+IDS = ("AK-G1-02", "AK-G3-03", "AK-G7-01", "AK-G7-02", "AK-G8-02", "AK-G9-01", "AK-G9-03", "AK-G9-05", "AK-G9-06",
+       "AK-G10-01")
 #: Tests der Suite (Node-ID) und die, die bestanden haben; die Deckung der Laeufe prueft pytest_sessionfinish
 GESAMMELT: set[str] = set()
 BESTANDEN: set[str] = set()

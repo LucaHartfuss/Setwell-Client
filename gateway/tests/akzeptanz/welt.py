@@ -268,6 +268,13 @@ class Welt(Handgriffe, Diagnose):
         if self.diagnose_port is not None:
             self.diagnose_schliessen()
 
+    def container_neu_starten(self) -> None:
+        """Der Container startet neu (Compose): der Prozess endet sauber, ein neuer baut sich auf denselben Dateien auf."""
+        prozess.beenden(self.device, None, None)
+        if self.diagnose_port is not None:
+            self.diagnose_schliessen()
+        self.starten()
+
     def arbeiten(self) -> None:
         """Geraetekern und Worker abarbeiten; ein gewollter Neustart baut einen neuen Prozess wie Compose."""
         for _ in range(5):
