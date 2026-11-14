@@ -85,7 +85,7 @@ tests() {
 # Akzeptanzsuite des Add-ons: eigener Lauf, die conftest.py im Ordner verlangt --confcutdir (nichts aus tests/ laden)
 akzeptanz() {
   local rc=0
-  for repo in heizungsbruecke gateway; do
+  for repo in heizungsbruecke gateway gateway/host; do
     (cd "$repo" && "$PY" -m pytest -q -p no:cacheprovider --confcutdir=tests/akzeptanz tests/akzeptanz --durations=5) || rc=1
   done
   return $rc

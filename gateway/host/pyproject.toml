@@ -3,6 +3,8 @@
 [tool.pytest.ini_options]
 pythonpath = [".", "tests", "../src", "../tests", "../../heizungsbruecke/src", "../../heizungsbruecke/testhilfen"]
 testpaths = ["tests"]
+# die Akzeptanzsuite laeuft nur allein (scripts/check.sh, Schritt akzeptanz): ihre conftest.py verlangt --confcutdir
+addopts = "--ignore=tests/akzeptanz"
 
 [tool.ruff]
 line-length = 120
