@@ -138,7 +138,7 @@ _BUDGET = ("SmartHeat: Das Tageslimit von {limit} Schreibvorgängen an der Heizu
 #: (`erzeuger_angaben`), der Server ordnet den Wortlaut zu. Die Codes liegen außerhalb von `meldung.`.
 _ERZEUGER = {
     "erzeuger.stoerung": _vorlage(
-        "orange", ("roh_text", "quelle"),
+        "rot", ("roh_text", "quelle"),
         "SmartHeat: Der Wärmeerzeuger meldet eine Störung (Kennung {roh_text}). Bitte die Anlage prüfen.",
         lokal=("quelle",)),
     "erzeuger.hinweis": _vorlage(

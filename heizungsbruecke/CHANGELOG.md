@@ -5,6 +5,9 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Eine Störung des Wärmeerzeugers (`erzeuger.stoerung`) hat die Stufe `rot` statt `orange`: Die Integration meldet sie
+  sofort, auch in der Ruhezeit, und erinnert, solange sie offen ist. Wartungshinweise (`erzeuger.hinweis`) bleiben `gelb`,
+  die Bestätigung nach 15 Minuten ändert sich nicht.
 - Das Status-Ereignis `smartheat_status` trägt statt `geraet_hinweise` (Schlüssel, Stufe, Text) die Liste `meldungen`
   mit `key`, `code`, `params`, `kreis` (nur bei Kreismeldungen) und `stufe` (`rot`, `orange`, `gelb`), ohne Text und ohne
   Raum- oder Entity-Namen, sowie die Push-Regeln `push_regeln`. Zu jedem Übergang einer Meldung (neu, aktualisiert,

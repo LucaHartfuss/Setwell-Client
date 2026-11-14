@@ -190,10 +190,10 @@ def test_ein_wert_in_codeform_bleibt_auf_dem_draht():
     assert meldungen.draht(meldungen.neu("meldung.abo_inaktiv", ende="2026-12-31"))["params"] == {"ende": "2026-12-31"}
 
 
-def test_die_erzeugermeldungen_haben_die_stufen_orange_und_gelb_und_den_kennungsparameter():
+def test_die_erzeugermeldungen_haben_die_stufen_rot_und_gelb_und_den_kennungsparameter():
     stoerung = meldungen.neu("erzeuger.stoerung", roh_text="f_28", quelle="mypyllant")
     hinweis = meldungen.neu("erzeuger.hinweis", roh_text="3", quelle="mypyllant")
-    assert (stoerung.stufe, hinweis.stufe) == ("orange", "gelb")
+    assert (stoerung.stufe, hinweis.stufe) == ("rot", "gelb")
     assert meldungen.TABELLE["erzeuger.stoerung"].params == ("roh_text", "quelle")
     assert meldungen.TABELLE["erzeuger.stoerung"].lokal == ("quelle",)
     assert "f_28" in meldungen.text(stoerung) and "mypyllant" not in meldungen.text(stoerung)

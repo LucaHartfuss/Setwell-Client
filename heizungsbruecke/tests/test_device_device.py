@@ -1146,7 +1146,7 @@ def test_eine_erzeugermeldung_traegt_quelle_und_roh_auf_dem_draht_andere_meldung
     world.device.schritt()
     (batch,) = world.link.of("up/notifications")
     erzeuger, andere = batch["items"]
-    assert (erzeuger["code"], erzeuger["params"], erzeuger["stufe"]) == ("erzeuger.stoerung", {"roh_text": "f_28"}, "orange")
+    assert (erzeuger["code"], erzeuger["params"], erzeuger["stufe"]) == ("erzeuger.stoerung", {"roh_text": "f_28"}, "rot")
     assert (erzeuger["quelle"], erzeuger["roh"], erzeuger["kreis"], erzeuger["offen"]) == ("mypyllant", "f_28", 2, True)
     assert erzeuger["key"].startswith("erzeuger_stoerung:") and "f_28" not in erzeuger["key"]
     assert "quelle" not in andere and "roh" not in andere

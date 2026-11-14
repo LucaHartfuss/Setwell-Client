@@ -4,9 +4,11 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from fakes import FakeClock, FakeNotifySink
+from fakes import FakeClock, FakeHa, FakeNotifySink
 
+from heizungsbruecke.ha_sinks import EREIGNIS_MELDUNG, GeraetUndHaSink, HaNotifySink
 from smartheat_core import meldungen
+from smartheat_device.host import MeldungSink
 from smartheat_runtime import erzeugerstoerung
 from smartheat_runtime.notifier import STATE_OK, Notifier
 from smartheat_runtime.ports import SignalNotFound, SourceUnavailable, Stoerung
@@ -66,9 +68,27 @@ def test_eine_stoerung_wird_erst_nach_fuenfzehn_minuten_zur_offenen_meldung(make
     erzeugerstoerung.check(rt)
     assert _offen(rt) == {"erzeuger_stoerung:f_28": "erzeuger.stoerung"}
     meldung = rt.kunde.offen["erzeuger_stoerung:f_28"]
-    assert meldung.stufe == "orange" and meldung.params == {"roh_text": "f_28", "quelle": QUELLE}
+    assert meldung.stufe == "rot" and meldung.params == {"roh_text": "f_28", "quelle": QUELLE}
     assert erzeugerstoerung.kennung(rt) == "f_28"
     assert rt.signals.gelesen == [REF] * 3
+
+
+def test_eine_stoerung_um_23_uhr_geht_als_rot_hinaus_ein_hinweis_zur_selben_zeit_als_gelb(make_store):
+    """Die Integration schickt `rot` sofort, auch in der Ruhezeit (22 bis 7 Uhr), `gelb` nie; das Geraet gibt die Stufe
+    ueber das Ereignis weiter. Die Uhr steht auf 23 Uhr, die Stufe haengt nicht von der Tageszeit ab."""
+    ha = FakeHa()
+    rt = _rt(make_store)
+    rt.notifier = Notifier(rt.store, GeraetUndHaSink(MeldungSink(lambda *args, **kwargs: None), HaNotifySink(ha, []),
+                                                     lambda: "geraet-1"))
+    rt.clock = FakeClock(start=23 * 3600.0)
+    _setzen(rt, _stoerung("f_28"), _stoerung("w_1", hinweis=True))
+    erzeugerstoerung.check(rt)
+    rt.clock.advance(BESTAETIGUNG)
+    erzeugerstoerung.check(rt)
+
+    ereignisse = {daten["code"]: daten for art, daten in ha.events if art == EREIGNIS_MELDUNG}
+    assert (ereignisse["erzeuger.stoerung"]["stufe"], ereignisse["erzeuger.stoerung"]["offen"]) == ("rot", True)
+    assert (ereignisse["erzeuger.hinweis"]["stufe"], ereignisse["erzeuger.hinweis"]["offen"]) == ("gelb", True)
 
 
 def test_eine_bestehende_stoerung_meldet_nicht_noch_einmal(make_store):
