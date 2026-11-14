@@ -13,6 +13,7 @@ from heizungsbruecke.host import HaHost
 from smartheat_core import meldungen
 from smartheat_runtime import app, aufraeumen
 from smartheat_runtime.app import StartFailure
+from smartheat_runtime.notifier import Notifier
 from smartheat_runtime.ports import SourceUnavailable
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT
@@ -420,6 +421,29 @@ def test_hinweise_batterien_und_meldedienste_kommen_aus_der_bindung(env):
     assert runtime.notify_hints_off == ("batterie",)
     assert [(ref.ref, ref.art) for ref in runtime.battery_refs] == [
         ("sensor.thermostat_battery", BATTERY_PERCENT), ("binary_sensor.thermostat_battery_low", BATTERY_LOW_FLAG)]
+
+
+def test_ein_gespeichertes_hinweise_aus_mit_raumfuehler_schaltet_ihn_nicht_stumm(env, make_store):
+    """Ein Bestandsdokument von vor dem Streichen von `raumfuehler` wird beim Start ungeprueft gelesen (die Pruefung
+    folgt erst in load()): die Kategorie darf nicht stumm schalten (sie ist nie abschaltbar), die uebrigen gueltigen
+    Kategorien schon."""
+    options = {**OPTIONS, "notify_hints_off": ["raumfuehler", "batterie"]}
+    ha = _DiensteHa()
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen(options), ha=ha), ha, clock=env.clock)
+    aus = host.boot_info().notify_hints_off
+    assert aus == ("batterie",)
+    notifier = Notifier(make_store(), host.notify_sink, aus)
+    notifier.notify("raumfuehler:sensor.wz", "ausgefallen", _MELDUNG, critical=False)
+    notifier.notify("batterie:sensor.x", "niedrig", _MELDUNG, critical=False)
+    assert ha.dienste == [("notify.mobile_app_handy", _TEXT)]
+
+
+def test_ohne_raumfuehler_in_hinweise_aus_bleibt_die_liste_unveraendert(env):
+    options = {**OPTIONS, "notify_hints_off": ["schreibbudget", "batterie"]}
+    ha = _DiensteHa()
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen(options), ha=ha), ha, clock=env.clock)
+    assert host.boot_info().notify_hints_off == ("schreibbudget", "batterie")
+    assert host.load().config.notify_hints_off == ("schreibbudget", "batterie")
 
 
 def test_while_the_reset_is_pending_the_messages_go_to_the_services_of_the_marker(env):

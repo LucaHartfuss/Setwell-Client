@@ -105,6 +105,9 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   den Text in Home Assistant. Ein Textparameter geht nur als Code, sonst als `unbekannt`. Ein Schlüssel mit Namen
   oder Kreis wird zu `<art>:<Prüfsumme>`; der Kreis geht als eigenes Feld. Schließt das Gerät eine Meldung, die es nicht
   mehr kennt, steht `code` auf `null`. Der Server von vor diesem Stand liest das neue Format nicht.
+- Beim Start schaltet nur noch eine Kategorie aus der Liste der Hinweise stumm. Ein gespeichertes Dokument von vor dem
+  Streichen von `raumfuehler` hätte sonst Raumfühler-Ausfälle still unterdrückt, ohne dass der Status es zeigt; das
+  Gerät verwirft solche Einträge und schreibt nur ihre Zahl ins Log.
 
 ## 1.1.0
 
