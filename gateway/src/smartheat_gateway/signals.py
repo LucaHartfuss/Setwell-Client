@@ -31,10 +31,10 @@ class GatewaySignalSource:
         self._driver, self._store, self._room_refs = driver, store, tuple(room_sensor_refs)
         self._raeume = {nummer: tuple(fuehler) for nummer, fuehler in raeume}
 
-    def kontingent_meldung(self) -> str | None:
-        """Kundentext, solange das Abfragekontingent des Treibers erschoepft und sein Cache veraltet ist (die Laufzeit
-        meldet es, kontingent.check), sonst None."""
-        return None if self._driver is None else self._driver.kontingent_meldung()
+    def kontingent_erschoepft(self) -> bool:
+        """True, solange das Abfragekontingent des Treibers erschoepft und sein Cache veraltet ist (die Laufzeit
+        meldet es, kontingent.check)."""
+        return self._driver is not None and self._driver.kontingent_erschoepft()
 
     def _mittel(self, sensors: tuple[str, ...]) -> float:
         values = []

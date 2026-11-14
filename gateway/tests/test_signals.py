@@ -68,11 +68,11 @@ def test_an_exhausted_driver_quota_is_an_unavailable_source_with_the_driver_text
 
 def test_the_quota_notice_of_the_driver_reaches_the_runtime(world):
     _, _, source = world
-    assert source.kontingent_meldung() is None
-    source._driver.kontingent_meldung = lambda: "weg"
-    assert source.kontingent_meldung() == "weg"
+    assert source.kontingent_erschoepft() is False
+    source._driver.kontingent_erschoepft = lambda: True
+    assert source.kontingent_erschoepft() is True
     source._driver = None
-    assert source.kontingent_meldung() is None  # Treiber noch nicht geladen
+    assert source.kontingent_erschoepft() is False  # Treiber noch nicht geladen
 
 
 def test_one_dead_sensor_keeps_the_mean_none_is_invalid(world):

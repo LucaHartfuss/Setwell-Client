@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Die Meldung zum erschoepften Abfragekontingent der Quelle kommt als Code (`meldung.kontingent_erschoepft`, Entwarnung
+  `meldung.kontingent_frei`) ohne Parameter statt als Freitext; der Treiber meldet nur noch den Zustand
+  (`kontingent_erschoepft()`).
+
 - Die Telemetrie traegt je Kreis das neue Feld `erzeuger_stoerung` (Kennung der aeltesten offenen Stoerung des
   Waermeerzeugers oder `null`). Kein Treiber des Gateways liefert Stoerungen: das Feld bleibt `null`, es entsteht keine
   Meldung `erzeuger.stoerung`.

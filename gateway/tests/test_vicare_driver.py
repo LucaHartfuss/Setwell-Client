@@ -211,15 +211,15 @@ def test_the_quota_notice_exists_only_while_the_quota_is_exhausted_and_the_cache
     """Ein erschoepftes Kontingent mit frischem Cache stoert den Kunden nicht; erst veraltete Daten ohne Aussicht auf
     eine Abfrage werden gemeldet, und mit dem Ende der Sperre (hier: das Fenster rutscht weiter) ist die Meldung weg."""
     server, driver, paths, clock = env
-    assert driver.kontingent_meldung() is None
+    assert driver.kontingent_erschoepft() is False
     for _ in range(1200 - len(driver._guard._load()["aufrufe"])):
         driver._guard.take()
-    assert driver.kontingent_meldung() is None  # Cache noch frisch
+    assert driver.kontingent_erschoepft() is False  # Cache noch frisch
     clock.advance(3 * 300 + 1)
-    assert driver.kontingent_meldung() == vicare_driver.QUOTA_TEXT
+    assert driver.kontingent_erschoepft() is True
     jetzt = driver._guard._now()
     driver._guard._now = lambda: jetzt + 86400 + 1  # alle Aufrufe liegen ausserhalb des Fensters
-    assert driver.kontingent_meldung() is None
+    assert driver.kontingent_erschoepft() is False
 
 
 @pytest.mark.parametrize(("alter_s", "frisch"), [(899, True), (900, True), (901, False)])
