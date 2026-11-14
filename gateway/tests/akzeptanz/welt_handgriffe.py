@@ -75,7 +75,7 @@ class Handgriffe:
     def neuer_tag_mit_tick(self, temperatur: float) -> str:
         """Genau ein Tag vergeht (Tagesbudget und Schreibabstaende gelten wieder), der Raumfuehler meldet, der Tagestick
         sendet einen Snapshot: dessen Folgenummer. Setzt voraus, dass die Uhr nach 12:00 steht (bis_nach_tagestick)."""
-        self.runde(86400 - 300 - 2)  # der Raumfuehler ist danach veraltet
+        self.uhr.vor(86400 - 300 - 2)  # der Raumfuehler ist danach veraltet; ohne Arbeit, nichts Fachliches faellt an
         self.raum(temperatur)
         self.runde(300)
         return self.link.von("up/snapshot")[-1]["seq"]

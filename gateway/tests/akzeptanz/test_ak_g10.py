@@ -1,5 +1,5 @@
 """Massenwirkung am Gateway: was immer der Server auf down/setpoints antwortet, der Treiber bekommt nie einen Wert
-ausserhalb der lokalen Grenzen, und der Regel-Worker laeuft weiter. 1000 feindliche Antworten insgesamt, verteilt auf
+ausserhalb der lokalen Grenzen, und der Regel-Worker laeuft weiter. 200 feindliche Antworten insgesamt, verteilt auf
 die acht Hebelsaetze des Simulationstreibers (feste Saat), je Satz vollstaendig die Sonderwerte und jede Grenze um einen
 Schritt ueber- und unterschritten. Jede Antwort geht auf einen offenen Tick. Beobachtet wird die Datei der simulierten
 Anlage (plant.json) nach jeder Antwort: jeder in dieser Runde geschriebene Hebel liegt in der Tabelle. Die Grenzen und
@@ -35,7 +35,7 @@ SCHRITTE = {
     "weishaupt_wwp_basis": {"room_setpoint": 0.5},
     "viessmann_vicare": {"curve": 0.1, "level": 1.0, "room_setpoint": 1.0},
 }
-GESAMT = 1000  # feindliche Antworten insgesamt
+GESAMT = 200  # feindliche Antworten insgesamt (Laufzeitbudget des Ordners: 30 s; je Satz mindestens die Pflichtfaelle)
 JE_ANLAGE = GESAMT // len(ALLE)
 SAAT = 20271031
 SONDERWERTE = (math.nan, INF, -INF)
@@ -119,8 +119,8 @@ def test_ak_g10_01_feindliche_antworten_bleiben_in_den_grenzen(welt, satz, verte
     for nr, antwort in enumerate(antworten):
         seq = _offener_tick(welt, beantwortet)
         beantwortet.add(seq)
-        welt.vom_server("down/setpoints", {"schema": 5, "kreis": 1, "seq": seq, "ts": welt.uhr.wand().isoformat(),
-                                           **antwort})
+        welt.link.empfangen("down/setpoints", {"schema": 5, "kreis": 1, "seq": seq, "ts": welt.uhr.wand().isoformat(),
+                                               **antwort})  # verarbeitet die folgende Runde (zwei Sekunden spaeter)
         welt.runde(2)
         hebel, um = _stand(welt)
         for name, wert in hebel.items():

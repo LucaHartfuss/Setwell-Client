@@ -29,6 +29,7 @@ from smartheat_gateway.zigbee import ZigbeeMirror
 
 BASE = "zigbee2mqtt"
 _CLIENTEN = itertools.count(1)
+ZEITDIENST_TAKT = 180  # Sekunden zwischen zwei Schreibvorgaengen des Zeitdienstes (echt: 60; der Leser gilt bis 300)
 
 
 def _passt(filter_: str, topic: str) -> bool:
@@ -198,6 +199,7 @@ class Welt(Handgriffe, Diagnose):
         self.host_dir = tmp_path / "host"
         self.host_dir.mkdir()
         self._monkeypatch, self.diagnose_port = monkeypatch, None
+        self._status_um: datetime.datetime | None = None  # Wanduhrzeit der zuletzt geschriebenen host/status.json
         self.uhr, self.bus = Uhr(), Bus()
         self.z2m = Zigbee(self.bus)
         self.links: list[Link] = []
@@ -236,9 +238,16 @@ class Welt(Handgriffe, Diagnose):
         return self.links[-1]
 
     def _zeitdienst(self) -> None:
-        """Der Zeitdienst des Hosts meldet die Uhr als abgeglichen (host/status.json mit Wanduhrzeit)."""
-        status = {"netz": True, "dns": True, "zeit_synchron": True, "ts": self.uhr.wand().isoformat()}
+        """Der Zeitdienst des Hosts meldet die Uhr als abgeglichen (host/status.json mit Wanduhrzeit). Der echte Dienst
+        (smartheat_host/hoststatus.py, PERIOD_SECONDS) schreibt alle 60 s und der Leser nimmt die Datei bis 5 min als
+        frisch; die Welt schreibt nur, wenn seit dem letzten Schreiben ZEITDIENST_TAKT Wanduhrzeit vergangen sind (ein
+        traeger Dienst; die Datei ist beim Lesen hoechstens so alt, und das bleibt unter der Frist des Lesers)."""
+        jetzt = self.uhr.wand()
+        if self._status_um is not None and (jetzt - self._status_um).total_seconds() < ZEITDIENST_TAKT:
+            return
+        status = {"netz": True, "dns": True, "zeit_synchron": True, "ts": jetzt.isoformat()}
         dateien.schreiben_json(self.host_dir / "status.json", status, modus=dateien.LESBAR)
+        self._status_um = jetzt
 
     def starten(self) -> None:
         """Ein Prozessstart wie im Container: Spiegel, Geraete-Host und Geraetekern (_vorbereiten), Laufzeit (start)."""
