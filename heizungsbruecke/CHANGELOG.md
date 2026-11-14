@@ -5,6 +5,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Ist die Uhr nicht vertrauenswürdig und ruht deshalb eine gesetzte Betriebsart (Wochenplan, Abwesenheit, Leerstand,
+  Übersteuerung), meldet das Gerät das je Kreis einmal als offene Meldung `meldung.uhr_unklar` (gelb, ohne Parameter und
+  ohne Zeiten) und nimmt sie ohne Push zurück, sobald die Uhr wieder stimmt oder keine Betriebsart mehr gesetzt ist.
+  Kein erneutes Melden je Takt; die Regelung ändert sich nicht.
+
 - Neue Grenzen für Abwesend, Leerstand und Übersteuerung im Gerät: die Temperatur darf nicht über den Bedienbereich
   (höchstens 25 °C) steigen; Abwesend gilt höchstens 365 Tage voraus (wie der Leerstand); die Übersteuerung in der
   kühlen Phase geht nicht unter 16 °C (Absenk-Untergrenze), Abwesend und Leerstand bleiben ab 15 °C. Ein Wert außerhalb

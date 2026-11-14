@@ -31,7 +31,6 @@ _.expires_rule  # Feld von wire.Command: Server geraete/device_protocol.py werte
 
 # --- Soll aus der Bedienung (smartheat_core/plan.py): der Prueftakt rechnet es je Kreis (smartheat_runtime/plan_quelle.py) ---
 _.naechster_wechsel  # smartheat_core/plan.py SollErgebnis: Feld wird mit dem Wochenplan vom Wecker gelesen
-_.uhr_unklar  # smartheat_core/plan.py SollErgebnis: Merker fuer die Meldung "Uhr unklar", gelesen mit der Meldung
 _.wochenplan_fehler  # smartheat_core/plan.py: Formpruefung des Wochenplans, der Dokument-Pruefer des Hosts ruft sie mit der Verdrahtung
 _.anstieg_vom_kunden  # smartheat_core/plan.py: Eingang des Boosts (anstieg_vom_kunden), mit der Verdrahtung gerufen
 _.SOLL_ART_ABSENKUNG  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung

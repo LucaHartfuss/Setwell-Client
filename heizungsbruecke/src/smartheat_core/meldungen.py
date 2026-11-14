@@ -203,6 +203,10 @@ TABELLE: dict[str, Vorlage] = _ERZEUGER | {
             "SmartHeat: Das Abfragekontingent beim Hersteller ist erschöpft. Die Werte der Anlage sind vorerst "
             "nicht aktuell."),
         "kontingent_frei": _vorlage("orange", (), "SmartHeat: Das Abfragekontingent beim Hersteller ist wieder frei."),
+        "uhr_unklar": _vorlage(
+            "gelb", (),
+            "SmartHeat: Die Uhr des Geräts ist nicht vertrauenswürdig. Die Zeitpläne ruhen, es gilt der Wunsch am "
+            "Thermostat, bis die Uhr wieder stimmt."),
         "entity_fehlt": _vorlage(
             "orange", ("feld",),
             "SmartHeat: {feld}: zugeordnete Entity fehlt in Home Assistant und wird bis zum nächsten Start nicht "
