@@ -42,7 +42,7 @@ SCHRITTE = {
     "weishaupt_wwp_basis": {"room_setpoint": 0.5},
     "viessmann_vicare": {"curve": 0.1, "level": 1.0, "room_setpoint": 1.0},
 }
-GESAMT = 500  # Groessenordnung der feindlichen Antworten (Laufzeitbudget des Ordners: 30 s); je Fall mindestens die Pflichtfaelle
+GESAMT = 500  # Groessenordnung der feindlichen Antworten (Laufzeitbudget des Ordners: 45 s); je Fall mindestens die Pflichtfaelle
 JE_ANLAGE = GESAMT // len(ALLE)
 SAAT = 20271031
 SONDERWERTE = (math.nan, INF, -INF)
@@ -84,12 +84,18 @@ def _ist_zahl(wert) -> bool:
     return isinstance(wert, (int, float)) and not isinstance(wert, bool) and math.isfinite(wert)
 
 
+def _typ_kategorie(nr: int, hebel: str | None) -> str:
+    """Zahlen gehen auf allen Hebeln zugleich hinaus, Nicht-Zahlen je Hebel einzeln."""
+    return f"typ:{nr}" if hebel is None else f"typ:{nr}:{hebel}"
+
+
 def _kategorien(satz: str, verteilsystem: str) -> set[str]:
     """Alles, was je Fall mindestens einmal hinausgehen muss (gegen kuenftiges Kuerzen der Antworten)."""
     hebel = tuple(BEREICHE[(satz, verteilsystem)])
     return ({f"grenze:{name}:{art}" for name in hebel for art in ("unter", "ueber")}
             | {f"sonder:{name}:{wert}" for name in hebel for wert in SONDERWERTE}
-            | {f"typ:{nr}" for nr in range(len(UNSINN))} | {f"fremd:{name}" for name in FREMDE_FELDER}
+            | {_typ_kategorie(nr, name) for nr, wert in enumerate(UNSINN) for name in (hebel if not _ist_zahl(wert) else (None,))}
+            | {f"fremd:{name}" for name in FREMDE_FELDER}
             | {f"fehlt:{name}" for name in hebel} | {f"kein_objekt:{nr}" for nr in range(len(KEIN_OBJEKT))}
             | {f"status:{wert!r}" for wert in STATUS} | {f"schema:{wert!r}" for wert in SCHEMA}
             | {f"huelle:{nr}" for nr in range(len(HUELLEN))})
@@ -117,10 +123,17 @@ def _pflichtfaelle(satz: str, verteilsystem: str) -> list[Antwort]:
                                   lambda stand, name=name, wert=wert: {"status": "ok",
                                                                        "levers": {**abweichend(stand), name: wert}},
                                   True))
-    for nr, wert in enumerate(UNSINN):  # derselbe Wert auf allen Hebeln: die Zusicherung gilt je Hebel
-        faelle.append(Antwort(f"typ:{nr}",
-                              lambda stand, wert=wert: {"status": "ok", "levers": dict.fromkeys(hebel, wert)},
-                              not _ist_zahl(wert)))
+    for nr, wert in enumerate(UNSINN):
+        if _ist_zahl(wert):  # derselbe Zahlenwert auf allen Hebeln: er wird je Hebel begrenzt
+            faelle.append(Antwort(_typ_kategorie(nr, None),
+                                  lambda stand, wert=wert: {"status": "ok", "levers": dict.fromkeys(hebel, wert)},
+                                  False))
+            continue
+        for name in hebel:  # eine Nicht-Zahl auf genau einem Hebel (die uebrigen gueltig): die Antwort ist ungueltig
+            faelle.append(Antwort(_typ_kategorie(nr, name),
+                                  lambda stand, name=name, wert=wert: {"status": "ok", "levers": {
+                                      **abweichend(stand), name: wert}},
+                                  True))
     for name in FREMDE_FELDER:
         faelle.append(Antwort(f"fremd:{name}",
                               lambda stand, name=name: {"status": "ok", "levers": {**abweichend(stand), name: 21.5}},

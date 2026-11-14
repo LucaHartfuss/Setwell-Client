@@ -38,12 +38,13 @@ def _anfordern(welt) -> str:
 
 
 def _tagestick(welt) -> list:
-    """Ein Tag mit Tagestick vergeht (warm, kein Boost); die Snapshots, die dabei auf dem aktuellen Link gesendet wurden."""
+    """Ein Tag mit Tagestick vergeht (warm, kein Boost); die Snapshots, die dabei auf dem aktuellen Link hinzukamen."""
+    vorher = len(welt.link.von("up/snapshot"))
     welt.bis_nach_tagestick(RAUM)
     welt.uhr.vor(86400 - 300 - 2)  # der Raumfuehler ist danach veraltet: er meldet vor dem naechsten Tick
     welt.raum(RAUM)
     welt.runde(300)
-    return welt.link.von("up/snapshot")
+    return welt.link.von("up/snapshot")[vorher:]
 
 
 def _regelt(welt, werte: dict) -> None:
