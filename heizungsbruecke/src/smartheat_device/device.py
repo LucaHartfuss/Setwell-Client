@@ -43,6 +43,7 @@ DEVICE_DIR = "device"
 TICK_SECONDS = 1.0
 STATUS_MIN_SECONDS = 10
 MELDUNGEN_MIN_SECONDS = 10
+HELLO_NACHSENDEN_MIN_SECONDS = 60
 MELDUNGEN_JE_NACHRICHT = 50
 SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
@@ -157,6 +158,7 @@ class Device:
         #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
         self._status_erzwingen = False
         self._hello_stand: dict | None = None  # Host-Felder des zuletzt gesendeten hello (ha), sonst None
+        self._hello_nachgesendet_at: float | None = None  # Takt-Uhr des zuletzt nachgesendeten hello (_hello_nachsenden)
         self._hello_fehler: str | None = None  # letzte Fehlerart beim Bauen von hello (je Art einmal loggen)
         self._status_fehler: str | None = None  # letzter Vertragsverstoss beim Bauen (je Text einmal loggen)
         self._wunsch_fehler: str | None = None  # dito beim Bauen von up/wish
@@ -378,7 +380,7 @@ class Device:
         if self._bereit:
             self._zurueckgehaltene_pruefen(now)
             if link is not None and link.connected:
-                self._hello_nachsenden()
+                self._hello_nachsenden(now)
         self.befehle.pruefen()
         self._wunsch_senden()
         self._status_senden(now, force=self._status_erzwingen)
@@ -485,11 +487,17 @@ class Device:
         return {"auto_update": auto_update if isinstance(auto_update, bool) else None,
                 "integration_version": version if nachrichten.integration_version_gueltig(version) else None}
 
-    def _hello_nachsenden(self) -> None:
-        """Aendert sich eines der Host-Felder des hello, geht ein neues hello hinaus (verbunden und bereit)."""
+    def _hello_nachsenden(self, now: float) -> None:
+        """Aendert sich eines der Host-Felder des hello, geht ein neues hello hinaus (verbunden und bereit), zwischen
+        zwei nachgesendeten hellos mindestens HELLO_NACHSENDEN_MIN_SECONDS: ein Feld, das schnell hin und her kippt,
+        loest sonst jede Sekunde ein hello aus (und beim Server jedes Mal das erneute Senden aller Meldungen). Eine
+        Aenderung im Abstand geht nicht verloren, der Stand bleibt verschieden und das naechste Fenster sendet sie."""
         if self._hello_stand is None or self.host.host != "ha":
             return
+        if self._hello_nachgesendet_at is not None and now - self._hello_nachgesendet_at < HELLO_NACHSENDEN_MIN_SECONDS:
+            return
         if self._hello_felder_jetzt() != self._hello_stand:
+            self._hello_nachgesendet_at = now
             self._hello_senden()
 
     def _uhr_synchron(self) -> bool | None:

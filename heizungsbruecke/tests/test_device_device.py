@@ -207,8 +207,40 @@ def test_eine_aenderung_der_werte_sendet_im_naechsten_takt_ein_neues_hello_sonst
     world.device.schritt()
     assert len(world.link.of("up/hello")) == 2
     world.host.hello_werte = {"auto_update": False, "integration_version": None}
+    world.clock.now += device.HELLO_NACHSENDEN_MIN_SECONDS
     world.device.schritt()
     assert [h["auto_update"] for h in world.link.of("up/hello")] == [True, True, False]
+
+
+def test_ein_kippendes_feld_sendet_hoechstens_ein_hello_je_60_sekunden_und_die_letzte_aenderung_geht_nicht_verloren(
+        tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    anzahl = len(world.link.of("up/hello"))
+    versionen = ["1.2.0", "1.3.0"]
+    for sekunde in range(1, 60):  # jede Sekunde kippt die Integration zwischen zwei Versionen
+        world.host.hello_werte = {"auto_update": True, "integration_version": versionen[sekunde % 2]}
+        world.clock.now += 1
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 1  # das erste Nachsenden geht gleich, danach ist Pause
+    world.host.hello_werte = {"auto_update": True, "integration_version": "9.9.9"}
+    world.clock.now += 1  # 59 s nach dem ersten Nachsenden
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 1
+    world.clock.now += 1  # 60 s danach: der aktuelle Stand geht hinaus
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 2
+    assert world.link.of("up/hello")[-1]["integration_version"] == "9.9.9"
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 2  # unveraendert: nichts mehr
+
+
+def test_der_abstand_gilt_zwischen_nachgesendeten_hellos_nicht_gegen_das_erste_nach_dem_verbinden(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    world.host.hello_werte = {"auto_update": False, "integration_version": "1.2.0"}
+    world.device.schritt()  # sofort nach dem Verbinden: das erste Nachsenden wartet nicht
+    assert len(world.link.of("up/hello")) == 2
 
 
 def test_ohne_verbindung_geht_kein_hello_hinaus_und_das_naechste_traegt_den_aktuellen_stand(tmp_path):
