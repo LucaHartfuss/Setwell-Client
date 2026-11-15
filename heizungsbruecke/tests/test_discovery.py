@@ -9,7 +9,7 @@ from fakes import FakeClock, HttpAntwort, datei_stand
 from heizungsbruecke import discovery
 from heizungsbruecke.supervisor import SupervisorApi
 
-CODE = "ABCDEFGHIJKL"
+CODE = "ABCDEFGHIJKLMNOP"
 
 
 class Supervisor:

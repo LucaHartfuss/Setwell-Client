@@ -80,7 +80,7 @@ class FakeDeviceSicht:
 
     def __init__(self, konf: dict | None, bedienung: dict | None = None, dirty: bool = False) -> None:
         self.konf, self.bed, self.dirty = konf, bedienung, dirty
-        self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKL")
+        self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKLMNOP")
         self.documents = SimpleNamespace(
             aktuell=lambda art: SimpleNamespace(dirty=self.dirty) if self.bed is not None else None)
         self.wuensche: list = []

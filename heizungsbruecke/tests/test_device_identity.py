@@ -52,9 +52,45 @@ def test_an_existing_agent_key_keeps_its_device_id(tmp_path):
     assert identity.load_or_create(tmp_path).device_id == identity.device_id_for(key.public_key())
 
 
-def test_claim_code_is_12_base32_characters():
+def test_claim_code_is_16_base32_characters():
     code = identity.new_claim_code(lambda n: bytes(range(n)))
-    assert len(code) == 12 and set(code) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")  # Literal aus V1
+    assert len(code) == 16 and set(code) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")  # Literal aus V1
+    assert wire.CLAIM_CODE_CHARS == 16
+
+
+def test_claim_code_uses_80_bits_of_randomness():
+    angefragt = []
+
+    def quelle(n):
+        angefragt.append(n)
+        return bytes(range(n))
+
+    identity.new_claim_code(quelle)
+    assert angefragt == [10]
+
+
+@pytest.mark.parametrize("alt", ["ABCDEFGHIJKL", "ABCDEFGHIJKLMNOP1", "abcdefghijklmnop", "ABCD-EFGH-IJKL-MNOP", ""])
+def test_a_stored_code_of_the_wrong_shape_is_replaced_and_logged_without_the_code(tmp_path, caplog, alt):
+    identity.load_or_create(tmp_path)
+    pfad = tmp_path / identity.CLAIM_CODE_FILE
+    pfad.write_text(alt)
+    pfad.chmod(0o644)
+
+    with caplog.at_level("WARNING"):
+        ident = identity.load_or_create(tmp_path, lambda n: bytes(range(n)))
+
+    assert ident.claim_code == "AAAQEAYEAUDAOCAJ" == pfad.read_text()
+    assert stat.S_IMODE(pfad.stat().st_mode) == 0o600
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+    assert not alt or alt not in caplog.text
+    assert "AAAQEAYEAUDAOCAJ" not in caplog.text
+
+
+def test_a_stored_code_of_the_right_shape_stays(tmp_path):
+    identity.load_or_create(tmp_path)
+    (tmp_path / identity.CLAIM_CODE_FILE).write_text("ABCDEFGHIJKLMNOP\n")
+
+    assert identity.load_or_create(tmp_path).claim_code == "ABCDEFGHIJKLMNOP"
 
 
 def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_path):
@@ -62,10 +98,10 @@ def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_pa
     folgt genau der Quelle und haengt von nichts anderem ab als von ihr."""
     for funktion in (identity.new_claim_code, identity.load_or_create):
         assert inspect.signature(funktion).parameters["randbytes"].default is secrets.token_bytes, funktion.__name__
-    assert identity.new_claim_code(lambda n: bytes(n)) == "AAAAAAAAAAAA"
-    assert identity.new_claim_code(lambda n: bytes([255]) * n) == "777777777777"
-    assert identity.new_claim_code(lambda n: bytes(range(n))) == "AAAQEAYEAUDA"
-    assert identity.load_or_create(tmp_path / "c", lambda n: bytes(n)).claim_code == "AAAAAAAAAAAA"
+    assert identity.new_claim_code(lambda n: bytes(n)) == "AAAAAAAAAAAAAAAA"
+    assert identity.new_claim_code(lambda n: bytes([255]) * n) == "7777777777777777"
+    assert identity.new_claim_code(lambda n: bytes(range(n))) == "AAAQEAYEAUDAOCAJ"
+    assert identity.load_or_create(tmp_path / "c", lambda n: bytes(n)).claim_code == "AAAAAAAAAAAAAAAA"
     codes = {identity.new_claim_code() for _ in range(2)}
     assert len(codes) == 2
     assert identity.load_or_create(tmp_path / "a").claim_code != identity.load_or_create(tmp_path / "b").claim_code
@@ -73,8 +109,8 @@ def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_pa
 
 def test_a_new_claim_code_is_saved_only_on_request(tmp_path):
     ident = identity.load_or_create(tmp_path)
-    neu = identity.save_claim_code(tmp_path, ident, "ABCDEFGHIJKL")
-    assert neu.claim_code == "ABCDEFGHIJKL" == identity.load_or_create(tmp_path).claim_code
+    neu = identity.save_claim_code(tmp_path, ident, "ABCDEFGHIJKLMNOP")
+    assert neu.claim_code == "ABCDEFGHIJKLMNOP" == identity.load_or_create(tmp_path).claim_code
     assert neu.device_id == ident.device_id
 
 
