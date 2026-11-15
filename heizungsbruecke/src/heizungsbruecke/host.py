@@ -25,7 +25,7 @@ from smartheat_core import config_check, kreisansicht, meldungen, wallclock
 from smartheat_core.logtext import lesbar
 from smartheat_runtime import dokument_config, plan_quelle
 from smartheat_runtime.app import Loaded, Notice, RestoreParts, StartFailure
-from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError
+from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError, ConfigFormError
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.plausibility import ROOM_TEMP_RANGE, is_plausible
 from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, TriggerSource
@@ -202,7 +202,7 @@ class HaHost:
             # (_bindung_pruefen).
             text = dokument.lokal_pruefen(self._konfiguration, self.kreis)
             if text:
-                raise ConfigError(text)
+                raise ConfigFormError(text)  # eine Pflichtzuordnung, die diese Software verlangt, fehlt
             b = dokument.bindung(self._konfiguration, self.kreis)
             geraet_trigger.pruefe_soll_ref(b.soll_entity)
             runtime = dokument_config.runtime_config(
@@ -230,10 +230,13 @@ class HaHost:
             plant_id = dokument.anlagen_kennung(b)
         except StartupError as error:
             raise StartFailure(str(error), error.key) from error
-        except ConfigError as error:
+        except ConfigFormError as error:
             # Pruefungstexte sind deterministisch: der Text ist zugleich die Identitaet. Nur die Konfiguration selbst
             # kann eine neue Software nicht lesen.
             raise StartFailure(str(error), konfigurationsform=True) from error
+        except ConfigError as error:
+            # Rastung, lokale Sicherheitswerte, Positivliste und ungueltige Werte aendert keine neue Software.
+            raise StartFailure(str(error)) from error
         except ManifestError as error:
             raise StartFailure(str(error)) from error
         _check_timezone(self._ha_api)
@@ -432,7 +435,7 @@ def _bindung_pruefen(konfiguration, kreis: int | None = None) -> None:
     ablehnung = config_check.ha_bindung_pruefen(kreisansicht.sicht(konfiguration, kreis))
     if ablehnung is not None:
         feld = (ablehnung.details or {}).get("feld", "bindung")
-        raise ConfigError(f"{feld}: Form der Zuordnung ungültig – {RECONFIGURE_HINT}")
+        raise ConfigFormError(f"{feld}: Form der Zuordnung ungültig – {RECONFIGURE_HINT}")
 
 
 def _rollen_pruefen_mit_wiederholung(ha_api, b: dokument.HaBindung) -> list[tuple[str, str]]:

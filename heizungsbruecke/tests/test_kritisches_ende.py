@@ -3,6 +3,7 @@ GRACE_PERIOD, als ISO-Datum in der Zeitzone des gespeicherten Beginns; ohne beka
 import logging
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fakes import FakeClock
 
 from heizungsbruecke import geraet_status
@@ -76,10 +77,10 @@ def test_eine_beschaedigte_datei_gibt_kein_datum_und_nur_eine_warnung_je_halbe_m
 def test_das_datum_erscheint_im_ereignis_als_parameter_und_ohne_datum_die_andere_fassung():
     anzeige = Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
                       hinweise=(), meldungen=(), konfiguration_abgelehnt=None)
-    mit = geraet_status.meldungen_liste(anzeige, "2026-12-01", True)
+    mit = geraet_status.meldungen_liste(anzeige, "2026-12-01", kritisch=True)
     assert mit == [{"key": "update_noetig", "code": "meldung.update_noetig", "params": {"ende": "2026-12-01"},
                     "stufe": "rot"}]
-    ohne = geraet_status.meldungen_liste(anzeige, None, True)
+    ohne = geraet_status.meldungen_liste(anzeige, None, kritisch=True)
     assert ohne == [{"key": "update_noetig", "code": "meldung.update_noetig_unbekannt", "params": {}, "stufe": "rot"}]
     assert meldungen.aus_dict({feld: mit[0][feld] for feld in ("code", "params", "stufe")}) is not None  # gueltig
 
@@ -99,5 +100,15 @@ def test_die_lokale_sicht_traegt_das_datum_und_das_ereignis_gibt_es_weiter(tmp_p
 
 
 def test_die_lokale_sicht_ohne_kritischen_eintrag_nennt_ihn_nicht():
-    lokal = geraet_status.lokale_sicht(lambda: None, lambda kreis: None, lambda kreis: None, lambda: None)
+    lokal = geraet_status.lokale_sicht(lambda: None, lambda kreis: None, lambda kreis: None, lambda: None,
+                                       update_noetig_kritisch=lambda: False)
     assert lokal()["update_noetig_kritisch"] is False
+
+
+def test_ob_ein_kritischer_eintrag_vorliegt_muss_jeder_aufrufer_ausdruecklich_angeben():
+    anzeige = Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
+                      hinweise=(), meldungen=(), konfiguration_abgelehnt=None)
+    with pytest.raises(TypeError):
+        geraet_status.meldungen_liste(anzeige, None)
+    with pytest.raises(TypeError):
+        geraet_status.lokale_sicht(lambda: None, lambda kreis: None, lambda kreis: None, lambda: None)

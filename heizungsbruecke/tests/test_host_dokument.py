@@ -325,6 +325,63 @@ def test_load_accepts_a_configuration_that_fits_the_lock(env):
     HaHost(FakeGeraet(konfiguration_aus_optionen(OPTIONS)), env.ha, clock=env.clock).load()
 
 
+def _grund_der_ablehnung(env, optionen=None) -> StartFailure:
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen({**OPTIONS, **(optionen or {})})), env.ha, clock=env.clock)
+    with pytest.raises(StartFailure) as fehler:
+        host.load()
+    return fehler.value
+
+
+@pytest.mark.parametrize("optionen", [
+    {"lever_set": "gibt_es_nicht"},  # Hebelsatz, den diese Software nicht kennt
+    {"verteilsystem": "Wandheizung"},  # Verteilsystem ohne lokale Sicherheitswerte dieser Software
+    {"lever_set": "weishaupt_wwp"},  # Pflichtzuordnung des Hebelsatzes fehlt im Dokument
+], ids=["hebelsatz", "verteilsystem", "pflichtzuordnung"])
+def test_was_diese_software_nicht_lesen_kann_ist_ein_formgrund_der_karenz(env, optionen):
+    assert _grund_der_ablehnung(env, optionen).konfigurationsform
+
+
+def test_zu_kurze_rueckstellliste_ist_ein_formgrund_der_karenz(env):
+    konf = konfiguration_aus_optionen(OPTIONS)
+    kurz = {**konf, "bindungsparameter": {**konf["bindungsparameter"], "zurueck": [], "zurueck_optional": []}}
+    with pytest.raises(StartFailure) as fehler:
+        HaHost(FakeGeraet(kurz), env.ha, clock=env.clock).load()
+    assert fehler.value.konfigurationsform
+
+
+def test_ein_ungueltiger_wert_der_konfiguration_ist_kein_formgrund(env):
+    """Tagestick, Soll-Entity und Kennung hat die neue Software nicht anders zu lesen: sofort melden."""
+    assert not _grund_der_ablehnung(env, {"daily_trigger_time": "25:00"}).konfigurationsform
+    assert not _grund_der_ablehnung(env, {"entity_room_target": "climate.wz"}).konfigurationsform
+
+
+def test_ein_verstoss_gegen_die_rastung_ist_kein_formgrund(env):
+    _rastung_schreiben("Fussbodenheizung")
+    fehler = _grund_der_ablehnung(env)
+    assert "festgelegt" in fehler.grund and not fehler.konfigurationsform
+
+
+def test_ein_fehlerhafter_sicherheitswert_ist_kein_formgrund(env, monkeypatch):
+    """Ein Verstoss gegen die lokalen Sicherheitswerte (Regel 4) meldet sofort, auch nach einem Softwarewechsel."""
+    def _verletzt(*args):
+        raise ValueError("Comfort-Boost curve=9 ausserhalb [0.4, 1.5]")
+
+    monkeypatch.setattr("smartheat_runtime.dokument_config.resolve_local_safety", _verletzt)
+    fehler = _grund_der_ablehnung(env)
+    assert "Comfort-Boost" in fehler.grund and not fehler.konfigurationsform
+
+
+def test_ein_fehler_des_kanalverzeichnisses_ist_kein_formgrund(env, monkeypatch):
+    from smartheat_runtime.roles import ManifestError
+
+    def _manifest(*args, **kwargs):
+        raise ManifestError("Pflichtrolle fehlt")
+
+    monkeypatch.setattr("heizungsbruecke.host.build_manifest", _manifest)
+    fehler = _grund_der_ablehnung(env)
+    assert fehler.grund == "Pflichtrolle fehlt" and not fehler.konfigurationsform
+
+
 def test_sign_off_parts_are_none_with_a_broken_lock(env):
     config.RASTUNG_PATH.parent.mkdir(parents=True, exist_ok=True)
     config.RASTUNG_PATH.write_text("{")

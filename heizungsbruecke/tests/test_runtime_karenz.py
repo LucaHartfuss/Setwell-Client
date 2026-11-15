@@ -1,18 +1,24 @@
 """Karenz nach einem Softwarewechsel: die Meldung zum Konfigurationsfehler ("Heizungssteuerung gestoppt") wartet 15 Minuten
 auf die neue Konfiguration; Zustand, Status und Ruhezustand bleiben wahr. Abgelehnte Konfiguration, abgelaufene Karenz,
 laufender Boost, ein Start ohne Softwarewechsel und jeder Startfehler, der nicht die Form der Konfiguration betrifft
-(Treiber, Kanalverzeichnis, Anlage), melden sofort. Die Karenz beginnt je Softwarestand nur einmal, auch wenn die
+(unbekannter Hebelsatz, unbekanntes Verteilsystem, fehlende Bindungsparameter oder Pflichtzuordnungen), melden sofort:
+Rastung, Positivliste, Sicherheitswerte, Treiber, Kanalverzeichnis, Anlage, ungueltige Werte. Die Karenz beginnt je Softwarestand nur einmal, auch wenn die
 monotone Uhr nach einem Neustart zurueckspringt."""
 import json
 
 import pytest
-from runtime_helpers import _start_bridge
+from geraet_helpers import konfiguration_aus_optionen
+from rastung_beispiele import rastung_aus
+from runtime_helpers import OPTIONS, _start_bridge
 
-from smartheat_core import dateien
+from heizungsbruecke import config
+from smartheat_core import dateien, rastung
 from smartheat_runtime import app, karenz
 from smartheat_runtime.backup_store import save_backup
+from smartheat_runtime.roles import ManifestError
 
-FEHLER = {"entity_shift_current": "climate.zone", "daily_trigger_time": "25:00"}  # ungueltig -> Konfigurationsfehler
+FEHLER = {"lever_set": "gibt_es_nicht"}  # Hebelsatz, den diese Software nicht kennt: Konfigurationsform
+SOFORT = {"daily_trigger_time": "25:00"}  # ungueltiger Wert: Konfigurationsfehler ohne Bezug zur Form
 NEU, ALT = "2.0.0", "1.9.0"
 
 
@@ -134,33 +140,56 @@ def test_eine_abgelehnte_konfiguration_meldet_sofort(env):
     assert _gemeldet(env)
 
 
-def test_ein_startfehler_ausserhalb_der_konfigurationsform_meldet_sofort(env, monkeypatch):
-    """Treiber, Kanalverzeichnis und Anlage sind kein Grund, auf eine neue Konfiguration zu warten."""
+def test_ein_ungueltiger_wert_der_konfiguration_meldet_sofort(env):
+    """Auch nach einem Softwarewechsel: ein Wert, den keine neue Software anders liest, wartet nicht."""
     _gemerkt(env)
 
-    def _treiber_kaputt(self):
-        raise app.StartFailure("Treiber nicht startbar", "treiber")
+    _start_bridge(env, **SOFORT)
 
-    monkeypatch.setattr("heizungsbruecke.host.HaHost.load", _treiber_kaputt)
-
-    bridge = _start_bridge(env, **FEHLER)
-
-    assert bridge.reason == "konfigurationsfehler"
     assert _gemeldet(env)
     assert json.loads(_datei(env).read_text()) == {"version": NEU}  # kein Beginn gemerkt
 
 
-def test_ein_formfehler_der_konfiguration_laesst_die_meldung_warten(env, monkeypatch):
+def test_ein_verstoss_gegen_die_rastung_meldet_sofort(env):
+    _gemerkt(env)
+    rastung.schreiben(config.RASTUNG_PATH, rastung_aus(konfiguration_aus_optionen(OPTIONS), verteilsystem="Fussbodenheizung"),
+                      "2026-10-14T00:00:00+00:00")
+
+    _start_bridge(env)
+
+    assert _gemeldet(env)
+
+
+def test_ein_verstoss_gegen_die_positivliste_meldet_sofort(env):
+    _gemerkt(env)
+    env.ha.states["person.luca"] = "home"
+
+    _start_bridge(env, entity_operating_mode="person.luca")
+
+    assert _gemeldet(env)
+
+
+def test_ein_fehler_des_kanalverzeichnisses_meldet_sofort(env, monkeypatch):
     _gemerkt(env)
 
-    def _formfehler(self):
-        raise app.StartFailure("Konfiguration: neues Pflichtfeld fehlt", konfigurationsform=True)
+    def _manifest(*args, **kwargs):
+        raise ManifestError("Pflichtrolle fehlt")
 
-    monkeypatch.setattr("heizungsbruecke.host.HaHost.load", _formfehler)
+    monkeypatch.setattr("heizungsbruecke.host.build_manifest", _manifest)
 
-    _start_bridge(env, **FEHLER)
+    _start_bridge(env)
 
-    assert not _gemeldet(env)
+    assert _gemeldet(env)
+
+
+def test_fehlende_entities_nach_dem_budget_melden_sofort(env, monkeypatch):
+    _gemerkt(env)
+    monkeypatch.setattr("heizungsbruecke.host.time.sleep", lambda s: None)
+    del env.ha.states["number.heat_limit"]
+
+    _start_bridge(env)
+
+    assert _gemeldet(env)
 
 
 def test_eine_boot_schleife_unterdrueckt_die_meldung_nicht_dauerhaft(env):
@@ -214,13 +243,15 @@ def test_bleibt_ein_boost_auf_der_anlage_meldet_der_start_sofort(env, monkeypatc
     assert any("Boost-Werten" in text for _, text in env.ha.persistent)
 
 
-def test_ein_zurueckgenommener_boost_laesst_die_meldung_warten(env):
+def test_ein_zurueckgenommener_boost_laesst_die_meldung_warten(env, monkeypatch):
+    """Die Pflichtzuordnung fehlt (Formgrund), die Bindung zum Zuruecknehmen ist aber lesbar."""
+    monkeypatch.setattr("heizungsbruecke.dokument.lokal_pruefen", lambda *args: "Es fehlt die Zuordnung curve.")
     _gemerkt(env)
     save_backup(env.paths["BACKUP_PATH"], {
         "boost_active": True, "restore_point": {"curve": 1.0, "room_setpoint": 20.0, "heat_limit": 16.0}})
     env.ha.states["climate.zone"] = "heat_cool"
 
-    _start_bridge(env, **FEHLER)
+    _start_bridge(env)
 
     assert env.ha.writes
     assert not _gemeldet(env)
@@ -294,6 +325,28 @@ def test_ein_weiterer_softwarewechsel_beginnt_nach_dem_ruecksprung_eine_neue_kar
 
     assert neuer.rest() == 900
     assert json.loads((tmp_path / karenz.DATEI).read_text())["karenz_fuer"] == "3.0.0"
+
+
+def _version_drei(tmp_path, uhr):
+    return karenz.Karenz(tmp_path / karenz.DATEI, "3.0.0", zustand_vorhanden=False, clock=uhr)
+
+
+def test_ein_weiterer_wechsel_ohne_uhrsprung_erbt_den_beginn_der_laufenden_karenz(tmp_path, clock):
+    """Die Karenz zaehlt vom gemerkten Beginn, nicht je Version: eine dritte Version in der Karenz der zweiten wartet
+    nur den Rest ab (kuerzer, nie laenger: die sichere Richtung)."""
+    _schreiben(tmp_path, {"version": ALT})
+    assert _karenz(tmp_path, clock).rest() == 900
+    clock.advance(300)
+
+    assert _version_drei(tmp_path, clock).rest() == pytest.approx(600)
+
+
+def test_ein_weiterer_wechsel_nach_dem_ende_der_karenz_ohne_uhrsprung_meldet_sofort(tmp_path, clock):
+    _schreiben(tmp_path, {"version": ALT})
+    _karenz(tmp_path, clock).rest()
+    clock.advance(1000)
+
+    assert _version_drei(tmp_path, clock).rest() is None
 
 
 def test_eine_datei_ohne_vermerk_der_karenz_bleibt_lesbar_und_beginnt_bei_ruecksprung_neu(tmp_path, clock):

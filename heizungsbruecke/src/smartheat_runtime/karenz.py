@@ -10,7 +10,16 @@ dort die Software, fuer die die Karenz begann: je Softwarestand beginnt sie hoec
 zurueck (Neustart des Geraets), beginnt deshalb keine zweite Karenz derselben Software; eine Boot-Schleife unter der
 Karenz haelt die Meldung nicht dauerhaft zurueck. Erst ein weiterer Softwarewechsel beginnt eine neue Karenz. Laesst
 sich der Beginn nicht merken, gibt es keine Karenz (lieber sofort melden als nie). Dateien des alten Stands ohne den
-Vermerk bleiben lesbar (dann beginnt die Karenz bei zurueckgesprungener Uhr einmal neu und wird vermerkt)."""
+Vermerk bleiben lesbar (dann beginnt die Karenz bei zurueckgesprungener Uhr einmal neu und wird vermerkt).
+
+Nur Startfehler, die die Form der Konfiguration betreffen (unbekannter Hebelsatz oder unbekanntes Verteilsystem,
+fehlende Bindungsparameter oder Pflichtzuordnungen), nutzen die Karenz; Rastung, lokale Sicherheitswerte, Positivliste
+und ungueltige Werte melden sofort (`StartFailure.konfigurationsform`).
+
+Grenzen: Springt die Uhr in einer laufenden Karenz zurueck (Neustart des Geraets), meldet die Meldung sofort, auch wenn
+die Karenz noch nicht abgelaufen waere; ein weiterer Softwarewechsel ohne Uhrsprung erbt den Beginn der vorigen Karenz,
+die Meldung geht dann nach deren Ende. Eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, haelt die
+Meldung bis zu KARENZ_NACH_UPDATE_S zurueck, weil ohne Boot-Kennung kein Neustart zu erkennen ist."""
 import logging
 import math
 from collections.abc import Callable

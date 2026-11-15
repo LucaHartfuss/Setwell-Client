@@ -107,9 +107,11 @@ logger = logging.getLogger(__name__)
 
 class StartFailure(Exception):
     """Konfigurations- oder Startfehler des Hosts: Ruhezustand `konfigurationsfehler`. `key` ist die stabile Identitaet
-    fuer den Meldezustand (None = der Text selbst), siehe _fail_start. `konfigurationsform`: die Konfiguration selbst
-    ist nach Schema, Version oder Pflichtfeldern nicht lesbar (nur dann kann eine neue Software die Ursache sein und
-    die Meldung auf die neue Konfiguration warten); Treiber-, Kanal-, Geraete- und Anlagenfehler sind es nicht."""
+    fuer den Meldezustand (None = der Text selbst), siehe _fail_start. `konfigurationsform`: diese Software kann die
+    Konfiguration nicht lesen (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende Bindungsparameter oder
+    Pflichtzuordnungen; nur dann kann eine neue Software die Ursache sein und die Meldung auf die neue Konfiguration
+    warten). Rastung, lokale Sicherheitswerte, Positivliste, ungueltige Werte sowie Treiber-, Kanal-, Geraete- und
+    Anlagenfehler sind es nicht und melden sofort."""
 
     def __init__(self, grund: str, key: str | None = None, *, konfigurationsform: bool = False) -> None:
         super().__init__(grund)
@@ -237,10 +239,11 @@ def _fail_start(notifier, status, clock, grund: str, key: str | None = None, *, 
     erneut, legt aber die offene Meldung neu an (in HA fehlt sie nach einem Host-Neustart). Danach
     Ruhezustand mit Neupruefung nach CONFIG_RECHECK_SECONDS. Laeuft ein Boost, nimmt der Start ihn ueber `parts`
     zurueck; geht das nicht, sagt die Meldung, dass die Boost-Werte noch auf der Anlage stehen.
-    Nach einem Softwarewechsel wartet die Meldung die Karenz ab, wenn die Konfiguration selbst nicht lesbar ist
+    Nach einem Softwarewechsel wartet die Meldung die Karenz ab, wenn diese Software die Konfiguration nicht lesen kann
     (`konfigurationsform`; Status und Ruhezustand sind sofort wahr); die Neupruefung kommt dann zum Ende der Karenz.
-    Sofort gemeldet wird jeder andere Startfehler (Treiber, Kanalverzeichnis, Anlage), bei abgelehnter Konfiguration,
-    bei Boost-Werten, die auf der Anlage bleiben, und ohne Karenz."""
+    Sofort gemeldet wird jeder andere Startfehler (Rastung, lokale Sicherheitswerte, Positivliste, Treiber,
+    Kanalverzeichnis, Anlage), bei abgelehnter Konfiguration, bei Boost-Werten, die auf der Anlage bleiben, und ohne
+    Karenz."""
     logger.error("FEHLER: %s", lesbar(grund))  # der Grund traegt Text der Konfiguration (Gateway: vom Server)
     meldung = meldungen.neu("meldung.konfiguration_fehler", grund=grund)
     boost_bleibt = False

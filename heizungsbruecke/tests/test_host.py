@@ -116,6 +116,7 @@ def test_eine_uebernommene_rolle_auf_einer_person_startet_nicht_und_legt_nichts_
         _host(env, entity_operating_mode="person.luca").load()
     assert fehler.value.grund == "operating_mode: diese Entity darf SmartHeat nicht nutzen (lokale Positivliste)"
     assert "person.luca" not in fehler.value.grund
+    assert not fehler.value.konfigurationsform  # die Positivliste gilt lokal, eine neue Software aendert daran nichts
     assert angelegt == [] and sleeps == []
 
 
@@ -140,6 +141,7 @@ def test_eine_pflichtrolle_ohne_zustand_wird_wiederholt_und_scheitert_mit_festem
                                   "bitte SmartHeat neu konfigurieren")
     assert sleeps == list(DERIVED_SENSORS_RETRY_DELAYS_SECONDS)
     assert angelegt == []
+    assert not fehler.value.konfigurationsform  # StartupError: HA liefert nicht, die Konfiguration ist es nicht
 
 
 def test_ein_raumfuehler_ohne_zustand_ist_nicht_pruefbar(env, angelegt, sleeps):

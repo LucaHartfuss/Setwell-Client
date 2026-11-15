@@ -28,7 +28,7 @@ from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import CAP_BATTERY, CAP_BATTERY_LOW, ZigbeeMirror
 from smartheat_runtime import dokument_config, plan_quelle
 from smartheat_runtime.app import Loaded, RestoreParts, StartFailure
-from smartheat_runtime.dokument_config import ConfigError
+from smartheat_runtime.dokument_config import ConfigError, ConfigFormError
 from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, TriggerSource
 from smartheat_runtime.raum import RaumPublisher
 from smartheat_runtime.roles import ALL_ROLES, REQUIRED_ROLES_BY_LEVER_SET, ChannelManifest, ManifestError
@@ -176,8 +176,10 @@ class GatewayHost:
                 lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
                 update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
                 plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
-        except (ConfigError, KeyError) as error:
+        except ConfigFormError as error:
             raise StartFailure(str(error), KEY_CONFIG, konfigurationsform=True) from error
+        except (ConfigError, KeyError) as error:  # Rastung, Sicherheitswerte, ungueltige Werte, Luecke im Dokument
+            raise StartFailure(str(error), KEY_CONFIG) from error
         try:
             sicht = kreisansicht.sicht(self.konfiguration, self.kreis)
             beschreibung = bindungsparameter.beschreibung(
@@ -198,11 +200,11 @@ class GatewayHost:
         try:
             check_lever_set(driver, runtime.lever_set_id)
         except ConfigError as error:
-            raise StartFailure(str(error), KEY_CONFIG, konfigurationsform=True) from error
+            raise StartFailure(str(error), KEY_CONFIG) from error
         try:
             plant_id = registry.plant_id(bindung.driver_spec())
         except kennung.KennungFehler as error:
-            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG, konfigurationsform=True) from error
+            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG) from error
         self._activate(driver)  # erste Abfrage vor dem Manifest: optionale Signale stehen dann im Cache
         try:
             manifest = build_manifest(driver, bindung.raeume)

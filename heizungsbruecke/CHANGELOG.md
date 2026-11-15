@@ -6,9 +6,12 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 ## Unveröffentlicht
 
 - Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
-  nicht lesbar ist (Schema, Version, neue Pflichtfelder); Treiber-, Kanal- und Anlagenfehler melden sofort. Die
-  Wartezeit beginnt je Softwarestand höchstens einmal: eine Boot-Schleife unter 15 Minuten hält die Meldung nicht mehr
-  dauerhaft zurück.
+  die neue Software sie nicht lesen kann (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende
+  Bindungsparameter oder Pflichtzuordnungen); Rastung, lokale Sicherheitswerte, Positivliste, ungültige Werte sowie
+  Treiber-, Kanal- und Anlagenfehler melden sofort. Die Wartezeit beginnt je Softwarestand höchstens einmal: eine
+  Boot-Schleife unter 15 Minuten hält die Meldung nicht mehr dauerhaft zurück. Grenzen: Ein Neustart des Geräts in der
+  laufenden Karenz meldet sofort; eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, hält die Meldung
+  bis zu 15 Minuten zurück.
 
 - Gibt die Integration einen Push-Eintrag nach 24 Stunden ohne Zustellung auf (Ereignis `smartheat_push_aufgegeben`),
   meldet das Add-on das als orange Meldung an den Server (Portal): eine Meldung je Stufe und Kreis, die 24 Stunden nach

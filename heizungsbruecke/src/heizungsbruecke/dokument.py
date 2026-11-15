@@ -26,7 +26,7 @@ from smartheat_core.bindungsparameter import ENERGIE_KANAELE
 from smartheat_core.config_check import NichtPruefbar
 from smartheat_core.levers import LEVER_SETS
 from smartheat_device import fehler
-from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError
+from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError, ConfigFormError
 from smartheat_runtime.roles import LEVER_ROLES
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ def bindung(konfiguration, kreis: int | None = None) -> HaBindung:
     konfiguration = kreisansicht.sicht(konfiguration, kreis)
     hebelsatz = konfiguration.get("hebelsatz")
     if not isinstance(hebelsatz, str) or hebelsatz not in LEVER_SETS or hebelsatz not in PFLICHT_ROLLEN:
-        raise ConfigError(f"Hebelsatz {hebelsatz!r} ist für Home Assistant unbekannt – {RECONFIGURE_HINT}")
+        raise ConfigFormError(f"Hebelsatz {hebelsatz!r} ist für Home Assistant unbekannt – {RECONFIGURE_HINT}")
     raw = _mapping(konfiguration.get("bindung"))
     rollen = {laufzeit_rolle(rolle): ref for rolle, ref in _mapping(raw.get("rollen")).items()
               if rolle != _ROOM_TARGET and isinstance(ref, str) and ref}

@@ -133,7 +133,7 @@ def test_unter_der_gewoehnlichen_mindestversion_ist_die_meldung_orange_und_ohne_
     """Ohne kritischen Eintrag gilt kein Notbetrieb: die Meldung bittet nur um das Update, auch wenn eine Frist-Datei
     ein Datum nennen wuerde."""
     for ende in (None, "2026-12-01"):
-        assert geraet_status.meldungen_liste(_anzeige(zustand="update_noetig"), ende, False) == [
+        assert geraet_status.meldungen_liste(_anzeige(zustand="update_noetig"), ende, kritisch=False) == [
             {"key": "update_noetig", "code": "meldung.update_noetig_mindest", "params": {}, "stufe": "orange"}]
     ha = FakeHa()
     sink, _ = _status(ha)  # die Sicht nennt keinen kritischen Eintrag
@@ -143,7 +143,7 @@ def test_unter_der_gewoehnlichen_mindestversion_ist_die_meldung_orange_und_ohne_
 
 def test_nur_unter_dem_zustand_update_noetig_gibt_es_die_meldung_zur_mindestversion():
     for zustand in ("regelt", "startet", "gesperrt"):
-        codes = [m["code"] for m in geraet_status.meldungen_liste(_anzeige(zustand=zustand), None, True)]
+        codes = [m["code"] for m in geraet_status.meldungen_liste(_anzeige(zustand=zustand), None, kritisch=True)]
         assert not [c for c in codes if "update_noetig" in c]
 
 
@@ -155,13 +155,13 @@ def test_die_stufe_des_codes_geht_unveraendert_ins_ereignis(stufe):
                "gelb": meldungen.neu("erzeuger.hinweis", roh_text="w_1", quelle="mypyllant")}[stufe]
     assert meldung.stufe == stufe
     eintrag = {"key": "k", **meldungen.zu_dict(meldung)}
-    assert geraet_status.meldungen_liste(_anzeige(hinweise=(eintrag,)))[0]["stufe"] == stufe
+    assert geraet_status.meldungen_liste(_anzeige(hinweise=(eintrag,)), kritisch=False)[0]["stufe"] == stufe
 
 
 def test_jede_meldung_hat_genau_key_code_params_und_stufe_aber_keinen_text():
     anzeige = _anzeige(zustand="gesperrt", hinweise=(DOPPELT,), meldungen=(BEGRENZT,),
                        konfiguration_abgelehnt=ABGELEHNT)
-    eintraege = geraet_status.meldungen_liste(anzeige)
+    eintraege = geraet_status.meldungen_liste(anzeige, kritisch=False)
     assert len(eintraege) == 4 and all(set(eintrag) == {"key", "code", "params", "stufe"} for eintrag in eintraege)
     # Literal V5: die Liste nennt `kreis` (nur wenn gesetzt), das Ereignis je Uebergang dazu schema, geraet_id und offen
     assert ha_sinks.MELDUNG_FIELDS == ("key", "code", "params", "kreis", "stufe")
@@ -443,7 +443,7 @@ def test_der_kreisname_steht_nie_im_log(caplog):
 
 def _sicht(konfiguration, soll=lambda n: 20.0, ist=lambda n: 19.0, anzeige=lambda: None):
     dokument = None if konfiguration is None else Dokument("konfiguration", 1, konfiguration)
-    return geraet_status.lokale_sicht(lambda: dokument, soll, ist, anzeige)()
+    return geraet_status.lokale_sicht(lambda: dokument, soll, ist, anzeige, update_noetig_kritisch=lambda: False)()
 
 
 def test_die_lokale_sicht_uebernimmt_nur_namen_vom_typ_text_und_kreise_mit_echter_nummer():
@@ -467,7 +467,8 @@ def _dokument(version, inhalt):
 
 
 def _sicht_mit(dokument):
-    return geraet_status.lokale_sicht(lambda: dokument, lambda n: 20.0, lambda n: 19.0, lambda: None)()
+    return geraet_status.lokale_sicht(lambda: dokument, lambda n: 20.0, lambda n: 19.0, lambda: None,
+                                     update_noetig_kritisch=lambda: False)()
 
 
 def test_das_ereignis_traegt_konfig_version_und_mindest_integration_nach_dem_anlagennamen():
@@ -512,7 +513,8 @@ def test_ein_folgeereignis_nach_neuer_dokumentversion_traegt_die_neue_version():
     ha = FakeHa()
     stand = [_dokument(7, {"mindest_integration": "1.2.0", "kreise": [{"kreis": 1, "name": "Wohnen"}]})]
     sink = geraet_status.GeraetStatus(
-        ha, GERAET_ID, geraet_status.lokale_sicht(lambda: stand[0], lambda n: 20.0, lambda n: 19.0, lambda: None),
+        ha, GERAET_ID, geraet_status.lokale_sicht(lambda: stand[0], lambda n: 20.0, lambda n: 19.0, lambda: None,
+                                   update_noetig_kritisch=lambda: False),
         laufzeit_merken=lambda e: None)
     sink.anzeige(_anzeige())
     stand[0] = _dokument(8, {"mindest_integration": "1.3.0", "kreise": [{"kreis": 1, "name": "Wohnen"}]})
@@ -566,7 +568,7 @@ def test_ein_ungueltiger_dienst_steht_nie_im_log_und_das_ereignis_wird_gesendet(
     ha = FakeHa()
     lokal = geraet_status.lokale_sicht(
         lambda: Dokument("konfiguration", 1, ha_konfiguration(bindung={"benachrichtigung": ["notify.GeheimerDienst"]})),
-        lambda n: 20.0, lambda n: 19.0, lambda: None)
+        lambda n: 20.0, lambda n: 19.0, lambda: None, update_noetig_kritisch=lambda: False)
     sink = geraet_status.GeraetStatus(ha, GERAET_ID, lokal, laufzeit_merken=lambda e: None)
     with caplog.at_level(logging.DEBUG):
         sink.anzeige(_anzeige())
