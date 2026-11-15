@@ -15,6 +15,9 @@ py-modules = []
 [tool.pytest.ini_options]
 pythonpath = [".", "../host", "../src"]
 testpaths = ["tests"]
+# tmp_path nur fehlgeschlagener Tests des letzten Laufs behalten: /tmp ist lokal ein tmpfs im RAM
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 
 [tool.ruff]
 line-length = 120
