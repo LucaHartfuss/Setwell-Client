@@ -63,6 +63,21 @@ def test_die_meldung_kommt_nach_neunhundert_sekunden(env):
     assert _gemeldet(env)
 
 
+def test_die_neupruefung_kommt_zum_ende_der_restlichen_karenz(env):
+    _gemerkt(env)
+    _start_bridge(env, **FEHLER)
+    env.clock.advance(300)
+    bridge = _start_bridge(env, **FEHLER)  # Neustart in der Karenz: noch 600 Sekunden
+
+    env.clock.advance(599)
+    bridge.worker.run_pending()
+    assert env.geraet.neustarts == []
+
+    env.clock.advance(1)
+    bridge.worker.run_pending()
+    assert env.geraet.neustarts == [1]  # nicht erst nach einer vollen Neupruefungsfrist
+
+
 def test_ein_neustart_in_der_karenz_verlaengert_sie_nicht(env):
     _gemerkt(env)
     _start_bridge(env, **FEHLER)

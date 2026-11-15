@@ -120,6 +120,18 @@ def test_the_auto_update_switch_is_cached_and_unknown_when_unreadable(tmp_path, 
     assert "OSError" in caplog.text and "geheim" not in caplog.text
 
 
+def test_the_auto_update_switch_is_read_at_most_once_a_minute(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    host.hello_felder()
+    clock.advance(59)
+    host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 1
+    clock.advance(1)
+    host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 2
+
+
 def test_clock_error_logs_only_the_kind(tmp_path, monkeypatch, caplog):
     host, _, _ = _host(tmp_path, monkeypatch, Supervisor(error=OSError("Bearer geheim")))
     host.uhr_synchron()

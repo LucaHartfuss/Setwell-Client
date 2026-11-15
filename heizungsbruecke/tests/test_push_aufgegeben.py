@@ -98,6 +98,22 @@ def test_stufe_und_kreis_laufen_unabhaengig(tmp_path, monkeypatch):
     assert zu == ["kreis-1:push_nicht_zugestellt_rot"]
 
 
+def test_mehrere_meldungen_oeffnen_und_schliessen_anlagenweit_vor_kreis_eins_vor_kreis_zwei_je_kreis_nach_stufe(
+        tmp_path, monkeypatch):
+    host, device, clock = _host(tmp_path, monkeypatch)
+    for kreis in (2, 1, None):
+        for stufe in ("rot", "orange"):
+            host.push_stand.aufgegeben(stufe, kreis, clock())
+    host.anzeigen(_anzeige())
+    soll = ["push_nicht_zugestellt_orange", "push_nicht_zugestellt_rot",
+            "kreis-1:push_nicht_zugestellt_orange", "kreis-1:push_nicht_zugestellt_rot",
+            "kreis-2:push_nicht_zugestellt_orange", "kreis-2:push_nicht_zugestellt_rot"]
+    assert [e[0] for e in _gemeldet(device) if e[2]] == soll
+    clock.advance(FRIST_SECONDS)
+    host.anzeigen(_anzeige())
+    assert [e[0] for e in _gemeldet(device) if not e[2]] == soll
+
+
 def test_nach_dem_schliessen_oeffnet_ein_neues_ereignis_wieder(tmp_path, monkeypatch):
     host, device, clock = _host(tmp_path, monkeypatch)
     host.push_stand.aufgegeben("rot", 1, clock())
