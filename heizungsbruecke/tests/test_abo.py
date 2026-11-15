@@ -461,7 +461,7 @@ def test_nach_dem_update_ist_ein_aktives_abo_nach_der_frist_wieder_normalbetrieb
     rt = _kritisch_abgelaufen(tmp_path, make_store, monkeypatch, tage=31)
     rt.config = runtime_config(entitlement_path=tmp_path / "entitlement_state.json",
                                abo_source=lambda: entitlement.ACTIVE, update_noetig_source=lambda: False)
-    rt.neustart = MagicMock()
+    rt.neustart = MagicMock(spec=lambda: None)
 
     abo.check_grace_end(rt)
 
