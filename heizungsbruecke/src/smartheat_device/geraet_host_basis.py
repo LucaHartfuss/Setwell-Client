@@ -31,9 +31,10 @@ from smartheat_runtime.worker import Event, RegulationWorker
 
 logger = logging.getLogger(__name__)
 
-#: Neustart der Laufzeit (neue laufzeitrelevante Konfiguration, sign_off); prozess.reload_anhaengen haengt ihn an.
+#: Marke: die Meldung update_noetig wurde in diesem Prozess noch nie an den Geraetekern gegeben.
 _NOCH_NICHT_GEMELDET = object()
 
+#: Neustart der Laufzeit (neue laufzeitrelevante Konfiguration, sign_off); prozess.reload_anhaengen haengt ihn an.
 EV_RELOAD = "geraet_reload"
 #: So lange wartet sign_off auf den Status "abgemeldet" (Frist des Befehls, beide Hosts).
 SIGN_OFF_WAIT_SECONDS = 24 * 3600
