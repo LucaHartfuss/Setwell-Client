@@ -13,6 +13,9 @@ version = {attr = "heizungsbruecke.version.ADDON_VERSION"}
 [tool.pytest.ini_options]
 pythonpath = ["src", "testhilfen"]
 testpaths = ["tests"]
+# tmp_path nur fehlgeschlagener Tests des letzten Laufs behalten: /tmp ist lokal ein tmpfs im RAM
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 # die Akzeptanzsuite laeuft nur allein (scripts/check.sh, Schritt akzeptanz): ihre conftest.py verlangt --confcutdir
 addopts = "--ignore=tests/akzeptanz"
 markers = [
