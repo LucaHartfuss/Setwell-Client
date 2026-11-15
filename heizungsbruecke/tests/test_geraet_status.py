@@ -36,15 +36,15 @@ def _lokal_kreis(soll=21.5, ist=20.5, name="Wohnen"):
             "befunde": []}
 
 
-def _lokal(soll=21.5, kreise=None, konfig_version=7, mindest_integration="1.2.0"):
+def _lokal(soll=21.5, kreise=None, konfig_version=7, mindest_integration="1.2.0", **mehr):
     """Die lokale Sicht (Konfiguration, Soll-Speicher, Raum, Anzeige-Dokument) mit einem Kreis oder den genannten."""
     return lambda: {"anlage_name": "Zuhause", "konfig_version": konfig_version, "mindest_integration": mindest_integration,
-                    "kreise": kreise if kreise is not None else {1: _lokal_kreis(soll)}}
+                    "kreise": kreise if kreise is not None else {1: _lokal_kreis(soll)}, **mehr}
 
 
-def _status(ha, soll=21.5):
+def _status(ha, soll=21.5, **mehr):
     seen = []
-    return geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(soll), laufzeit_merken=seen.append), seen
+    return geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(soll, **mehr), laufzeit_merken=seen.append), seen
 
 
 def _runtime_event(**changes):
@@ -112,7 +112,7 @@ BEGRENZT = {"key": "wunsch_begrenzt", "text": "15 °C",
 
 def test_hints_messages_rejection_and_update_become_meldungen_with_code_and_params():
     ha = FakeHa()
-    sink, _ = _status(ha)
+    sink, _ = _status(ha, update_noetig_kritisch=True)
     sink.anzeige(_anzeige(zustand="update_noetig", hinweise=(DOPPELT,), meldungen=(BEGRENZT,),
                           konfiguration_abgelehnt=ABGELEHNT))
     data = ha.events[-1][1]
@@ -125,8 +125,26 @@ def test_hints_messages_rejection_and_update_become_meldungen_with_code_and_para
     assert keys["wunsch_begrenzt"]["code"] == "meldung.wunsch_begrenzt"
     assert keys["wunsch_begrenzt"]["params"] == {"roh": 15.0, "begrenzt": 18.0}
     assert keys["konfiguration_abgelehnt"]["params"] == {"grund": "ungueltig"}
-    # ohne bekannten Beginn der Frist (Uhr unklar) gilt die Fassung ohne Datum
+    # kritischer Eintrag ohne bekannten Beginn der Frist (Uhr unklar): die rote Fassung ohne Datum
     assert keys["update_noetig"]["code"] == "meldung.update_noetig_unbekannt"
+
+
+def test_unter_der_gewoehnlichen_mindestversion_ist_die_meldung_orange_und_ohne_datum():
+    """Ohne kritischen Eintrag gilt kein Notbetrieb: die Meldung bittet nur um das Update, auch wenn eine Frist-Datei
+    ein Datum nennen wuerde."""
+    for ende in (None, "2026-12-01"):
+        assert geraet_status.meldungen_liste(_anzeige(zustand="update_noetig"), ende, False) == [
+            {"key": "update_noetig", "code": "meldung.update_noetig_mindest", "params": {}, "stufe": "orange"}]
+    ha = FakeHa()
+    sink, _ = _status(ha)  # die Sicht nennt keinen kritischen Eintrag
+    sink.anzeige(_anzeige(zustand="update_noetig"))
+    assert [(m["code"], m["stufe"]) for m in ha.events[-1][1]["meldungen"]] == [("meldung.update_noetig_mindest", "orange")]
+
+
+def test_nur_unter_dem_zustand_update_noetig_gibt_es_die_meldung_zur_mindestversion():
+    for zustand in ("regelt", "startet", "gesperrt"):
+        codes = [m["code"] for m in geraet_status.meldungen_liste(_anzeige(zustand=zustand), None, True)]
+        assert not [c for c in codes if "update_noetig" in c]
 
 
 @pytest.mark.parametrize("stufe", ["rot", "orange", "gelb"])

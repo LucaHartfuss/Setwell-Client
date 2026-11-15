@@ -255,6 +255,25 @@ def test_ohne_bekanntes_datum_geht_die_fassung_ohne_datum_hinaus_nie_beide(tmp_p
     assert welt.gesendet == [("update_noetig", meldungen.neu("meldung.update_noetig_unbekannt"), True)]
 
 
+def test_ohne_kritischen_eintrag_geht_die_orange_meldung_ohne_datum_hinaus(tmp_path):
+    """Die gewoehnliche Anhebung der Mindestversion loest keinen Notbetrieb aus: kein Rot, auch wenn eine Frist-Datei
+    vorliegt."""
+    welt = _Kritisch(tmp_path, kritisch=False)
+    welt.beginn()
+    welt.host.update_noetig_melden(_anzeige("update_noetig"))
+    assert welt.gesendet == [("update_noetig", meldungen.neu("meldung.update_noetig_mindest"), True)]
+    assert welt.gesendet[0][1].stufe == "orange"
+
+
+def test_wird_der_eintrag_kritisch_ersetzt_die_rote_meldung_die_orange(tmp_path):
+    welt = _Kritisch(tmp_path, kritisch=False)
+    welt.host.update_noetig_melden(_anzeige("update_noetig"))
+    welt.kritisch = True
+    welt.host.update_noetig_melden(_anzeige("update_noetig"))
+    assert [m[1].code for m in welt.gesendet] == ["meldung.update_noetig_mindest", "meldung.update_noetig_unbekannt"]
+    assert all(m[0] == "update_noetig" and m[2] for m in welt.gesendet)
+
+
 def test_dieselbe_lage_wird_nicht_in_jedem_takt_neu_gemeldet(tmp_path):
     welt = _Kritisch(tmp_path)
     welt.beginn()

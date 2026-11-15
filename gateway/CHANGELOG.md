@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Liegt die Software nur unter einer gewoehnlich angehobenen Mindestversion und steht kein kritischer Eintrag in der
+  Konfiguration (kein Notbetrieb, kein Datum), meldet das Gateway die orange Meldung `update_noetig_mindest` („bei
+  Gelegenheit aktualisieren“) an den Server statt der roten; Rot bleibt dem kritischen Eintrag vorbehalten.
+
 - Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der urspruenglichen Werte geht jetzt auch an den
   Server und erreicht Eigentuemer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurueckgenommen.
 

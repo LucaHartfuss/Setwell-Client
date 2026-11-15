@@ -11,6 +11,11 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   zu, bis die Integration neue Einträge aufgibt; beide Stufen aller Kreise schließt das Add-on dazu bei jedem Start
   einmal ausdrücklich, weil der Server offene Meldungen bei einem Neustart nicht selbst schließt.
 
+- Liegt die Software nur unter einer gewöhnlich angehobenen Mindestversion und steht kein kritischer Eintrag in der
+  Konfiguration (kein Notbetrieb, kein Datum), meldet das Add-on die orange Meldung `update_noetig_mindest` („bei
+  Gelegenheit aktualisieren“) statt der roten, in Home Assistant und an den Server; Rot bleibt dem kritischen Eintrag
+  vorbehalten.
+
 - Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der ursprünglichen Werte geht jetzt auch an den
   Server und erreicht Eigentümer und Bedienende im Portal, per Push und per Mail. Nach einem Neustart mit der
   Mindestversion nimmt die erste Anzeige sie zurück, auch ohne neuen Konfigurationsstand; ohne die Mindestversion

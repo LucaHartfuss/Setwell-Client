@@ -76,10 +76,10 @@ def test_eine_beschaedigte_datei_gibt_kein_datum_und_nur_eine_warnung_je_halbe_m
 def test_das_datum_erscheint_im_ereignis_als_parameter_und_ohne_datum_die_andere_fassung():
     anzeige = Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
                       hinweise=(), meldungen=(), konfiguration_abgelehnt=None)
-    mit = geraet_status.meldungen_liste(anzeige, "2026-12-01")
+    mit = geraet_status.meldungen_liste(anzeige, "2026-12-01", True)
     assert mit == [{"key": "update_noetig", "code": "meldung.update_noetig", "params": {"ende": "2026-12-01"},
                     "stufe": "rot"}]
-    ohne = geraet_status.meldungen_liste(anzeige)
+    ohne = geraet_status.meldungen_liste(anzeige, None, True)
     assert ohne == [{"key": "update_noetig", "code": "meldung.update_noetig_unbekannt", "params": {}, "stufe": "rot"}]
     assert meldungen.aus_dict({feld: mit[0][feld] for feld in ("code", "params", "stufe")}) is not None  # gueltig
 
@@ -89,10 +89,15 @@ def test_die_lokale_sicht_traegt_das_datum_und_das_ereignis_gibt_es_weiter(tmp_p
     ha = FakeHa()
     lokal = geraet_status.lokale_sicht(
         lambda: None, lambda kreis: None, lambda kreis: None, lambda: None,
-        kritisch_ende=lambda kreise: "2026-12-01")
-    assert lokal()["update_noetig_ende"] == "2026-12-01"
+        kritisch_ende=lambda kreise: "2026-12-01", update_noetig_kritisch=lambda: True)
+    assert lokal()["update_noetig_ende"] == "2026-12-01" and lokal()["update_noetig_kritisch"] is True
     status = geraet_status.GeraetStatus(ha, "shg-aaaaaaaaaaaaaaaa", lokal, laufzeit_merken=lambda e: None)
     status.anzeige(Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
                            hinweise=(), meldungen=(), konfiguration_abgelehnt=None))
     gesendet = ha.events[-1][1]["meldungen"]
     assert [(m["code"], m["params"]) for m in gesendet] == [("meldung.update_noetig", {"ende": "2026-12-01"})]
+
+
+def test_die_lokale_sicht_ohne_kritischen_eintrag_nennt_ihn_nicht():
+    lokal = geraet_status.lokale_sicht(lambda: None, lambda kreis: None, lambda kreis: None, lambda: None)
+    assert lokal()["update_noetig_kritisch"] is False

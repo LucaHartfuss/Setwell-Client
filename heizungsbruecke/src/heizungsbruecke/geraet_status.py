@@ -51,12 +51,13 @@ ZUSTAND_MELDUNGEN = {
 }
 
 
-def meldungen_liste(anzeige: Anzeige, ende: str | None = None) -> list[dict]:
+def meldungen_liste(anzeige: Anzeige, ende: str | None = None, kritisch: bool = False) -> list[dict]:
     """Meldungen der Anzeige als {key, code, params, stufe} (Code und Parameter, nie ein Text; die Integration bildet
     den Wortlaut): Hinweise des Servers, eigene Meldungen des Geraets, abgelehnte Konfiguration und die Zustaende
     update_noetig/gesperrt (was keine gueltige Meldung der Tabelle ist, entfaellt). Bei update_noetig mit abgelehnter
     Konfiguration stehen bewusst beide Meldungen da: der Grund der Ablehnung und die Handlungsanweisung. update_noetig
-    nennt mit `ende` das Datum der urspruenglichen Werte, ohne die Fassung ohne Datum."""
+    ist unter einem kritischen Eintrag (`kritisch`) rot, mit `ende` als Datum der urspruenglichen Werte, ohne die Fassung
+    ohne Datum; ohne kritischen Eintrag orange und ohne Datum (`meldungen.update_noetig`)."""
     result = []
     for eintrag in (*anzeige.hinweise, *anzeige.meldungen):
         meldung = meldungen.aus_dict({feld: eintrag.get(feld) for feld in ("code", "params", "stufe")}
@@ -67,9 +68,7 @@ def meldungen_liste(anzeige: Anzeige, ende: str | None = None) -> list[dict]:
     if abgelehnt is not None:
         result.append(meldung_daten(KONFIGURATION_ABGELEHNT, abgelehnt))
     if anzeige.zustand == "update_noetig":
-        meldung = (meldungen.neu(meldungen.PREFIX + "update_noetig", ende=ende) if ende is not None
-                   else meldungen.neu(meldungen.PREFIX + "update_noetig_unbekannt"))
-        result.append(meldung_daten("update_noetig", meldung))
+        result.append(meldung_daten("update_noetig", meldungen.update_noetig(kritisch=kritisch, ende=ende)))
     if anzeige.zustand in ZUSTAND_MELDUNGEN:
         result.append(meldung_daten(anzeige.zustand, meldungen.neu(ZUSTAND_MELDUNGEN[anzeige.zustand])))
     return result
@@ -112,14 +111,16 @@ def _push_regeln(wert) -> dict[str, int]:
 
 def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[int], float | None],
                  raum_ist: Callable[[int], float | None], anzeige: Callable[[], Mapping | None],
-                 kritisch_ende: Callable[[list[int]], str | None] | None = None) -> Callable[[], dict]:
+                 kritisch_ende: Callable[[list[int]], str | None] | None = None,
+                 update_noetig_kritisch: Callable[[], bool] | None = None) -> Callable[[], dict]:
     """Die lokale Sicht des Ereignisses: Anlagenname, Version des Konfigurationsdokuments und dessen kritische
     Mindestversion der Integration (beide null ohne Dokument bzw. ohne gueltigen Wert) und je Kreis der Konfiguration
     Name, Soll (Soll-Speicher), Ist des Raums und die Felder des Anzeige-Dokuments (heute ohne Befund: null/null/[]).
     Version und Inhalt kommen aus einem Dokument, damit sie zusammenpassen. Dazu die Ziele des Push (`benachrichtigung`)
     und die stummgeschalteten Hinweis-Kategorien (`hinweise_aus`) der Bindung, leer ohne Dokument. `update_noetig_ende`
-    ist das Datum der urspruenglichen Werte unter einer kritischen Mindestversion (`KritischesEnde`), sonst null; es
-    geht nicht ins Ereignis, nur in die Meldung. Liest nur, ohne Sperre."""
+    ist das Datum der urspruenglichen Werte unter einer kritischen Mindestversion (`KritischesEnde`), sonst null;
+    `update_noetig_kritisch` ob die Konfiguration einen kritischen Eintrag traegt (ohne Quelle false); beide gehen nicht
+    ins Ereignis, nur in die Meldung. Liest nur, ohne Sperre."""
     def sicht() -> dict:
         dokument_konf = konfiguration()
         konf = dokument_konf.inhalt if dokument_konf is not None else None
@@ -146,6 +147,7 @@ def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[i
                 "hinweise_aus": kategorien,
                 "push_regeln": _push_regeln(konf.get("push_regeln") if isinstance(konf, Mapping) else None),
                 "update_noetig_ende": kritisch_ende(list(kreise)) if kritisch_ende is not None else None,
+                "update_noetig_kritisch": bool(update_noetig_kritisch()) if update_noetig_kritisch is not None else False,
                 "kreise": kreise}
     return sicht
 
@@ -204,7 +206,8 @@ class GeraetStatus:
         return {**self._laufzeit, "schema": EVENT_SCHEMA, "geraet_id": self._geraet_id,
                 "geraet_zustand": anzeige.zustand if anzeige is not None else "startet",
                 "server_verbunden": anzeige.server_ok if anzeige is not None else False,
-                "meldungen": (meldungen_liste(anzeige, lokal.get("update_noetig_ende"))
+                "meldungen": (meldungen_liste(anzeige, lokal.get("update_noetig_ende"),
+                                              bool(lokal.get("update_noetig_kritisch")))
                               if anzeige is not None else []),
                 "anlage_name": lokal["anlage_name"], "konfig_version": lokal["konfig_version"],
                 "mindest_integration": lokal["mindest_integration"],
