@@ -282,6 +282,7 @@ class FakeDevice:
             Dokument(art, 1, self.konf) if art == "konfiguration" and self.konf is not None else None))
         self.sent = []
         self.aufgaben = []
+        self.meldungen = []
 
     def im_geraete_thread(self, aufgabe):
         self.aufgaben.append(aufgabe)
@@ -297,6 +298,9 @@ class FakeDevice:
 
     def update_noetig_kritisch(self):
         return False
+
+    def meldung(self, key, meldung, *, offen):
+        self.meldungen.append((key, meldung, offen))
 
     def start(self):
         self.order.append("start")

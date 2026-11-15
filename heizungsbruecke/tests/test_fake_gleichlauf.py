@@ -38,7 +38,7 @@ PAARE = [
     *((f"KonformDevice.{name}", getattr(KonformDevice, name), getattr(Device, name)) for name in DEVICE_SICHT),
     # Geraetekern, wie ihn main (laufen, verdrahten) sieht
     *((f"FakeDevice.{name}", getattr(FakeDevice, name), getattr(Device, name))
-      for name in ("konfiguration", "bedienung", "abo_status", "start", "stop", "laufzeit_kanal")),
+      for name in ("konfiguration", "bedienung", "abo_status", "meldung", "start", "stop", "laufzeit_kanal")),
     # Geraete-Host, wie ihn HaHost und app.start sehen
     *((f"FakeGeraet.{name}", getattr(FakeGeraet, name), getattr(HaDeviceHost, name))
       for name in ("konfiguration", "bedienung", "abo_status", "notify_sink_fuer", "wunsch", "soll_quelle_aus",
