@@ -20,6 +20,7 @@ from smartheat_core.bindungsparameter import beschreibung as _beschreibung
 from smartheat_core.levers import LEVER_SETS
 from smartheat_core.safety import LocalSafety, resolve_local_safety
 from smartheat_runtime import entitlement
+from smartheat_runtime.plan_quelle import PlanEingabe
 from smartheat_runtime.runtime_config import BootInfo, RuntimeConfig
 from smartheat_runtime.windows import validate_daily_trigger_time
 
@@ -152,7 +153,8 @@ def rastung_pruefen(konfiguration, rastung_pfad: Path) -> None:
 def runtime_config(konfiguration, *, rastung_pfad: Path, entitlement_path: Path,
                    abo_source: Callable[[], str], kreis: int | None = None,
                    zustand_source: Callable[[], str] | None = None,
-                   update_noetig_source: Callable[[], bool] | None = None) -> RuntimeConfig:
+                   update_noetig_source: Callable[[], bool] | None = None,
+                   plan_source: Callable[[], PlanEingabe | None] | None = None) -> RuntimeConfig:
     """Die Laufzeitkonfiguration des Kreises `kreis` (ohne Angabe des ersten). Wirft ConfigError (der Host macht daraus
     StartFailure); config_check hat das Dokument schon geprueft."""
     if not eingerichtet(konfiguration):
@@ -182,6 +184,7 @@ def runtime_config(konfiguration, *, rastung_pfad: Path, entitlement_path: Path,
         abo_source=abo_source, referenzraeume=tuple(kreisansicht.referenz_versatz(konfiguration, kreis)),
         zustand_source=zustand_source or (lambda: kreisansicht.IN_BETRIEB),
         update_noetig_source=update_noetig_source or (lambda: False),
+        plan_source=plan_source or (lambda: None),
     )
 
 

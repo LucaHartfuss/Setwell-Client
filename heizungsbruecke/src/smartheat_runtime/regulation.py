@@ -16,7 +16,9 @@ from smartheat_core.emergency_boost import (
     kaelteschutz_entscheiden,
 )
 from smartheat_core.logtext import lesbar
+from smartheat_core.plan import anstieg_vom_kunden
 from smartheat_runtime import kreiszustand, testphase
+from smartheat_runtime.plan_quelle import geltendes_soll
 from smartheat_runtime.plausibility import ROOM_ACTUAL_RANGE, is_plausible
 from smartheat_runtime.ports import SignalUngueltig
 from smartheat_runtime.runtime import Runtime
@@ -97,16 +99,24 @@ def run_local_check(rt: Runtime) -> None:
     state = rt.store.state
     if state.abo_finished:
         return
-    room_target = state.stable_target
+    wunsch = state.stable_target
     now = wallclock.now()
+    # Das geltende Soll: der Wunsch des Thermostats oder, mit Zeitzone und Betriebsart im Dokument, das Soll des Plans.
+    # In der Testphase ohne Setwell gilt kein Plan. Bei Soll-Quelle aus (Thermostat aus, Frostschutz-Stellung) haelt der
+    # Speicher nur den alten Wunsch: es gibt dann kein geltendes Soll, und der Kaelteschutz rechnet ohne Soll.
+    vorher = rt.geltendes_soll
+    eingabe, soll = _soll_rechnen(rt, wunsch, now)
+    rt.geltendes_soll = soll
     # Der Kaelteschutz laeuft auch ohne Soll (dann nur die Frostnaehe) und ohne lesbaren Referenzraum. Eine Bedingung
-    # fuer seine Wirksamkeit gehoert vor diesen Aufruf. Bei Soll-Quelle aus (Thermostat aus, Frostschutz-Stellung) haelt
-    # der Speicher nur den alten Wunsch: der Kaelteschutz rechnet dann ohne Soll.
-    schutz = _kaelteschutz_entscheiden(rt, now, None if rt.soll_quelle_aus else room_target)
-    if room_target is None:
+    # fuer seine Wirksamkeit gehoert vor diesen Aufruf.
+    schutz = _kaelteschutz_entscheiden(rt, now, soll.soll)
+    if wunsch is None:
         logger.warning("Lokaler Check uebersprungen: Stable-Target-Cache noch nicht befuellt (room_target=None)")
         _kaelteschutz_allein(rt, schutz, now)
         return
+    # Boost und Notfall-Boost lesen das geltende Soll; bei Soll-Quelle aus bleibt der alte Wunsch ihr Vergleichswert
+    # (unveraendert gegenueber dem Stand ohne Plan).
+    room_target = soll.soll if soll.soll is not None else wunsch
 
     try:
         room_actual = wirksames_raum_ist(rt, room_target)
@@ -123,6 +133,11 @@ def run_local_check(rt: Runtime) -> None:
     if expired:
         logger.info("Comfort-Boost endet nach der Hoechstdauer (seit %s)", state.boost_since)
     safety = rt.override.safety
+    # Ein Anstieg zaehlt als der des Kunden, wenn die Soll-Art davor bekannt ist und der Wunsch (oder eine Uebersteuerung)
+    # ihn bringt; fehlt die Planeingabe nach einer Absenkung, ist er es nicht (der Plan hatte das Soll gesenkt). Nach dem
+    # Start ist die Art davor unbekannt: mit Planeingabe gilt er dann nicht als der des Kunden (kein Plan-Boost ueber
+    # einen Neustart hinweg), ohne Planeingabe kennt die Regelung nur die Wunschaenderung des Kunden.
+    vom_kunden = (eingabe is None if vorher is None else anstieg_vom_kunden(vorher.soll_art, soll.soll_art))
     # Ohne Comfort-Boost-Werte (z. B. Fussbodenheizung) gibt es keinen Comfort-Boost.
     comfort = not expired and bool(safety.comfort_boost) and not testphase.aktiv(rt) and decide_boost(
         room_actual=room_actual,
@@ -130,6 +145,8 @@ def run_local_check(rt: Runtime) -> None:
         previous_room_target=state.last_room_target,
         boost_was_active=state.boost_active,
         arrival_threshold_k=safety.arrival_threshold_k,
+        aufheizen=None if eingabe is None else eingabe.konfiguration.get("aufheizen"),
+        anstieg_vom_kunden=vom_kunden,
     )
     emergency = state.delivery.notbetrieb and decide_emergency_boost(
         room_actual=room_actual,
@@ -150,11 +167,24 @@ def run_local_check(rt: Runtime) -> None:
     rt.store.update_saved(last_room_target=remembered)
 
 
+def _soll_rechnen(rt: Runtime, wunsch: float | None, now: datetime):
+    """Planeingabe und geltendes Soll des Kreises. Jeder Fehler der Eingabe, des Uhrurteils oder der Rechnung laesst
+    den Wunsch gelten (Log nur mit der Fehlerart): der Kaelteschutz danach darf an keiner dieser Stellen haengen."""
+    try:
+        eingabe = None if testphase.aktiv(rt) else rt.config.plan_source()
+        return eingabe, geltendes_soll(
+            eingabe, wunsch, now, uhr_vertrauenswuerdig=rt.uhr_vertrauen(), soll_quelle_aus=rt.soll_quelle_aus)
+    except Exception as fehler:
+        logger.warning("Plan nicht berechenbar (%s), es gilt der Wunsch", type(fehler).__name__)
+        return None, geltendes_soll(None, wunsch, now, uhr_vertrauenswuerdig=False, soll_quelle_aus=rt.soll_quelle_aus)
+
+
 def _ausser_betrieb_pruefen(rt: Runtime) -> None:
     """Ein Kreis ausser Betrieb: nur der Kaelteschutz mit dem Frostnaehe-Ausloeser (kein Soll, es wird auch nicht gelesen).
     Kein Comfort-Boost und kein Notfall-Boost des Notbetriebs; ein Lauf endet bei jedem gueltigen Raum ab 7 Grad oder nach
     der Hoechstdauer. Ohne gueltigen Fuehler passiert nichts. Nach `abo_finished` des ganzen Geraets gilt auch das nicht."""
     state = rt.store.state
+    rt.geltendes_soll = None  # ohne Soll gerechnet: nach der Rueckkehr in den Betrieb ist die Art davor unbekannt
     if state.abo_finished:
         return
     if not rt.config.referenzraeume and "room_actual" not in rt.manifest.refs:

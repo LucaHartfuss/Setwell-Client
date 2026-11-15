@@ -5,6 +5,7 @@ from configs import THERMOSTAT
 from fake_vicare.server import GOOD_CODE, FakeVicare
 from fakes import FakeBus, SofortHintergrund
 
+from smartheat_core import write_budget
 from smartheat_gateway.drivers.vicare_cloud.driver import ViCareCloudDriver
 from smartheat_gateway.paths import Paths
 from smartheat_gateway.zigbee import ZigbeeMirror
@@ -29,6 +30,14 @@ class FakeClock:
 def _kein_echtes_lebenszeichen(tmp_path, monkeypatch):
     """Nie das echte Lebenszeichen unter /tmp (runtime_main beruehrt es bei jedem Start)."""
     monkeypatch.setenv("SHG_ALIVE_FILE", str(tmp_path / "alive"))
+
+
+@pytest.fixture(autouse=True)
+def _tag_der_tageszaehler_zuruecksetzen():
+    """Der Tag der Tageszaehler ist prozessweit (folgt der Wanduhr nur bei vertrauenswuerdiger Uhr): je Test frisch."""
+    write_budget._tag = None
+    yield
+    write_budget._tag = None
 
 
 @pytest.fixture

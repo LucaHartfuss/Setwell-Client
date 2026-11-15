@@ -48,6 +48,54 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
   und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
   keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+
+- Ist die Uhr nicht vertrauenswürdig und ruht deshalb eine gesetzte Betriebsart (Wochenplan, Abwesenheit, Leerstand,
+  Übersteuerung), meldet das Gerät das je Kreis einmal als offene Meldung `meldung.uhr_unklar` (gelb, ohne Parameter und
+  ohne Zeiten) und nimmt sie ohne Push zurück, sobald die Uhr wieder stimmt oder keine Betriebsart mehr gesetzt ist.
+  Kein erneutes Melden je Takt; die Regelung ändert sich nicht.
+
+- Neue Grenzen für Abwesend, Leerstand und Übersteuerung im Gerät: die Temperatur darf nicht über den Bedienbereich
+  (höchstens 25 °C) steigen; Abwesend gilt höchstens 365 Tage voraus (wie der Leerstand); die Übersteuerung in der
+  kühlen Phase geht nicht unter 16 °C (Absenk-Untergrenze), Abwesend und Leerstand bleiben ab 15 °C. Ein Wert außerhalb
+  macht den Teil ungültig, das Soll fällt auf Plan bzw. Wunsch zurück.
+
+- Ohne vertrauenswürdige Uhr rückt der Tag der Tageszähler nach der monotonen Uhr vor (je volle 24 Stunden einer, nie
+  zurück): der Start-Zähler, den der Kälteschutz teilt, hängt so nicht bis zum Neustart fest. Einträge eines späteren
+  Tages (Uhr stand beim Start vor) zählen als heute. Ein Fehler bei der Plan-Eingabe, beim Uhrurteil oder beim
+  Fortschreiben des Tages hält Kälteschutz und Watchdog nicht an (es gilt der Wunsch). Fehlt die Plan-Eingabe nach
+  einer Absenkung kurz, gilt der Anstieg des Wunsches nicht als der des Kunden.
+
+- Ein Sprung der Uhr über Mitternacht setzt die Tageszähler nicht mehr zurück: das Tageslimit des Schreibbudgets und
+  „Durchsetzen höchstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswürdiger Uhr. Ohne Vertrauen (Zeitdienst
+  nie synchron seit dem Start, Wanduhr gegen die monotone Uhr gesprungen) bleibt der alte Tag, es wird dann eher weniger
+  geschrieben. Die Grenzwerte sind unverändert.
+
+- Der Prüftakt rechnet jetzt je Heizkreis das geltende Soll aus dem Wunsch am Thermostat und der Bedienung des Kreises
+  (Wochenplan, Abwesenheit, Leerstand, Übersteuerung). Kälteschutz und Notfall-Boost lesen dieses Soll; ist die
+  Soll-Quelle aus (Thermostat aus, Frostschutz-Stellung), schreibt der Plan nichts. Ein Anstieg durch den Plan startet
+  den Comfort-Boost nur beim Profil „Boost“ (ein Anstieg des Kunden wie bisher immer). Ohne Plan, ohne Zeitzone oder
+  in der Testphase gilt unverändert der Wunsch; ein Fehler der Rechnung hält die Regelung nicht an.
+
+- Die Rechnung des geltenden Solls nimmt das Urteil über die Uhr entgegen: ist die Uhr nicht vertrauenswürdig, ruhen
+  Wochenplan, Abwesenheit, Leerstand und Übersteuerung, das Soll ist der Wunsch (die warme Richtung), und das Ergebnis
+  trägt einen Merker für die spätere Meldung „Uhr unklar“. Sobald die Uhr wieder vertrauenswürdig ist, gilt der Plan an
+  der aktuellen Stelle. Noch ohne Wirkung: die Rechnung wird erst mit der Verdrahtung in die Hosts angewendet.
+
+- Das Gerät rechnet jetzt das geltende Soll aus Wochenplan, Abwesenheit und Leerstand (Vorrang: Leerstand, Abwesend,
+  Plan kühl, Wunsch), mit Absenkung in der kühlen Phase und Aufheizen vor dem Ende der Phase, in der Zeitzone der
+  Anlage und über die Sommerzeit hinweg; es meldet die Art des Solls und den nächsten Wechsel. Ohne Wochenplan bleibt
+  das Soll der Wunsch. Noch ohne Wirkung: die Rechnung wird erst mit der Verdrahtung in die Hosts angewendet.
+- Das Gerät kennt jetzt die Grenzen der kommenden Betriebsarten (Absenkung nie unter 16 °C, Leerstand nie unter
+  15 °C und höchstens 365 Tage, jede Phase mindestens 60 Minuten, Abwesenheits-Vorschlag 17 °C bzw. 19 °C je
+  Verteilsystem). Noch ohne Wirkung: sie werden erst mit dem Wochenplan angewendet.
+- Der Comfort-Boost kennt jetzt das Aufheizen des Profils: bei einem Anstieg des Solls durch den Plan, das Ende von
+  Abwesend oder Leerstand startet er nur beim Profil „boost“, bei „kurve“ bleibt er aus. Die Erhöhung durch den Kunden
+  und die Quote (höchstens 6 Starts am Tag, 1800 Sekunden Abstand) bleiben unverändert. Noch ohne Wirkung: der Plan
+  wird erst mit dem Wochenplan angebunden. Ein vergessener Parameter öffnet den Boost nicht mehr still: Profil und
+  Herkunft des Anstiegs müssen immer angegeben werden.
+- Die Höchstdauer des Leerstands gilt jetzt auch ab der Uhr des Geräts, nicht nur ab dem vom Server gesetzten Beginn,
+  und wird in absoluter Zeit gerechnet (auch über den Sommerzeitwechsel); eine unbrauchbare Zahl oder Zeitzone wird als
+  ungültig verworfen, statt die Rechnung abzubrechen.
 - Eine Störung des Wärmeerzeugers (`erzeuger.stoerung`) hat die Stufe `rot` statt `orange`: Die Integration meldet sie
   sofort, auch in der Ruhezeit, und erinnert, solange sie offen ist. Wartungshinweise (`erzeuger.hinweis`) bleiben `gelb`,
   die Bestätigung nach 15 Minuten ändert sich nicht.

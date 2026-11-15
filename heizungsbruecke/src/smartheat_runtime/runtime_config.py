@@ -7,6 +7,7 @@ from pathlib import Path
 from smartheat_core import kreisansicht
 from smartheat_core.levers import LeverSet
 from smartheat_core.safety import LocalSafety
+from smartheat_runtime.plan_quelle import PlanEingabe
 
 BATTERY_PERCENT = "prozent"
 BATTERY_LOW_FLAG = "niedrig_flag"
@@ -59,6 +60,10 @@ def _in_betrieb() -> str:
     return kreisansicht.IN_BETRIEB
 
 
+def _kein_plan() -> PlanEingabe | None:
+    return None
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     tenant_id: str
@@ -86,3 +91,7 @@ class RuntimeConfig:
     # Ob die Software unter einer kritischen Mindestversion mit Datum liegt (smartheat_device update_noetig_ab): der
     # Kreis geht dann in den Notbetrieb wie bei inaktivem Abo, mit derselben 30-Tage-Frist. Ohne Quelle: nie.
     update_noetig_source: Callable[[], bool] = lambda: False
+    # Liest die Planeingabe des Kreises (Zeitzone, Bedienung und Konfiguration des Kreises) frisch aus den Dokumenten;
+    # der Check rechnet daraus das geltende Soll. None: keine Eingabe (ohne Zeitzone oder Kreiseintrag), dann gilt der
+    # Wunsch. Ohne Quelle gilt kein Plan.
+    plan_source: Callable[[], PlanEingabe | None] = _kein_plan
