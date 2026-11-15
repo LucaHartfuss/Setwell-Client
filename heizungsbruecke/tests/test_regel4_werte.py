@@ -15,7 +15,7 @@ from smartheat_core.clamping import round_to_step
 from smartheat_core.pipeline import LeverPipeline
 from smartheat_core.safety import LOCAL_SAFETY
 from smartheat_device import wire
-from smartheat_runtime import delivery, entitlement, plausibility
+from smartheat_runtime import delivery, entitlement, karenz, plausibility
 
 R4 = "Regel 4: Änderung braucht die Freigabe des Nutzers"
 HK, FBH = "Heizkoerper", "Fussbodenheizung"
@@ -69,6 +69,7 @@ KONSTANTEN = {
     "Kaelteschutz Ist gleich Plausibilitaet": (emergency_boost.KAELTESCHUTZ_IST_BEREICH, plausibility.ROOM_ACTUAL_RANGE),
     "Notbetrieb": ((delivery.NOTBETRIEB_AFTER_SERVER_FAILURES, delivery.ACK_TIMEOUT_SECONDS), (2, 30)),
     "Abo-Frist": (entitlement.GRACE_PERIOD, timedelta(days=30)),
+    "Karenz der Meldung nach Softwarewechsel": (karenz.KARENZ_NACH_UPDATE_S, 900),
     "Betriebsarten Absenk-Untergrenze": (safety.ABSENK_UNTERGRENZE_C, 16.0),
     "Betriebsarten Leerstand-Untergrenze": (safety.LEERSTAND_UNTERGRENZE_C, 15.0),
     "Betriebsarten Leerstand-Voreinstellung": (safety.LEERSTAND_VORGABE_C, 16.0),

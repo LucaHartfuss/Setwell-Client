@@ -1,9 +1,11 @@
 """Das HA-Add-on als DeviceHost (Faehigkeiten, Uhr, Pruefung, Befehle, Dokumente, Wunsch, Raum)."""
+import dataclasses
 import io
 import json
 import logging
 import stat
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
@@ -12,7 +14,7 @@ from fakes import FakeHa, HttpAntwort, nachricht_bytes
 from geraet_helpers import Device, Supervisor, _host, _register, bedienung_inhalt, konfiguration_aus_optionen
 from runtime_helpers import OPTIONS
 
-from heizungsbruecke import config, discovery, geraet_host, stdin_befehl
+from heizungsbruecke import config, discovery, geraet_host, geraet_status, stdin_befehl
 from heizungsbruecke.host import EV_RAUM, RAUM_SECONDS, HaHost
 from heizungsbruecke.supervisor import SupervisorApi
 from smartheat_core import meldungen
@@ -21,7 +23,7 @@ from smartheat_device import inventory, nachrichten, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Waiting
 from smartheat_device.geraet_host_basis import EV_RELOAD
 from smartheat_device.host import Anzeige
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, entitlement
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
 from smartheat_runtime.status import STATUS_ABGEMELDET
 from smartheat_runtime.worker import RegulationWorker
@@ -89,6 +91,47 @@ def test_clock_is_cached_for_a_minute(tmp_path, monkeypatch):
     assert supervisor.calls == 2
 
 
+def test_hello_felder_come_from_the_supervisor_switch_and_the_integration(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    assert host.hello_felder() == {"auto_update": True, "integration_version": None}
+    host.integration_stand.ereignis({"schema": 1, "version": "0.4.2", "v5_schemas": [geraet_status.EVENT_SCHEMA]},
+                                    clock())
+    assert host.hello_felder() == {"auto_update": True, "integration_version": "0.4.2"}
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS + 1)
+    supervisor.auto_update = False
+    assert host.hello_felder()["auto_update"] is False
+    clock.advance(900)  # die Integration hat sich 900 s nicht gemeldet
+    assert host.hello_felder()["integration_version"] is None
+
+
+def test_the_auto_update_switch_is_cached_and_unknown_when_unreadable(tmp_path, monkeypatch, caplog):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    for _ in range(5):
+        host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 1
+    supervisor.auto_update = None
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS)
+    assert host.hello_felder()["auto_update"] is None
+    supervisor.auto_update, supervisor.auto_update_fehler = True, OSError("Bearer geheim")
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS)
+    assert host.hello_felder()["auto_update"] is None
+    assert "OSError" in caplog.text and "geheim" not in caplog.text
+
+
+def test_the_auto_update_switch_is_read_at_most_once_a_minute(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    host.hello_felder()
+    clock.advance(59)
+    host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 1
+    clock.advance(1)
+    host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 2
+
+
 def test_clock_error_logs_only_the_kind(tmp_path, monkeypatch, caplog):
     host, _, _ = _host(tmp_path, monkeypatch, Supervisor(error=OSError("Bearer geheim")))
     host.uhr_synchron()
@@ -125,6 +168,12 @@ def test_a_clock_answer_without_dt_synchronized_counts_as_not_synchronized(tmp_p
 def test_software_is_ignored(tmp_path, monkeypatch):
     host, _, _ = _host(tmp_path, monkeypatch)
     host.software_soll({"version": "9.9.9"})  # Updates kommen ueber Supervisor und Add-on-Store
+    assert not any(tmp_path.iterdir())
+
+
+def test_the_updates_setting_is_ignored(tmp_path, monkeypatch):
+    host, _, _ = _host(tmp_path, monkeypatch)
+    host.updates_soll({"funktion": "aus", "sicherheit": "aus"})  # Updates kommen ueber Supervisor und Add-on-Store
     assert not any(tmp_path.iterdir())
 
 
@@ -300,6 +349,22 @@ def test_remembered_originals_are_handed_to_the_device_as_a_copy(tmp_path, monke
     assert gelesen == {"heat_limit": 16.0}
     gelesen["x"] = 1.0
     assert host.ursprungswerte() == {"heat_limit": 16.0}
+
+
+def test_the_critical_minimum_version_goes_to_the_device_as_a_red_message_with_the_date(tmp_path, monkeypatch):
+    """Unter update_noetig geht die rote Meldung mit dem Datum der Ursprungswerte ueber den Geraetekern an den Server
+    (Portal, Push, Mail); beim Verlassen des Zustands wird sie zurueckgenommen."""
+    host, device, _ = _host(tmp_path, monkeypatch, device=Device(kritisch=True))
+    pfad = config.entitlement_path(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    entitlement.mark_inactive(pfad, datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=1))), kritisch=True)
+    anzeige = Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
+                      hinweise=(), meldungen=(), konfiguration_abgelehnt=None)
+    host.anzeigen(anzeige)
+    host.anzeigen(anzeige)
+    assert device.meldungen == [("update_noetig", meldungen.neu("meldung.update_noetig", ende="2026-01-31"), True)]
+    host.anzeigen(dataclasses.replace(anzeige, zustand="regelt"))
+    assert device.meldungen[1:] == [("update_noetig", None, False)]
 
 
 def test_portal_operation_reaches_the_worker(tmp_path, monkeypatch):

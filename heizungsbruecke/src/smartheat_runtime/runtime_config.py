@@ -51,6 +51,9 @@ class BootInfo:
     # Liest den Zustand des Kreises (`kreise[n].zustand`) frisch aus dem Dokument; das Status-Ereignis meldet ihn, auch
     # im Ruhezustand ohne Laufzeit-Konfiguration.
     zustand_source: Callable[[], str] = lambda: kreisansicht.IN_BETRIEB
+    # Hat der Geraetekern die zuletzt gelieferte Konfiguration abgelehnt? Dann meldet ein Konfigurationsfehler sofort
+    # (nach einem Softwarewechsel wartet die Meldung sonst auf die neue Konfiguration, karenz.py).
+    konfiguration_abgelehnt: Callable[[], bool] = lambda: False
 
 
 def _in_betrieb() -> str:
@@ -85,6 +88,9 @@ class RuntimeConfig:
     # Zustand des Kreises aus dem laufenden Konfigurationsdokument (kreisansicht.ZUSTAENDE); die Laufzeit liest ihn bei
     # jedem Check frisch, ein Wechsel loest keinen Neustart aus. Ohne Quelle gilt der Betrieb.
     zustand_source: Callable[[], str] = _in_betrieb
+    # Ob die Software unter einer kritischen Mindestversion mit Datum liegt (smartheat_device update_noetig_ab): der
+    # Kreis geht dann in den Notbetrieb wie bei inaktivem Abo, mit derselben 30-Tage-Frist. Ohne Quelle: nie.
+    update_noetig_source: Callable[[], bool] = lambda: False
     # Liest die Planeingabe des Kreises (Zeitzone, Bedienung und Konfiguration des Kreises) frisch aus den Dokumenten;
     # der Check rechnet daraus das geltende Soll. None: keine Eingabe (ohne Zeitzone oder Kreiseintrag), dann gilt der
     # Wunsch. Ohne Quelle gilt kein Plan.

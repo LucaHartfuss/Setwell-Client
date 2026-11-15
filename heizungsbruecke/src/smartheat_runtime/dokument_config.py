@@ -121,7 +121,8 @@ def kreisnummer(konfiguration, kreis: int | None = None) -> int:
 def boot_info(konfiguration, *, abgemeldet: bool, client_version: str, backup_path: Path,
               failsafe_path: Path, aufraeumen_path: Path | None = None,
               alter_zustand: Path | None = None, anlage_budget_path: Path | None = None,
-              kreis: int | None = None, zustand_source: Callable[[], str] | None = None) -> BootInfo:
+              kreis: int | None = None, zustand_source: Callable[[], str] | None = None,
+              abgelehnt_source: Callable[[], bool] | None = None) -> BootInfo:
     """Wirft nie (wie die BootInfo der Hosts): ein unbekannter Hebelsatz faellt fuer das Statusereignis auf den
     Standard zurueck; runtime_config meldet ihn danach als Konfigurationsfehler."""
     intervalle = _e2e_intervalle()  # einmal je Aufruf lesen (und loggen)
@@ -137,6 +138,7 @@ def boot_info(konfiguration, *, abgemeldet: bool, client_version: str, backup_pa
         aufraeumen_path=aufraeumen_path, alter_zustand=alter_zustand, anlage_budget_path=anlage_budget_path,
         kreise_der_anlage=max(1, len(kreisansicht.kreise(konfiguration))),
         zustand_source=zustand_source or (lambda: kreisansicht.IN_BETRIEB),
+        konfiguration_abgelehnt=abgelehnt_source or (lambda: False),
     )
 
 
@@ -151,6 +153,7 @@ def rastung_pruefen(konfiguration, rastung_pfad: Path) -> None:
 def runtime_config(konfiguration, *, rastung_pfad: Path, entitlement_path: Path,
                    abo_source: Callable[[], str], kreis: int | None = None,
                    zustand_source: Callable[[], str] | None = None,
+                   update_noetig_source: Callable[[], bool] | None = None,
                    plan_source: Callable[[], PlanEingabe | None] | None = None) -> RuntimeConfig:
     """Die Laufzeitkonfiguration des Kreises `kreis` (ohne Angabe des ersten). Wirft ConfigError (der Host macht daraus
     StartFailure); config_check hat das Dokument schon geprueft."""
@@ -180,6 +183,7 @@ def runtime_config(konfiguration, *, rastung_pfad: Path, entitlement_path: Path,
         notify_hints_off=(), room_sensor_refs=tuple(sensors), battery_refs=(), entitlement_path=entitlement_path,
         abo_source=abo_source, referenzraeume=tuple(kreisansicht.referenz_versatz(konfiguration, kreis)),
         zustand_source=zustand_source or (lambda: kreisansicht.IN_BETRIEB),
+        update_noetig_source=update_noetig_source or (lambda: False),
         plan_source=plan_source or (lambda: None),
     )
 

@@ -139,7 +139,8 @@ class HaHost:
             backup_path=config.backup_path(self.kreis), failsafe_path=config.failsafe_path(self.kreis),
             aufraeumen_path=config.AUFRAEUMEN_PATH, alter_zustand=config.ALTER_BACKUP_PATH,
             anlage_budget_path=config.anlage_budget_path(), kreis=self.kreis,
-            zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis))
+            zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
+            abgelehnt_source=self._geraet.konfiguration_abgelehnt)
         vorab = self._bindung_oder_none()
         boot = dataclasses.replace(boot, notify_hints_off=_stumm_schaltbar(vorab.hinweise_aus) if vorab else ())
         if not boot.configured and not boot.signed_off:
@@ -208,6 +209,7 @@ class HaHost:
                 self._konfiguration, rastung_pfad=config.RASTUNG_PATH,
                 entitlement_path=config.entitlement_path(self.kreis), kreis=self.kreis,
                 abo_source=lambda: self._geraet.abo_status(self.kreis),
+                update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
                 zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
                 plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
             # Ohne gueltige Bindungsparameter kein Start
@@ -280,6 +282,7 @@ class HaHost:
             anlagenkreise=anlagenkreise,
             # das Lebenszeichen der Integration gilt der Anlage: nur der Client des kleinsten Kreises abonniert es
             integration_stand=geraet.integration_stand if self.kreis == min(anlagenkreise) else None,
+            push_stand=geraet.push_stand if self.kreis == min(anlagenkreise) else None,
             uhr=self._clock)
         if self._angleichen and quelle is not None:
             self._soll_entity_angleichen(quelle)

@@ -147,10 +147,11 @@ def konfiguration(satz: str, verteilsystem: str, abo: str = "aktiv") -> dict:
                     "verteilsystem": verteilsystem, "abo": abo}],
         "tagestick": "12:00", "mindest_software": "1.0.0", "mindest_integration": None,
         "software": None, "bindungsparameter": parameter, "push_regeln": None,
+        "update_noetig": None, "updates": None,
     }
 
 
 #: Konfiguration ohne Anlage: das Abmelden vom Dienst (Felder wie die Konfiguration, ohne Inhalt)
 LEERE_KONFIGURATION = {"anlage": None, "anlage_name": None, "weg": None, "kreise": [], "tagestick": None,
                        "mindest_software": "1.0.0", "mindest_integration": None, "software": None,
-                       "bindungsparameter": None, "push_regeln": None}
+                       "bindungsparameter": None, "push_regeln": None, "update_noetig": None, "updates": None}

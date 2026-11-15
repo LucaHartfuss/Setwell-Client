@@ -12,15 +12,17 @@ Markierung (vor dem Speichern), geht der OSError an den Dokumentspeicher, und da
 (Nr. 38)."""
 import logging
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
-from smartheat_core import dateien
+from smartheat_core import dateien, kreisansicht, meldungen
 from smartheat_core.meldungen import Meldung
 from smartheat_device.commands import Done, Waiting
+from smartheat_device.documents import KONFIGURATION
 from smartheat_device.hintergrund import Hintergrund
 from smartheat_device.host import Anzeige, MeldungSink
-from smartheat_runtime import aufraeumen, dokument_config
+from smartheat_runtime import aufraeumen, dokument_config, entitlement
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
 from smartheat_runtime.soll_speicher import KREIS, SOURCE_PORTAL, raum_soll_von
 from smartheat_runtime.status import STATUS_ABGEMELDET
@@ -28,6 +30,9 @@ from smartheat_runtime.texts import HA_TEXTS, HostTexts
 from smartheat_runtime.worker import Event, RegulationWorker
 
 logger = logging.getLogger(__name__)
+
+#: Marke: die Meldung update_noetig wurde in diesem Prozess noch nie an den Geraetekern gegeben.
+_NOCH_NICHT_GEMELDET = object()
 
 #: Neustart der Laufzeit (neue laufzeitrelevante Konfiguration, sign_off); prozess.reload_anhaengen haengt ihn an.
 EV_RELOAD = "geraet_reload"
@@ -57,6 +62,37 @@ def abmeldung_abwarten(anlage: str, runtime_status: Callable[[], dict | None], b
         return Done({"zurueckgesetzt": status.get("grund") is None, "werte": wiederherstellungspunkt(backup_pfad)})
 
     return Waiting(check, frist_bis)
+
+
+class KritischesEnde:
+    """Datum, an dem das Geraet unter einer kritischen Mindestversion die urspruenglichen Werte wieder einstellt: der
+    lokale Beginn der Frist (Entitlement-Datei je Kreis) plus `GRACE_PERIOD`, als ISO-Datum in der Zeitzone des
+    gespeicherten Beginns, bei mehreren Kreisen das fruehere. `None` ohne kritische Mindestversion und ohne lesbaren
+    Beginn (Uhr unklar: es wurde keiner gespeichert). Die Dateien werden je `CACHE_SECONDS` hoechstens einmal gelesen
+    (eine beschaedigte Datei meldet sich so nur einmal je Fenster im Log); ohne kritische Mindestversion bleibt nichts
+    im Zwischenspeicher. Liest nur."""
+    CACHE_SECONDS = 30
+
+    def __init__(self, kritisch: Callable[[], bool], pfad: Callable[[int], Path], *,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._kritisch, self._pfad, self._clock = kritisch, pfad, clock
+        self._gelesen: tuple[tuple[int, ...], float, str | None] | None = None
+
+    def __call__(self, kreise: list[int]) -> str | None:
+        if not self._kritisch():
+            self._gelesen = None
+            return None
+        schluessel, jetzt = tuple(kreise), self._clock()
+        if self._gelesen is not None and self._gelesen[0] == schluessel and jetzt - self._gelesen[1] < self.CACHE_SECONDS:
+            return self._gelesen[2]
+        enden = []
+        for kreis in schluessel:
+            beginn = entitlement.load_inactive_since(self._pfad(kreis))
+            if beginn is not None:
+                enden.append(entitlement.grace_end(beginn).date().isoformat())
+        ende = min(enden) if enden else None
+        self._gelesen = (schluessel, jetzt, ende)
+        return ende
 
 
 class GeraetHostBasis:
@@ -91,6 +127,16 @@ class GeraetHostBasis:
         #: Thread, nie im Geraete-Thread und nie hinter den Befehlen.
         self._laufzeit = None
         self._konfig_hintergrund = Hintergrund()
+        #: Datum der urspruenglichen Werte unter kritischer Mindestversion (Meldung und lokales Status-Ereignis)
+        self._kritisches_ende = KritischesEnde(self.update_noetig_kritisch, self.entitlement_pfad)
+        #: Die zuletzt an den Geraetekern gegebene Meldung update_noetig (None = zu); nur der Geraete-Thread.
+        #: Nach einem Prozessstart noch unbekannt: die erste Anzeige meldet immer, auch die Ruecknahme, weil eine
+        #: vor dem Neustart offene Meldung beim Server sonst stehen bliebe.
+        self._update_noetig_gemeldet: Meldung | None | object = _NOCH_NICHT_GEMELDET
+
+    def entitlement_pfad(self, kreis: int) -> Path:
+        """Die Entitlement-Datei des Kreises (Host): ihr Beginn der Frist gibt das Datum der urspruenglichen Werte."""
+        raise NotImplementedError
 
     def aufraeumen_pfad(self) -> Path:
         """Wohin konfiguration_vorbereiten die Markierung aufraeumen.json schreibt (Host)."""
@@ -151,6 +197,10 @@ class GeraetHostBasis:
     def konfiguration(self) -> dict | None:
         return self.device.konfiguration() if self.device is not None else None
 
+    def konfiguration_abgelehnt(self) -> bool:
+        """Hat der Geraetekern die zuletzt gelieferte Konfiguration abgelehnt (die Laufzeit regelt mit der alten)?"""
+        return self.device is not None and self.device.documents.ablehnung(KONFIGURATION) is not None
+
     def bedienung(self) -> tuple[dict | None, bool]:
         if self.device is None:
             return None, False
@@ -179,6 +229,52 @@ class GeraetHostBasis:
 
     def abo_status(self, kreis: int | None = None) -> str:
         return self.device.abo_status(kreis) if self.device is not None else dokument_config.abo_status(None)
+
+    def update_noetig_kritisch(self) -> bool:
+        return self.device.update_noetig_kritisch() if self.device is not None else False
+
+    def kritisches_ende(self, kreise: list[int]) -> str | None:
+        """Datum der urspruenglichen Werte unter einer kritischen Mindestversion (ISO) oder None (`KritischesEnde`)."""
+        return self._kritisches_ende(kreise)
+
+    def kreis_nummern(self) -> list[int]:
+        """Die Kreisnummern der Konfiguration (leer ohne Konfiguration)."""
+        return [k for eintrag in kreisansicht.kreise(self.konfiguration() or {})
+                if isinstance(k := eintrag.get("kreis"), int) and not isinstance(k, bool)]
+
+    def update_noetig_melden(self, anzeige: Anzeige) -> None:
+        """Unter dem Zustand update_noetig geht die rote Meldung ueber den Geraetekern an den Server (Portal, Push und
+        Mail an Eigentuemer und Bedienende): mit dem Datum der urspruenglichen Werte, ohne bekannten Beginn (Uhr
+        unklar) die Fassung ohne Datum, nie beide. Gemeldet wird nur bei Aenderung; verlaesst das Geraet den Zustand
+        (Update eingespielt), nimmt es die Meldung zurueck; die erste Anzeige nach einem Prozessstart meldet den Stand
+        immer, auch als Ruecknahme (der Server schliesst Geraete-Meldungen nicht von selbst). Beide Hosts rufen es mit jeder Anzeige; Geraete-Thread."""
+        if self.device is None:
+            return
+        meldung = None
+        if anzeige.zustand == "update_noetig":
+            ende = self.kritisches_ende(self.kreis_nummern() or [KREIS])
+            meldung = (meldungen.neu(meldungen.PREFIX + "update_noetig", ende=ende) if ende is not None
+                       else meldungen.neu(meldungen.PREFIX + "update_noetig_unbekannt"))
+        if meldung == self._update_noetig_gemeldet:
+            return
+        self._melden("update_noetig", meldung, offen=meldung is not None)
+        self._update_noetig_gemeldet = meldung
+
+    def update_noetig_geaendert(self, kritisch: bool) -> None:
+        """Die Kreise nehmen den Notbetrieb der kritischen Mindestversion auf bzw. verlassen ihn ohne Prozessneustart
+        (im Hintergrund wie die Konfigurationsaenderung); ohne Laufzeit oder bei einem Fehler startet der Prozess neu."""
+        laufzeit = self._laufzeit
+        if laufzeit is None:
+            self.neustart_anfordern()
+            return
+        self._konfig_hintergrund.submit(lambda: self._laufzeit_kritisch(laufzeit))
+
+    def _laufzeit_kritisch(self, laufzeit) -> None:
+        try:
+            laufzeit.kritisch_geaendert()
+        except Exception:
+            logger.exception("Die Laufzeit konnte die kritische Mindestversion nicht anwenden, Neustart")
+            self.neustart_anfordern()
 
     def wunsch(self, wert: float, herkunft: str | None = None, durch: str | None = None, kreis: int = KREIS) -> float:
         """Bedienwunsch fuer den Kreis `kreis` (HA: Soll-Entity oder smartheat_wunsch; Gateway: Thermostat): begrenzt

@@ -22,7 +22,9 @@ from heizungsbruecke.discovery import Discovery
 from heizungsbruecke.geraet_status import GeraetStatus
 from heizungsbruecke.ha_sinks import GeraetUndHaSink, HaNotifySink
 from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import PushStand
 from heizungsbruecke.version import ADDON_VERSION
+from smartheat_core import meldungen
 from smartheat_device import fehler, nachrichten, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Outcome, Waiting
 from smartheat_device.geraet_host_basis import SIGN_OFF_WAIT_SECONDS, GeraetHostBasis, abmeldung_abwarten
@@ -36,8 +38,21 @@ logger = logging.getLogger(__name__)
 WEG_JE_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
                     "weishaupt_modbus": "weishaupt_modbus"}
 UHR_CACHE_SECONDS = 60
+AUTO_UPDATE_CACHE_SECONDS = 60
 INVENTUR_SECONDS = 120
 _FREMD = ("zigbee_permit_join", "zigbee_devices", "driver_login")
+#: Schluessel der Meldung zur veralteten Integration (Kennung der Persistent Notification in HA).
+INTEGRATION_VERALTET = "integration_veraltet"
+
+
+def _push_key(stufe: str, kreis: int | None) -> str:
+    """Schluessel der Geraete-Meldung je Stufe und Kreis (ein Kreis geht als Praefix, nachrichten.draht_key)."""
+    key = f"push_nicht_zugestellt_{stufe}"
+    return key if kreis is None else f"kreis-{kreis}:{key}"
+
+
+def _push_ordnung(eintrag: tuple[str, int | None]) -> tuple[int, str]:
+    return (eintrag[1] or 0, eintrag[0])
 
 
 def _nicht_unterstuetzt(payload: dict) -> Failed:
@@ -58,14 +73,22 @@ class HaDeviceHost(GeraetHostBasis):
         self.claim_code: Callable[[], str | None] = lambda: None  # Uebernahme-Code des Geraets (__main__.verdrahten)
         self.runtime_status_event: dict | None = None  # letztes Status-Ereignis der Laufzeit (laufzeit_merken)
         self.integration_stand = IntegrationStand()  # Lebenszeichen der Integration (geraet_trigger.build)
+        self._integration_veraltet_offen = False  # Meldung zur veralteten Integration in HA offen (_integration_pruefen)
+        self.push_stand = PushStand()  # aufgegebene Push-Eintraege der Integration (geraet_trigger.build)
+        self._push_offen: set[tuple[str, int | None]] = set()  # als Geraete-Meldung offen (_push_pruefen)
+        self._push_start_geschlossen = False  # die Meldungen eines frueheren Prozesses sind geschlossen
         self._raeume: dict[int, dict | None] = {}  # je Kreis der Raum des letzten Takts
         self._uhr: tuple[float, bool | None] | None = None
+        self._auto_update: tuple[float, bool | None] | None = None
 
     def aufraeumen_pfad(self) -> Path:
         return config.AUFRAEUMEN_PATH
 
     def abgemeldet_pfad(self) -> Path:
         return config.ABGEMELDET_PATH
+
+    def entitlement_pfad(self, kreis: int) -> Path:
+        return config.entitlement_path(kreis)
 
     # --- Sicht der Laufzeit (HaHost) ---
 
@@ -106,6 +129,21 @@ class HaDeviceHost(GeraetHostBasis):
         self._uhr = (now, result)
         return result
 
+    def hello_felder(self) -> dict:
+        """Die Felder des hello, die nur dieser Host sendet: der Schalter fuer automatische Updates des Add-ons (nur
+        gelesen, hoechstens einmal je AUTO_UPDATE_CACHE_SECONDS; unlesbar = None) und die Version der Integration (None
+        ohne frisches Lebenszeichen)."""
+        now = self._clock()
+        if self._auto_update is None or now - self._auto_update[0] >= AUTO_UPDATE_CACHE_SECONDS:
+            try:
+                wert = self._supervisor.addon_auto_update()
+                schalter = wert if isinstance(wert, bool) else None
+            except Exception as error:
+                logger.warning("Schalter fuer automatische Updates unbekannt (%s)", type(error).__name__)
+                schalter = None
+            self._auto_update = (now, schalter)
+        return {"auto_update": self._auto_update[1], "integration_version": self.integration_stand.version(now)}
+
     def treiber_pruefen(self, konfiguration: dict) -> dict | None:
         """HA-Teil der Pruefung (config_check gibt fuer Host ha ein Dokument mit dem einen Kreis, der geprueft wird; sein
         Referenzraum traegt die Fuehler aller Raeume): details oder None. Gegen die uebernommene Konfiguration
@@ -128,6 +166,9 @@ class HaDeviceHost(GeraetHostBasis):
     def software_soll(self, software: dict | None) -> None:
         """HA-Add-ons aktualisiert der Supervisor; die Faehigkeit updater fehlt."""
 
+    def updates_soll(self, updates: dict | None) -> None:
+        """Ebenso: ohne Updater gibt es nichts, was die Einstellung zu Updates liest."""
+
     def runtime_status(self) -> dict | None:
         return self.runtime_status_event
 
@@ -136,6 +177,7 @@ class HaDeviceHost(GeraetHostBasis):
 
     def anzeigen(self, anzeige: Anzeige) -> None:
         self.letzte_anzeige = anzeige
+        self.update_noetig_melden(anzeige)
         sink = self.status_sink
         if sink is not None and hasattr(sink, "anzeige"):
             try:
@@ -151,6 +193,58 @@ class HaDeviceHost(GeraetHostBasis):
                                              self.claim_code() if anzeige.code_zeigen else None)
             except Exception as error:
                 logger.warning("Discovery nicht aktualisiert (%s)", type(error).__name__)
+        try:
+            self._integration_pruefen()
+        except Exception as error:
+            logger.warning("Meldung zur Integration nicht gesetzt (%s)", type(error).__name__)
+        try:
+            self._push_pruefen()
+        except Exception as error:
+            logger.warning("Meldung zum Push nicht gesetzt (%s)", type(error).__name__)
+
+    def _push_pruefen(self) -> None:
+        """Je (Stufe, Kreis) eine Geraete-Meldung: offen, solange die Integration binnen der Frist einen Push-Eintrag
+        dieser Stufe und dieses Kreises aufgegeben hat, sonst zu. Der Stand wird erst nach dem Melden uebernommen; schlaegt
+        es fehl, versucht der naechste Takt es erneut."""
+        if self.device is None:
+            return
+        offen = set(self.push_stand.offen(self._clock()))
+        self._push_start_schliessen(offen)
+        for stufe, kreis in sorted(offen - self._push_offen, key=_push_ordnung):
+            self._melden(_push_key(stufe, kreis), meldungen.neu(meldungen.PREFIX + "push_nicht_zugestellt", stufe=stufe),
+                         offen=True)
+            self._push_offen.add((stufe, kreis))
+        for stufe, kreis in sorted(self._push_offen - offen, key=_push_ordnung):
+            self._melden(_push_key(stufe, kreis), None, offen=False)
+            self._push_offen.discard((stufe, kreis))
+
+    def _push_start_schliessen(self, offen: set[tuple[str, int | None]]) -> None:
+        """Einmal je Start, sobald die Kreise bekannt sind: beide Stufen anlagenweit und je Kreis zu melden. Der Stand
+        der aufgegebenen Eintraege ueberlebt keinen Neustart, der Server schliesst Geraete-Meldungen aber nicht von
+        selbst: eine vor dem Neustart offene Meldung bliebe sonst fuer immer stehen. Ein Schliessen ohne offene Meldung
+        ist beim Server wirkungslos. Gemeldet wird nach dem Eintragen der Kreise im ersten Takt, in dem die Konfiguration
+        da ist; scheitert ein Aufruf, wiederholt der naechste Takt alles."""
+        if self._push_start_geschlossen or self.konfiguration() is None:
+            return
+        for kreis in (None, *self.kreis_nummern()):
+            for stufe in ("rot", "orange"):
+                if (stufe, kreis) not in offen:
+                    self._melden(_push_key(stufe, kreis), None, offen=False)
+        self._push_start_geschlossen = True
+
+    def _integration_pruefen(self) -> None:
+        """Offen, solange die Integration veraltet ist, sonst zu (auch nach Ablauf der Frist des Lebenszeichens).
+        Nur diese Persistent Notification: die Integration kann sie nicht selbst zeigen, der Server erfaehrt nichts.
+        Schlaegt HA fehl, bleibt der Stand unveraendert und der naechste Takt versucht es erneut."""
+        veraltet = self.integration_stand.veraltet(self._clock())
+        if veraltet == self._integration_veraltet_offen:
+            return
+        sink = HaNotifySink(self._ha, [])
+        if veraltet:
+            sink.show(INTEGRATION_VERALTET, meldungen.neu("meldung.integration_veraltet"))
+        else:
+            sink.withdraw(INTEGRATION_VERALTET)
+        self._integration_veraltet_offen = veraltet
 
     # --- Befehle ---
 

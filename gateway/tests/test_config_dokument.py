@@ -131,6 +131,8 @@ def test_new_paths():
     assert str(paths.rastung) == "/data/device/sicherheitssatz.json"
     assert [str(p) for p in (paths.software_soll, paths.software_meldungen, paths.software_quittung)] == [
         "/data/software_soll.json", "/data/software_meldungen.json", "/data/software_quittung.json"]
+    assert [str(p) for p in (paths.updates_soll, paths.updates_veraltet)] == [
+        "/data/updates_soll.json", "/data/updates_veraltet.json"]
 
 
 def test_the_empty_configuration_and_the_test_configuration_are_accepted_by_the_document_store(tmp_path):

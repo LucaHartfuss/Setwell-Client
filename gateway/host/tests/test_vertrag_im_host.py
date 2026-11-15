@@ -34,6 +34,14 @@ def test_check_47_gruende_des_updaters_sind_gruende_des_vertrags():
     assert _probleme_47(updater, wire.SOFTWARE_ERRORS) == []
 
 
+def test_die_werte_der_einstellung_updates_sind_die_des_vertrags():
+    from smartheat_host import kanal
+
+    assert kanal.UPDATES_FUNKTIONEN == wire.UPDATES_FUNKTIONEN
+    assert kanal.UPDATES_SICHERHEIT == wire.UPDATES_SICHERHEIT
+    assert updater.EINSTELLUNG_AUS in wire.SOFTWARE_ERRORS
+
+
 def test_check_47_meldet_gruende_ausserhalb_des_vertrags():
     problems = _probleme_47(updater, ("manifest_ungueltig",))
     assert "RETRY_REASON 'server_unerreichbar' steht nicht in SOFTWARE_ERRORS" in problems

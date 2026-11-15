@@ -65,11 +65,10 @@ _.burner_starts  # Server: tests/generic (Brennerzaehler im Anlagenzustand); der
 _.brenner  # Server: tests/generic (Feld des Anlagenschritts); der Simulationstreiber liest es nicht
 _.leistung  # Server: tests/generic (Feld des Anlagenschritts); der Simulationstreiber liest es nicht
 
-# --- Kritische Mindestversion (smartheat_runtime/entitlement.py): der Zeitpunkt "wirksam ab" kommt mit dem Versionspruefer; bis dahin ruft nur der Test ---
-_.kritische_mindestversion_abgelaufen  # smartheat_runtime/entitlement.py: Haken fuer das Ende der Regelung 30 Tage nach dem lokalen ersten Empfang (tests/test_entitlement.py), noch ohne Aufrufer in den Hosts
-
-# --- Stand des Add-ons (supervisor.py): die Meldung an den Server liest den Schalter erst mit der Statusmeldung der Version; bis dahin ruft nur der Test ---
-_.addon_auto_update  # supervisor.py: liest den Schalter "Automatisch aktualisieren" (nur lesen), noch ohne Aufrufer in den Hosts (tests/test_supervisor.py)
+# --- Update-Felder des Dokumentspeichers (smartheat_device/documents.py): der Versionspruefer liest sie; bis dahin ruft nur der Test ---
+_.update_noetig_ab  # smartheat_device/documents.py: Zeitpunkt, ab dem die Mindestversion Pflicht ist (tests/test_device_documents.py), noch ohne Aufrufer in den Hosts
+_.updates  # smartheat_device/documents.py: Update-Zulassung je Art (tests/test_device_documents.py), noch ohne Aufrufer in den Hosts
+_.FELD_MINDESTVERSION  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py) und im Vertragscheck
 
 # --- Grenzen der Betriebsarten (smartheat_core/safety.py): Plan, Leerstand und Abwesenheit rufen die Pruefer mit der Verdrahtung in den Takt; bis dahin ruft nur der Test ---
 _.LEERSTAND_VORGABE_C  # smartheat_core/safety.py: Voreinstellung der Leerstandstemperatur (tests/test_core_safety.py, tests/test_regel4_werte.py)

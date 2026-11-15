@@ -1801,6 +1801,65 @@ def test_inactive_after_grace_idles_as_abo_beendet_without_writes(env, monkeypat
     assert _status_states(env) == ["startet", "abo_beendet"]
 
 
+def test_start_unter_kritischer_mindestversion_laeuft_im_notbetrieb_ohne_server_und_ohne_abo_meldung(env):
+    _quiet_backup(env)
+    env.abo["kritisch"] = True
+
+    bridge = _start_bridge(env)
+
+    assert _delivery(bridge).notbetrieb is True and bridge.store.state.abo_inactive_since is not None
+    assert _links(env) == []
+    assert env.ha.pushes == [] and env.ha.writes == []
+    assert entitlement.ist_kritisch(env.paths["ENTITLEMENT_PATH"])
+    assert entitlement.load_inactive_since(env.paths["ENTITLEMENT_PATH"]) is not None
+
+
+def test_start_nach_dem_update_laeuft_normal_und_raeumt_den_kritischen_beginn_weg(env):
+    _quiet_backup(env)
+    entitlement.mark_inactive(env.paths["ENTITLEMENT_PATH"], datetime.now().astimezone(), kritisch=True)
+
+    bridge = _start(env)
+
+    assert _delivery(bridge).notbetrieb is False
+    assert not env.paths["ENTITLEMENT_PATH"].exists()
+    assert env.ha.pushes == []
+
+
+def test_start_nach_dem_update_hebt_auch_das_ende_nach_30_tagen_auf(env, monkeypatch):
+    _quiet_backup(env)
+    entitlement.mark_inactive(env.paths["ENTITLEMENT_PATH"], datetime.now().astimezone(), kritisch=True)
+    entitlement.mark_beendet(env.paths["ENTITLEMENT_PATH"])
+    monkeypatch.setattr("smartheat_runtime.entitlement.grace_expired", lambda since, now: True)
+
+    bridge = _start(env)
+
+    assert not isinstance(bridge, app.IdleBridge)
+    assert not env.paths["ENTITLEMENT_PATH"].exists()
+
+
+def test_start_nach_tag_31_unter_kritischer_mindestversion_beendet_ohne_abo_meldung(env, monkeypatch):
+    _quiet_backup(env)
+    env.abo["kritisch"] = True
+    entitlement.mark_inactive(env.paths["ENTITLEMENT_PATH"], datetime.now().astimezone(), kritisch=True)
+    monkeypatch.setattr("smartheat_runtime.entitlement.grace_expired", lambda since, now: True)
+
+    bridge = _start_bridge(env)
+
+    assert isinstance(bridge, app.IdleBridge) and bridge.reason == "abo_beendet"
+    assert env.ha.writes == [] and env.ha.pushes == []
+
+
+def test_ein_abo_beginn_ohne_kritischen_anlass_bleibt_bei_aktivem_abo_nicht_stehen(env):
+    _quiet_backup(env)
+    env.abo["status"] = entitlement.INACTIVE
+    entitlement.mark_inactive(env.paths["ENTITLEMENT_PATH"], datetime.now().astimezone(), kritisch=True)
+
+    _start_bridge(env)  # Abo inaktiv, nichts kritisch: der Beginn des kritischen Anlasses faellt, der des Abos beginnt neu
+
+    assert entitlement.load_inactive_since(env.paths["ENTITLEMENT_PATH"]) is not None
+    assert not entitlement.ist_kritisch(env.paths["ENTITLEMENT_PATH"])
+
+
 def test_closing_start_retries_a_failed_restore_and_reports_it_once(env, monkeypatch):
     # Im Startpfad; die Wiederholung laeuft im Worker, das Lebenszeichen weiter.
     _quiet_backup(env, emergency_boost_active=True)

@@ -80,6 +80,11 @@ class DeviceHost(Protocol):
         """Zeitdienst des Systems (Gateway: NTP); None = unbekannt, gilt als nicht synchron."""
         ...
 
+    def hello_felder(self) -> dict:
+        """Felder des hello, die nur der Host ha sendet: auto_update (Schalter fuer automatische Updates) und
+        integration_version, je None = unbekannt. Das Geraet fragt nur den Host ha; das Gateway antwortet {}."""
+        ...
+
     def treiber_pruefen(self, bindung: dict, /) -> dict | None:
         """details (smartheat_device.fehler), wenn die Treiberparameter nicht passen (config_check, Regel 6), sonst None.
         Gateway: `bindung`; HA: die ganze Konfiguration. Nur positional (config_check ruft so), daher darf
@@ -109,6 +114,16 @@ class DeviceHost(Protocol):
 
     def software_soll(self, software: dict | None) -> None:
         """Feld software jeder Konfiguration mit bekanntem Schema, auch einer abgelehnten (Updater)."""
+        ...
+
+    def updates_soll(self, updates: dict | None) -> None:
+        """Einstellung des Kunden zu Updates (Feld updates, wie das Dokumentenlager sie merkt; None = keine), nach
+        jeder Konfiguration, auch einer abgelehnten (Updater)."""
+        ...
+
+    def update_noetig_geaendert(self, kritisch: bool) -> None:
+        """Die kritische Mindestversion (Feld update_noetig mit Datum) gilt jetzt bzw. nicht mehr, nach jeder
+        Konfiguration, auch einer abgelehnten: die Laufzeit nimmt die Kreise ohne Prozessneustart wieder auf."""
         ...
 
     def runtime_status(self) -> dict | None: ...

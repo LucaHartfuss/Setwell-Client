@@ -223,6 +223,9 @@ class GatewayDeviceHost(GeraetHostBasis):
     def abgemeldet_pfad(self) -> Path:
         return self.paths.abgemeldet
 
+    def entitlement_pfad(self, kreis: int) -> Path:
+        return self.paths.entitlement(kreis)
+
     # --- Sicht der Laufzeit (host.GatewayHost) ---
 
     def snapshot(self) -> dict:
@@ -253,6 +256,10 @@ class GatewayDeviceHost(GeraetHostBasis):
     def wege(self) -> list[str]:
         """Wege des Katalogs, die dieses Gateway ueber seine Treiber bedient (Treiber-ID -> Weg-ID)."""
         return sorted({WEG_JE_TREIBER[treiber] for treiber in registry.driver_ids()})
+
+    def hello_felder(self) -> dict:
+        """Das Gateway sendet weder auto_update noch integration_version (nur der Host ha)."""
+        return {}
 
     def uhr_synchron(self) -> bool | None:
         """Zeitdienst des Hosts (host/status.json, Dienst hoststatus); aelter als 5 min oder unlesbar = unbekannt."""
@@ -299,6 +306,11 @@ class GatewayDeviceHost(GeraetHostBasis):
             # 0644: der Updater (root) liest
             dateien.schreiben_json(self.paths.software_soll, software, modus=dateien.LESBAR)
 
+    def updates_soll(self, updates: dict | None) -> None:
+        if dateien.lesen_json(self.paths.updates_soll) != updates or not self.paths.updates_soll.exists():
+            # 0644: der Updater (root) liest
+            dateien.schreiben_json(self.paths.updates_soll, updates, modus=dateien.LESBAR)
+
     def runtime_status(self) -> dict | None:
         return self.zustand.status
 
@@ -311,6 +323,7 @@ class GatewayDeviceHost(GeraetHostBasis):
 
     def anzeigen(self, anzeige: Anzeige) -> None:
         self.letzte_anzeige = anzeige
+        self.update_noetig_melden(anzeige)
         self._knopf_pruefen()
         self._reset_pruefen()
         try:

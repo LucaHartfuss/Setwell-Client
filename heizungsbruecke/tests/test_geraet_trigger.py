@@ -12,6 +12,8 @@ from fakes import FakeClock, FakeHa
 from heizungsbruecke import geraet_trigger, ha_trigger_client
 from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import FRIST_SECONDS as FRIST_PUSH_SECONDS
+from heizungsbruecke.push_stand import PushStand
 from smartheat_runtime.dokument_config import ConfigError
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
@@ -26,7 +28,8 @@ SOLL = f"{CLIMATE}::temperature"
 
 
 class Aufbau:
-    def __init__(self, tmp_path: Path, soll=SOLL, room_actual="sensor.raum", ha=None, stand=None):
+    def __init__(self, tmp_path: Path, soll=SOLL, room_actual="sensor.raum", ha=None, stand=None, push_stand=None,
+                 anlagenkreise=None):
         self.clock = FakeClock()
         self.worker = RegulationWorker(self.clock)
         self.ha = ha or FakeHa()
@@ -39,7 +42,7 @@ class Aufbau:
             manifest, self.ha, self.worker, self.store, soll, tagestick="12:00", wache_s=300,
             wunsch=lambda v, h, d: self.wuensche.append((v, h, d)) or min(max(v, 15.0), 25.0),
             soll_quelle_aus=lambda aus, wirksam: self.aus.append((aus, wirksam)),
-            integration_stand=stand, uhr=self.clock)
+            integration_stand=stand, push_stand=push_stand, anlagenkreise=anlagenkreise, uhr=self.clock)
         self.fire = self.client._on_trigger_event
 
     def run(self):
@@ -119,6 +122,92 @@ def test_the_integration_event_without_a_stand_is_not_taken_for_a_wish(tmp_path)
     a.fire(_lebenszeichen({"schema": 1, "version": "0.4.2", "v5_schemas": [4], "raum_soll": 30.0, "kreis": 1}))
     a.run()
     assert a.wuensche == []
+
+
+# --- Rueckkanal der Push-Meldung (smartheat_push_aufgegeben) ---
+
+def _aufgegeben(daten, context=None):
+    return {"platform": "event", "event": {"event_type": "smartheat_push_aufgegeben", "data": daten,
+                                           "context": context or {}}}
+
+
+def test_with_a_push_stand_the_push_event_is_subscribed_and_without_one_it_is_not(tmp_path):
+    mit = Aufbau(tmp_path, push_stand=PushStand()).client._triggers
+    assert {"platform": "event", "event_type": "smartheat_push_aufgegeben"} in mit and len(mit) == 6
+    assert {"platform": "event", "event_type": "smartheat_push_aufgegeben"} not in Aufbau(tmp_path).client._triggers
+
+
+def test_the_push_event_feeds_the_stand_with_the_clock_of_the_build(tmp_path):
+    stand = PushStand()
+    a = Aufbau(tmp_path, push_stand=stand, anlagenkreise=frozenset({1, 2}))
+    a.fire(_aufgegeben({"schema": 1, "stufe": "rot", "kreis": 2}))
+    assert stand.offen(a.clock()) == {("rot", 2)}
+    a.clock.advance(FRIST_PUSH_SECONDS - 1)
+    assert stand.offen(a.clock()) == {("rot", 2)}
+    a.clock.advance(1)
+    assert stand.offen(a.clock()) == frozenset()
+
+
+def test_the_push_event_for_a_foreign_circuit_is_system_wide(tmp_path):
+    stand = PushStand()
+    a = Aufbau(tmp_path, push_stand=stand, anlagenkreise=frozenset({1, 2}))
+    a.fire(_aufgegeben({"schema": 1, "stufe": "orange", "kreis": 7}))
+    assert stand.offen(a.clock()) == {("orange", None)}
+
+
+@pytest.mark.parametrize("daten", [
+    None, [], "rot", {}, {"schema": 1}, {"stufe": "rot"}, {"schema": "1", "stufe": "rot"}, {"schema": True, "stufe": "rot"},
+    {"schema": 1, "stufe": "gelb"}, {"schema": 1, "stufe": "ROT"}, {"schema": 1, "stufe": 3}, {"schema": 1, "stufe": None},
+    {"schema": 1, "stufe": ["rot"]},
+])
+def test_an_unreadable_push_event_opens_nothing_and_does_not_crash(tmp_path, caplog, daten):
+    stand = PushStand()
+    a = Aufbau(tmp_path, push_stand=stand, anlagenkreise=frozenset({1}))
+    with caplog.at_level(logging.DEBUG):
+        a.fire(_aufgegeben(daten))
+    a.run()
+    assert stand.offen(a.clock()) == frozenset() and a.wuensche == [] and a.checks == []
+    assert "geheim" not in caplog.text
+
+
+def test_the_push_event_is_no_wish_and_not_the_integration_sign_of_life(tmp_path):
+    stand, integration = PushStand(), IntegrationStand()
+    a = Aufbau(tmp_path, push_stand=stand, stand=integration)
+    a.fire(_aufgegeben({"schema": 1, "stufe": "rot", "kreis": 1, "raum_soll": 30.0, "version": "9.9.9",
+                        "v5_schemas": [4]}))
+    a.run()
+    assert a.wuensche == [] and a.checks == [] and integration.version(a.clock()) is None
+    assert stand.offen(a.clock()) == {("rot", 1)}
+
+
+def test_the_integration_event_does_not_feed_the_push_stand(tmp_path):
+    stand = PushStand()
+    a = Aufbau(tmp_path, push_stand=stand, stand=IntegrationStand())
+    a.fire(_lebenszeichen({"schema": 1, "stufe": "rot", "kreis": 1, "version": "0.4.2", "v5_schemas": [4]}))
+    assert stand.offen(a.clock()) == frozenset()
+
+
+@pytest.mark.parametrize(("daten", "anlage", "erwartet"), [
+    ({"schema": 1, "stufe": "rot", "kreis": 1}, (1, 2), ("rot", 1)),
+    ({"schema": 1, "stufe": "orange", "kreis": 2}, (1, 2), ("orange", 2)),
+    ({"schema": 1, "stufe": "rot"}, (1, 2), ("rot", None)),
+    ({"schema": 1, "stufe": "rot", "kreis": None}, (1, 2), ("rot", None)),
+    ({"schema": 1, "stufe": "rot", "kreis": 3}, (1, 2), ("rot", None)),
+    ({"schema": 1, "stufe": "rot", "kreis": 0}, (1, 2), ("rot", None)),
+    ({"schema": 1, "stufe": "rot", "kreis": "1"}, (1, 2), ("rot", None)),
+    ({"schema": 1, "stufe": "rot", "kreis": True}, (1, 2), ("rot", None)),
+    ({"schema": 1, "stufe": "rot", "kreis": 1.0}, (1, 2), ("rot", None)),
+    ({"schema": 1, "stufe": "rot", "kreis": 1, "fremd": {"x": 1}}, (1, 2), ("rot", 1)),
+    ({"schema": 9, "stufe": "rot", "kreis": 1}, (1,), ("rot", 1)),
+    ({"schema": 1, "stufe": "rot", "kreis": 5}, None, ("rot", 5)),
+    ({"schema": 1, "stufe": "rot", "kreis": 0}, None, ("rot", None)),
+])
+def test_push_aufgegeben_lesen(daten, anlage, erwartet):
+    assert geraet_trigger.push_aufgegeben_lesen(daten, None if anlage is None else frozenset(anlage)) == erwartet
+
+
+def test_the_event_name_is_the_one_of_the_integration():
+    assert geraet_trigger.EREIGNIS_PUSH_AUFGEGEBEN == "smartheat_push_aufgegeben"
 
 
 def test_the_trigger_is_on_the_real_entity_not_on_the_manifest_ref(tmp_path):

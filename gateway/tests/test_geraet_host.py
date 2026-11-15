@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ from smartheat_gateway.drivers import registry
 from smartheat_gateway.triggers import EV_TARGET_INPUT
 from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import ZigbeeMirror
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, entitlement
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.soll_speicher import SOURCE_PORTAL
 from smartheat_runtime.worker import RegulationWorker
@@ -72,6 +72,10 @@ def test_clock_sync_comes_from_the_host_status(welt):
     assert welt.host.uhr_synchron() is None
 
 
+def test_the_gateway_has_no_hello_fields_of_the_ha_host(welt):
+    assert welt.host.hello_felder() == {}
+
+
 def test_status_and_room_stay_in_the_process(welt):
     welt.host.status_sink.publish({"schema": 2, "status": "regelt"})
     welt.host.raum_merken(1, {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t"})
@@ -90,6 +94,22 @@ def test_runtime_messages_become_notifications(welt):
     assert welt.device.meldungen == [
         ("notbetrieb", notbetrieb, True), ("notbetrieb", notbetrieb, True),
         ("batterie:0x1", batterie, False), ("notbetrieb", notbetrieb, False)]
+
+
+def test_the_critical_minimum_version_goes_to_the_device_as_a_red_message_with_the_date(welt):
+    """Unter update_noetig geht die rote Meldung mit dem Datum der Ursprungswerte ueber den Geraetekern an den Server
+    (die Gateway-Kunden sehen sie nur dort); beim Verlassen des Zustands wird sie zurueckgenommen."""
+    welt.device.update_noetig_kritisch = lambda: True
+    pfad = welt.paths.entitlement(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    mez = timezone(timedelta(hours=1))
+    entitlement.mark_inactive(pfad, datetime(2026, 1, 1, tzinfo=mez), kritisch=True)
+    welt.host.anzeigen(_anzeige("update_noetig"))
+    welt.host.anzeigen(_anzeige("update_noetig"))
+    assert welt.device.meldungen == [("update_noetig", meldungen.neu("meldung.update_noetig", ende="2026-01-31"), True)]
+    welt.host.anzeigen(_anzeige("regelt"))
+    assert welt.device.meldungen[-1] == ("update_noetig", None, False)
+    assert len(welt.device.meldungen) == 2
 
 
 def test_the_datentraeger_message_goes_to_the_device_as_a_code(welt):
@@ -375,12 +395,29 @@ def test_operation_and_abo_for_the_runtime_host(welt):
 
 def test_the_software_target_is_written_for_the_updater(welt):
     software = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
-                "signature": "sig"}
+                "signature": "sig", "einmalig": False}
     welt.host.software_soll(software)
     assert json.loads(welt.paths.software_soll.read_text()) == software
     assert oct(welt.paths.software_soll.stat().st_mode & 0o777) == "0o644"  # der Updater (root) liest
     welt.host.software_soll(None)
     assert json.loads(welt.paths.software_soll.read_text()) is None
+
+
+def test_the_updates_setting_is_written_for_the_updater(welt):
+    updates = {"funktion": "aufschub", "sicherheit": "automatisch"}
+    welt.host.updates_soll(updates)
+    assert json.loads(welt.paths.updates_soll.read_text()) == updates
+    assert oct(welt.paths.updates_soll.stat().st_mode & 0o777) == "0o644"  # der Updater (root) liest
+    welt.host.updates_soll(None)
+    assert json.loads(welt.paths.updates_soll.read_text()) is None
+
+
+def test_an_unchanged_updates_setting_is_not_written_again(welt):
+    updates = {"funktion": "aus", "sicherheit": "aus"}
+    welt.host.updates_soll(updates)
+    os.utime(welt.paths.updates_soll, (1, 1))
+    welt.host.updates_soll(updates)
+    assert welt.paths.updates_soll.stat().st_mtime == 1
 
 
 def test_software_results_are_sent_in_order_and_acknowledged(welt, clock):
@@ -586,3 +623,19 @@ def test_an_operation_in_the_idle_state_is_not_posted_to_the_worker(welt, caplog
         welt.host.bedienung_uebernommen(bedienung(22.5))
         leerlauf.run_pending()
     assert "Kein Handler" not in caplog.text
+
+
+def test_das_gateway_hat_keine_integration_und_meldet_nie_integration_veraltet():
+    """Die Meldung zur veralteten Integration gibt es nur im HA-Host: das Gateway hat weder ein Lebenszeichen der
+    Integration noch einen Code dafuer."""
+    assert not hasattr(gh.GatewayDeviceHost, "integration_stand")
+    quellen = Path(gh.__file__).parent
+    assert not [p.name for p in quellen.rglob("*.py") if "integration_veraltet" in p.read_text()]
+
+
+def test_das_gateway_hat_kein_ereignis_der_integration_und_meldet_nie_push_nicht_zugestellt():
+    """Die Meldung zum aufgegebenen Push gibt es nur im HA-Host (Ereignis der Integration): das Gateway hat keinen
+    Stand dafuer und keinen Code."""
+    assert not hasattr(gh.GatewayDeviceHost, "push_stand")
+    quellen = Path(gh.__file__).parent
+    assert not [p.name for p in quellen.rglob("*.py") if "push_nicht_zugestellt" in p.read_text()]

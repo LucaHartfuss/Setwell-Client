@@ -5,6 +5,50 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Gibt die Integration einen Push-Eintrag nach 24 Stunden ohne Zustellung auf (Ereignis `smartheat_push_aufgegeben`),
+  meldet das Add-on das als orange Meldung an den Server (Portal): eine Meldung je Stufe und Kreis, die 24 Stunden nach
+  dem letzten solchen Ereignis wieder schließt. Der Stand liegt nur im Speicher; nach einem Neustart ist die Meldung
+  zu, bis die Integration neue Einträge aufgibt; beide Stufen aller Kreise schließt das Add-on dazu bei jedem Start
+  einmal ausdrücklich, weil der Server offene Meldungen bei einem Neustart nicht selbst schließt.
+
+- Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der ursprünglichen Werte geht jetzt auch an den
+  Server und erreicht Eigentümer und Bedienende im Portal, per Push und per Mail. Nach einem Neustart mit der
+  Mindestversion nimmt die erste Anzeige sie zurück, auch ohne neuen Konfigurationsstand; ohne die Mindestversion
+  meldet sie dieselbe Anzeige wieder.
+
+- Unter einer kritischen Mindestversion nennt die Meldung `update_noetig` das Datum, an dem das Gerät die
+  ursprünglichen Werte wieder einstellt (Beginn der lokalen Frist plus 30 Tage); ohne bekannten Beginn (unklare Uhr)
+  erscheint die Fassung ohne Datum. Ist die Integration veraltet, zeigt das Add-on in Home Assistant die Meldung
+  „Integration veraltet“, bis sie aktuell ist oder ihr Lebenszeichen 15 Minuten fehlt.
+
+- Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
+  Notbetrieb mit unveränderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
+  30 Tage zählen lokal ab dem ersten Empfang mit vertrauenswürdiger Uhr und überstehen Neustarts (eine unklare Uhr zählt
+  nicht). Danach stellt die Laufzeit die ursprünglichen Werte wieder her wie beim Abo-Ende. Ein Update auf die
+  Mindestversion oder ein Konfigurationsstand ohne `update_noetig` hebt den Zustand ohne Neustart des Add-ons auf, auch
+  nach den 30 Tagen; erreicht die laufende Version die gemerkte Mindestversion, bleibt das Gerät auch ohne neuen
+  Konfigurationsstand nicht im Notbetrieb, und die 30 Tage zählen nicht weiter (liegt die Version darunter, bleibt
+  alles wie bisher). Der Zustand `update_noetig` geht dem Zustand „keine Verbindung“ vor. Neuer Rückruf
+  `update_noetig_geaendert` des Geräts an den Host; der Beginn steht mit dem Zusatz `kritisch` in
+  `entitlement_state.json` (neues Feld, keine Migration). Die Abo-Meldungen erscheinen dabei nicht.
+
+- Neue Meldung `meldung.updates_veraltet` (Stufe `orange`, Parameter `grund`: `ablauf` oder `kein_angebot`) und ein
+  Rückruf `updates_soll` des Geräts an den Host: nach jeder Konfiguration (auch einer abgelehnten) gibt das Gerät die
+  Einstellung `updates` an den Host weiter. Der Home-Assistant-Host ignoriert sie (kein Updater).
+
+- Das Gerät liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
+  Soll-Software (auch aus einer abgelehnten Konfiguration; Unlesbares blockiert nie und lässt den gemerkten Wert stehen),
+  merkt sie in `dokumente.json` (ältere Dateien ohne die Schlüssel starten ohne gemerkten Wert) und meldet
+  `update_noetig` auch dann, wenn eine Konfiguration wegen unbekannter Felder abgelehnt wird und ihre lesbare
+  `mindest_software` über der eigenen liegt. Das `hello` des Home-Assistant-Hosts trägt `auto_update` (Schalter
+  „Automatisch aktualisieren“ des Add-ons, nur gelesen, höchstens einmal je Minute) und `integration_version`
+  (`null` = unbekannt); ändert sich einer der Werte, geht ein neues `hello` hinaus, zwischen zwei so nachgesendeten
+  `hello` mindestens 60 Sekunden (die letzte Änderung geht dabei nicht verloren).
+- Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
+  auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
+  und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
+  keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+
 - Ist die Uhr nicht vertrauenswürdig und ruht deshalb eine gesetzte Betriebsart (Wochenplan, Abwesenheit, Leerstand,
   Übersteuerung), meldet das Gerät das je Kreis einmal als offene Meldung `meldung.uhr_unklar` (gelb, ohne Parameter und
   ohne Zeiten) und nimmt sie ohne Push zurück, sobald die Uhr wieder stimmt oder keine Betriebsart mehr gesetzt ist.

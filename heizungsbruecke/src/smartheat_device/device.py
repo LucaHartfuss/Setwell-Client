@@ -43,6 +43,7 @@ DEVICE_DIR = "device"
 TICK_SECONDS = 1.0
 STATUS_MIN_SECONDS = 10
 MELDUNGEN_MIN_SECONDS = 10
+HELLO_NACHSENDEN_MIN_SECONDS = 60
 MELDUNGEN_JE_NACHRICHT = 50
 SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
@@ -156,6 +157,8 @@ class Device:
         #: Nach hello muss ein Status hinaus; gescheitert der Rueckruf dabei, bleibt der Merker, bis
         #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
         self._status_erzwingen = False
+        self._hello_stand: dict | None = None  # Host-Felder des zuletzt gesendeten hello (ha), sonst None
+        self._hello_nachgesendet_at: float | None = None  # Takt-Uhr des zuletzt nachgesendeten hello (_hello_nachsenden)
         self._hello_fehler: str | None = None  # letzte Fehlerart beim Bauen von hello (je Art einmal loggen)
         self._status_fehler: str | None = None  # letzter Vertragsverstoss beim Bauen (je Text einmal loggen)
         self._wunsch_fehler: str | None = None  # dito beim Bauen von up/wish
@@ -276,6 +279,11 @@ class Device:
         """abo_source der Laufzeit (dokument_config.runtime_config): das Abo des Kreises, ohne Angabe des ersten."""
         return dokument_config.abo_status(self.konfiguration(), kreis)
 
+    def update_noetig_kritisch(self) -> bool:
+        """update_noetig_source der Laufzeit: ob eine kritische Mindestversion mit Datum gilt (das Datum allein, so
+        gespeichert wie `documents.update_noetig_ab`); sie loest den Notbetrieb mit der 30-Tage-Frist aus."""
+        return self.documents.update_noetig_ab is not None
+
     def zustand(self) -> str:
         """Scheitert der Rueckruf runtime_status, gilt die Laufzeit als startend (_LAUFZEIT_UNBEKANNT)."""
         status, gescheitert = self._host_wert("runtime_status", self.host.runtime_status)
@@ -371,6 +379,8 @@ class Device:
                     self._hello_senden()
         if self._bereit:
             self._zurueckgehaltene_pruefen(now)
+            if link is not None and link.connected:
+                self._hello_nachsenden(now)
         self.befehle.pruefen()
         self._wunsch_senden()
         self._status_senden(now, force=self._status_erzwingen)
@@ -461,7 +471,34 @@ class Device:
             bedienung_version=self.documents.version(BEDIENUNG), anzeige_version=self.documents.version(ANZEIGE),
             software_version=self.host.version, host=self.host.host, faehigkeiten=faehigkeiten, wege=wege,
             boot_id=self.boot_id,
-            uhr_synchron=self._uhr_synchron() is True, device_state=bootstrap.device_state(self._dir))
+            uhr_synchron=self._uhr_synchron() is True, device_state=bootstrap.device_state(self._dir),
+            **self._hello_felder_jetzt())
+
+    def _hello_felder_jetzt(self) -> dict:
+        """Die hello-Felder, die nur der Host ha sendet (auto_update, integration_version): None heisst unbekannt
+        (Rueckruf gescheitert oder Wert unbrauchbar). Der Gateway sendet beide Felder nie und fragt den Host nicht."""
+        if self.host.host != "ha":
+            return {}
+        werte, gescheitert = self._host_wert("hello_felder", self.host.hello_felder)
+        if gescheitert or not isinstance(werte, dict):
+            werte = {}
+        auto_update = werte.get("auto_update")
+        version = werte.get("integration_version")
+        return {"auto_update": auto_update if isinstance(auto_update, bool) else None,
+                "integration_version": version if nachrichten.integration_version_gueltig(version) else None}
+
+    def _hello_nachsenden(self, now: float) -> None:
+        """Aendert sich eines der Host-Felder des hello, geht ein neues hello hinaus (verbunden und bereit), zwischen
+        zwei nachgesendeten hellos mindestens HELLO_NACHSENDEN_MIN_SECONDS: ein Feld, das schnell hin und her kippt,
+        loest sonst jede Sekunde ein hello aus (und beim Server jedes Mal das erneute Senden aller Meldungen). Eine
+        Aenderung im Abstand geht nicht verloren, der Stand bleibt verschieden und das naechste Fenster sendet sie."""
+        if self._hello_stand is None or self.host.host != "ha":
+            return
+        if self._hello_nachgesendet_at is not None and now - self._hello_nachgesendet_at < HELLO_NACHSENDEN_MIN_SECONDS:
+            return
+        if self._hello_felder_jetzt() != self._hello_stand:
+            self._hello_nachgesendet_at = now
+            self._hello_senden()
 
     def _uhr_synchron(self) -> bool | None:
         """Rueckruf uhr_synchron; gescheitert gilt als None (unbekannt = nicht synchron), auch fuer Bootstrap."""
@@ -494,6 +531,7 @@ class Device:
             return
         if self._publish("up/hello", hello) is None:
             return  # schon wieder getrennt: das naechste "verbunden" schickt hello
+        self._hello_stand = {feld: hello[feld] for feld in nachrichten.HELLO_NUR_HA if feld in hello}
         self._hello_offen = False
         self._bereit = True
         now = self._clock()
@@ -552,6 +590,7 @@ class Device:
         es deshalb zurueck und prueft alle PRUEFUNG_WIEDERHOLEN_SECONDS erneut. Eine neue Zustellung ersetzt es."""
         self._zurueckgehalten.pop(art, None)
         alt = self.documents.inhalt(art)
+        kritisch_vorher = self.update_noetig_kritisch()
         try:
             ergebnis = self.documents.empfangen(art, body)
         except config_check.NichtPruefbar:
@@ -587,6 +626,10 @@ class Device:
             # dasselbe Angebot, das der Speicher merkt, auch aus einer abgelehnten Konfiguration (ein Update kann der
             # Ausweg sein); ein ungueltiges laesst das vorherige stehen (R15, documents.angebot_aus)
             self._host_rufen("software_soll", self.host.software_soll, angebot.software)
+        if art == KONFIGURATION:  # die Einstellung des Kunden zu Updates, ebenso auch aus einer abgelehnten Konfiguration
+            self._host_rufen("updates_soll", self.host.updates_soll, self.documents.updates)
+            if (kritisch := self.update_noetig_kritisch()) != kritisch_vorher:  # auch aus einer abgelehnten Konfiguration
+                self._host_rufen("update_noetig_geaendert", self.host.update_noetig_geaendert, kritisch)
 
     def _zurueckgehaltene_pruefen(self, now: float) -> None:
         if not self._zurueckgehalten or now < self._pruefung_at:

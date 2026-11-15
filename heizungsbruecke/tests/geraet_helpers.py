@@ -20,6 +20,7 @@ from heizungsbruecke.geraet_status import GeraetStatus, lokale_sicht
 from heizungsbruecke.ha_sinks import HaNotifySink
 from heizungsbruecke.host import HaHost
 from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import PushStand
 from smartheat_device.commands import CommandRegister
 from smartheat_device.documents import Dokument
 from smartheat_device.geraet_host_basis import GeraetHostBasis
@@ -121,12 +122,14 @@ class FakeGeraet:
     uhr_synchron = geraet_host.HaDeviceHost.uhr_synchron
 
     def __init__(self, konfiguration, *, bedienung=None, dirty=False, abo=entitlement.ACTIVE, ha=None, log=None,
-                 start_markierung=None, clock=time.monotonic):
+                 start_markierung=None, clock=time.monotonic, kritisch=False):
         self._konfiguration, self._bedienung, self._dirty, self._abo = konfiguration, bedienung, dirty, abo
+        self._kritisch = kritisch  # bool oder eine Funktion: gilt die kritische Mindestversion fuer dieses Geraet
         self.start_markierung = start_markierung  # die beim Start gelesene Aufraeum-Markierung (aufraeumen.entscheiden)
         self._supervisor, self._clock, self._uhr = Supervisor(), clock, None  # Zustand fuer uhr_synchron
         self.wuensche, self.aus, self.status = [], [], []
         self.integration_stand = IntegrationStand()  # wie im echten Geraete-Host
+        self.push_stand = PushStand()
         self.wunsch_kreise: list[int] = []  # der Kreis jedes Wunschs, parallel zu wuensche
         self.gemeldet: list[dict] = []  # Ursprungswerte, die die Laufzeit dem Host gab
         self.gemeldet_kreise: list[int] = []
@@ -135,6 +138,7 @@ class FakeGeraet:
         self.sent = Sent(log)
         self.channel = None
         self.channels = []
+        self.abgelehnt = False  # der Geraetekern hat die zuletzt gelieferte Konfiguration abgelehnt
         self.neustarts: list[int] = []
         self.host = None
         self._ha = ha
@@ -171,6 +175,12 @@ class FakeGeraet:
     def abo_status(self, kreis=None):
         return self._abo() if callable(self._abo) else self._abo
 
+    def update_noetig_kritisch(self):
+        return self._kritisch() if callable(self._kritisch) else self._kritisch
+
+    def konfiguration_abgelehnt(self):
+        return self.abgelehnt
+
     def notify_sink_fuer(self, services):
         return HaNotifySink(self._ha, services) if self._ha is not None else _NullSink()
 
@@ -202,7 +212,7 @@ class FakeGeraet:
 
 def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedienung=None, log=None,
                  verbunden=True, leer_mit_markierung=False, ursprungswerte=None, neustart=None, zeit_synchron=True,
-                 **option_overrides):
+                 abgelehnt=False, kritisch=False, **option_overrides):
     """Startet die Laufzeit auf dem Dokument aus den Test-Optionen (options, z. B. runtime_helpers.OPTIONS; plus
     Overrides). Liefert (bridge, geraet); die gesendeten Nachrichten stehen in geraet.sent, der Kanal in geraet.channel.
     Ohne bedienung ist die Bedienung des Servers der Wert, den die Soll-Entity gerade zeigt (wie nach einem Wunsch,
@@ -214,7 +224,9 @@ def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedi
     channel.verbunden).
     ursprungswerte: Feld `ursprungswerte` der Konfiguration.
     neustart: Rueckruf des Hosts fuer app.start; ohne ihn zaehlt geraet.neustarts die Neustarts.
-    zeit_synchron: was der Zeitdienst des Hosts dem Supervisor meldet (dt_synchronized)."""
+    zeit_synchron: was der Zeitdienst des Hosts dem Supervisor meldet (dt_synchronized).
+    abgelehnt: der Geraetekern hat die zuletzt gelieferte Konfiguration abgelehnt.
+    kritisch: gilt die kritische Mindestversion (bool oder eine Funktion, die sie liefert)."""
     options = {**options, **option_overrides}
     konfiguration = konfiguration_aus_optionen(options)
     if ursprungswerte is not None:
@@ -232,8 +244,9 @@ def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedi
         angezeigt = env.ha.states.get(options["entity_room_target"], 21.0)
         bedienung = {"raum_soll": angezeigt if isinstance(angezeigt, int | float) else 21.0}
     geraet = FakeGeraet(konfiguration, abo=abo, ha=env.ha, bedienung=bedienung, log=log,
-                        start_markierung=start_markierung, clock=env.clock)
+                        start_markierung=start_markierung, clock=env.clock, kritisch=kritisch)
     geraet.zeitdienst_setzen(zeit_synchron)
+    geraet.abgelehnt = abgelehnt
     geraet.sent.connected = verbunden
     geraet.host = HaHost(geraet, env.ha, clock=env.clock)
     # wie die Laufzeit der Kreise: ein Statussammler fasst das Ereignis des einen Kreises fuer die Statussenke zusammen
@@ -269,6 +282,7 @@ class FakeDevice:
             Dokument(art, 1, self.konf) if art == "konfiguration" and self.konf is not None else None))
         self.sent = []
         self.aufgaben = []
+        self.meldungen = []
 
     def im_geraete_thread(self, aufgabe):
         self.aufgaben.append(aufgabe)
@@ -281,6 +295,12 @@ class FakeDevice:
 
     def abo_status(self, kreis=None):
         return dokument_config.abo_status(self.konf, kreis)
+
+    def update_noetig_kritisch(self):
+        return False
+
+    def meldung(self, key, meldung, *, offen):
+        self.meldungen.append((key, meldung, offen))
 
     def start(self):
         self.order.append("start")
@@ -315,6 +335,13 @@ class Supervisor:
     def __init__(self, info=None, error=None):
         self.info, self.error, self.calls = info or {"dt_synchronized": True}, error, 0
         self.gemeldet: list[dict] = []
+        self.auto_update, self.auto_update_fehler, self.auto_update_aufrufe = True, None, 0
+
+    def addon_auto_update(self):
+        self.auto_update_aufrufe += 1
+        if self.auto_update_fehler:
+            raise self.auto_update_fehler
+        return self.auto_update
 
     def host_info(self):
         self.calls += 1
@@ -336,11 +363,15 @@ class Doc:
 
 
 class Device:
-    def __init__(self, konf=None, bed=None, dirty=False):
+    def __init__(self, konf=None, bed=None, dirty=False, kritisch=False):
         self.wuensche, self.aus, self.konf, self.bed, self.dirty = [], [], konf, bed, dirty
+        self.kritisch = kritisch
         self.wunsch_kreise = []
         self.meldungen = []
         self.documents = self
+
+    def update_noetig_kritisch(self):
+        return self.kritisch
 
     def wunsch(self, wert, *, herkunft, durch=None, kreis=1):
         self.wuensche.append((wert, herkunft, durch))

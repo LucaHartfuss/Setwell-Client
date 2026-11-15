@@ -26,6 +26,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
 from kette_helper import release, roots_pem, signiere
 from kette_helper import root as neue_root
+from smartheat_core import meldungen
 from startauswahl_fake import FakeStartauswahl
 
 from smartheat_gateway.version import GATEWAY_VERSION
@@ -62,6 +63,16 @@ class FakeKanal:
     def __init__(self, desired):
         self.desired_answer, self.results, self.offline, self.broken = desired, [], False, False
         self.desired_calls = self.reach_calls = 0
+        self.updates_answer = None  # Einstellung updates des Kunden; None: keine bekannt (keine Einschraenkung)
+        self.frische = []  # jede Frische-Meldung (Ablage als dict) bzw. None (keine Warnung), in der Reihenfolge der Aufrufe
+
+    def updates(self):
+        if isinstance(self.updates_answer, Exception):
+            raise self.updates_answer
+        return self.updates_answer
+
+    def updates_veraltet(self, meldung):
+        self.frische.append(meldung)
 
     def desired(self):
         self.desired_calls += 1
@@ -271,7 +282,7 @@ def test_state_file_is_world_readable_and_survives_load(tmp_path):
         "current": "0.3.0", "previous": "0.2.0", "rejected": [], "in_progress": None,
         "rejected_context": {"updater": "0.2.0", "roots": kette.roots_identity(world.roots)}, "pending_reports": [],
         "zertifikat_untergrenze": ZERTIFIKAT_VON.isoformat(), "system": None, "system_abstand": None,
-        "system_installfehler": 0}
+        "system_installfehler": 0, "aus_gemeldet": None}
 
 
 def test_in_progress_is_persisted_before_the_switch(tmp_path):
@@ -589,9 +600,31 @@ def test_a_complete_update_changes_only_the_bundle_store_and_the_state(tmp_path)
         "docker-compose.yml", "manifest.json", "manifest.json.sig", "mosquitto.conf"]
 
 
+def _zaehlung_ablegen(world, hoechste, seit):
+    (world.state_path.parent / updater.FRISCHE_ZAEHLUNG_DATEI).write_text(
+        json.dumps({"hoechste": hoechste, "seit": seit.isoformat()}))
+
+
+def _zaehlung(world):
+    """Die abgelegte Frische-Zaehlung (hoechste Version, Beginn) oder None, solange sie nicht begonnen hat."""
+    datei = world.state_path.parent / updater.FRISCHE_ZAEHLUNG_DATEI
+    if not datei.exists():
+        return None
+    daten = json.loads(datei.read_text())
+    return daten["hoechste"], daten["seit"]
+
+
+def _zaehlung_begonnen(world):
+    """Die Frische-Zaehlung hat schon begonnen (die erste Beobachtung mit Uhr schreibt sie einmal): ein Durchlauf ohne
+    hoeheres Angebot aendert den Zustand dann nicht mehr."""
+    updater.State(current="0.2.0").save(world.state_path)
+    _zaehlung_ablegen(world, "0.3.0", JETZT)
+
+
 def test_the_running_version_is_current_without_download_report_or_state_change(tmp_path):
     """F-gateway-host-01/-06/-43: ein vollstaendiges Angebot fuer die laufende Version (0.2.0) ist "aktuell"."""
     world = World(tmp_path)
+    _zaehlung_begonnen(world)
     offer = dict(world.api.desired_answer)
     world.api.desired_answer = offer | {"version": "0.2.0"}
     state_before = world.state_path.read_bytes()
@@ -610,6 +643,7 @@ def test_the_running_version_is_current_without_download_report_or_state_change(
 ])
 def test_a_newer_version_without_any_bundle_field_is_current_without_download(tmp_path, offer):
     world = World(tmp_path)
+    _zaehlung_begonnen(world)
     world.api.desired_answer = offer
     state_before = world.state_path.read_bytes()
     assert world.updater.run_once() == "aktuell"
@@ -2226,6 +2260,7 @@ def test_a_full_disk_while_installing_is_provisional_and_logged(tmp_path, monkey
     versucht es erneut), der Fehler steht mit seinem Namen im ERROR-Log, Zustand und Compose bleiben unberuehrt: nichts
     wurde gezogen oder umgeschaltet."""
     world = World(tmp_path)
+    _zaehlung_begonnen(world)
     before = world.state_path.read_bytes()
 
     def full(version, files):
@@ -4315,3 +4350,287 @@ def test_main_mit_der_startauswahl_des_testlaufs_meldet_keine_warnung(tmp_path, 
 def test_die_standard_startauswahl_ist_rauc_tryboot():
     from smartheat_host.startauswahl import RaucTryboot
     assert updater.Einstellungen().startauswahl is RaucTryboot
+
+
+# --- Einstellung updates des Kunden ---
+
+FUNKTION_AUS = {"funktion": "aus", "sicherheit": "automatisch"}
+SICHERHEIT_AUS = {"funktion": "automatisch", "sicherheit": "aus"}
+ALLES_AN = {"funktion": "automatisch", "sicherheit": "automatisch"}
+FUNKTION_AUFSCHUB = {"funktion": "aufschub", "sicherheit": "automatisch"}
+ABGELEHNT_AUS = [("0.3.0", "rollback", "einstellung_aus")]
+
+
+def _welt_mit(tmp_path, art, updates, **angebot):
+    world = World(tmp_path, manifest_over={"art": art})
+    world.api.updates_answer = updates
+    world.api.desired_answer.update(angebot)
+    return world
+
+
+def test_der_grund_einstellung_aus_ist_ein_grund_des_updaters():
+    assert updater.EINSTELLUNG_AUS == "einstellung_aus" and updater.EINSTELLUNG_AUS in updater.REASONS
+
+
+@pytest.mark.parametrize("art, updates", [("funktion", FUNKTION_AUS), ("treiberfix", FUNKTION_AUS),
+                                          ("sicherheit", SICHERHEIT_AUS)])
+def test_eine_art_die_die_einstellung_nicht_erlaubt_wird_abgelehnt(tmp_path, art, updates):
+    world = _welt_mit(tmp_path, art, updates)
+    assert world.updater.run_once() == "abgelehnt"
+    assert world.api.results == ABGELEHNT_AUS
+    _assert_nothing_installed(world)
+    assert world.state().current == "0.2.0" and world.state().rejected == []
+
+
+def test_die_ablehnung_wegen_der_einstellung_wird_nur_einmal_gemeldet(tmp_path):
+    world = _welt_mit(tmp_path, "funktion", FUNKTION_AUS)
+    assert world.updater.run_once() == "abgelehnt"
+    assert world.updater.run_once() == "abgelehnt"
+    assert world.api.results == ABGELEHNT_AUS
+    world.updater = world.rebuild()  # auch nach einem Neustart
+    assert world.updater.run_once() == "abgelehnt"
+    assert world.api.results == ABGELEHNT_AUS
+
+
+def test_die_ablehnung_wegen_der_einstellung_gilt_nur_solange_die_einstellung_so_steht(tmp_path):
+    world = _welt_mit(tmp_path, "funktion", FUNKTION_AUS)
+    assert world.updater.run_once() == "abgelehnt"
+    world.api.updates_answer = ALLES_AN
+    assert world.updater.run_once() == "aktualisiert"
+    assert world.state().current == "0.3.0"
+
+
+@pytest.mark.parametrize("art, updates", [
+    ("funktion", ALLES_AN), ("funktion", None), ("funktion", FUNKTION_AUFSCHUB), ("funktion", SICHERHEIT_AUS),
+    ("treiberfix", SICHERHEIT_AUS), ("sicherheit", FUNKTION_AUS), ("sicherheit", FUNKTION_AUFSCHUB),
+    ("sicherheit", ALLES_AN)])
+def test_eine_art_die_die_einstellung_erlaubt_wird_installiert(tmp_path, art, updates):
+    world = _welt_mit(tmp_path, art, updates)
+    assert world.updater.run_once() == "aktualisiert"
+    assert world.state().current == "0.3.0" and world.api.results == [("0.3.0", "ok", "")]
+
+
+@pytest.mark.parametrize("art, updates", [("funktion", FUNKTION_AUS), ("sicherheit", SICHERHEIT_AUS)])
+def test_einmalig_installiert_auch_gegen_die_einstellung(tmp_path, art, updates):
+    world = _welt_mit(tmp_path, art, updates, einmalig=True)
+    assert world.updater.run_once() == "aktualisiert"
+    assert world.state().current == "0.3.0" and world.api.results == [("0.3.0", "ok", "")]
+
+
+@pytest.mark.parametrize("einmalig", [False, None, "ja", 1])
+def test_nur_ein_echtes_einmalig_hebt_die_einstellung_auf(tmp_path, einmalig):
+    world = _welt_mit(tmp_path, "funktion", FUNKTION_AUS, einmalig=einmalig)
+    assert world.updater.run_once() == "abgelehnt"
+    assert world.api.results == ABGELEHNT_AUS
+
+
+def test_einmalig_hebt_andere_ablehnungen_nicht_auf(tmp_path):
+    world = _welt_mit(tmp_path, "funktion", ALLES_AN, einmalig=True)
+    _serve_manifest(world, world.served[BASE + "manifest.json"], signed=b"anderes")
+    assert world.updater.run_once() == "abgelehnt"
+    assert world.api.results == [("0.3.0", "rollback", "signatur_ungueltig")]
+
+
+def test_eine_unlesbare_einstellung_installiert_nichts_und_lehnt_nicht_ab(tmp_path):
+    world = _welt_mit(tmp_path, "funktion", kanal.KanalFehler("kaputt"))
+    assert world.updater.run_once() == "vorlaeufig"
+    assert world.fetched == [] and world.api.results == [] and world.state().rejected == []
+    world.api.updates_answer = ALLES_AN
+    assert world.updater.run_once() == "aktualisiert"
+
+
+# --- Frische-Warnung ---
+
+def _warnung(grund):
+    return meldungen.zu_dict(meldungen.neu("meldung.updates_veraltet", grund=grund))
+
+
+def _letzte_frische(world):
+    return world.api.frische[-1] if world.api.frische else None
+
+
+def _ruhig(world):
+    """Kein Angebot ueber die laufende Version hinaus: der Updater prueft nur die Frische."""
+    world.api.desired_answer = {"version": "0.2.0"}
+
+
+def _laufendes_manifest(world, ablauf):
+    """Das Manifest der laufenden Version 0.2.0 im Bundle-Speicher, mit dem Ablauf `ablauf`."""
+    manifest = {"version": "0.2.0", "min_updater_version": "0.2.0",
+                "files": {"docker-compose.yml": hashlib.sha256(ALTE_COMPOSE).hexdigest(),
+                          "mosquitto.conf": hashlib.sha256(MOSQ).hexdigest()},
+                "images": {"gateway": ALTES_IMAGE}, "archiv": dict(ARCHIV), "art": "funktion",
+                "ablauf": _utc_text(ablauf)}
+    world.store.install("0.2.0", {"docker-compose.yml": ALTE_COMPOSE, "mosquitto.conf": MOSQ,
+                                  bundles.MANIFEST_NAME: json.dumps(manifest).encode()})
+
+
+def test_die_fristen_der_frische_warnung_sind_benannt():
+    assert (updater.FRISCHE_ABLAUF_TAGE, updater.FRISCHE_KEIN_ANGEBOT_TAGE) == (60, 90)
+
+
+def test_die_meldung_updates_veraltet_ist_ein_code_der_meldungstabelle():
+    assert "meldung.updates_veraltet" in meldungen.TABELLE
+    assert _warnung("ablauf")["code"] == "meldung.updates_veraltet"
+    # der Host liefert smartheat_core.meldungen nicht mit: Code und Stufe stehen im Updater und gleichen mit der Tabelle ab
+    assert updater.FRISCHE_MELDUNG == "meldung.updates_veraltet"
+    assert meldungen.TABELLE["meldung.updates_veraltet"].stufe == updater.FRISCHE_STUFE
+
+
+@pytest.mark.parametrize("tage, warnt", [(59, True), (60, False), (61, False)])
+def test_ein_manifest_das_in_unter_60_tagen_ablaeuft_warnt(tmp_path, tage, warnt):
+    world = World(tmp_path)
+    _ruhig(world)
+    _laufendes_manifest(world, JETZT + timedelta(days=tage))
+    assert world.updater.run_once() == "aktuell"
+    assert _letzte_frische(world) == (_warnung("ablauf") if warnt else None)
+
+
+def test_ein_schon_abgelaufenes_manifest_der_laufenden_version_warnt(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    _laufendes_manifest(world, JETZT - timedelta(days=1))
+    world.updater.run_once()
+    assert _letzte_frische(world) == _warnung("ablauf")
+
+
+def test_die_warnung_nimmt_sich_zurueck_wenn_das_neue_bundle_lange_gilt(tmp_path):
+    world = World(tmp_path, manifest_over={"ablauf": _utc_text(JETZT + timedelta(days=400))})
+    _laufendes_manifest(world, JETZT + timedelta(days=10))
+    assert world.updater.run_once() == "aktualisiert"
+    world.api.desired_answer = {"version": "0.3.0"}
+    world.updater.run_once()
+    assert _letzte_frische(world) is None
+
+
+def test_ohne_manifest_der_laufenden_version_warnt_der_ablauf_nicht(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    world.updater.run_once()
+    assert _letzte_frische(world) is None
+
+
+@pytest.mark.parametrize("tage, warnt", [(89, False), (90, True), (91, True)])
+def test_neunzig_tage_ohne_hoeheres_angebot_warnen(tmp_path, tage, warnt):
+    world = World(tmp_path)
+    _ruhig(world)
+    world.updater.run_once()  # erste Beobachtung mit Uhr: hier beginnt die Zaehlung
+    world.now = JETZT + timedelta(days=tage)
+    world.updater.run_once()
+    assert _letzte_frische(world) == (_warnung("kein_angebot") if warnt else None)
+
+
+def test_ein_hoeheres_angebot_beginnt_die_zaehlung_neu(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    world.updater.run_once()
+    world.now = JETZT + timedelta(days=80)
+    world.api.desired_answer = {"version": "0.4.0"}  # hoeher, ohne Bundle: nur ein Angebot der Version
+    world.updater.run_once()
+    world.now = JETZT + timedelta(days=80 + 89)
+    world.updater.run_once()
+    assert _letzte_frische(world) is None
+    world.now = JETZT + timedelta(days=80 + 90)
+    world.updater.run_once()
+    assert _letzte_frische(world) == _warnung("kein_angebot")
+
+
+def test_dasselbe_angebot_noch_einmal_beginnt_die_zaehlung_nicht_neu(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    world.updater.run_once()
+    world.api.desired_answer = {"version": "0.4.0"}
+    world.now = JETZT + timedelta(days=10)
+    world.updater.run_once()
+    world.now = JETZT + timedelta(days=60)
+    world.updater.run_once()
+    world.now = JETZT + timedelta(days=100)
+    world.updater.run_once()
+    assert _letzte_frische(world) == _warnung("kein_angebot")
+
+
+def test_die_zaehlung_ueberlebt_einen_neustart(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    world.updater.run_once()
+    world.updater = world.rebuild()
+    world.now = JETZT + timedelta(days=90)
+    world.updater.run_once()
+    assert _letzte_frische(world) == _warnung("kein_angebot")
+
+
+def test_der_ablauf_geht_der_zaehlung_vor(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    _laufendes_manifest(world, JETZT + timedelta(days=10))
+    world.updater.run_once()
+    world.now = JETZT + timedelta(days=95)
+    world.updater.run_once()
+    assert _letzte_frische(world) == _warnung("ablauf")
+
+
+@pytest.mark.parametrize("sicherheit, warnt", [("aus", False), ("automatisch", True)])
+def test_bei_ausgeschalteten_sicherheitsupdates_gibt_es_keine_frische_warnung(tmp_path, sicherheit, warnt):
+    world = World(tmp_path)
+    _ruhig(world)
+    world.api.updates_answer = {"funktion": "aus", "sicherheit": sicherheit}
+    _laufendes_manifest(world, JETZT + timedelta(days=10))
+    world.updater.run_once()
+    world.now = JETZT + timedelta(days=200)
+    world.updater.run_once()
+    assert (_letzte_frische(world) is not None) is warnt
+    assert all(m is None for m in world.api.frische) is (not warnt)
+
+
+def test_eine_warnung_nimmt_sich_zurueck_wenn_die_sicherheitsupdates_ausgeschaltet_werden(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    _laufendes_manifest(world, JETZT + timedelta(days=10))
+    world.updater.run_once()
+    assert _letzte_frische(world) == _warnung("ablauf")
+    world.api.updates_answer = SICHERHEIT_AUS
+    world.updater.run_once()
+    assert _letzte_frische(world) is None
+
+
+def test_ohne_synchrone_uhr_gibt_es_keine_frische_warnung(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    _laufendes_manifest(world, JETZT + timedelta(days=10))
+    world.now = None
+    world.updater.run_once()
+    assert world.api.frische == []
+    assert _zaehlung(world) is None
+
+
+def test_die_zaehlung_beginnt_erst_mit_der_ersten_vertrauenswuerdigen_uhr(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    world.now = None
+    world.updater.run_once()
+    world.now = JETZT + timedelta(days=500)  # erst jetzt ist die Uhr vertrauenswuerdig
+    world.updater.run_once()
+    assert _letzte_frische(world) is None
+    world.now = JETZT + timedelta(days=590)
+    world.updater.run_once()
+    assert _letzte_frische(world) == _warnung("kein_angebot")
+
+
+def test_eine_uhr_vor_dem_juengsten_zertifikat_gibt_keine_frische_warnung(tmp_path):
+    world = World(tmp_path)
+    _ruhig(world)
+    _laufendes_manifest(world, JETZT + timedelta(days=10))
+    _untergrenze_setzen(world, _utc_text(JETZT + timedelta(days=1)))
+    world.updater.run_once()
+    assert world.api.frische == []
+
+
+def test_ein_fehler_beim_schreiben_der_warnung_stoppt_den_durchlauf_nicht(tmp_path):
+    world = World(tmp_path)
+    _laufendes_manifest(world, JETZT + timedelta(days=10))
+
+    def kaputt(meldung):
+        raise kanal.KanalFehler("nicht schreibbar")
+
+    world.api.updates_veraltet = kaputt
+    assert world.updater.run_once() == "aktualisiert"

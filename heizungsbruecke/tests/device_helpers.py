@@ -89,6 +89,8 @@ class FakeHost:
         self.version = version
         self.synchron: bool | None = True
         self.konfigurationen, self.bedienungen, self.software, self.anzeigen_liste = [], [], [], []
+        self.updates: list = []
+        self.kritisch_geaendert: list = []
         self.status: dict | None = {"status": "regelt"}
         self.raum_werte: dict[int, dict | None] = {}  # Raum je weiterem Kreis
         self.raum_wert: dict | None = {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t0"}
@@ -97,6 +99,14 @@ class FakeHost:
         self.ursprung: dict = {}
         self.entfernen: str | None = None  # Wahl des Nutzers beim Entfernen ("freigeben" oder keine)
         self.entfernen_zugestellt = 0
+        self.hello_werte: dict = {"auto_update": True, "integration_version": "1.2.0"}
+        self.hello_felder_aufrufe = 0
+
+    def hello_felder(self):
+        self.hello_felder_aufrufe += 1
+        if isinstance(self.hello_werte, Exception):
+            raise self.hello_werte
+        return dict(self.hello_werte)
 
     def ursprungswerte(self):
         return dict(self.ursprung)
@@ -135,6 +145,12 @@ class FakeHost:
 
     def software_soll(self, software):
         self.software.append(software)
+
+    def updates_soll(self, updates):
+        self.updates.append(updates)
+
+    def update_noetig_geaendert(self, kritisch):
+        self.kritisch_geaendert.append(kritisch)
 
     def runtime_status(self):
         return self.status

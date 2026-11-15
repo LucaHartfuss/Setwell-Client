@@ -295,6 +295,13 @@ class Laufzeit:
                 self._check_anstossen(kreis)
         return False
 
+    def kritisch_geaendert(self) -> None:
+        """Die kritische Mindestversion gilt neu oder nicht mehr: jeder Kreis startet allein neu (`app.start` liest den
+        Zustand frisch, der Notbetrieb beginnt bzw. endet ohne Prozessneustart). Ein Kreis, der gerade aufgenommen wird,
+        holt es nach seiner Aufnahme nach."""
+        for kreis in sorted(self.kreise()):
+            self.wiederaufnehmen(kreis, erzwingen=True, merken=True)
+
     def _check_anstossen(self, kreis: int) -> None:
         """Ein Zustandswechsel (etwa nach oder aus der Testphase) wirkt im naechsten lokalen Check dieses Kreises, ohne
         Neustart; der Check wird nicht erst vom naechsten Signal ausgeloest."""

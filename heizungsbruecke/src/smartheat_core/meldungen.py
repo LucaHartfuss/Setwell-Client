@@ -109,6 +109,12 @@ def _abo_inaktiv(p: Mapping[str, Param], u: Umgebung) -> str:
             "stellt es die ursprünglichen Werte wieder ein und beendet die Steuerung.")
 
 
+def _update_noetig(p: Mapping[str, Param], u: Umgebung) -> str:
+    return ("Das Add-on ist zu alt für den SmartHeat-Dienst. Bitte das Add-on aktualisieren. Die Heizung läuft bis "
+            f"{_datum(p['ende'])} im Notbetrieb weiter, danach stellt SmartHeat die ursprünglichen Werte wieder ein "
+            "und beendet die Steuerung.")
+
+
 def _zusatz(p: Mapping[str, Param]) -> str:
     if "zusatz" not in p:
         return ""
@@ -156,8 +162,21 @@ TABELLE: dict[str, Vorlage] = _ERZEUGER | {
             "rot", (),
             "Dieses Gerät läuft offenbar zweimal (zum Beispiel aus einem Backup oder einem kopierten Datenträger). "
             "Bitte die Kopie stoppen; SmartHeat regelt weiter."),
-        "update_noetig": _vorlage(
+        "update_noetig": Vorlage("rot", ("ende",), _update_noetig),
+        "update_noetig_unbekannt": _vorlage(
             "rot", (), "Das Add-on ist zu alt für den SmartHeat-Dienst. Bitte das Add-on aktualisieren."),
+        "integration_veraltet": _vorlage(
+            "orange", (),
+            "Die Integration in Home Assistant ist veraltet. Bitte bei Gelegenheit aktualisieren; SmartHeat regelt "
+            "weiter."),
+        "updates_veraltet": _vorlage(
+            "orange", ("grund",),
+            "Die installierte Software wird nicht mehr aktuell gehalten (Grund {grund}). Bitte die Einstellung zu "
+            "Updates prüfen."),
+        "push_nicht_zugestellt": _vorlage(
+            "orange", ("stufe",),
+            "Eine Push-Meldung der Stufe {stufe} konnte seit 24 Stunden nicht zugestellt werden. Bitte die "
+            "Benachrichtigungen in Home Assistant prüfen."),
         "gesperrt": _vorlage(
             "rot", (), "Dieses Gerät ist beim SmartHeat-Dienst gesperrt. Bitte den Support kontaktieren."),
         "konfiguration_abgelehnt": _vorlage(

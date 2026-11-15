@@ -120,6 +120,44 @@ class _Laufzeit:
             raise self.antwort
         return self.antwort
 
+    def kritisch_geaendert(self):
+        self.thread = threading.current_thread()
+        self.aufrufe.append("kritisch")
+        if isinstance(self.antwort, Exception):
+            raise self.antwort
+
+
+def test_eine_aenderung_der_kritischen_mindestversion_nimmt_die_laufzeit_im_hintergrund_wieder_auf(tmp_path):
+    host = _Host(tmp_path / "a.json")
+    laufzeit = _Laufzeit()
+    host.laufzeit_binden(laufzeit)
+    host.update_noetig_geaendert(True)
+    assert _warten(lambda: laufzeit.aufrufe == ["kritisch"])
+    assert laufzeit.thread is not threading.current_thread() and not host._neustart
+
+
+def test_scheitert_die_wiederaufnahme_bei_kritischer_mindestversion_startet_der_prozess_neu(tmp_path):
+    host = _Host(tmp_path / "a.json")
+    host.laufzeit_binden(_Laufzeit(antwort=RuntimeError("kaputt")))
+    host.update_noetig_geaendert(False)
+    assert _warten(lambda: host._neustart)
+
+
+def test_ohne_laufzeit_fordert_eine_aenderung_der_kritischen_mindestversion_den_neustart(tmp_path):
+    host = _Host(tmp_path / "a.json")
+    host.update_noetig_geaendert(True)
+    assert host._neustart
+
+
+def test_ohne_geraet_ist_nichts_kritisch(tmp_path):
+    assert _Host(tmp_path / "a.json").update_noetig_kritisch() is False
+
+
+def test_der_host_fragt_das_geraet_nach_dem_kritischen_zustand(tmp_path):
+    host = _Host(tmp_path / "a.json")
+    host.verbinden(Device(kritisch=True))
+    assert host.update_noetig_kritisch() is True
+
 
 def _warten(bedingung, schritte=300):
     for _ in range(schritte):

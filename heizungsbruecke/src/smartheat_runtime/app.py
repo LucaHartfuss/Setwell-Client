@@ -41,6 +41,8 @@ from smartheat_runtime import (
 )
 from smartheat_runtime.budget_store import AnlagenBudget, BudgetStore, ZustandsSpeicher
 from smartheat_runtime.delivery import ROLE_DATENTRAEGER, SOURCE_LOCAL, DataFault
+from smartheat_runtime.karenz import DATEI as KARENZ_DATEI
+from smartheat_runtime.karenz import Karenz
 from smartheat_runtime.notifier import STATE_OK, Notifier
 from smartheat_runtime.ports import (
     MqttChannel,
@@ -225,25 +227,38 @@ def _idle_heartbeat(worker: RegulationWorker, status: StatusReporter, event: Eve
 
 
 def _fail_start(notifier, status, clock, grund: str, key: str | None = None, *, neustart: Callable[[], None],
-                store=None, parts: RestoreParts | None = None) -> IdleBridge:
+                store=None, parts: RestoreParts | None = None, karenz: Karenz | None = None,
+                abgelehnt: bool = False) -> IdleBridge:
     """Meldezustand `fehler:<key>` (stabile Identitaet, Standard: der Text selbst); Meldung und
     Status tragen den ausfuehrlichen Grund. Derselbe Fehler wie beim letzten Start pusht nicht
     erneut, legt aber die offene Meldung neu an (in HA fehlt sie nach einem Host-Neustart). Danach
     Ruhezustand mit Neupruefung nach CONFIG_RECHECK_SECONDS. Laeuft ein Boost, nimmt der Start ihn ueber `parts`
-    zurueck; geht das nicht, sagt die Meldung, dass die Boost-Werte noch auf der Anlage stehen."""
+    zurueck; geht das nicht, sagt die Meldung, dass die Boost-Werte noch auf der Anlage stehen.
+    Nach einem Softwarewechsel wartet die Meldung die Karenz ab (Status und Ruhezustand sind sofort wahr); die
+    Neupruefung kommt dann zum Ende der Karenz. Sofort gemeldet wird bei abgelehnter Konfiguration, bei Boost-Werten,
+    die auf der Anlage bleiben, und ohne Karenz."""
     logger.error("FEHLER: %s", lesbar(grund))  # der Grund traegt Text der Konfiguration (Gateway: vom Server)
     meldung = meldungen.neu("meldung.konfiguration_fehler", grund=grund)
+    boost_bleibt = False
     if (store is not None and (store.state.boost_active or store.state.emergency_boost_active)
             and not _end_boosts(store, parts, clock)):
+        boost_bleibt = True
         description = None if parts is None else parts.binding.description
         params = {"grund": grund, "werte": _restore_values_text(store.state, description)}
         if parts is not None and not _gleiche_anlage(store, parts):
             params["zusatz"] = GRUND_ANDERE_ANLAGE
         meldung = meldungen.neu("meldung.konfiguration_fehler_boost", **params)
-    if not notifier.notify("konfiguration", f"fehler:{grund if key is None else key}", meldung, critical=True):
-        notifier.refresh_persistent("konfiguration", meldung)
+    rest = None if karenz is None or abgelehnt or boost_bleibt else karenz.rest()
+    if rest is None:
+        if not notifier.notify("konfiguration", f"fehler:{grund if key is None else key}", meldung, critical=True):
+            notifier.refresh_persistent("konfiguration", meldung)
+        if karenz is not None:
+            karenz.beenden()
+    else:
+        logger.info("Konfigurationsfehler nach einem Softwarewechsel: die Meldung wartet auf die neue Konfiguration")
     status.update(konfigurationsfehler=True, grund=laufzeitgrund("start_fehlgeschlagen"))
-    return _idle(clock, status, STATUS_KONFIGURATIONSFEHLER, neustart=neustart, recheck_after=CONFIG_RECHECK_SECONDS)
+    return _idle(clock, status, STATUS_KONFIGURATIONSFEHLER, neustart=neustart,
+                 recheck_after=CONFIG_RECHECK_SECONDS if rest is None else min(rest, CONFIG_RECHECK_SECONDS))
 
 
 def _gleiche_anlage(store, parts: RestoreParts) -> bool:
@@ -831,6 +846,8 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     # Erst warten, bis die Quelle antwortet: Status und Meldungen sollen ankommen, und ohne sie geht ohnehin nichts.
     host.wait_until_ready()
     assert boot.tenant_id is not None  # configured bzw. signed_off setzen ihn voraus
+    karenz = Karenz(boot.backup_path.parent / KARENZ_DATEI, boot.client_version,
+                    zustand_vorhanden=boot.backup_path.exists(), clock=clock)  # vor dem Anlegen des Zustands
     store = _zustandsspeicher(boot)
     status = StatusReporter(status_sink or host.status_sink, boot.tenant_id, store, boot.lever_set,
                             boot.client_version, boot.zustand_source)
@@ -853,8 +870,10 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     except StartFailure as error:
         boosting = store.state.boost_active or store.state.emergency_boost_active
         return _fail_start(notifier, status, clock, error.grund, error.key, neustart=neustart, store=store,
-                           parts=host.sign_off_parts() if boosting else None)
+                           parts=host.sign_off_parts() if boosting else None, karenz=karenz,
+                           abgelehnt=boot.konfiguration_abgelehnt())
 
+    karenz.beenden()  # die Konfiguration passt zur laufenden Software
     notifier.notify("konfiguration", STATE_OK, meldungen.neu("meldung.konfiguration_ok"), critical=True)
     for notice in loaded.notices:
         notifier.notify(notice.key, notice.state, notice.message, critical=False)
@@ -885,6 +904,10 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     # Ein Kreis ausser Betrieb hat weder Abo noch Server: keine Abo-Abfrage, keine Frist, kein Abo-inaktiv-Modus.
     # Seine MQTT-Verbindung dient nur den Raumwerten der Schutz-Telemetrie.
     ausser = kreiszustand.ausser_betrieb(rt)
+    if not config.update_noetig_source():
+        # Beginn und Ende aus einer kritischen Mindestversion gelten nicht weiter, sobald das Geraet sie nicht mehr meldet
+        # (Update eingespielt, Eintrag entfernt): der Kreis regelt wieder, auch nach dem Ende der 30 Tage.
+        entitlement.kritisch_aufheben(config.entitlement_path)
     abo_status = entitlement.UNKNOWN if ausser else entitlement.query(config)
     if abo_status == entitlement.ACTIVE:
         entitlement.clear(config.entitlement_path)

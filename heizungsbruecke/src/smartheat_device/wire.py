@@ -64,7 +64,10 @@ HELLO_FIELDS = (
     "schema", "schemata", "konfiguration_version", "bedienung_version", "anzeige_version", "software_version", "host",
     "faehigkeiten", "wege", "boot_id", "uhr_synchron",
 )
-HELLO_OPTIONAL = ("device_state",)  # fehlt = Uebernahmestand des Geraets unbekannt, kein Abgleich (Spec 5c F1)
+#: device_state: fehlt = Uebernahmestand des Geraets unbekannt, kein Abgleich. Nur Host ha: auto_update (Schalter des
+#: Supervisors fuer das Add-on; fehlt oder null = unbekannt) und integration_version (Version der HA-Integration; fehlt oder
+#: null nach 900 s ohne Ereignis der Integration = unbekannt). Ein Geraet sendet beide immer, der Server speichert Wert und Zeit.
+HELLO_OPTIONAL = ("device_state", "auto_update", "integration_version")
 STATUS_FIELDS = ("schema", "zustand", "runtime_status", "kreise", "ts")
 STATUS_KREIS_FIELDS = ("kreis", "raum")  # ein Eintrag je Kreis der Konfiguration, Nummern aufsteigend und einmalig
 STATUS_OPTIONAL = ("ursprungswerte",)  # fehlt = keine neuen Ursprungswerte (G-4: Hebel -> Wert vor dem ersten Schreiben)
@@ -119,8 +122,15 @@ DOKUMENT_TOPICS = {"konfiguration": "down/config", "bedienung": "down/operation"
 #: Bindung, Raeume, Abo), je Raum `KONFIGURATION_RAUM_FIELDS`. `profil` und die Raumfuehler-Liste gibt es nicht mehr.
 KONFIGURATION_FIELDS = (
     "schema", "version", "anlage", "anlage_name", "weg", "kreise", "tagestick", "mindest_software",
-    "mindest_integration", "software", "bindungsparameter", "push_regeln",
+    "mindest_integration", "software", "bindungsparameter", "push_regeln", "update_noetig", "updates",
 )
+#: update_noetig: null oder der Zeitpunkt (Epoche-Sekunden), ab dem die kritische Mindestversion fuer dieses Geraet gilt; das
+#: Geraet liest es auch aus einer Konfiguration, die es wegen mindest_software ablehnt. updates (nur mit der Faehigkeit
+#: `updater`, sonst null): die Einstellung des Kunden zu Updates, `UPDATES_FIELDS` mit den Werten `UPDATES_FUNKTIONEN`
+#: und `UPDATES_SICHERHEIT`.
+UPDATES_FIELDS = ("funktion", "sicherheit")
+UPDATES_FUNKTIONEN = ("automatisch", "aufschub", "aus")
+UPDATES_SICHERHEIT = ("automatisch", "aus")
 KONFIGURATION_KREIS_FIELDS = ("kreis", "name", "bindung", "raeume", "hebelsatz", "verteilsystem", "abo")
 #: ursprungswerte: fehlt = keine Ursprungswerte auf dem Server; zustand: fehlt = in_betrieb (der Server sendet ihn nur an ein
 #: Geraet mit der Faehigkeit des Zustands, sonst lehnte dessen strenge Pruefung das Feld ab).
@@ -165,7 +175,9 @@ PUSH_REGELN_FIELDS = ("ruhe_von", "ruhe_bis", "tageslimit")
 PUSH_STUNDEN = (0, 23)
 PUSH_TAGESLIMIT = (1, 5)
 TREIBER_FIELDS = ("id", "parameter")
-SOFTWARE_FIELDS = ("version", "manifest_url", "manifest_sha256", "signature")
+#: einmalig: der Kunde hat „jetzt aktualisieren“ gewaehlt, das Geraet installiert diese Version einmal, auch gegen seine
+#: Einstellung zu Updates.
+SOFTWARE_FIELDS = ("version", "manifest_url", "manifest_sha256", "signature", "einmalig")
 ABO = ("aktiv", "inaktiv")
 KREIS_ZUSTAENDE = ("in_betrieb", "ausser_betrieb", "testphase_ohne")
 BEDIENUNG_FIELDS = ("schema", "version", "kreise", "quelle", "ts")
@@ -191,7 +203,7 @@ DOKUMENT_ERRORS = (
 )
 SOFTWARE_ERRORS = (
     "manifest_ungueltig", "signatur_ungueltig", "updater_zu_alt", "version_zu_alt", "start_fehlgeschlagen",
-    "ungesund", "server_unerreichbar",
+    "ungesund", "server_unerreichbar", "manifest_abgelaufen", "einstellung_aus",
 )
 MELDUNGEN = ("wunsch_begrenzt", "soll_quelle_aus", "geraet_doppelt", "update_noetig", "gesperrt")
 
@@ -291,3 +303,7 @@ def command_errors(kind: str) -> tuple[str, ...]:
 NACHWEIS_METHOD = "POST"
 NACHWEIS_PATH = "/einrichtung/v1/geraetecode"
 NACHWEIS_BODY = b"{}"
+#: Versionsweiche des Servers: ein Feld der Konfiguration, das erst ab einer Softwareversion des Hosts gilt (Feld -> Host ->
+#: Version). Das Geraet liest sie nicht; sie steht hier, damit beide Seiten dieselben Namen tragen. Leer, solange kein
+#: Feld nach dem Schnitt dazukam.
+FELD_MINDESTVERSION: dict[str, dict[str, str]] = {}

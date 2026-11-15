@@ -95,6 +95,9 @@ class FakeDeviceSicht:
     def abo_status(self, kreis=None):
         return dokument_config.abo_status(self.konf)
 
+    def update_noetig_kritisch(self):
+        return False
+
     def wunsch(self, wert, *, herkunft, durch=None, kreis=1):
         self.wuensche.append(wert)
         return wert

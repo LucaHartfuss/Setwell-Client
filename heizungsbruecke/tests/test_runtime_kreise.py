@@ -196,6 +196,18 @@ def test_wiederaufnahme_nimmt_nur_den_betroffenen_kreis_neu_auf(env, monkeypatch
     assert not fehler
 
 
+def test_eine_aenderung_der_kritischen_mindestversion_nimmt_jeden_kreis_neu_auf(env):
+    anlage = Anlage(env)
+    laufzeit = _laufzeit(anlage, env)
+    _, fehler = _lauf_im_thread(laufzeit)
+    eins, zwei = laufzeit.kreise()[1], laufzeit.kreise()[2]
+
+    laufzeit.kritisch_geaendert()
+
+    assert laufzeit.kreise()[1] is not eins and laufzeit.kreise()[2] is not zwei
+    assert not fehler
+
+
 def test_ein_laufender_kreis_wird_nicht_wiederaufgenommen(env):
     anlage = Anlage(env)
     laufzeit = _laufzeit(anlage, env)
@@ -707,6 +719,19 @@ def test_ein_dokument_waehrend_der_aufnahme_wird_danach_nachgezogen(env, monkeyp
     aufnahme.join(10)
 
     assert not aufnahme.is_alive() and starts == [1, 1]  # das neuere Dokument wurde nach der Aufnahme nachgezogen
+    assert 1 not in laufzeit._in_aufnahme and 1 not in laufzeit._nachholen
+
+
+def test_eine_kritische_mindestversion_waehrend_der_aufnahme_wird_danach_nachgezogen(env, monkeypatch):
+    laufzeit = _laufzeit(Anlage(env), env)
+    aufnahme, frei, starts = _aufnahme_haengt(laufzeit, 1, monkeypatch)
+
+    laufzeit.kritisch_geaendert()  # Kreis 1 wird schon aufgenommen: er merkt sich den Wechsel, Kreis 2 startet sofort
+    assert starts.count(1) == 1
+    frei.set()
+    aufnahme.join(10)
+
+    assert not aufnahme.is_alive() and starts.count(1) == 2  # der Wechsel wurde nach der Aufnahme nachgezogen
     assert 1 not in laufzeit._in_aufnahme and 1 not in laufzeit._nachholen
 
 

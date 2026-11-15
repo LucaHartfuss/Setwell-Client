@@ -2,6 +2,39 @@
 
 ## Unveroeffentlicht
 
+- Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der urspruenglichen Werte geht jetzt auch an den
+  Server und erreicht Eigentuemer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurueckgenommen.
+
+- Die Meldung `update_noetig` des Geraets (gemeinsame Tabelle) traegt unter einer kritischen Mindestversion das Datum
+  der urspruenglichen Werte, ohne bekannten Beginn gilt die Fassung `update_noetig_unbekannt`. Die Meldung zur
+  veralteten Integration gibt es nur im Add-on, nie am Gateway.
+
+- Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
+  Notbetrieb mit unveraenderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
+  30 Tage zaehlen lokal ab dem ersten Empfang mit vertrauenswuerdiger Uhr und ueberstehen Neustarts (eine unklare Uhr zaehlt
+  nicht). Danach stellt die Laufzeit die urspruenglichen Werte wieder her wie beim Abo-Ende. Ein Update auf die
+  Mindestversion oder ein Konfigurationsstand ohne `update_noetig` hebt den Zustand ohne Neustart der Laufzeit auf, auch
+  nach den 30 Tagen. Der Beginn steht mit dem Zusatz `kritisch` in der Datei der Abo-Frist (`entitlement_state.json` je
+  Kreis; neues Feld, keine Migration). Die Abo-Meldungen erscheinen dabei nicht.
+
+- Der Updater des Gateways achtet auf die Einstellung `updates` des Kunden: ein signiertes Angebot, dessen Art
+  (`sicherheit`, `funktion`, `treiberfix`) die Einstellung nicht erlaubt, wird nicht installiert und einmal mit dem Grund
+  `einstellung_aus` gemeldet (kein Eintrag unter den abgelehnten Angeboten, es gilt wieder, sobald die Einstellung es
+  erlaubt); `einmalig` hebt das auf. Die Laufzeit legt die Einstellung in der neuen Datei `data/updates_soll.json` ab
+  (neue Datei, keine Migration; ohne sie gilt keine Einschraenkung, eine unlesbare Datei laesst den Updater abwarten).
+  Ausserdem warnt der Updater in `data/updates_veraltet.json` (neue Datei), wenn das Manifest der laufenden Version in
+  weniger als 60 Tagen ablaeuft oder seit 90 Tagen kein hoeheres Angebot kam (Meldung `meldung.updates_veraltet`; nie ohne
+  verlaessliche Uhr, nie bei ausgeschalteten Sicherheitsupdates). Neues Feld in `updater/state.json`: `aus_gemeldet`;
+  die Zaehlung der Frische steht in der neuen Datei `updater/frische.json` (ohne sie beginnt die Zaehlung neu).
+
+- Das Geraet liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
+  Soll-Software (Unlesbares blockiert nie) und merkt sie in `dokumente.json`; das `hello` des Gateways traegt
+  `auto_update` und `integration_version` nie.
+- Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
+  auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
+  und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
+  keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+
 - Ohne vertrauenswuerdige Uhr rueckt der Tag der Tageszaehler nach der monotonen Uhr vor (je volle 24 Stunden einer); der
   Start-Zaehler des Kaelteschutzes haengt nicht mehr bis zum Neustart fest. Eintraege eines spaeteren Tages zaehlen als
   heute. Ein Fehler der Plan-Eingabe oder des Uhrurteils haelt den Kaelteschutz nicht an (es gilt der Wunsch).

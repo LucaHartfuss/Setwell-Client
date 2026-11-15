@@ -112,7 +112,8 @@ class GatewayHost:
             backup_path=self._paths.backup(self.kreis), failsafe_path=self._paths.failsafe(self.kreis),
             aufraeumen_path=self._paths.aufraeumen, alter_zustand=self._paths.alter_backup,
             anlage_budget_path=self._paths.anlage_budget, kreis=self.kreis,
-            zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis))
+            zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
+            abgelehnt_source=self._geraet.konfiguration_abgelehnt)
         if not boot.configured and not boot.signed_off:
             logger.info(NOT_CONFIGURED_HINT)
         return boot
@@ -173,7 +174,8 @@ class GatewayHost:
             runtime, bindung = gateway_config.parse_dokument(
                 self.konfiguration, self._paths, lambda: self._geraet.abo_status(self.kreis), self.kreis,
                 lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
-                lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
+                update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
+                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
         except (ConfigError, KeyError) as error:
             raise StartFailure(str(error), KEY_CONFIG) from error
         try:

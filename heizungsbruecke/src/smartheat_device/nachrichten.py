@@ -31,6 +31,16 @@ def _host(name: str, body: dict, feld: str = "host") -> None:
         raise Vertragsfehler(f"{name}: {feld} steht nicht in HOSTS")
 
 
+#: Felder des hello, die nur der Host ha sendet (Vertrag: wire.HELLO_OPTIONAL).
+HELLO_NUR_HA = ("auto_update", "integration_version")
+_INTEGRATION_VERSION = re.compile(r"[0-9A-Za-z.+-]{1,32}")  # die Form, die der Server annimmt
+
+
+def integration_version_gueltig(wert) -> bool:
+    """Versionstext in der Form, die der Server annimmt."""
+    return isinstance(wert, str) and _INTEGRATION_VERSION.fullmatch(wert) is not None
+
+
 def _faehigkeiten(name: str, wert) -> dict:
     """hello.faehigkeiten und register.capabilities: genau drivers und zigbee, dazu optional updater und programm."""
     if not isinstance(wert, dict):
@@ -61,6 +71,13 @@ def hello(*, device_state: str | None = None, **felder) -> dict:
         body["device_state"] = device_state
     pruefen("hello", body, wire.HELLO_FIELDS, wire.HELLO_OPTIONAL)
     _host("hello", body)
+    for feld in HELLO_NUR_HA:
+        if feld in body and body["host"] != "ha":
+            raise Vertragsfehler(f"hello.{feld}: nur der Host ha sendet das Feld")
+    if "auto_update" in body and body["auto_update"] is not None and not isinstance(body["auto_update"], bool):
+        raise Vertragsfehler("hello.auto_update: kein Wahrheitswert")
+    if body.get("integration_version") is not None and not integration_version_gueltig(body["integration_version"]):
+        raise Vertragsfehler("hello.integration_version: kein Versionstext")
     _faehigkeiten("hello.faehigkeiten", body["faehigkeiten"])
     wege = body["wege"]
     if not isinstance(wege, list) or not all(isinstance(weg, str) for weg in wege) or len(set(wege)) != len(wege):

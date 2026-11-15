@@ -170,7 +170,7 @@ def _abo_status(env):
 
 def _start_bridge(env, **option_overrides):
     bridge, env.geraet = geraet_helpers.start_bridge(env, options=OPTIONS, abo=lambda: _abo_status(env),
-                                                  **option_overrides)
+                                                  kritisch=lambda: env.abo["kritisch"], **option_overrides)
     return bridge
 
 
@@ -295,7 +295,7 @@ def _frische_umgebung(verzeichnis: Path, mp, clock):
                                                "fp1", raeume={n: "sensor.room_actual" for n, _ in kwargs["raeume"]}))
     trigger = []
     mp.setattr("heizungsbruecke.geraet_trigger.HaTriggerClient", trigger_klasse(trigger))
-    return SimpleNamespace(clock=clock, paths=paths, abo={"status": entitlement.ACTIVE, "queries": 0},
+    return SimpleNamespace(clock=clock, paths=paths, abo={"status": entitlement.ACTIVE, "queries": 0, "kritisch": False},
                            ha=FakeHa(), trigger_clients=trigger, derived=derived, geraet=None)
 
 

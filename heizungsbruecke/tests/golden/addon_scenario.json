@@ -396,6 +396,9 @@
     "source": "portal",
     "ts": "2026-01-15T08:00:00+01:00",
     "value": 21.0
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -528,6 +531,9 @@
     "source": "portal",
     "ts": "2026-01-15T08:00:00+01:00",
     "value": 21.0
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -668,6 +674,9 @@
     "source": "portal",
     "ts": "2026-01-15T08:00:00+01:00",
     "value": 21.0
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -808,6 +817,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -1031,6 +1043,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
     "value": 22.0
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -1173,6 +1188,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
     "value": 22.0
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -1355,6 +1373,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
     "value": 21.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -1513,6 +1534,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
     "value": 21.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -1777,6 +1801,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
     "value": 21.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -2023,6 +2050,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:00+01:00",
     "value": 21.0
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -2274,6 +2304,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 21.0
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -2552,6 +2585,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -3650,6 +3686,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -3885,6 +3924,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -4250,6 +4292,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -4487,6 +4532,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -4643,6 +4691,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -4868,6 +4919,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -5132,6 +5186,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  },
@@ -5353,6 +5410,9 @@
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
     "value": 20.5
+   },
+   "runtime/kreis-1/software_stand.json": {
+    "version": "1.1.0"
    }
   }
  }

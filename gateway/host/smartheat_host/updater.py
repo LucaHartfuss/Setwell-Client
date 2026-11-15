@@ -104,8 +104,21 @@ UPDATER_ZU_ALT = "updater_zu_alt"
 VERSION_ZU_ALT = "version_zu_alt"
 START_FEHLGESCHLAGEN = "start_fehlgeschlagen"
 UNGESUND = "ungesund"
+EINSTELLUNG_AUS = "einstellung_aus"  # die Einstellung des Kunden zu Updates erlaubt die Art des Angebots nicht
 REASONS = (MANIFEST_UNGUELTIG, SIGNATUR_UNGUELTIG, UPDATER_ZU_ALT, VERSION_ZU_ALT, START_FEHLGESCHLAGEN, UNGESUND,
-           RETRY_REASON)
+           RETRY_REASON, EINSTELLUNG_AUS)
+#: Frische der installierten Software: eine Warnung (Meldung updates_veraltet), wenn das Manifest der laufenden Version
+#: in weniger als FRISCHE_ABLAUF_TAGE Tagen ablaeuft (oder schon abgelaufen ist) oder seit FRISCHE_KEIN_ANGEBOT_TAGE Tagen
+#: kein hoeheres Angebot kam; nie ohne verlaessliche Uhr und nie bei ausgeschalteten Sicherheitsupdates.
+FRISCHE_ABLAUF_TAGE = 60
+FRISCHE_KEIN_ANGEBOT_TAGE = 90
+#: Die Zaehlung (hoechste angebotene Version und seit wann) steht neben dem Zustand, nicht darin: er bleibt, wie ihn der
+#: Updater ohne Frische schreibt.
+FRISCHE_ZAEHLUNG_DATEI = "frische.json"
+#: Die Meldung in der Form von smartheat_core.meldungen (der Host liefert dieses Modul nicht mit; test_updater.py gleicht
+#: Code und Stufe mit der Tabelle ab).
+FRISCHE_MELDUNG = "meldung.updates_veraltet"
+FRISCHE_STUFE = "orange"
 HEALTH_SECONDS = 600
 HEALTH_POLL_SECONDS = 10
 HEALTH_CAP_SECONDS = 3600  # Gesamtgrenze der Gesundheitspruefung, wenn die Frist wegen Unerreichbarkeit ruht
@@ -151,6 +164,11 @@ class FetchError(Exception):
 
 class _Abgelaufen(Exception):
     """Das gepruefte Manifest gilt nicht mehr: kein Fehler des Angebots, keine Ablehnung und keine Meldung."""
+
+
+class _Eingestellt(Exception):
+    """Die Einstellung des Kunden zu Updates erlaubt die Art des Angebots nicht: das Angebot bleibt unberuehrt (nicht in
+    `rejected`), es gilt wieder, sobald die Einstellung es erlaubt."""
 
 
 class _Refused(Exception):
@@ -246,7 +264,7 @@ def abstand_sekunden(rueckfaelle: int) -> int:
 
 
 _STATE_FELDER = ("current", "previous", "rejected", "in_progress", "rejected_context", "pending_reports",
-                 "zertifikat_untergrenze", "system", "system_abstand", "system_installfehler")
+                 "zertifikat_untergrenze", "system", "system_abstand", "system_installfehler", "aus_gemeldet")
 
 
 @dataclass
@@ -261,6 +279,7 @@ class State:
     system: dict | None = None
     system_abstand: dict | None = None
     system_installfehler: int = 0
+    aus_gemeldet: str | None = None  # Kennung des Angebots, dessen Ablehnung wegen der Einstellung gemeldet ist
     unbekannt: dict = field(default_factory=dict)  # Felder, die dieser Updater nicht kennt: `save` erhaelt sie (GPC24)
     #: Ein vorhandener, aber nicht lesbarer Systemauftrag (etwa eine Phase oder ein Grund eines neueren Updaters): bleibt
     #: unveraendert in der Datei (GPC24) und sperrt Start und Abschluss der Container dieses Auftrags (`_auftrag_unlesbar`)
@@ -288,6 +307,7 @@ class State:
                 system=system, system_roh=data.get("system") if system is None and data.get("system") is not None else None,
                 system_abstand=_system_abstand(data.get("system_abstand")),
                 system_installfehler=fehler if isinstance(fehler, int) and not isinstance(fehler, bool) and fehler > 0 else 0,
+                aus_gemeldet=_text_or_none(data.get("aus_gemeldet")),
                 unbekannt={key: value for key, value in data.items() if key not in _STATE_FELDER})
         except (OSError, ValueError, AttributeError, TypeError):
             return cls()
@@ -773,6 +793,23 @@ def _older_or_equal(version: str, current: str | None) -> bool:
         return False
 
 
+def _hoeher(version: str, bisher: str | None) -> bool:
+    """Ob `version` eine lesbare Version ist, die hoeher als `bisher` liegt (None: noch keine)."""
+    try:
+        return bisher is None or bundles.parse_version(version) > bundles.parse_version(bisher)
+    except bundles.ManifestError:
+        return False
+
+
+def _art_erlaubt(art: str, updates: dict | None) -> bool:
+    """Ob die Einstellung des Kunden zu Updates (None = keine bekannt) die Art des Manifests erlaubt: Sicherheitsupdates
+    nach `sicherheit`, Funktionsupdates und Treiberfixe nach `funktion`; nur "aus" sperrt (Aufschub ist eine Frage der
+    Zeit, nicht der Art)."""
+    if updates is None:
+        return True
+    return updates["sicherheit" if art == "sicherheit" else "funktion"] != "aus"
+
+
 @dataclass(frozen=True)
 class _Paket:
     """Was der Updater nach der Kettenpruefung in der Hand hat: die Bundle-Dateien samt Manifest und Signatur (alles fuer
@@ -796,6 +833,7 @@ class Updater:
         self._kanal, self._store, self._compose, self._fetch = kanal, store, compose, fetch
         self._startauswahl, self._lokal_health = startauswahl, lokal_health
         self._unlesbar_gemeldet = False
+        self._angebot_version: str | None = None  # Version des Soll-Angebots im laufenden Durchlauf (Frische)
         self._probestart_angefordert: str | None = None  # Version, fuer die dieser Prozess den Neustart schon angefordert hat
         self._fetch_datei, self._docker_load = fetch_datei, docker_load
         self._uhr, self._state_path, self._version = uhr, state_path, version
@@ -832,11 +870,17 @@ class Updater:
         Dateifehler (Datentraeger voll oder schreibgeschuetzt, Zustandsdatei) ist kein Fehler des Bundles: ERROR mit dem
         Namen des Fehlers, Ergebnis "vorlaeufig"; der Zustand bleibt, wie die letzte erfolgreiche Speicherung ihn liess
         (ein unterbrochenes Update setzt recover() im naechsten Durchlauf fort)."""
+        self._angebot_version = None
         try:
-            return self._run_once()
+            ergebnis = self._run_once()
         except OSError as error:
             self._file_error("run_once", error)
-            return "vorlaeufig"
+            ergebnis = "vorlaeufig"
+        try:
+            self._frische_pruefen()
+        except OSError as error:
+            self._file_error("frische", error)
+        return ergebnis
 
     @staticmethod
     def _file_error(where: str, error: OSError) -> None:
@@ -895,6 +939,7 @@ class Updater:
         version = desired.get("version")
         signatur = desired.get("signature")
         manifest_sha = desired.get("manifest_sha256")
+        self._angebot_version = version if isinstance(version, str) else None
         if (not isinstance(version, str) or version == state.current
                 or _rejected_key(version, manifest_sha, signatur) in state.rejected):
             return "aktuell"
@@ -917,8 +962,14 @@ class Updater:
                          untergrenze_version)
             self._reject(state, version, VERSION_ZU_ALT, manifest_sha, signatur)
             return "abgelehnt"
+        try:  # ohne lesbare Einstellung nichts installieren und nichts ablehnen: vorlaeufig
+            updates = self._kanal.updates()
+        except kanal.KanalFehler as error:
+            logger.info("Einstellung zu Updates nicht abrufbar (%s), naechster Durchlauf", error)
+            return "vorlaeufig"
         try:
-            paket = self._download(desired, version, jetzt, untergrenze)
+            paket = self._download(desired, version, jetzt, untergrenze, updates)
+            state.aus_gemeldet = None  # die Art ist (wieder) erlaubt: eine spaetere Sperre wird neu gemeldet
             missing = self._missing_devices(paket.files["docker-compose.yml"].decode("utf-8"))
             if missing:  # z. B. Zigbee-Stick abgezogen: up und Rueckweg scheiterten beide, kein Fehler des Bundles
                 logger.warning("Bundle %s wartet: Geraet fehlt (%s), naechster Durchlauf", version, ", ".join(missing))
@@ -944,6 +995,15 @@ class Updater:
         except _Abgelaufen as abgelaufen:  # nichts merken: eine neu signierte Fassung derselben Version bleibt annehmbar
             logger.warning("Bundle %s nicht installiert: %s", version, abgelaufen)
             return MANIFEST_ABGELAUFEN
+        except _Eingestellt as eingestellt:  # nicht in `rejected`: gilt wieder, sobald die Einstellung es erlaubt
+            logger.warning("Bundle %s nicht installiert: %s", version, eingestellt)
+            kennung = _rejected_key(version, manifest_sha, signatur)
+            if state.aus_gemeldet != kennung:  # je Angebot einmal melden, auch nach einem Neustart
+                state.aus_gemeldet = kennung
+                self._queue(state, version, "rollback", EINSTELLUNG_AUS)
+                state.save(self._state_path)
+                self._flush(state)
+            return "abgelehnt"
         except _Refused as refused:
             logger.error("Bundle %s abgelehnt: %s", version, refused)
             self._reject(state, version, refused.reason, manifest_sha, signatur)
@@ -984,10 +1044,78 @@ class Updater:
             done = self._rollback(state, version, RETRY_REASON, reject=False)
         return "zurueckgerollt" if done else "vorlaeufig"
 
+    # --- Frische ---
+
+    def _frische_pruefen(self) -> None:
+        """Legt die Meldung updates_veraltet ab, wenn die installierte Software nicht mehr frisch ist (FRISCHE_*), und nimmt
+        sie zurueck, wenn sie es wieder ist oder die Sicherheitsupdates ausgeschaltet sind. Ohne verlaessliche Uhr (oder
+        mit einer vor dem juengsten angenommenen Zertifikat) bleibt alles, wie es ist; auch die Zaehlung beginnt erst mit
+        einer vertrauenswuerdigen Uhr."""
+        try:
+            updates = self._kanal.updates()
+        except kanal.KanalFehler:
+            return  # Einstellung unlesbar: nichts aendern
+        if updates is not None and updates["sicherheit"] == "aus":
+            self._frische_ablegen(None)  # der Kunde will keine Sicherheitsupdates: nichts zu warnen
+            return
+        jetzt = self._uhr()
+        state = self._load()
+        untergrenze = _zeit(state.zertifikat_untergrenze)
+        if jetzt is None or (untergrenze is not None and jetzt < untergrenze):
+            return
+        laufend = state.current or self._version
+        hoechste, seit_text = self._zaehlung_laden()
+        geaendert = False
+        for angebot in (self._angebot_version, laufend):
+            if angebot is not None and _hoeher(angebot, hoechste):
+                hoechste, seit_text, geaendert = angebot, jetzt.isoformat(), True
+        if geaendert:
+            try:
+                dateien.schreiben_json(self._zaehlung_pfad(), {"hoechste": hoechste, "seit": seit_text},
+                                       modus=dateien.LESBAR)
+            except OSError as error:
+                logger.warning("Frische-Zaehlung nicht abgelegt (%s), naechster Durchlauf", type(error).__name__)
+        grund = None
+        ablauf = self._ablauf_der_laufenden(laufend)
+        seit = _zeit(seit_text)
+        if ablauf is not None and ablauf - jetzt < timedelta(days=FRISCHE_ABLAUF_TAGE):
+            grund = "ablauf"
+        elif seit is not None and jetzt - seit >= timedelta(days=FRISCHE_KEIN_ANGEBOT_TAGE):
+            grund = "kein_angebot"
+        self._frische_ablegen(None if grund is None else {"code": FRISCHE_MELDUNG, "params": {"grund": grund},
+                                                          "stufe": FRISCHE_STUFE})
+
+    def _zaehlung_pfad(self) -> Path:
+        return self._state_path.with_name(FRISCHE_ZAEHLUNG_DATEI)
+
+    def _zaehlung_laden(self) -> tuple[str | None, str | None]:
+        """(hoechste angebotene Version, Zeitpunkt der ersten Beobachtung); fehlt die Datei oder ist sie unbrauchbar,
+        beginnt die Zaehlung neu."""
+        try:
+            daten = json.loads(self._zaehlung_pfad().read_text())
+            return _text_or_none(daten.get("hoechste")), _zeit_text(daten.get("seit"))
+        except (OSError, ValueError, AttributeError):
+            return None, None
+
+    def _ablauf_der_laufenden(self, version: str) -> datetime | None:
+        """Ablauf aus dem Manifest, mit dem die Version installiert wurde; None, wenn es fehlt oder unlesbar ist."""
+        try:
+            return bundles.parse_manifest((self._store.dir(version) / bundles.MANIFEST_NAME).read_bytes()).ablauf
+        except (OSError, bundles.ManifestError):
+            return None
+
+    def _frische_ablegen(self, meldung: dict | None) -> None:
+        try:
+            self._kanal.updates_veraltet(meldung)
+        except kanal.KanalFehler as error:
+            logger.warning("Frische-Meldung nicht abgelegt (%s), naechster Durchlauf", error)
+
     # --- Schritte ---
 
-    def _download(self, desired: dict, version: str, jetzt: datetime, untergrenze: datetime | None) -> _Paket:
-        """Prueft und laedt (ein abgelaufenes Manifest, erst nach Signatur und Version geprueft, wirft _Abgelaufen); liefert die Bundle-Dateien plus Manifest und Signatur (alles fuer bundles/<version>/), das
+    def _download(self, desired: dict, version: str, jetzt: datetime, untergrenze: datetime | None,
+                  updates: dict | None) -> _Paket:
+        """Prueft und laedt (ein abgelaufenes Manifest, erst nach Signatur und Version geprueft, wirft _Abgelaufen; eine Art,
+        die die Einstellung `updates` nicht erlaubt, ausser bei `einmalig`, wirft _Eingestellt); liefert die Bundle-Dateien plus Manifest und Signatur (alles fuer bundles/<version>/), das
         Release-Zertifikat, mit dem das Manifest signiert ist, das gepruefte Manifest und seine Adresse. Das Archiv des
         Images holt erst `_image_bereitstellen`."""
         url, expected_sha, signature = (desired.get(key) for key in OFFER_KEYS)
@@ -1024,6 +1152,8 @@ class Updater:
             raise _Refused(UPDATER_ZU_ALT, f"Bundle verlangt Updater {manifest.min_updater_version}")
         if manifest.ablauf <= jetzt:
             raise _Abgelaufen(f"Manifest ist seit {manifest.ablauf.isoformat()} abgelaufen")
+        if desired.get("einmalig") is not True and not _art_erlaubt(manifest.art, updates):
+            raise _Eingestellt(f"Einstellung zu Updates erlaubt die Art {manifest.art} nicht")
         files = {}
         for name, sha in manifest.files.items():
             data = self._fetch(urllib.parse.urljoin(url, name), MAX_FILE_BYTES)

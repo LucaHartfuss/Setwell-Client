@@ -18,13 +18,14 @@ from smartheat_gateway import anmeldung, runtime_main
 from smartheat_gateway.bus import BUS_PORT
 from smartheat_gateway.paths import Paths
 from smartheat_gateway.zigbee import ZigbeeMirror
-from smartheat_runtime import app, aufraeumen
+from smartheat_runtime import app, aufraeumen, karenz
 from smartheat_runtime.app import IDLE_NOT_CONFIGURED, IdleBridge
 from smartheat_runtime.runtime import EV_RECHECK, Runtime
 from smartheat_runtime.status import STATUS_ABGEMELDET
 from smartheat_runtime.worker import Event, RegulationWorker
 
-SOFTWARE = {"version": "0.6.1", "manifest_url": "https://x.test/m.json", "manifest_sha256": "a" * 64, "signature": "s"}
+SOFTWARE = {"version": "0.6.1", "manifest_url": "https://x.test/m.json", "manifest_sha256": "a" * 64, "signature": "s",
+            "einmalig": False}
 
 
 @pytest.fixture
@@ -92,6 +93,42 @@ def test_the_config_error_recheck_restarts_through_the_reload_path(world):
     assert not first.stopped  # der Worker trennt nicht selbst
     prozess.beenden(world.device, None, None)
     assert first.stopped
+
+
+def _fehlermeldungen(caplog):
+    return [r for r in caplog.records if r.getMessage() == "Meldung meldung.konfiguration_fehler"]
+
+
+def test_after_a_software_change_the_config_error_message_waits_and_the_state_stays_true(world, monkeypatch, caplog):
+    """Nach einem Softwarewechsel wartet die Meldung zum Konfigurationsfehler 900 s auf die neue Konfiguration; der
+    Ruhezustand und der Status sind sofort wahr (beide Hosts teilen den Ablauf, app._fail_start)."""
+    monkeypatch.setattr("smartheat_gateway.host.GATEWAY_VERSION", "2.0.0")
+    dokumente_schreiben(world.paths, konfiguration(raumfuehler=["test-falsch"]))
+    dateien.schreiben_json(world.paths.backup(1).parent / karenz.DATEI, {"version": "1.0.0"}, modus=dateien.PRIVAT)
+
+    result = world.start_runtime()
+
+    assert isinstance(result, IdleBridge) and result.reason == "konfigurationsfehler"
+    assert world.status()["status"] == "konfigurationsfehler"
+    assert not _fehlermeldungen(caplog)
+    world.clock.advance(karenz.KARENZ_NACH_UPDATE_S - 1)
+    result.worker.run_pending()  # noch kein Neustart
+    world.clock.advance(1)
+    with pytest.raises(prozess.Neustart):
+        result.worker.run_pending()
+    prozess.beenden(world.device, None, None)
+    world.start_runtime()
+    assert _fehlermeldungen(caplog)
+
+
+def test_without_a_software_change_the_config_error_message_comes_at_once(world, monkeypatch, caplog):
+    monkeypatch.setattr("smartheat_gateway.host.GATEWAY_VERSION", "2.0.0")
+    dokumente_schreiben(world.paths, konfiguration(raumfuehler=["test-falsch"]))
+    dateien.schreiben_json(world.paths.backup(1).parent / karenz.DATEI, {"version": "2.0.0"}, modus=dateien.PRIVAT)
+
+    world.start_runtime()
+
+    assert _fehlermeldungen(caplog)
 
 
 def test_the_sign_off_retry_stays_a_retry(data_dir, clock):
@@ -324,6 +361,39 @@ def test_a_withdrawn_offer_is_replayed_as_null(world):
     dateien.schreiben_json(world.paths.software_soll, SOFTWARE, modus=dateien.LESBAR)  # Schreiben von null verloren
     _neustart(world)
     assert _soll_software(world) is None  # null = kein Angebot fuer den Updater (kanal.desired() -> {})
+
+
+UPDATES = {"funktion": "aus", "sicherheit": "automatisch"}
+
+
+def _soll_updates(world):
+    return json.loads(world.paths.updates_soll.read_text()) if world.paths.updates_soll.exists() else "fehlt"
+
+
+def test_the_updates_setting_is_given_to_the_updater_and_replayed_after_a_restart(world):
+    world.start_runtime()
+    world.connect()
+    world.konfiguration_senden(konfiguration(updates=UPDATES), 1)
+    assert _soll_updates(world) == UPDATES
+    world.paths.updates_soll.unlink()
+    _neustart(world)
+    assert _soll_updates(world) == UPDATES
+
+
+def test_a_lost_withdrawal_of_the_updates_setting_is_replayed_as_null(world):
+    world.start_runtime()
+    world.connect()
+    world.konfiguration_senden(konfiguration(updates=UPDATES), 1)
+    world.konfiguration_senden(konfiguration(updates=None), 2)
+    assert _soll_updates(world) is None
+    dateien.schreiben_json(world.paths.updates_soll, UPDATES, modus=dateien.LESBAR)  # Schreiben von null verloren
+    _neustart(world)
+    assert _soll_updates(world) is None
+
+
+def test_no_updates_replay_without_a_stored_configuration(world):
+    world.start_runtime()
+    assert _soll_updates(world) == "fehlt"
 
 
 def test_a_stored_configuration_without_a_remembered_offer_is_not_replayed(world):

@@ -20,7 +20,7 @@ from smartheat_runtime.worker import RegulationWorker
 HINWEIS = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
 
 SOFTWARE = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
-            "signature": "sig"}
+            "signature": "sig", "einmalig": False}
 
 
 def _bedienung(version=3, raum_soll=21.0):
@@ -142,6 +142,120 @@ def test_hello_after_a_reconnect_reports_the_taken_versions(tmp_path):
     world.device.schritt()
     hello = world.link.of("up/hello")[-1]
     assert (hello["konfiguration_version"], hello["bedienung_version"]) == (4, 2)
+
+
+def _ha_welt(tmp_path, **werte):
+    host = FakeHost()
+    host.host = "ha"
+    if werte:
+        host.hello_werte = werte
+    return World(tmp_path, host)
+
+
+def test_hello_des_ha_hosts_traegt_auto_update_und_integration_version(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    (hello,) = world.link.of("up/hello")
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state", "auto_update", "integration_version"}
+    assert (hello["auto_update"], hello["integration_version"]) == (True, "1.2.0")
+
+
+def test_hello_des_gateways_traegt_beide_felder_nie_und_der_host_wird_nicht_gefragt(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    for _ in range(3):
+        world.device.schritt()
+    assert all("auto_update" not in hello and "integration_version" not in hello for hello in world.link.of("up/hello"))
+    assert world.host.hello_felder_aufrufe == 0
+
+
+def test_ein_gescheiterter_hostrueckruf_meldet_beide_felder_unbekannt_und_loggt_nichts_geheimes(tmp_path, caplog):
+    world = _ha_welt(tmp_path)
+    world.host.hello_werte = RuntimeError("GEHEIM")
+    world.verbinden()
+    hello = world.link.of("up/hello")[-1]
+    assert (hello["auto_update"], hello["integration_version"]) == (None, None)
+    assert "GEHEIM" not in caplog.text and "RuntimeError" in caplog.text
+    world.host.hello_werte = {"auto_update": False, "integration_version": "1.3.0"}
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert (hello["auto_update"], hello["integration_version"]) == (False, "1.3.0")
+    assert len(world.link.of("up/hello")) == 2
+
+
+@pytest.mark.parametrize("werte", [{"auto_update": "ja", "integration_version": 5},
+                                   {"auto_update": 1, "integration_version": ["1.2.0"]},
+                                   {"auto_update": None, "integration_version": None}, {}])
+def test_ungueltige_oder_fehlende_hostwerte_gehen_als_unbekannt_hinaus(tmp_path, werte):
+    world = _ha_welt(tmp_path)
+    world.host.hello_werte = werte
+    world.verbinden()
+    (hello,) = world.link.of("up/hello")
+    assert (hello["auto_update"], hello["integration_version"]) == (None, None)
+
+
+def test_eine_aenderung_der_werte_sendet_im_naechsten_takt_ein_neues_hello_sonst_keines(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    for _ in range(5):
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == 1
+    world.host.hello_werte = {"auto_update": True, "integration_version": None}
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert len(world.link.of("up/hello")) == 2 and hello["integration_version"] is None
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == 2
+    world.host.hello_werte = {"auto_update": False, "integration_version": None}
+    world.clock.now += device.HELLO_NACHSENDEN_MIN_SECONDS
+    world.device.schritt()
+    assert [h["auto_update"] for h in world.link.of("up/hello")] == [True, True, False]
+
+
+def test_ein_kippendes_feld_sendet_hoechstens_ein_hello_je_60_sekunden_und_die_letzte_aenderung_geht_nicht_verloren(
+        tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    anzahl = len(world.link.of("up/hello"))
+    versionen = ["1.2.0", "1.3.0"]
+    for sekunde in range(1, 60):  # jede Sekunde kippt die Integration zwischen zwei Versionen
+        world.host.hello_werte = {"auto_update": True, "integration_version": versionen[sekunde % 2]}
+        world.clock.now += 1
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 1  # das erste Nachsenden geht gleich, danach ist Pause
+    world.host.hello_werte = {"auto_update": True, "integration_version": "9.9.9"}
+    world.clock.now += 1  # 59 s nach dem ersten Nachsenden
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 1
+    world.clock.now += 1  # 60 s danach: der aktuelle Stand geht hinaus
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 2
+    assert world.link.of("up/hello")[-1]["integration_version"] == "9.9.9"
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 2  # unveraendert: nichts mehr
+
+
+def test_der_abstand_gilt_zwischen_nachgesendeten_hellos_nicht_gegen_das_erste_nach_dem_verbinden(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    world.host.hello_werte = {"auto_update": False, "integration_version": "1.2.0"}
+    world.device.schritt()  # sofort nach dem Verbinden: das erste Nachsenden wartet nicht
+    assert len(world.link.of("up/hello")) == 2
+
+
+def test_ohne_verbindung_geht_kein_hello_hinaus_und_das_naechste_traegt_den_aktuellen_stand(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    world.link.trennen()
+    world.host.hello_werte = {"auto_update": False, "integration_version": "2.0.0"}
+    for _ in range(3):
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == 1
+    world.link.verbinden()
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert len(world.link.of("up/hello")) == 2
+    assert (hello["auto_update"], hello["integration_version"]) == (False, "2.0.0")
 
 
 # --- Dokumente ---
@@ -759,7 +873,7 @@ def test_hello_reports_the_claim_state_the_device_knows(tmp_path):
     world.verbinden()
     (hello,) = world.link.of("up/hello")
     assert hello["device_state"] == bootstrap.device_state(world.dir) == "nicht_uebernommen"
-    assert set(hello) == set(wire.HELLO_FIELDS) | set(wire.HELLO_OPTIONAL)
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
 
 
 def test_weg_pruefen_is_refused_as_not_supported(tmp_path):
@@ -1281,6 +1395,127 @@ def test_a_failing_software_callback_still_answers_and_hands_over(tmp_path, capl
     world.empfangen("down/config", _konfiguration())
     assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
     assert len(world.host.konfigurationen) == 1
+    assert "RuntimeError" in caplog.text and "geheimer Parameter" not in caplog.text
+
+
+UPDATES = {"funktion": "aufschub", "sicherheit": "automatisch"}
+
+
+def test_the_updates_setting_of_a_configuration_reaches_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    assert world.host.updates == [UPDATES]
+
+
+def test_a_configuration_without_updates_hands_the_host_no_setting(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration())
+    assert world.host.updates == [None]
+
+
+def test_an_invalid_updates_field_keeps_the_last_setting_for_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    world.empfangen("down/config", _konfiguration(version=2, updates={"funktion": "morgen", "sicherheit": "aus"}))
+    assert world.host.updates[-1] == UPDATES
+
+
+def test_a_date_in_update_noetig_makes_the_state_critical_and_tells_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    assert world.device.update_noetig_kritisch() is False
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    assert world.device.update_noetig_kritisch() is True
+    assert world.host.kritisch_geaendert == [True]
+    world.empfangen("down/config", _konfiguration(version=2, update_noetig=1900000000))
+    assert world.host.kritisch_geaendert == [True]  # unveraendert: nichts zu melden
+
+
+def test_removing_the_date_ends_the_critical_state_and_tells_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    world.empfangen("down/config", _konfiguration(version=2, update_noetig=None))
+    assert world.device.update_noetig_kritisch() is False
+    assert world.host.kritisch_geaendert == [True, False]
+
+
+def test_update_noetig_null_without_a_date_tells_the_host_nothing(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=None))
+    assert world.device.update_noetig_kritisch() is False
+    assert world.host.kritisch_geaendert == []
+
+
+def test_the_critical_state_survives_a_restart_of_the_device(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    neu = World(tmp_path)
+    assert neu.device.update_noetig_kritisch() is True
+
+
+def _kritisch_ohne_update(tmp_path):
+    """Ein Geraet unter der Mindestversion 0.7.0 mit Datum: kritisch, die Konfiguration abgelehnt."""
+    world = World(tmp_path, FakeHost(version="0.6.0"))
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(mindest_software="0.7.0", update_noetig=1900000000))
+    assert world.device.update_noetig_kritisch() is True
+    return world
+
+
+def test_a_restart_with_the_required_version_and_no_new_configuration_is_no_longer_critical(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    neu = World(tmp_path, FakeHost(version="0.7.0"))  # Update eingespielt, der Server hat noch nichts erneut geschickt
+    assert neu.device.update_noetig_kritisch() is False
+    assert neu.device.zustand() != "update_noetig"
+    assert World(tmp_path, FakeHost(version="0.7.1")).device.update_noetig_kritisch() is False
+
+
+def test_a_restart_below_the_required_version_stays_critical(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    assert World(tmp_path, FakeHost(version="0.6.0")).device.update_noetig_kritisch() is True
+    assert World(tmp_path, FakeHost(version="0.6.9")).device.update_noetig_kritisch() is True
+
+
+def test_a_new_server_state_with_a_date_above_the_running_version_is_critical_again(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    neu = World(tmp_path, FakeHost(version="0.7.0"))
+    neu.verbinden()
+    neu.empfangen("down/config", _konfiguration(version=2, mindest_software="0.8.0", update_noetig=1900000001))
+    assert neu.device.update_noetig_kritisch() is True
+
+
+def test_the_updates_setting_reaches_the_host_from_a_rejected_configuration(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(hebelsatz="gibt_es_nicht", updates=UPDATES))
+    assert world.link.of("up/result")[0]["ok"] is False
+    assert world.host.updates == [UPDATES]
+
+
+def test_a_dokument_other_than_a_configuration_never_touches_the_updates_setting(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/operation", _bedienung(version=3))
+    assert world.host.updates == []
+
+
+class UpdatesFehlerHost(FakeHost):
+    def updates_soll(self, updates):
+        raise RuntimeError("geheimer Parameter")
+
+
+def test_a_failing_updates_callback_still_answers_and_hands_over(tmp_path, caplog):
+    world = World(tmp_path, UpdatesFehlerHost())
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
+    assert len(world.host.konfigurationen) == 1 and world.host.software == [None]
     assert "RuntimeError" in caplog.text and "geheimer Parameter" not in caplog.text
 
 
