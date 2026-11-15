@@ -44,7 +44,8 @@ REGISTER_OPTIONAL = ("werks_nachweis",)  # fehlt = kein Nachweis (Pruefung: eige
 CERTIFICATE_FIELDS = ("csr",)
 CAPABILITY_FIELDS = ("drivers", "zigbee")
 CAPABILITY_OPTIONAL = ("updater", "programm", "testphase", "kaelteschutz")  # fehlt = false
-BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca")
+BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca", "anker_signatur",
+                      "anker_id")
 BOOTSTRAP_OPTIONAL = ("mqtt_alpn",)  # fehlt = kein Rueckfall auf Port 443 (AN-3)
 DEVICE_STATES = ("nicht_uebernommen", "uebernommen", "gesperrt")
 

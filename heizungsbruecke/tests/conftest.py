@@ -53,6 +53,24 @@ def _tag_der_tageszaehler_zuruecksetzen():
     write_budget._tag = None
 
 
+@pytest.fixture(scope="session")
+def _anker_datei(tmp_path_factory):
+    """Die oeffentlichen Teile der Testkette (device_helpers.ANKER_AKTIV und ANKER_RESERVE) als Datei."""
+    from device_helpers import anker_oeffentlich_pem
+
+    datei = tmp_path_factory.mktemp("anker") / "anker.pem"
+    datei.write_text(anker_oeffentlich_pem())
+    return datei
+
+
+@pytest.fixture(autouse=True)
+def _anker_kette(_anker_datei, monkeypatch):
+    """Jeder Test prueft Bootstrap-Antworten gegen die Testkette: Override der Schluesseldatei, erlaubt nur mit Testkennung.
+    Die Datei im Paket ist ein Platzhalter ohne Schluessel (das Geraet liesse sonst jede Antwort fallen)."""
+    monkeypatch.setenv("SMARTHEAT_ANKER_DATEI", str(_anker_datei))
+    monkeypatch.setenv("SMARTHEAT_TESTKENNUNG", "geraetetests")
+
+
 @pytest.fixture
 def clock():
     from fakes import FakeClock

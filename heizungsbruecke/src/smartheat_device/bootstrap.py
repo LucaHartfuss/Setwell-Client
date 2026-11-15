@@ -17,7 +17,7 @@ import requests
 
 from smartheat_core import dateien
 from smartheat_core.zeitquelle import echte_epoche
-from smartheat_device import commands, fehler, nachrichten, wire
+from smartheat_device import anker, commands, fehler, nachrichten, wire
 from smartheat_device import identity as identity_module
 from smartheat_device.tls import ALPN_443, IOT_PORTS
 
@@ -47,6 +47,11 @@ class Unavailable(BootstrapError):
     """Netz, Zeitueberschreitung, 5xx, 408/429 oder eine unbrauchbare Antwort: spaeter erneut."""
 
 
+class AnkerUngueltig(Unavailable):
+    """Die Antwort trägt keine gueltige Signatur des Vertrauensankers (smartheat_device/anker.py): Backoff wie bei einer
+    unbrauchbaren Antwort, nie "gesperrt" (ein Angreifer auf dem Weg soll das Geraet nicht stilllegen)."""
+
+
 class Rejected(BootstrapError):
     """Anderes 4xx: die Anfrage selbst ist falsch; eine sofortige Wiederholung hilft nicht."""
 
@@ -72,7 +77,9 @@ class Antwort:
 
 
 def _antwort(body) -> Antwort:
-    if not isinstance(body, dict) or any(key not in body for key in wire.BOOTSTRAP_RESPONSE):
+    # die Ankerfelder prueft _request vor dem Lesen (anker.pruefen); hier zaehlen nur die Felder, die gelesen werden
+    if not isinstance(body, dict) or any(key not in body for key in wire.BOOTSTRAP_RESPONSE
+                                         if key not in anker.ANKER_FELDER):
         raise Unavailable("Bootstrap-Antwort unvollstaendig")
     host, port, ca, cert = body["mqtt_endpoint"], body["mqtt_port"], body["mqtt_ca"], body["certificate"]
     alpn = body.get(_ALPN)
@@ -128,9 +135,13 @@ class BootstrapClient:
         if response.status_code >= 300:
             raise Unavailable(f"{route}: HTTP {response.status_code}")
         try:
-            return response.json()
+            antwort = response.json()
         except ValueError:
             raise Unavailable(f"{route}: keine gueltige Antwort") from None
+        # Vor jeder Auswertung: nur eine Antwort des Servers fuer genau diese Anfrage darf Zustand und Broker setzen
+        if not anker.pruefen(antwort, route=f"{method} {path}", device_id=self._ident.device_id, ts=timestamp):
+            raise AnkerUngueltig("anker_ungueltig")
+        return antwort
 
 
 def device_state(device_dir: Path) -> str | None:
