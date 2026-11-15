@@ -103,7 +103,7 @@ def test_after_a_software_change_the_config_error_message_waits_and_the_state_st
     """Nach einem Softwarewechsel wartet die Meldung zum Konfigurationsfehler 900 s auf die neue Konfiguration; der
     Ruhezustand und der Status sind sofort wahr (beide Hosts teilen den Ablauf, app._fail_start)."""
     monkeypatch.setattr("smartheat_gateway.host.GATEWAY_VERSION", "2.0.0")
-    dokumente_schreiben(world.paths, konfiguration(raumfuehler=["test-falsch"]))
+    dokumente_schreiben(world.paths, konfiguration(hebelsatz="gibt-es-nicht"))
     dateien.schreiben_json(world.paths.backup(1).parent / karenz.DATEI, {"version": "1.0.0"}, modus=dateien.PRIVAT)
 
     result = world.start_runtime()
@@ -123,7 +123,7 @@ def test_after_a_software_change_the_config_error_message_waits_and_the_state_st
 
 def test_without_a_software_change_the_config_error_message_comes_at_once(world, monkeypatch, caplog):
     monkeypatch.setattr("smartheat_gateway.host.GATEWAY_VERSION", "2.0.0")
-    dokumente_schreiben(world.paths, konfiguration(raumfuehler=["test-falsch"]))
+    dokumente_schreiben(world.paths, konfiguration(hebelsatz="gibt-es-nicht"))
     dateien.schreiben_json(world.paths.backup(1).parent / karenz.DATEI, {"version": "2.0.0"}, modus=dateien.PRIVAT)
 
     world.start_runtime()
