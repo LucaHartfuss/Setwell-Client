@@ -341,12 +341,36 @@ def test_was_diese_software_nicht_lesen_kann_ist_ein_formgrund_der_karenz(env, o
     assert _grund_der_ablehnung(env, optionen).konfigurationsform
 
 
-def test_zu_kurze_rueckstellliste_ist_ein_formgrund_der_karenz(env):
+def _mit_parametern(env, **aenderung) -> StartFailure:
     konf = konfiguration_aus_optionen(OPTIONS)
-    kurz = {**konf, "bindungsparameter": {**konf["bindungsparameter"], "zurueck": [], "zurueck_optional": []}}
+    geaendert = {**konf, "bindungsparameter": {**konf["bindungsparameter"], **aenderung}}
     with pytest.raises(StartFailure) as fehler:
-        HaHost(FakeGeraet(kurz), env.ha, clock=env.clock).load()
-    assert fehler.value.konfigurationsform
+        HaHost(FakeGeraet(geaendert), env.ha, clock=env.clock).load()
+    return fehler.value
+
+
+def test_fehlende_bindungsparameter_sind_ein_formgrund_der_karenz(env):
+    assert _grund_der_ablehnung(env, {"bindungsparameter": None}).konfigurationsform
+
+
+def test_felder_der_bindungsparameter_die_diese_software_nicht_kennt_sind_ein_formgrund_der_karenz(env):
+    assert _mit_parametern(env, neues_feld=1).konfigurationsform
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 99}},  # lockerer als lokal erlaubt
+    {"wartezeit_s": 1},  # ausserhalb der lokalen Grenzen
+    {"zurueck": [], "zurueck_optional": []},  # unterschreitet die lokale Mindestliste der Rueckstellung
+    {"schritte": {"curve": 0.05, "room_setpoint": 0.5, "heat_limit": 0.1, "min_flow": 9.0}},
+], ids=["schreibschutz", "wartezeit", "rueckstellliste", "schrittweite"])
+def test_ein_verstoss_gegen_die_lokalen_grenzen_der_bindungsparameter_meldet_sofort(env, aenderung):
+    """Die Grenzen gelten lokal und hat keine neue Software anders zu lesen: auch nach einem Softwarewechsel sofort."""
+    assert not _mit_parametern(env, **aenderung).konfigurationsform
+
+
+def test_eine_unbeschreibbare_entity_art_der_schreibziele_meldet_sofort(env):
+    """Die Entity-Art der Schreibziele ist eine lokale Positivliste, keine Frage der Form."""
+    assert not _grund_der_ablehnung(env, {"entity_heat_limit": "sensor.heizgrenze"}).konfigurationsform
 
 
 def test_ein_ungueltiger_wert_der_konfiguration_ist_kein_formgrund(env):

@@ -185,7 +185,9 @@ class GatewayHost:
             beschreibung = bindungsparameter.beschreibung(
                 sicht.get("weg"), runtime.lever_set_id, sicht.get("bindungsparameter"))
         except ValueError as error:
-            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG, konfigurationsform=True) from error
+            gemeldet = dokument_config.bindungsfehler(error, sicht.get("bindungsparameter"))
+            raise StartFailure(str(gemeldet), KEY_CONFIG,
+                               konfigurationsform=isinstance(gemeldet, ConfigFormError)) from error
         self._geraete_abwarten(self._zigbee_ieees(bindung))
         if thermostat_unzulaessig(self.mirror, bindung.thermostat):
             # Vor dem Treiber; die IEEE-Adresse gehoert nicht in den Text (Regel 6).

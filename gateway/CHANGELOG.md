@@ -4,8 +4,9 @@
 
 - Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
   die neue Software sie nicht lesen kann (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende
-  Bindungsparameter oder Pflichtzuordnungen); Rastung, lokale Sicherheitswerte, Positivliste, ungültige Werte sowie
-  Treiber-, Kanal- und Anlagenfehler melden sofort. Die Wartezeit beginnt je Softwarestand höchstens einmal, eine
+  Bindungsparameter oder andere Felder der Bindungsparameter); ein Verstoß gegen eine lokale Grenze meldet sofort:
+  Rastung, lokale Sicherheitswerte, Schreibschutz, Wartezeit, Schrittweite, Mindestliste der Rückstellung und erlaubte
+  Schreibgruppen der Bindungsparameter, Positivliste, ungültige Werte sowie Treiber-, Kanal- und Anlagenfehler. Die Wartezeit beginnt je Softwarestand höchstens einmal, eine
   Boot-Schleife hält die Meldung nicht dauerhaft zurück. Grenzen: Ein Neustart des Geräts in der laufenden Karenz meldet
   sofort; eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, hält die Meldung bis zu 15 Minuten
   zurück.

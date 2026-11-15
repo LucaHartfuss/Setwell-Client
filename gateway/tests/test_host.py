@@ -192,6 +192,23 @@ def test_was_diese_software_nicht_lesen_kann_ist_ein_formgrund_der_karenz(data_d
     assert _ablehnung(Paths(data_dir), konfiguration(**aenderung), clock).konfigurationsform
 
 
+def test_felder_der_bindungsparameter_die_diese_software_nicht_kennt_sind_ein_formgrund_der_karenz(data_dir, clock):
+    parameter = {**bindung_beispiele.parameter("viessmann_vicare"), "neues_feld": 1}
+    assert _ablehnung(Paths(data_dir), konfiguration(bindungsparameter=parameter), clock).konfigurationsform
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"wartezeit_s": 1},  # ausserhalb der lokalen Grenzen
+    {"schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 99}},  # lockerer als lokal erlaubt
+    {"zurueck": ["curve"]},  # unterschreitet die lokale Mindestliste der Rueckstellung
+    {"schreibgruppen": [["curve", "room_setpoint"]]},  # keine erlaubte Schreibgruppe (Positivliste)
+], ids=["wartezeit", "schreibschutz", "rueckstellliste", "schreibgruppe"])
+def test_ein_verstoss_gegen_die_lokalen_grenzen_der_bindungsparameter_meldet_sofort(data_dir, clock, aenderung):
+    parameter = bindung_beispiele.parameter("viessmann_vicare", **aenderung)
+    fehler = _ablehnung(Paths(data_dir), konfiguration(bindungsparameter=parameter), clock)
+    assert fehler.key == "konfiguration" and not fehler.konfigurationsform
+
+
 def test_ein_ungueltiger_wert_der_konfiguration_ist_kein_formgrund(data_dir, clock):
     assert not _ablehnung(Paths(data_dir), konfiguration(tagestick="25:00"), clock).konfigurationsform
 

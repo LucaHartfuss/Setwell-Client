@@ -49,7 +49,8 @@ def _zuordnung(konfiguration, ha_api, akzeptiert=None):
 
 
 def _lokal_pruefen(konfiguration):
-    return dokument.lokal_pruefen(_neu(konfiguration))
+    befund = dokument.lokal_befund(_neu(konfiguration))
+    return befund.text if befund is not None else None
 
 
 def _ha():

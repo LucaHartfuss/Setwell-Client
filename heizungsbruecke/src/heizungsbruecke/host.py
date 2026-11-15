@@ -200,9 +200,10 @@ class HaHost:
             # Konfigurationsfehlers. Muster der Raumfuehler/Aussenquelle/Batterien/Handys und die Hinweise prueft der
             # Server (config_check); die Positivliste und Formen der Rollen prueft der Host selbst weiter unten
             # (_bindung_pruefen).
-            text = dokument.lokal_pruefen(self._konfiguration, self.kreis)
-            if text:
-                raise ConfigFormError(text)  # eine Pflichtzuordnung, die diese Software verlangt, fehlt
+            befund = dokument.lokal_befund(self._konfiguration, self.kreis)
+            if befund is not None:
+                # fehlt eine Pflichtzuordnung, kann eine neue Software sie lesen; die Entity-Art der Schreibziele nicht
+                raise (ConfigFormError if dokument.ist_formgrund(befund) else ConfigError)(befund.text)
             b = dokument.bindung(self._konfiguration, self.kreis)
             geraet_trigger.pruefe_soll_ref(b.soll_entity)
             runtime = dokument_config.runtime_config(
@@ -242,7 +243,7 @@ class HaHost:
         _check_timezone(self._ha_api)
         self._bindung, self._runtime = b, runtime
         self.soll_entity = b.soll_entity
-        assert self.soll_entity is not None  # lokal_pruefen verlangt sie
+        assert self.soll_entity is not None  # lokal_befund verlangt sie
         bedienung, dirty = self._geraet.bedienung()
         bedient = bedienung_start(bedienung, self.kreis)
         start_value = bedient if bedient is not None else _angezeigter_start(self._ha_api, self.soll_entity)
@@ -434,8 +435,10 @@ def _bindung_pruefen(konfiguration, kreis: int | None = None) -> None:
     Entity (Regel 6)."""
     ablehnung = config_check.ha_bindung_pruefen(kreisansicht.sicht(konfiguration, kreis))
     if ablehnung is not None:
-        feld = (ablehnung.details or {}).get("feld", "bindung")
-        raise ConfigFormError(f"{feld}: Form der Zuordnung ungültig – {RECONFIGURE_HINT}")
+        details = ablehnung.details or {}
+        text = f"{details.get('feld', 'bindung')}: Form der Zuordnung ungültig – {RECONFIGURE_HINT}"
+        # Ein unbekanntes oder fehlendes Feld kann eine neue Software lesen; jede andere Form gilt lokal.
+        raise (ConfigFormError if details.get("regel") in ("fehlt", "unbekannt") else ConfigError)(text)
 
 
 def _rollen_pruefen_mit_wiederholung(ha_api, b: dokument.HaBindung) -> list[tuple[str, str]]:

@@ -11,8 +11,9 @@ from geraet_helpers import konfiguration_aus_optionen
 from rastung_beispiele import rastung_aus
 from runtime_helpers import OPTIONS, _start_bridge
 
-from heizungsbruecke import config
+from heizungsbruecke import config, dokument
 from smartheat_core import dateien, rastung
+from smartheat_device import fehler
 from smartheat_runtime import app, karenz
 from smartheat_runtime.backup_store import save_backup
 from smartheat_runtime.roles import ManifestError
@@ -245,7 +246,8 @@ def test_bleibt_ein_boost_auf_der_anlage_meldet_der_start_sofort(env, monkeypatc
 
 def test_ein_zurueckgenommener_boost_laesst_die_meldung_warten(env, monkeypatch):
     """Die Pflichtzuordnung fehlt (Formgrund), die Bindung zum Zuruecknehmen ist aber lesbar."""
-    monkeypatch.setattr("heizungsbruecke.dokument.lokal_pruefen", lambda *args: "Es fehlt die Zuordnung curve.")
+    monkeypatch.setattr("heizungsbruecke.dokument.lokal_befund", lambda *args: dokument.Befund(
+        fehler.details("curve", "fehlt"), "Es fehlt die Zuordnung curve."))
     _gemerkt(env)
     save_backup(env.paths["BACKUP_PATH"], {
         "boost_active": True, "restore_point": {"curve": 1.0, "room_setpoint": 20.0, "heat_limit": 16.0}})

@@ -16,6 +16,8 @@ from pathlib import Path
 
 from smartheat_core import config_check, dateien, kreisansicht, rastung
 from smartheat_core.binding import BindingDescription
+from smartheat_core.bindungsparameter import FELDER as _PARAMETER_FELDER
+from smartheat_core.bindungsparameter import Fehler
 from smartheat_core.bindungsparameter import beschreibung as _beschreibung
 from smartheat_core.levers import LEVER_SETS
 from smartheat_core.safety import LOCAL_SAFETY, LocalSafety, resolve_local_safety
@@ -47,10 +49,27 @@ class ConfigError(ValueError):
 
 
 class ConfigFormError(ConfigError):
-    """Die Konfiguration nennt etwas, das diese Software nicht lesen kann (unbekannter Hebelsatz oder unbekanntes
-    Verteilsystem, fehlende Bindungsparameter oder Pflichtzuordnungen): eine neue Software kann sie lesen, nach einem
-    Softwarewechsel wartet die Meldung darauf (app.StartFailure.konfigurationsform). Jeder andere ConfigError (Rastung,
-    lokale Sicherheitswerte, Positivliste, ungueltige Werte) meldet sofort."""
+    """Die Konfiguration nennt etwas, das diese Software nicht lesen kann (unbekannter Hebelsatz, Weg oder Zaehlerart,
+    unbekanntes Verteilsystem, fehlende oder andere Felder der Bindungsparameter, fehlende Pflichtzuordnungen): eine
+    neue Software kann sie lesen, nach einem Softwarewechsel wartet die Meldung darauf
+    (app.StartFailure.konfigurationsform). Ein Verstoss gegen eine lokale Grenze ist kein Formgrund und meldet sofort,
+    denn keine neue Software lockert sie: Rastung, lokale Sicherheitswerte, Werte der Bindungsparameter ausserhalb
+    ihrer Grenzen (Schreibschutz, Wartezeit, Schrittweite, Mindestliste der Rueckstellung, erlaubte Schreibgruppen),
+    Positivliste und Entity-Art der Schreibziele sowie ungueltige Werte."""
+
+#: Regeln eines Verstosses gegen die Bindungsparameter (Fehler.details["regel"]), die eine neue Software lesen kann.
+_FORMGRUND_REGELN = ("fehlt", "unbekannt")
+
+
+def bindungsfehler(error: ValueError, parameter) -> ConfigError:
+    """Der Fehler der Bindungsparameter als Konfigurationsfehler: ConfigFormError, wenn nur eine neue Software ihn
+    beheben kann (fehlende Parameter, unbekannter Weg, Hebelsatz ohne Verfahren oder unbekannte Zaehlerart, andere
+    Felder als diese Software kennt), sonst ConfigError (Grenzen, die lokal gelten, und alles Unbekannte: sofort)."""
+    details = error.details if isinstance(error, Fehler) else {}
+    andere_felder = details.get("feld") == "bindungsparameter" and details.get("regel") == "ungueltig" and (
+        isinstance(parameter, Mapping) and set(parameter) != set(_PARAMETER_FELDER))
+    form = details.get("regel") in _FORMGRUND_REGELN or andere_felder
+    return (ConfigFormError if form else ConfigError)(f"Konfiguration: {error}")
 
 
 def _hebelsatz(konfiguration, kreis: int | None = None) -> str:
@@ -63,11 +82,11 @@ def _hebelsatz(konfiguration, kreis: int | None = None) -> str:
 def beschreibung(konfiguration, kreis: int | None = None) -> BindingDescription:
     """Wirksame Binding-Beschreibung des Kreises aus Hebelsatz und Bindungsparametern; keine Ersatztabelle."""
     hebelsatz = _hebelsatz(konfiguration, kreis)
+    sicht = kreisansicht.sicht(konfiguration, kreis)
     try:
-        sicht = kreisansicht.sicht(konfiguration, kreis)
         return _beschreibung(sicht.get("weg"), hebelsatz, sicht.get("bindungsparameter"))
     except ValueError as error:
-        raise ConfigFormError(f"Konfiguration: {error}") from None
+        raise bindungsfehler(error, sicht.get("bindungsparameter")) from None
 
 
 def sicherheit(konfiguration, kreis: int | None = None) -> LocalSafety:
