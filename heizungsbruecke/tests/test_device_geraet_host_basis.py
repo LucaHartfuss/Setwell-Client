@@ -286,11 +286,31 @@ def test_nach_dem_update_wird_die_meldung_genau_einmal_zurueckgenommen(tmp_path)
     assert [m[2] for m in welt.gesendet] == [True, False, True]
 
 
-def test_ohne_den_zustand_wird_nie_etwas_gemeldet(tmp_path):
+def test_ohne_den_zustand_wird_nur_beim_ersten_mal_die_ruecknahme_gemeldet(tmp_path):
     welt = _Kritisch(tmp_path, kritisch=False)
     for zustand in ("regelt", "startet", "gesperrt"):
         welt.host.update_noetig_melden(_anzeige(zustand))
-    assert welt.gesendet == []
+    assert welt.gesendet == [("update_noetig", None, False)]
+
+
+def test_nach_einem_neustart_mit_dem_update_nimmt_die_erste_anzeige_die_offene_meldung_zurueck(tmp_path):
+    vorher = _Kritisch(tmp_path)  # der Prozess vor dem Update: die rote Meldung steht beim Server offen
+    vorher.beginn()
+    vorher.host.update_noetig_melden(_anzeige("update_noetig"))
+    assert [m[2] for m in vorher.gesendet] == [True]
+    nachher = _Kritisch(tmp_path, kritisch=False)  # neuer Prozess, derselbe Datentraeger: das Update ist eingespielt
+    nachher.host.update_noetig_melden(_anzeige("startet"))
+    nachher.host.update_noetig_melden(_anzeige("regelt"))
+    assert nachher.gesendet == [("update_noetig", None, False)]  # einmal, auch nach dem Neustart ohne eigenen Zustand
+
+
+def test_nach_einem_neustart_unter_dem_zustand_meldet_die_erste_anzeige_ihn_wieder(tmp_path):
+    welt = _Kritisch(tmp_path)
+    welt.beginn()
+    welt.host.update_noetig_melden(_anzeige("update_noetig"))
+    neu = _Kritisch(tmp_path)
+    neu.host.update_noetig_melden(_anzeige("update_noetig"))
+    assert neu.gesendet == welt.gesendet and neu.gesendet[0][2] is True
 
 
 def test_ohne_verbundenes_geraet_geht_nichts_hinaus_und_nichts_wirft(tmp_path):

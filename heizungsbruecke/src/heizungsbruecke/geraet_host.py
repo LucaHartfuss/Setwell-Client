@@ -76,6 +76,7 @@ class HaDeviceHost(GeraetHostBasis):
         self._integration_veraltet_offen = False  # Meldung zur veralteten Integration in HA offen (_integration_pruefen)
         self.push_stand = PushStand()  # aufgegebene Push-Eintraege der Integration (geraet_trigger.build)
         self._push_offen: set[tuple[str, int | None]] = set()  # als Geraete-Meldung offen (_push_pruefen)
+        self._push_start_geschlossen = False  # die Meldungen eines frueheren Prozesses sind geschlossen
         self._raeume: dict[int, dict | None] = {}  # je Kreis der Raum des letzten Takts
         self._uhr: tuple[float, bool | None] | None = None
         self._auto_update: tuple[float, bool | None] | None = None
@@ -208,6 +209,7 @@ class HaDeviceHost(GeraetHostBasis):
         if self.device is None:
             return
         offen = set(self.push_stand.offen(self._clock()))
+        self._push_start_schliessen(offen)
         for stufe, kreis in sorted(offen - self._push_offen, key=_push_ordnung):
             self._melden(_push_key(stufe, kreis), meldungen.neu(meldungen.PREFIX + "push_nicht_zugestellt", stufe=stufe),
                          offen=True)
@@ -215,6 +217,20 @@ class HaDeviceHost(GeraetHostBasis):
         for stufe, kreis in sorted(self._push_offen - offen, key=_push_ordnung):
             self._melden(_push_key(stufe, kreis), None, offen=False)
             self._push_offen.discard((stufe, kreis))
+
+    def _push_start_schliessen(self, offen: set[tuple[str, int | None]]) -> None:
+        """Einmal je Start, sobald die Kreise bekannt sind: beide Stufen anlagenweit und je Kreis zu melden. Der Stand
+        der aufgegebenen Eintraege ueberlebt keinen Neustart, der Server schliesst Geraete-Meldungen aber nicht von
+        selbst: eine vor dem Neustart offene Meldung bliebe sonst fuer immer stehen. Ein Schliessen ohne offene Meldung
+        ist beim Server wirkungslos. Gemeldet wird nach dem Eintragen der Kreise im ersten Takt, in dem die Konfiguration
+        da ist; scheitert ein Aufruf, wiederholt der naechste Takt alles."""
+        if self._push_start_geschlossen or self.konfiguration() is None:
+            return
+        for kreis in (None, *self.kreis_nummern()):
+            for stufe in ("rot", "orange"):
+                if (stufe, kreis) not in offen:
+                    self._melden(_push_key(stufe, kreis), None, offen=False)
+        self._push_start_geschlossen = True
 
     def _integration_pruefen(self) -> None:
         """Offen, solange die Integration veraltet ist, sonst zu (auch nach Ablauf der Frist des Lebenszeichens).

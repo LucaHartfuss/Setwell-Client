@@ -1,9 +1,9 @@
 """Meldung `push_nicht_zugestellt` des HA-Hosts: die Integration gibt einen Push-Eintrag nach 24 h auf und feuert das
 Ereignis `smartheat_push_aufgegeben`; das Add-on haelt je (Stufe, Kreis) eine Geraete-Meldung offen, bis 24 h lang kein
-neues Ereignis gleicher Stufe und gleichen Kreises kam (monotone Uhr, Uhr-Port). Der Stand ueberlebt keinen Neustart.
+neues Ereignis gleicher Stufe und gleichen Kreises kam (monotone Uhr, Uhr-Port). Der Stand ueberlebt keinen Neustart; der erste Takt eines neuen Prozesses schliesst darum je Kreis beide Stufen.
 Das Gateway hat keine Integration und kein Ereignis (Gegenprobe in gateway/tests/test_geraet_host.py)."""
 import pytest
-from geraet_helpers import _host
+from geraet_helpers import Device, _host
 
 from heizungsbruecke.push_stand import FRIST_SECONDS, PushStand
 from smartheat_core import meldungen
@@ -125,13 +125,64 @@ def test_nach_dem_schliessen_oeffnet_ein_neues_ereignis_wieder(tmp_path, monkeyp
     assert [e[2] for e in _gemeldet(device)] == [True, False, True]
 
 
-def test_ein_neuer_host_hat_keine_offene_meldung(tmp_path, monkeypatch):
+ZWEI_KREISE = {"kreise": [{"kreis": 1}, {"kreis": 2}]}
+ALLE_SCHLUESSEL = {"push_nicht_zugestellt_rot", "push_nicht_zugestellt_orange",
+                   "kreis-1:push_nicht_zugestellt_rot", "kreis-1:push_nicht_zugestellt_orange",
+                   "kreis-2:push_nicht_zugestellt_rot", "kreis-2:push_nicht_zugestellt_orange"}
+
+
+def test_ein_neuer_host_hat_keine_offene_meldung_im_eigenen_stand(tmp_path, monkeypatch):
     host, device, clock = _host(tmp_path, monkeypatch)
     host.push_stand.aufgegeben("rot", 1, clock())
     host.anzeigen(_anzeige())
-    host2, device2, _ = _host(tmp_path, monkeypatch)
-    host2.anzeigen(_anzeige())
-    assert _gemeldet(device2) == []
+    host2, _, _ = _host(tmp_path, monkeypatch)
+    assert host2.push_stand.offen(0.0) == set()
+
+
+def test_der_erste_takt_nach_dem_start_schliesst_je_bekanntem_kreis_beide_stufen_genau_einmal(tmp_path, monkeypatch):
+    # eine vor dem Neustart offene Meldung bliebe beim Server sonst stehen: er schliesst Geraete-Meldungen nicht selbst
+    host, device, _ = _host(tmp_path, monkeypatch, device=Device(konf=ZWEI_KREISE))
+    host.anzeigen(_anzeige())
+    host.anzeigen(_anzeige())
+    assert sorted(e[0] for e in _gemeldet(device)) == sorted(ALLE_SCHLUESSEL)
+    assert all(e[1] is None and e[2] is False for e in _gemeldet(device))
+
+
+def test_der_start_schliesst_nicht_was_im_selben_takt_gerade_offen_ist(tmp_path, monkeypatch):
+    host, device, clock = _host(tmp_path, monkeypatch, device=Device(konf=ZWEI_KREISE))
+    host.push_stand.aufgegeben("rot", 2, clock())
+    host.anzeigen(_anzeige())
+    gemeldet = _gemeldet(device)
+    assert [e for e in gemeldet if e[0] == "kreis-2:push_nicht_zugestellt_rot"] == [
+        ("kreis-2:push_nicht_zugestellt_rot", meldungen.neu(CODE, stufe="rot"), True)]
+    assert {e[0] for e in gemeldet} == ALLE_SCHLUESSEL
+
+
+def test_ohne_konfiguration_wird_beim_start_noch_nichts_geschlossen_und_spaeter_nachgeholt(tmp_path, monkeypatch):
+    host, device, _ = _host(tmp_path, monkeypatch)
+    host.anzeigen(_anzeige())
+    assert _gemeldet(device) == []
+    device.konf = ZWEI_KREISE
+    host.anzeigen(_anzeige())
+    host.anzeigen(_anzeige())
+    assert sorted(e[0] for e in _gemeldet(device)) == sorted(ALLE_SCHLUESSEL)
+
+
+def test_scheitert_das_schliessen_beim_start_wird_es_im_naechsten_takt_wiederholt(tmp_path, monkeypatch):
+    host, device, _ = _host(tmp_path, monkeypatch, device=Device(konf=ZWEI_KREISE))
+    echt = device.meldung
+
+    def kaputt(key, meldung, *, offen):
+        if "push_nicht_zugestellt" in key:
+            raise RuntimeError("boom")
+
+    device.meldung = kaputt
+    host.anzeigen(_anzeige())
+    assert _gemeldet(device) == []
+    device.meldung = echt
+    host.anzeigen(_anzeige())
+    host.anzeigen(_anzeige())
+    assert sorted(e[0] for e in _gemeldet(device)) == sorted(ALLE_SCHLUESSEL)
 
 
 def test_ein_fehler_beim_melden_bricht_die_anzeige_nicht_ab_und_wird_wiederholt(tmp_path, monkeypatch):
@@ -141,6 +192,8 @@ def test_ein_fehler_beim_melden_bricht_die_anzeige_nicht_ab_und_wird_wiederholt(
     versuche = []
 
     def kaputt(key, meldung, *, offen):
+        if "push_nicht_zugestellt" not in key:
+            return  # die Ruecknahme von update_noetig im ersten Takt ist nicht Gegenstand dieses Tests
         versuche.append(key)
         raise RuntimeError("boom")
 

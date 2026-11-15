@@ -2,8 +2,9 @@
 Das Ereignis kommt vom HA-Event-Bus und ist nicht vertrauenswuerdig: gelesen wird es streng in
 geraet_trigger.push_aufgegeben_lesen, hier landen nur Stufe (rot|orange) und Kreis (oder None, anlagenweit). Eine
 Faelschung kann hoechstens je (Stufe, Kreis) eine orange Meldung oeffnen, nie mehr. Zeit kommt als monotone Sekunden
-vom Aufrufer, nie von der Wanduhr. Der Stand liegt nur im Speicher: nach einem Neustart ist die Meldung zu, die
-Integration gibt neue Eintraege neu auf."""
+vom Aufrufer, nie von der Wanduhr. Der Stand liegt nur im Speicher: nach einem Neustart ist der Stand leer, der Host schliesst
+die Meldungen des frueheren Prozesses beim ersten Takt (geraet_host._push_start_schliessen), die Integration gibt neue
+Eintraege neu auf."""
 import threading
 
 #: Ohne neues Ereignis gleicher Stufe und gleichen Kreises seit so vielen Sekunden schliesst die Meldung.

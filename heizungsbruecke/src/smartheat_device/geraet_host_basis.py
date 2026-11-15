@@ -32,6 +32,8 @@ from smartheat_runtime.worker import Event, RegulationWorker
 logger = logging.getLogger(__name__)
 
 #: Neustart der Laufzeit (neue laufzeitrelevante Konfiguration, sign_off); prozess.reload_anhaengen haengt ihn an.
+_NOCH_NICHT_GEMELDET = object()
+
 EV_RELOAD = "geraet_reload"
 #: So lange wartet sign_off auf den Status "abgemeldet" (Frist des Befehls, beide Hosts).
 SIGN_OFF_WAIT_SECONDS = 24 * 3600
@@ -126,8 +128,10 @@ class GeraetHostBasis:
         self._konfig_hintergrund = Hintergrund()
         #: Datum der urspruenglichen Werte unter kritischer Mindestversion (Meldung und lokales Status-Ereignis)
         self._kritisches_ende = KritischesEnde(self.update_noetig_kritisch, self.entitlement_pfad)
-        #: Die zuletzt an den Geraetekern gegebene Meldung update_noetig (None = zu); nur der Geraete-Thread
-        self._update_noetig_gemeldet: Meldung | None = None
+        #: Die zuletzt an den Geraetekern gegebene Meldung update_noetig (None = zu); nur der Geraete-Thread.
+        #: Nach einem Prozessstart noch unbekannt: die erste Anzeige meldet immer, auch die Ruecknahme, weil eine
+        #: vor dem Neustart offene Meldung beim Server sonst stehen bliebe.
+        self._update_noetig_gemeldet: Meldung | None | object = _NOCH_NICHT_GEMELDET
 
     def entitlement_pfad(self, kreis: int) -> Path:
         """Die Entitlement-Datei des Kreises (Host): ihr Beginn der Frist gibt das Datum der urspruenglichen Werte."""
@@ -232,18 +236,22 @@ class GeraetHostBasis:
         """Datum der urspruenglichen Werte unter einer kritischen Mindestversion (ISO) oder None (`KritischesEnde`)."""
         return self._kritisches_ende(kreise)
 
+    def kreis_nummern(self) -> list[int]:
+        """Die Kreisnummern der Konfiguration (leer ohne Konfiguration)."""
+        return [k for eintrag in kreisansicht.kreise(self.konfiguration() or {})
+                if isinstance(k := eintrag.get("kreis"), int) and not isinstance(k, bool)]
+
     def update_noetig_melden(self, anzeige: Anzeige) -> None:
         """Unter dem Zustand update_noetig geht die rote Meldung ueber den Geraetekern an den Server (Portal, Push und
         Mail an Eigentuemer und Bedienende): mit dem Datum der urspruenglichen Werte, ohne bekannten Beginn (Uhr
         unklar) die Fassung ohne Datum, nie beide. Gemeldet wird nur bei Aenderung; verlaesst das Geraet den Zustand
-        (Update eingespielt), nimmt es die Meldung zurueck. Beide Hosts rufen es mit jeder Anzeige; Geraete-Thread."""
+        (Update eingespielt), nimmt es die Meldung zurueck; die erste Anzeige nach einem Prozessstart meldet den Stand
+        immer, auch als Ruecknahme (der Server schliesst Geraete-Meldungen nicht von selbst). Beide Hosts rufen es mit jeder Anzeige; Geraete-Thread."""
         if self.device is None:
             return
         meldung = None
         if anzeige.zustand == "update_noetig":
-            nummern = [k for eintrag in kreisansicht.kreise(self.konfiguration() or {})
-                       if isinstance(k := eintrag.get("kreis"), int) and not isinstance(k, bool)]
-            ende = self.kritisches_ende(nummern or [KREIS])
+            ende = self.kritisches_ende(self.kreis_nummern() or [KREIS])
             meldung = (meldungen.neu(meldungen.PREFIX + "update_noetig", ende=ende) if ende is not None
                        else meldungen.neu(meldungen.PREFIX + "update_noetig_unbekannt"))
         if meldung == self._update_noetig_gemeldet:
