@@ -177,13 +177,13 @@ class GatewayHost:
                 update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
                 plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
         except (ConfigError, KeyError) as error:
-            raise StartFailure(str(error), KEY_CONFIG) from error
+            raise StartFailure(str(error), KEY_CONFIG, konfigurationsform=True) from error
         try:
             sicht = kreisansicht.sicht(self.konfiguration, self.kreis)
             beschreibung = bindungsparameter.beschreibung(
                 sicht.get("weg"), runtime.lever_set_id, sicht.get("bindungsparameter"))
         except ValueError as error:
-            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG) from error
+            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG, konfigurationsform=True) from error
         self._geraete_abwarten(self._zigbee_ieees(bindung))
         if thermostat_unzulaessig(self.mirror, bindung.thermostat):
             # Vor dem Treiber; die IEEE-Adresse gehoert nicht in den Text (Regel 6).
@@ -198,11 +198,11 @@ class GatewayHost:
         try:
             check_lever_set(driver, runtime.lever_set_id)
         except ConfigError as error:
-            raise StartFailure(str(error), KEY_CONFIG) from error
+            raise StartFailure(str(error), KEY_CONFIG, konfigurationsform=True) from error
         try:
             plant_id = registry.plant_id(bindung.driver_spec())
         except kennung.KennungFehler as error:
-            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG) from error
+            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG, konfigurationsform=True) from error
         self._activate(driver)  # erste Abfrage vor dem Manifest: optionale Signale stehen dann im Cache
         try:
             manifest = build_manifest(driver, bindung.raeume)

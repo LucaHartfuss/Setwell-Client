@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
+  nicht lesbar ist (Schema, Version, neue Pflichtfelder); Treiber-, Kanal- und Anlagenfehler melden sofort. Die
+  Wartezeit beginnt je Softwarestand höchstens einmal, eine Boot-Schleife hält die Meldung nicht dauerhaft zurück.
+
 - Liegt die Software nur unter einer gewoehnlich angehobenen Mindestversion und steht kein kritischer Eintrag in der
   Konfiguration (kein Notbetrieb, kein Datum), meldet das Gateway die orange Meldung `update_noetig_mindest` („bei
   Gelegenheit aktualisieren“) an den Server statt der roten; Rot bleibt dem kritischen Eintrag vorbehalten.

@@ -230,8 +230,11 @@ class HaHost:
             plant_id = dokument.anlagen_kennung(b)
         except StartupError as error:
             raise StartFailure(str(error), error.key) from error
-        except (ConfigError, ManifestError) as error:
-            # Pruefungstexte sind deterministisch: der Text ist zugleich die Identitaet.
+        except ConfigError as error:
+            # Pruefungstexte sind deterministisch: der Text ist zugleich die Identitaet. Nur die Konfiguration selbst
+            # kann eine neue Software nicht lesen.
+            raise StartFailure(str(error), konfigurationsform=True) from error
+        except ManifestError as error:
             raise StartFailure(str(error)) from error
         _check_timezone(self._ha_api)
         self._bindung, self._runtime = b, runtime

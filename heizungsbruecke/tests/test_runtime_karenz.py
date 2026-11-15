@@ -1,6 +1,8 @@
 """Karenz nach einem Softwarewechsel: die Meldung zum Konfigurationsfehler ("Heizungssteuerung gestoppt") wartet 15 Minuten
 auf die neue Konfiguration; Zustand, Status und Ruhezustand bleiben wahr. Abgelehnte Konfiguration, abgelaufene Karenz,
-laufender Boost und ein Start ohne Softwarewechsel melden sofort."""
+laufender Boost, ein Start ohne Softwarewechsel und jeder Startfehler, der nicht die Form der Konfiguration betrifft
+(Treiber, Kanalverzeichnis, Anlage), melden sofort. Die Karenz beginnt je Softwarestand nur einmal, auch wenn die
+monotone Uhr nach einem Neustart zurueckspringt."""
 import json
 
 import pytest
@@ -132,6 +134,61 @@ def test_eine_abgelehnte_konfiguration_meldet_sofort(env):
     assert _gemeldet(env)
 
 
+def test_ein_startfehler_ausserhalb_der_konfigurationsform_meldet_sofort(env, monkeypatch):
+    """Treiber, Kanalverzeichnis und Anlage sind kein Grund, auf eine neue Konfiguration zu warten."""
+    _gemerkt(env)
+
+    def _treiber_kaputt(self):
+        raise app.StartFailure("Treiber nicht startbar", "treiber")
+
+    monkeypatch.setattr("heizungsbruecke.host.HaHost.load", _treiber_kaputt)
+
+    bridge = _start_bridge(env, **FEHLER)
+
+    assert bridge.reason == "konfigurationsfehler"
+    assert _gemeldet(env)
+    assert json.loads(_datei(env).read_text()) == {"version": NEU}  # kein Beginn gemerkt
+
+
+def test_ein_formfehler_der_konfiguration_laesst_die_meldung_warten(env, monkeypatch):
+    _gemerkt(env)
+
+    def _formfehler(self):
+        raise app.StartFailure("Konfiguration: neues Pflichtfeld fehlt", konfigurationsform=True)
+
+    monkeypatch.setattr("heizungsbruecke.host.HaHost.load", _formfehler)
+
+    _start_bridge(env, **FEHLER)
+
+    assert not _gemeldet(env)
+
+
+def test_eine_boot_schleife_unterdrueckt_die_meldung_nicht_dauerhaft(env):
+    """Springt die monotone Uhr nach einem Neustart zurueck, beginnt keine zweite Karenz."""
+    _gemerkt(env)
+    _start_bridge(env, **FEHLER)
+    assert not _gemeldet(env)
+
+    env.clock.advance(-900)  # Neustart des Geraets: die monotone Uhr beginnt von vorn
+    _start_bridge(env, **FEHLER)
+
+    assert _gemeldet(env)
+
+
+def test_ein_weiterer_softwarewechsel_beginnt_eine_neue_karenz(env, monkeypatch):
+    _gemerkt(env)
+    _start_bridge(env, **FEHLER)
+    env.clock.advance(-900)
+    _start_bridge(env, **FEHLER)
+    assert _gemeldet(env)
+    env.ha.persistent.clear()
+
+    monkeypatch.setattr("heizungsbruecke.host.ADDON_VERSION", "3.0.0")
+    _start_bridge(env, **FEHLER)
+
+    assert not _gemeldet(env)
+
+
 def test_ohne_gemerkte_software_aber_mit_zustand_gilt_der_start_als_wechsel(env):
     save_backup(env.paths["BACKUP_PATH"], {"last_room_target": 21.0})
 
@@ -201,11 +258,47 @@ def test_der_beginn_bewahrt_die_gemerkte_alte_version(tmp_path, clock):
 
     _karenz(tmp_path, clock).rest()
 
-    assert json.loads((tmp_path / karenz.DATEI).read_text()) == {"version": ALT, "beginn": clock()}
+    assert json.loads((tmp_path / karenz.DATEI).read_text()) == {
+        "version": ALT, "beginn": clock(), "karenz_fuer": NEU}
 
 
-def test_eine_zurueckgesprungene_uhr_beginnt_die_karenz_neu(tmp_path, clock):
-    _schreiben(tmp_path, {"version": ALT, "beginn": clock() + 5000})
+def test_eine_zurueckgesprungene_uhr_beginnt_keine_zweite_karenz_derselben_version(tmp_path, clock):
+    assert _karenz(tmp_path, clock).rest() is None  # ohne Datei und ohne Zustand keine Karenz
+    _schreiben(tmp_path, {"version": ALT})
+    assert _karenz(tmp_path, clock).rest() == 900
+
+    clock.advance(-500)  # Neustart des Geraets: die monotone Uhr beginnt von vorn
+
+    assert _karenz(tmp_path, clock).rest() is None
+
+
+def test_nach_dem_ruecksprung_bleibt_es_bei_keiner_karenz_auch_wenn_die_uhr_wieder_aufholt(tmp_path, clock):
+    _schreiben(tmp_path, {"version": ALT})
+    _karenz(tmp_path, clock).rest()
+    clock.advance(-500)
+    assert _karenz(tmp_path, clock).rest() is None
+
+    clock.advance(500)
+
+    assert _karenz(tmp_path, clock).rest() == 900  # der gemerkte Beginn gilt weiter und laeuft ab
+    clock.advance(900)
+    assert _karenz(tmp_path, clock).rest() is None
+
+
+def test_ein_weiterer_softwarewechsel_beginnt_nach_dem_ruecksprung_eine_neue_karenz(tmp_path, clock):
+    _schreiben(tmp_path, {"version": ALT})
+    _karenz(tmp_path, clock).rest()
+    clock.advance(-500)
+
+    neuer = karenz.Karenz(tmp_path / karenz.DATEI, "3.0.0", zustand_vorhanden=False, clock=clock)
+
+    assert neuer.rest() == 900
+    assert json.loads((tmp_path / karenz.DATEI).read_text())["karenz_fuer"] == "3.0.0"
+
+
+def test_eine_datei_ohne_vermerk_der_karenz_bleibt_lesbar_und_beginnt_bei_ruecksprung_neu(tmp_path, clock):
+    """Dateien des alten Stands kennen das Feld nicht; unbekannte Felder werden ignoriert."""
+    _schreiben(tmp_path, {"version": ALT, "beginn": clock() + 5000, "weiteres": 1})
 
     assert _karenz(tmp_path, clock).rest() == 900
 

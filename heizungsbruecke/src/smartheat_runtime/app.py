@@ -107,12 +107,15 @@ logger = logging.getLogger(__name__)
 
 class StartFailure(Exception):
     """Konfigurations- oder Startfehler des Hosts: Ruhezustand `konfigurationsfehler`. `key` ist die stabile Identitaet
-    fuer den Meldezustand (None = der Text selbst), siehe _fail_start."""
+    fuer den Meldezustand (None = der Text selbst), siehe _fail_start. `konfigurationsform`: die Konfiguration selbst
+    ist nach Schema, Version oder Pflichtfeldern nicht lesbar (nur dann kann eine neue Software die Ursache sein und
+    die Meldung auf die neue Konfiguration warten); Treiber-, Kanal-, Geraete- und Anlagenfehler sind es nicht."""
 
-    def __init__(self, grund: str, key: str | None = None) -> None:
+    def __init__(self, grund: str, key: str | None = None, *, konfigurationsform: bool = False) -> None:
         super().__init__(grund)
         self.grund = grund
         self.key = key
+        self.konfigurationsform = konfigurationsform
 
 
 @dataclass(frozen=True)
@@ -228,15 +231,16 @@ def _idle_heartbeat(worker: RegulationWorker, status: StatusReporter, event: Eve
 
 def _fail_start(notifier, status, clock, grund: str, key: str | None = None, *, neustart: Callable[[], None],
                 store=None, parts: RestoreParts | None = None, karenz: Karenz | None = None,
-                abgelehnt: bool = False) -> IdleBridge:
+                abgelehnt: bool = False, konfigurationsform: bool = False) -> IdleBridge:
     """Meldezustand `fehler:<key>` (stabile Identitaet, Standard: der Text selbst); Meldung und
     Status tragen den ausfuehrlichen Grund. Derselbe Fehler wie beim letzten Start pusht nicht
     erneut, legt aber die offene Meldung neu an (in HA fehlt sie nach einem Host-Neustart). Danach
     Ruhezustand mit Neupruefung nach CONFIG_RECHECK_SECONDS. Laeuft ein Boost, nimmt der Start ihn ueber `parts`
     zurueck; geht das nicht, sagt die Meldung, dass die Boost-Werte noch auf der Anlage stehen.
-    Nach einem Softwarewechsel wartet die Meldung die Karenz ab (Status und Ruhezustand sind sofort wahr); die
-    Neupruefung kommt dann zum Ende der Karenz. Sofort gemeldet wird bei abgelehnter Konfiguration, bei Boost-Werten,
-    die auf der Anlage bleiben, und ohne Karenz."""
+    Nach einem Softwarewechsel wartet die Meldung die Karenz ab, wenn die Konfiguration selbst nicht lesbar ist
+    (`konfigurationsform`; Status und Ruhezustand sind sofort wahr); die Neupruefung kommt dann zum Ende der Karenz.
+    Sofort gemeldet wird jeder andere Startfehler (Treiber, Kanalverzeichnis, Anlage), bei abgelehnter Konfiguration,
+    bei Boost-Werten, die auf der Anlage bleiben, und ohne Karenz."""
     logger.error("FEHLER: %s", lesbar(grund))  # der Grund traegt Text der Konfiguration (Gateway: vom Server)
     meldung = meldungen.neu("meldung.konfiguration_fehler", grund=grund)
     boost_bleibt = False
@@ -248,7 +252,7 @@ def _fail_start(notifier, status, clock, grund: str, key: str | None = None, *, 
         if parts is not None and not _gleiche_anlage(store, parts):
             params["zusatz"] = GRUND_ANDERE_ANLAGE
         meldung = meldungen.neu("meldung.konfiguration_fehler_boost", **params)
-    rest = None if karenz is None or abgelehnt or boost_bleibt else karenz.rest()
+    rest = None if karenz is None or abgelehnt or boost_bleibt or not konfigurationsform else karenz.rest()
     if rest is None:
         if not notifier.notify("konfiguration", f"fehler:{grund if key is None else key}", meldung, critical=True):
             notifier.refresh_persistent("konfiguration", meldung)
@@ -871,7 +875,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
         boosting = store.state.boost_active or store.state.emergency_boost_active
         return _fail_start(notifier, status, clock, error.grund, error.key, neustart=neustart, store=store,
                            parts=host.sign_off_parts() if boosting else None, karenz=karenz,
-                           abgelehnt=boot.konfiguration_abgelehnt())
+                           abgelehnt=boot.konfiguration_abgelehnt(), konfigurationsform=error.konfigurationsform)
 
     karenz.beenden()  # die Konfiguration passt zur laufenden Software
     notifier.notify("konfiguration", STATE_OK, meldungen.neu("meldung.konfiguration_ok"), critical=True)
