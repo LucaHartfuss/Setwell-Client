@@ -918,6 +918,44 @@ def test_a_configuration_within_reach_clears_update_needed(tmp_path):
     assert store.empfangen("konfiguration", _konfiguration(version=2)).uebernommen and not store.update_noetig
 
 
+def test_the_critical_date_ends_once_the_device_reaches_the_required_minimum_without_a_new_server_state(tmp_path):
+    alt = _store(tmp_path, version="0.5.9")
+    assert alt.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", update_noetig=1900000000)).grund \
+        == "update_noetig"
+    assert alt.update_noetig_ab == 1900000000  # unter der Mindestversion: das Datum gilt
+    assert _store(tmp_path, version="0.5.9").update_noetig_ab == 1900000000  # auch nach einem Neustart (Gegenprobe)
+    assert _store(tmp_path, version="0.5.99").update_noetig_ab == 1900000000  # knapp darunter: weiter kritisch
+    assert _store(tmp_path, version="0.6.0").update_noetig_ab is None  # Mindestversion erreicht: kein Notbetrieb
+    assert _store(tmp_path, version="0.7.1").update_noetig_ab is None
+
+
+def test_a_critical_date_without_a_remembered_reason_is_kept(tmp_path):
+    """Ohne gemerkte Mindestversion (Anlass fehlt) bleibt das Datum, bis ein neuer Stand des Servers kommt."""
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(update_noetig=1900000000)).uebernommen
+    assert store.update_noetig_ab == 1900000000 and _store(tmp_path, version="0.9.0").update_noetig_ab == 1900000000
+
+
+def test_the_reached_minimum_does_not_change_the_stored_date_only_what_the_device_reports(tmp_path):
+    store = _store(tmp_path, version="0.5.9")
+    store.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", update_noetig=1900000000))
+    neu = _store(tmp_path, version="0.6.0")
+    assert neu.update_noetig_ab is None
+    # ein neuer Stand des Servers mit Datum (er sieht die Version noch unter der Mindestversion) gilt wieder
+    assert neu.empfangen("konfiguration", _konfiguration(version=2, mindest_software="0.7.0", update_noetig=1900000001)).grund \
+        == "update_noetig"
+    assert neu.update_noetig_ab == 1900000001
+
+
+def test_an_unknown_schema_does_not_end_a_critical_date(tmp_path):
+    """Ein unbekanntes Schema ist kein erreichbares Update: das gemerkte Datum gilt weiter."""
+    store = _store(tmp_path, version="0.5.9")
+    store.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", update_noetig=1900000000))
+    assert store.empfangen("konfiguration", {**_konfiguration(version=2), "schema": 99}).grund == "schema_unbekannt"
+    assert store.update_noetig and store.update_noetig_ab == 1900000000
+    assert _store(tmp_path, version="0.5.9").update_noetig_ab == 1900000000
+
+
 def test_update_needed_ends_once_the_device_reaches_the_rejected_minimum(tmp_path):
     store = _store(tmp_path, version="0.5.9")
     assert store.empfangen("konfiguration", _konfiguration()).grund == "update_noetig"

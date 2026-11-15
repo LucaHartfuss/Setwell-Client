@@ -325,7 +325,13 @@ class DocumentStore:
 
     @property
     def update_noetig_ab(self) -> int | float | None:
-        """Zeitpunkt (Epoche-Sekunden), ab dem die kritische Mindestversion fuer dieses Geraet gilt; None = keiner."""
+        """Zeitpunkt (Epoche-Sekunden), ab dem die kritische Mindestversion fuer dieses Geraet gilt; None = keiner.
+        Erreicht die laufende Version die gemerkte Mindestversion (Update eingespielt), gilt das Datum nicht mehr, auch
+        wenn der Server noch keinen neuen Stand geschickt hat: das Geraet bleibt nicht im Notbetrieb, und die 30 Tage
+        zaehlen nicht weiter. Gemerkt bleibt das Datum, bis ein neuer Stand es ersetzt oder zurueckzieht."""
+        anlass = self._update_anlass
+        if anlass is not None and anlass[0] == UPDATE_NOETIG and not unter_mindest(self._software_version, anlass[1]):
+            return None
         return self._update_noetig_ab
 
     @property

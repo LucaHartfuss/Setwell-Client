@@ -1459,6 +1459,37 @@ def test_the_critical_state_survives_a_restart_of_the_device(tmp_path):
     assert neu.device.update_noetig_kritisch() is True
 
 
+def _kritisch_ohne_update(tmp_path):
+    """Ein Geraet unter der Mindestversion 0.7.0 mit Datum: kritisch, die Konfiguration abgelehnt."""
+    world = World(tmp_path, FakeHost(version="0.6.0"))
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(mindest_software="0.7.0", update_noetig=1900000000))
+    assert world.device.update_noetig_kritisch() is True
+    return world
+
+
+def test_a_restart_with_the_required_version_and_no_new_configuration_is_no_longer_critical(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    neu = World(tmp_path, FakeHost(version="0.7.0"))  # Update eingespielt, der Server hat noch nichts erneut geschickt
+    assert neu.device.update_noetig_kritisch() is False
+    assert neu.device.zustand() != "update_noetig"
+    assert World(tmp_path, FakeHost(version="0.7.1")).device.update_noetig_kritisch() is False
+
+
+def test_a_restart_below_the_required_version_stays_critical(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    assert World(tmp_path, FakeHost(version="0.6.0")).device.update_noetig_kritisch() is True
+    assert World(tmp_path, FakeHost(version="0.6.9")).device.update_noetig_kritisch() is True
+
+
+def test_a_new_server_state_with_a_date_above_the_running_version_is_critical_again(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    neu = World(tmp_path, FakeHost(version="0.7.0"))
+    neu.verbinden()
+    neu.empfangen("down/config", _konfiguration(version=2, mindest_software="0.8.0", update_noetig=1900000001))
+    assert neu.device.update_noetig_kritisch() is True
+
+
 def test_the_updates_setting_reaches_the_host_from_a_rejected_configuration(tmp_path):
     world = World(tmp_path)
     world.verbinden()
