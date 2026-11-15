@@ -6,18 +6,18 @@ from unittest.mock import MagicMock
 
 import pytest
 from fakes import FakeHa, schreibziel_eintrag
-from geraet_helpers import FakeGeraet, konfiguration_aus_optionen
+from geraet_helpers import FakeGeraet, ha_konfiguration, konfiguration_aus_optionen
 from runtime_helpers import OPTIONS, _start_bridge
 
 from heizungsbruecke import dokument
 from heizungsbruecke.derived_sensors import DerivedSensors
 from heizungsbruecke.ha_api import HomeAssistantApi
-from heizungsbruecke.host import DERIVED_SENSORS_RETRY_DELAYS_SECONDS, HaHost
-from smartheat_core import meldungen
+from heizungsbruecke.host import DERIVED_SENSORS_RETRY_DELAYS_SECONDS, HaHost, _bindung_pruefen
+from smartheat_core import config_check, kreisansicht, meldungen
 from smartheat_runtime import status
 from smartheat_runtime.app import IdleBridge, StartFailure
 from smartheat_runtime.backup_store import load_backup, save_backup
-from smartheat_runtime.dokument_config import ConfigError
+from smartheat_runtime.dokument_config import ConfigError, ConfigFormError
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.roles import lever_refs_identity
 from smartheat_runtime.texts import HA_TEXTS
@@ -106,6 +106,25 @@ def test_der_weg_gehoert_nicht_zur_kennung_und_eine_unbrauchbare_kennung_scheite
     for feld, wert in (("plattform", "unbekannt"), ("anlage", ""), ("nummer", "x"), ("nummer", None)):
         with pytest.raises(ConfigError):
             dokument.anlagen_kennung(dataclasses.replace(b, kreis={**b.kreis, feld: wert}))
+
+
+@pytest.mark.parametrize(("aenderung", "feld", "regel", "formgrund"), [
+    ({"rollen": {"curve": "number.zuhause_circuit_0_heating_curve"}}, "room_target", "fehlt", True),
+    ({"extra": 1}, "bindung", "unbekannt", True),
+    ({"benachrichtigung": ["notify.email"]}, "benachrichtigung", "format", False),
+])
+def test_eine_abgelehnte_ha_bindung_ist_nur_bei_fehlendem_oder_unbekanntem_feld_ein_formgrund(
+        aenderung, feld, regel, formgrund):
+    """Ein fehlendes oder unbekanntes Feld kann eine neue Software lesen (Karenz); jede andere Form gilt sofort
+    lokal. Der Text nennt das Feld, nie die Entity."""
+    konfiguration = ha_konfiguration(bindung=aenderung)
+    ablehnung = config_check.ha_bindung_pruefen(kreisansicht.sicht(konfiguration, None))
+    assert ablehnung is not None and ablehnung.details == {"feld": feld, "regel": regel}
+    with pytest.raises(ConfigError) as gemeldet:
+        _bindung_pruefen(konfiguration)
+    assert isinstance(gemeldet.value, ConfigFormError) is formgrund
+    assert str(gemeldet.value).startswith(f"{feld}: ")
+    assert "notify.email" not in str(gemeldet.value)
 
 
 def test_eine_uebernommene_rolle_auf_einer_person_startet_nicht_und_legt_nichts_an(env, angelegt, sleeps):
