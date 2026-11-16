@@ -14,7 +14,7 @@ Ist HA nicht erreichbar oder faehrt gerade hoch, ist das kein Urteil: der Server
 erneut zu, ein Neustart des Hosts haette das Geraet sonst festgesetzt. zuordnung_pruefen wirft dann NichtPruefbar (das
 Geraet haelt das Dokument zurueck und prueft spaeter erneut). Bleiben Bindung, Raumfuehler und Hebelsatz gegenueber der
 uebernommenen Konfiguration gleich (z. B. nur das Abo oder der Tagestick aendert sich), entfaellt der HA-Teil.
-Ablehnungen sind details (Rollen, nie Entity-IDs), nur lokal_pruefen liefert den lokalen Text."""
+Ablehnungen sind details (Rollen, nie Entity-IDs), nur lokal_befund liefert den lokalen Text."""
 import logging
 import re
 from collections.abc import Mapping
@@ -26,7 +26,7 @@ from smartheat_core.bindungsparameter import ENERGIE_KANAELE
 from smartheat_core.config_check import NichtPruefbar
 from smartheat_core.levers import LEVER_SETS
 from smartheat_device import fehler
-from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError
+from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError, ConfigFormError
 from smartheat_runtime.roles import LEVER_ROLES
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ def bindung(konfiguration, kreis: int | None = None) -> HaBindung:
     konfiguration = kreisansicht.sicht(konfiguration, kreis)
     hebelsatz = konfiguration.get("hebelsatz")
     if not isinstance(hebelsatz, str) or hebelsatz not in LEVER_SETS or hebelsatz not in PFLICHT_ROLLEN:
-        raise ConfigError(f"Hebelsatz {hebelsatz!r} ist für Home Assistant unbekannt – {RECONFIGURE_HINT}")
+        raise ConfigFormError(f"Hebelsatz {hebelsatz!r} ist für Home Assistant unbekannt – {RECONFIGURE_HINT}")
     raw = _mapping(konfiguration.get("bindung"))
     rollen = {laufzeit_rolle(rolle): ref for rolle, ref in _mapping(raw.get("rollen")).items()
               if rolle != _ROOM_TARGET and isinstance(ref, str) and ref}
@@ -153,7 +153,7 @@ def v1_rolle(rolle: str) -> str:
 @dataclass(frozen=True)
 class Befund:
     """HA-Pruefung: details fuer den Server (config_check, V1) und der lokale Text fuer den Konfigurationsfehler beim
-    Start (lokal_pruefen). details nennen Rollen, nie Entity-IDs (Regel 6)."""
+    Start (lokal_befund). details nennen Rollen, nie Entity-IDs (Regel 6)."""
     details: dict
     text: str
 
@@ -180,17 +180,22 @@ def _lokal(b: HaBindung) -> Befund | None:
     return None
 
 
-def lokal_pruefen(konfiguration, kreis: int | None = None) -> str | None:
-    """Der Teil ohne HA fuer den Kreis `kreis` (ohne Angabe den ersten): lokaler Text oder None (Konfigurationsfehler
-    beim Start). Wirft ConfigError bei unbekanntem Hebelsatz (HaHost.load macht daraus einen Konfigurationsfehler,
-    damit der Start nie an einem fehlenden Schluessel stirbt)."""
-    befund = _lokal(bindung(konfiguration, kreis))
-    return befund.text if befund is not None else None
+def lokal_befund(konfiguration, kreis: int | None = None) -> Befund | None:
+    """Der Teil ohne HA fuer den Kreis `kreis` (ohne Angabe den ersten): Befund mit lokalem Text oder None
+    (Konfigurationsfehler beim Start). Wirft ConfigError bei unbekanntem Hebelsatz (HaHost.load macht daraus einen
+    Konfigurationsfehler, damit der Start nie an einem fehlenden Schluessel stirbt)."""
+    return _lokal(bindung(konfiguration, kreis))
+
+
+def ist_formgrund(befund: Befund) -> bool:
+    """Fehlt eine Zuordnung, die diese Software verlangt, kann eine neue Software sie lesen (Formgrund der Karenz). Die
+    Entity-Art eines Schreibziels ist die lokale Positivliste und meldet sofort."""
+    return befund.details.get("regel") == "fehlt"
 
 
 def _refs(b: HaBindung) -> list[tuple[str, str]]:
     """Alle gebundenen Referenzen als (Feld, Referenz) in der Reihenfolge der Pruefung; Feld ist die V1-Rolle bzw.
-    raumfuehler/batterien, nie die Entity. Ohne Soll-Entity entfaellt room_target (lokal_pruefen meldet sie als fehlend)."""
+    raumfuehler/batterien, nie die Entity. Ohne Soll-Entity entfaellt room_target (lokal_befund meldet sie als fehlend)."""
     soll = [("room_target", b.soll_entity)] if b.soll_entity is not None else []
     return [*soll, *((v1_rolle(rolle), ref) for rolle, ref in b.rollen.items()),
             *(("fuehler", ref) for ref in b.raumfuehler), *(("batterien", ref) for ref in b.batterien)]
@@ -317,7 +322,7 @@ def rollen_befund(b: HaBindung, ha_api, *, beim_start: bool) -> tuple[tuple[str,
     Start so (beim_start, schreibziele_befund), beim Uebernehmen ist es nicht_erlaubt. Eine
     optionale Lese-Rolle oder Batterie ohne Zustand (geloescht, umbenannt, deaktiviert) heilt nicht von selbst: ihre
     Domaene wird aus der ID geprueft, sie steht in der zweiten Liste und wird nicht gelesen. Ohne Soll-Entity entfaellt
-    room_target (lokal_pruefen meldet das). Die Schreibziel-Regeln folgen nach der Positivliste aller Felder."""
+    room_target (lokal_befund meldet das). Die Schreibziel-Regeln folgen nach der Positivliste aller Felder."""
     registry = {e["entity_id"]: e for e in ha_api.entity_registry() if isinstance(e, Mapping) and "entity_id" in e}
     states = {s["entity_id"]: s for s in ha_api.get_states() if isinstance(s, Mapping) and "entity_id" in s}
     einstellbar = einstellbare_plattformen({entity_id: entry for entity_id, entry in registry.items()

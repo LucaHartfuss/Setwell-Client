@@ -28,7 +28,7 @@ from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import CAP_BATTERY, CAP_BATTERY_LOW, ZigbeeMirror
 from smartheat_runtime import dokument_config, plan_quelle
 from smartheat_runtime.app import Loaded, RestoreParts, StartFailure
-from smartheat_runtime.dokument_config import ConfigError
+from smartheat_runtime.dokument_config import ConfigError, ConfigFormError
 from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, TriggerSource
 from smartheat_runtime.raum import RaumPublisher
 from smartheat_runtime.roles import ALL_ROLES, REQUIRED_ROLES_BY_LEVER_SET, ChannelManifest, ManifestError
@@ -176,14 +176,18 @@ class GatewayHost:
                 lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
                 update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
                 plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
-        except (ConfigError, KeyError) as error:
+        except ConfigFormError as error:
+            raise StartFailure(str(error), KEY_CONFIG, konfigurationsform=True) from error
+        except (ConfigError, KeyError) as error:  # Rastung, Sicherheitswerte, ungueltige Werte, Luecke im Dokument
             raise StartFailure(str(error), KEY_CONFIG) from error
         try:
             sicht = kreisansicht.sicht(self.konfiguration, self.kreis)
             beschreibung = bindungsparameter.beschreibung(
                 sicht.get("weg"), runtime.lever_set_id, sicht.get("bindungsparameter"))
         except ValueError as error:
-            raise StartFailure(f"Konfiguration: {error}", KEY_CONFIG) from error
+            gemeldet = dokument_config.bindungsfehler(error, sicht.get("bindungsparameter"))
+            raise StartFailure(str(gemeldet), KEY_CONFIG,
+                               konfigurationsform=isinstance(gemeldet, ConfigFormError)) from error
         self._geraete_abwarten(self._zigbee_ieees(bindung))
         if thermostat_unzulaessig(self.mirror, bindung.thermostat):
             # Vor dem Treiber; die IEEE-Adresse gehoert nicht in den Text (Regel 6).

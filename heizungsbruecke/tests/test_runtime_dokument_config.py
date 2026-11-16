@@ -568,3 +568,21 @@ def test_boot_info_und_runtime_config_tragen_die_kreisnummer(tmp_path):
     assert config.kreis == 2
     assert dc.kreisnummer(zwei) == 2
     assert dc.kreisnummer({}) == 1  # nicht eingerichtet: der erste Kreis, die Nummer bestimmt dann nur Pfade
+
+
+@pytest.mark.parametrize("fehler, parameter_, formgrund", [
+    (("bindungsparameter", "fehlt"), None, True),
+    (("weg", "unbekannt"), {}, True),
+    (("zaehler", "unbekannt"), {}, True),
+    (("bindungsparameter", "ungueltig"), {**parameter("vaillant_vrc720"), "neu": 1}, True),  # andere Felder
+    (("bindungsparameter", "ungueltig"), parameter("vaillant_vrc720"), False),  # Rueckhalt der Beschreibung
+    (("wartezeit_s", "bereich"), parameter("vaillant_vrc720"), False),
+    (("schreibgruppen", "nicht_erlaubt"), parameter("vaillant_vrc720"), False),
+], ids=["fehlt", "weg", "zaehler", "andere_felder", "rueckhalt", "wartezeit", "schreibgruppe"])
+def test_nur_was_eine_neue_software_lesen_kann_ist_ein_formfehler_der_bindungsparameter(fehler, parameter_, formgrund):
+    from smartheat_core.bindungsparameter import Fehler
+
+    gemeldet = _dokument_config.bindungsfehler(Fehler("Text", *fehler), parameter_)
+    assert isinstance(gemeldet, _dokument_config.ConfigFormError) is formgrund
+    assert not isinstance(_dokument_config.bindungsfehler(ValueError("fremd"), parameter_),
+                          _dokument_config.ConfigFormError)  # ein unbekannter Fehler meldet sofort

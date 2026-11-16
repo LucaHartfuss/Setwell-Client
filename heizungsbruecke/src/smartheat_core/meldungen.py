@@ -165,6 +165,10 @@ TABELLE: dict[str, Vorlage] = _ERZEUGER | {
         "update_noetig": Vorlage("rot", ("ende",), _update_noetig),
         "update_noetig_unbekannt": _vorlage(
             "rot", (), "Das Add-on ist zu alt für den SmartHeat-Dienst. Bitte das Add-on aktualisieren."),
+        "update_noetig_mindest": _vorlage(
+            "orange", (),
+            "Das Add-on ist zu alt für den SmartHeat-Dienst. Bitte bei Gelegenheit aktualisieren; SmartHeat regelt "
+            "weiter nach den lokalen Grenzen."),
         "integration_veraltet": _vorlage(
             "orange", (),
             "Die Integration in Home Assistant ist veraltet. Bitte bei Gelegenheit aktualisieren; SmartHeat regelt "
@@ -334,6 +338,18 @@ def neu(code: str, **params: Param) -> Meldung:
     if vorlage is None:
         raise ValueError("Code nicht im Katalog der Geräte-Meldungen")
     return Meldung(code, dict(params), vorlage.stufe)
+
+
+def update_noetig(*, kritisch: bool, ende: str | None) -> Meldung:
+    """Die Meldung unter dem Zustand update_noetig. Nur ein kritischer Eintrag der Konfiguration löst den Notbetrieb mit
+    Frist aus und ist rot: mit dem Datum der ursprünglichen Werte, ohne bekannten Beginn (Uhr unklar) die Fassung ohne
+    Datum. Ohne kritischen Eintrag (gewöhnliche Anhebung der Mindestversion) bittet die orange Meldung nur um das Update;
+    ein Datum gibt es dann nicht."""
+    if not kritisch:
+        return neu(PREFIX + "update_noetig_mindest")
+    if ende is None:
+        return neu(PREFIX + "update_noetig_unbekannt")
+    return neu(PREFIX + "update_noetig", ende=ende)
 
 
 def text(meldung: Meldung, *, praefix: str = STANDARD_PRAEFIX, traeger: str = STANDARD_TRAEGER) -> str:

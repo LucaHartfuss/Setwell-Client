@@ -15,6 +15,19 @@
   (`a***@e***.com`), sobald der Server sie kennt. Der LED-Zustand `wartet_auf_einrichtung` blinkt jetzt gleichmaessig
   1 s an, 1 s aus und ist damit vom Doppelblitz des Zustands `nicht_uebernommen` zu unterscheiden.
 
+- Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
+  die neue Software sie nicht lesen kann (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende
+  Bindungsparameter oder andere Felder der Bindungsparameter); ein Verstoß gegen eine lokale Grenze meldet sofort:
+  Rastung, lokale Sicherheitswerte, Schreibschutz, Wartezeit, Schrittweite, Mindestliste der Rückstellung und erlaubte
+  Schreibgruppen der Bindungsparameter, Positivliste, ungültige Werte sowie Treiber-, Kanal- und Anlagenfehler. Die Wartezeit beginnt je Softwarestand höchstens einmal, eine
+  Boot-Schleife hält die Meldung nicht dauerhaft zurück. Grenzen: Ein Neustart des Geräts in der laufenden Karenz meldet
+  sofort; eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, hält die Meldung bis zu 15 Minuten
+  zurück.
+
+- Liegt die Software nur unter einer gewoehnlich angehobenen Mindestversion und steht kein kritischer Eintrag in der
+  Konfiguration (kein Notbetrieb, kein Datum), meldet das Gateway die orange Meldung `update_noetig_mindest` („bei
+  Gelegenheit aktualisieren“) an den Server statt der roten; Rot bleibt dem kritischen Eintrag vorbehalten.
+
 - Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der urspruenglichen Werte geht jetzt auch an den
   Server und erreicht Eigentuemer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurueckgenommen.
 

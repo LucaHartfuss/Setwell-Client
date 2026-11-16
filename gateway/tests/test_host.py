@@ -170,6 +170,78 @@ def test_load_refuses_a_configuration_that_does_not_fit_the_lock(data_dir, clock
     assert error.value.key == "konfiguration"
 
 
+def _ablehnung(paths, konf, clock) -> StartFailure:
+    with pytest.raises(StartFailure) as fehler:
+        _host(paths, konf, clock).load()
+    return fehler.value
+
+
+def test_ein_verstoss_gegen_die_rastung_ist_kein_formgrund_der_karenz(data_dir, clock):
+    paths = Paths(data_dir)
+    rastung.schreiben(paths.rastung, rastung_aus(konfiguration(), verteilsystem="Fussbodenheizung"),
+                      "2026-10-14T00:00:00+00:00")
+    assert not _ablehnung(paths, konfiguration(), clock).konfigurationsform
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"hebelsatz": "gibt-es-nicht"},  # Hebelsatz, den diese Software nicht kennt
+    {"verteilsystem": "Wandheizung"},  # Verteilsystem ohne lokale Sicherheitswerte dieser Software
+    {"bindungsparameter": None},  # Bindungsparameter fehlen (Pflichtfelder des Hebelsatzes)
+], ids=["hebelsatz", "verteilsystem", "bindungsparameter"])
+def test_was_diese_software_nicht_lesen_kann_ist_ein_formgrund_der_karenz(data_dir, clock, aenderung):
+    assert _ablehnung(Paths(data_dir), konfiguration(**aenderung), clock).konfigurationsform
+
+
+def test_felder_der_bindungsparameter_die_diese_software_nicht_kennt_sind_ein_formgrund_der_karenz(data_dir, clock):
+    parameter = {**bindung_beispiele.parameter("viessmann_vicare"), "neues_feld": 1}
+    assert _ablehnung(Paths(data_dir), konfiguration(bindungsparameter=parameter), clock).konfigurationsform
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"wartezeit_s": 1},  # ausserhalb der lokalen Grenzen
+    {"schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 99}},  # lockerer als lokal erlaubt
+    {"zurueck": ["curve"]},  # unterschreitet die lokale Mindestliste der Rueckstellung
+    {"schreibgruppen": [["curve", "room_setpoint"]]},  # keine erlaubte Schreibgruppe (Positivliste)
+], ids=["wartezeit", "schreibschutz", "rueckstellliste", "schreibgruppe"])
+def test_ein_verstoss_gegen_die_lokalen_grenzen_der_bindungsparameter_meldet_sofort(data_dir, clock, aenderung):
+    parameter = bindung_beispiele.parameter("viessmann_vicare", **aenderung)
+    fehler = _ablehnung(Paths(data_dir), konfiguration(bindungsparameter=parameter), clock)
+    assert fehler.key == "konfiguration" and not fehler.konfigurationsform
+
+
+def test_ein_ungueltiger_wert_der_konfiguration_ist_kein_formgrund(data_dir, clock):
+    assert not _ablehnung(Paths(data_dir), konfiguration(tagestick="25:00"), clock).konfigurationsform
+
+
+def test_ein_fehlender_schluessel_im_dokument_meldet_sofort(data_dir, clock, monkeypatch):
+    def _luecke(*args, **kwargs):
+        raise KeyError("raumfuehler")
+
+    monkeypatch.setattr(gateway_config, "parse_dokument", _luecke)
+    assert not _ablehnung(Paths(data_dir), konfiguration(), clock).konfigurationsform
+
+
+def test_ein_treiberfehler_und_ein_fehler_des_kanalverzeichnisses_sind_kein_formgrund(data_dir, clock, monkeypatch):
+    unbekannt = {"treiber": {"id": "simulation", "parameter": {"lever_set": "gibt-es-nicht"}}, "thermostat": None}
+    treiber = _ablehnung(Paths(data_dir), konfiguration(bindung=unbekannt), clock)
+    assert treiber.key == "treiber" and not treiber.konfigurationsform
+
+    def _manifest(*args, **kwargs):
+        raise ManifestError("Treiber liefert Pflicht-Rollen nicht: curve")
+
+    monkeypatch.setattr(host_modul, "build_manifest", _manifest)
+    manifest = _ablehnung(Paths(data_dir), konfiguration(), clock)
+    assert manifest.key == "manifest" and not manifest.konfigurationsform
+
+
+def test_ein_hebelsatz_des_treibers_gegen_die_konfiguration_ist_kein_formgrund(data_dir, clock):
+    """Treiber und Konfiguration meinen verschiedene Hebelsaetze: die Sicherheitswerte passen nicht zum Treiber."""
+    binding = {"treiber": {"id": "simulation", "parameter": {"lever_set": "weishaupt_wwp", "heizkreis": 0}},
+               "thermostat": THERMOSTAT}
+    fehler = _ablehnung(Paths(data_dir), konfiguration(bindung=binding), clock)
+    assert "weicht von der Konfiguration" in fehler.grund and not fehler.konfigurationsform
+
+
 def test_sign_off_parts_are_none_with_a_broken_lock(data_dir, clock):
     paths = Paths(data_dir)
     gateway_config.abmelden(paths, "test-tenant")
