@@ -19,7 +19,9 @@ def as_fixture(real: dict) -> dict:
     data["networks"]["wan"] = {**data["networks"]["wan"], "external": True, "name": "shg-upd-wan"}
     runtime = data["services"]["runtime"]
     del runtime["ports"]
-    runtime["environment"] = {**runtime["environment"], "SHG_DEVICE_API_URL": "http://shg-upd-bootstrap:8090"}
+    runtime["environment"] = {**runtime["environment"], "SHG_DEVICE_API_URL": "http://shg-upd-bootstrap:8090",
+                              "SMARTHEAT_ANKER_DATEI": "/anker/anker.pem", "SMARTHEAT_TESTKENNUNG": "updater-test"}
+    runtime["volumes"] = [*runtime["volumes"], "${SHG_FAKE_PKI:?SHG_FAKE_PKI fehlt}/anker.pub:/anker/anker.pem:ro"]
     for block in (data["x-hardening"], data["x-gateway"], *data["services"].values()):
         if block.get("security_opt") == HARDENING:
             block["security_opt"] = [*HARDENING, "label:disable"]
