@@ -471,6 +471,7 @@ def _rollen_pruefen_mit_wiederholung(ha_api, b: dokument.HaBindung) -> list[tupl
 
 
 def _ensure_derived_sensors_with_retry(ha_api, b: dokument.HaBindung, tenant_id: str, kreis: int = 1) -> DerivedSensors:
+    derived_sensors.anlage_pruefen(tenant_id)  # ein Urteil, keine Wiederholung: ConfigError ohne Wartezeit
     return _retry_with_budget(
         ha_api,
         lambda: derived_sensors.ensure_all(

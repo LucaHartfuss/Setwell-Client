@@ -8,6 +8,7 @@ from heizungsbruecke.derived_sensors import ensure_all, entfernen
 from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.helper_templates import room_temperature_template
 from smartheat_runtime.backup_store import load_backup, save_backup
+from smartheat_runtime.dokument_config import ConfigError
 
 ROOMS = ["sensor.wz", "climate.kz::current_temperature"]
 ROOM_TEMPLATE = room_temperature_template(ROOMS)
@@ -379,3 +380,49 @@ def test_ensure_entity_without_a_sensor_list_remembers_only_the_source(tmp_path)
 
     assert (entity_id, meldung) == (ROOM_ID, False)
     assert load_backup(pfad)["k"] == {"entity_id": ROOM_ID, "source": "vorlage"}
+
+
+FEINDLICHE_IDS = ["x{{ states('sensor.geheim') }}", "x{% if 1 %}", "t1\n", "t1\nSmartHeat", "a" * 65, "", "a b", "ä"]
+
+
+@pytest.mark.parametrize("anlage", FEINDLICHE_IDS)
+def test_an_unsafe_plant_id_creates_no_helper_and_leaks_no_raw_text(tmp_path, caplog, anlage):
+    """Die Anlagen-ID kommt vom Server und steht im Namen des Template-Helfers, den HA rendert: nur sichere Zeichen."""
+    ha_api = _ha_api()
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(ConfigError) as fehler:
+        ensure_all(ha_api, anlage, ROOMS, tmp_path / "d.json", kreis=2, raeume=((1, ("sensor.wz",)),))
+
+    ha_api.create_template_sensor.assert_not_called()
+    ha_api.delete_helper.assert_not_called()
+    assert not (tmp_path / "d.json").exists()
+    zeigbar = str(fehler.value) + caplog.text
+    assert "geheim" not in zeigbar and "SmartHeat" not in str(fehler.value)
+
+
+@pytest.mark.parametrize("anlage", ["client1", "a-b_C9", "A" * 64])
+def test_a_safe_plant_id_names_the_helpers_as_before(tmp_path, anlage):
+    ha_api = _ha_api()
+
+    ensure_all(ha_api, anlage, ROOMS, tmp_path / "d.json", kreis=2, raeume=((1, ("sensor.wz",)),))
+
+    namen = [call.kwargs["name"] for call in ha_api.create_template_sensor.call_args_list]
+    assert namen == [f"SmartHeat {anlage} K2 Raumtemperatur", f"SmartHeat {anlage} K2 R1 Raumtemperatur"]
+
+
+@pytest.mark.parametrize("anlage", ["x{{ 1 }}", "t1\n"])
+def test_removing_with_an_unsafe_plant_id_compares_no_raw_title(tmp_path, anlage):
+    """Mit ungueltiger ID wird kein Titel mit Rohtext verglichen (tenant_id=None); die Helfer mit `smartheat_`-Praefix
+    gehen weg, ein fremder bleibt im Tracking und der Rueckgabewert ist False."""
+    ha_api = _ha_api_namen({"sensor.smartheat_t1_raumtemperatur", "sensor.umbenannt"})
+    ha_api.delete_helper.side_effect = lambda entity_id, tenant_id=None: (
+        None if entity_id.startswith("sensor.smartheat_") else (_ for _ in ()).throw(RuntimeError("fremd")))
+    state = tmp_path / "d.json"
+    save_backup(state, {"room_temperature": {"entity_id": "sensor.smartheat_t1_raumtemperatur", "source": "s"},
+                        "room_temperature:2": {"entity_id": "sensor.umbenannt", "source": "s"}})
+
+    assert entfernen(ha_api, anlage, state) is False
+
+    assert [call.kwargs["tenant_id"] for call in ha_api.delete_helper.call_args_list] == [None, None]
+    assert list(load_backup(state)) == ["room_temperature:2"]

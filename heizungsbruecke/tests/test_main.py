@@ -21,6 +21,7 @@ from heizungsbruecke.host import (
     _retry_with_budget,
     _wait_for_required_entities,
 )
+from smartheat_runtime.dokument_config import ConfigError
 
 #: Ungueltiger Tagestick im Konfigurationsdokument: ein Konfigurationsfehler beim Start. (Die Grenzen der Intervalle
 #: prueft nur noch config_check beim Annehmen des Dokuments, nicht mehr der Host.)
@@ -335,6 +336,17 @@ def test_helper_creation_failure_after_budget_is_a_start_error(monkeypatch, slee
 
     with pytest.raises(StartupError, match="Hilfs-Entities konnten nicht angelegt werden"):
         _ensure_derived_sensors_with_retry(_reachable(), _DERIVED_BINDUNG, "t1")
+
+
+def test_an_unsafe_plant_id_fails_the_start_at_once_without_retries(monkeypatch, sleeps):
+    """Ein Urteil ueber die Anlagen-ID wird nicht wiederholt: ConfigError, keine Wartezeit, nichts angelegt."""
+    ha_api = _reachable()
+
+    with pytest.raises(ConfigError):
+        _ensure_derived_sensors_with_retry(ha_api, _DERIVED_BINDUNG, "x{{ 1 }}")
+
+    ha_api.create_template_sensor.assert_not_called()
+    assert not sleeps
 
 
 def test_ensure_derived_sensors_with_retry_recovers_after_transient_failures(monkeypatch, sleeps, tmp_path):
