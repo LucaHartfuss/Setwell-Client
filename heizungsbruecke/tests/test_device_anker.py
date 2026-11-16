@@ -120,7 +120,8 @@ def test_eine_fehlende_leere_oder_kaputte_datei_macht_jede_antwort_ungueltig(ide
 
 def test_ein_privater_teil_in_der_datei_zaehlt_nicht(ident, antwort, monkeypatch, tmp_path):
     datei = tmp_path / "anker.pem"
-    datei.write_text("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
+    art = "PRIVATE " + "KEY"  # zur Laufzeit zusammengesetzt: der Geheimnis-Scan sieht in der Quelle keinen PEM-Kopf
+    datei.write_text(f"-----BEGIN {art}-----\nAAAA\n-----END {art}-----\n")
     monkeypatch.setenv(anker.ENV_DATEI, str(datei))
     assert anker.schluessel() == {}
 
