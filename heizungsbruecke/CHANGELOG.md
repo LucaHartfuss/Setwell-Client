@@ -5,11 +5,26 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
+  die neue Software sie nicht lesen kann (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende
+  Bindungsparameter, andere Felder der Bindungsparameter oder Pflichtzuordnungen); ein Verstoß gegen eine lokale Grenze
+  meldet sofort: Rastung, lokale Sicherheitswerte, Schreibschutz, Wartezeit, Schrittweite, Mindestliste der
+  Rückstellung und erlaubte Schreibgruppen der Bindungsparameter, Positivliste, Entity-Art der Schreibziele, ungültige
+  Werte sowie Treiber-, Kanal- und Anlagenfehler. Die Wartezeit beginnt je Softwarestand höchstens einmal: eine
+  Boot-Schleife unter 15 Minuten hält die Meldung nicht mehr dauerhaft zurück. Grenzen: Ein Neustart des Geräts in der
+  laufenden Karenz meldet sofort; eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, hält die Meldung
+  bis zu 15 Minuten zurück.
+
 - Gibt die Integration einen Push-Eintrag nach 24 Stunden ohne Zustellung auf (Ereignis `smartheat_push_aufgegeben`),
   meldet das Add-on das als orange Meldung an den Server (Portal): eine Meldung je Stufe und Kreis, die 24 Stunden nach
   dem letzten solchen Ereignis wieder schließt. Der Stand liegt nur im Speicher; nach einem Neustart ist die Meldung
   zu, bis die Integration neue Einträge aufgibt; beide Stufen aller Kreise schließt das Add-on dazu bei jedem Start
   einmal ausdrücklich, weil der Server offene Meldungen bei einem Neustart nicht selbst schließt.
+
+- Liegt die Software nur unter einer gewöhnlich angehobenen Mindestversion und steht kein kritischer Eintrag in der
+  Konfiguration (kein Notbetrieb, kein Datum), meldet das Add-on die orange Meldung `update_noetig_mindest` („bei
+  Gelegenheit aktualisieren“) statt der roten, in Home Assistant und an den Server; Rot bleibt dem kritischen Eintrag
+  vorbehalten.
 
 - Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der ursprünglichen Werte geht jetzt auch an den
   Server und erreicht Eigentümer und Bedienende im Portal, per Push und per Mail. Nach einem Neustart mit der

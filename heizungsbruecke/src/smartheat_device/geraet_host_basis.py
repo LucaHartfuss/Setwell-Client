@@ -243,18 +243,19 @@ class GeraetHostBasis:
                 if isinstance(k := eintrag.get("kreis"), int) and not isinstance(k, bool)]
 
     def update_noetig_melden(self, anzeige: Anzeige) -> None:
-        """Unter dem Zustand update_noetig geht die rote Meldung ueber den Geraetekern an den Server (Portal, Push und
-        Mail an Eigentuemer und Bedienende): mit dem Datum der urspruenglichen Werte, ohne bekannten Beginn (Uhr
-        unklar) die Fassung ohne Datum, nie beide. Gemeldet wird nur bei Aenderung; verlaesst das Geraet den Zustand
-        (Update eingespielt), nimmt es die Meldung zurueck; die erste Anzeige nach einem Prozessstart meldet den Stand
+        """Unter dem Zustand update_noetig geht die Meldung ueber den Geraetekern an den Server (Portal, Push und
+        Mail an Eigentuemer und Bedienende). Unter einem kritischen Eintrag der Konfiguration ist sie rot: mit dem Datum
+        der urspruenglichen Werte, ohne bekannten Beginn (Uhr unklar) die Fassung ohne Datum, nie beide; ohne kritischen
+        Eintrag (gewoehnliche Anhebung der Mindestversion, kein Notbetrieb) orange, ohne Datum. Gemeldet wird nur bei
+        Aenderung; verlaesst das Geraet den Zustand (Update eingespielt), nimmt es die Meldung zurueck; die erste Anzeige nach einem Prozessstart meldet den Stand
         immer, auch als Ruecknahme (der Server schliesst Geraete-Meldungen nicht von selbst). Beide Hosts rufen es mit jeder Anzeige; Geraete-Thread."""
         if self.device is None:
             return
         meldung = None
         if anzeige.zustand == "update_noetig":
-            ende = self.kritisches_ende(self.kreis_nummern() or [KREIS])
-            meldung = (meldungen.neu(meldungen.PREFIX + "update_noetig", ende=ende) if ende is not None
-                       else meldungen.neu(meldungen.PREFIX + "update_noetig_unbekannt"))
+            kritisch = self.update_noetig_kritisch()
+            ende = self.kritisches_ende(self.kreis_nummern() or [KREIS]) if kritisch else None
+            meldung = meldungen.update_noetig(kritisch=kritisch, ende=ende)
         if meldung == self._update_noetig_gemeldet:
             return
         self._melden("update_noetig", meldung, offen=meldung is not None)

@@ -16,9 +16,11 @@ from pathlib import Path
 
 from smartheat_core import config_check, dateien, kreisansicht, rastung
 from smartheat_core.binding import BindingDescription
+from smartheat_core.bindungsparameter import FELDER as _PARAMETER_FELDER
+from smartheat_core.bindungsparameter import Fehler
 from smartheat_core.bindungsparameter import beschreibung as _beschreibung
 from smartheat_core.levers import LEVER_SETS
-from smartheat_core.safety import LocalSafety, resolve_local_safety
+from smartheat_core.safety import LOCAL_SAFETY, LocalSafety, resolve_local_safety
 from smartheat_runtime import entitlement
 from smartheat_runtime.plan_quelle import PlanEingabe
 from smartheat_runtime.runtime_config import BootInfo, RuntimeConfig
@@ -46,30 +48,58 @@ class ConfigError(ValueError):
     app.CONFIG_RECHECK_SECONDS). Die Meldung nennt das fehlende oder ungueltige Feld."""
 
 
+class ConfigFormError(ConfigError):
+    """Die Konfiguration nennt etwas, das diese Software nicht lesen kann (unbekannter Hebelsatz, Weg oder Zaehlerart,
+    unbekanntes Verteilsystem, fehlende oder andere Felder der Bindungsparameter, fehlende Pflichtzuordnungen): eine
+    neue Software kann sie lesen, nach einem Softwarewechsel wartet die Meldung darauf
+    (app.StartFailure.konfigurationsform). Ein Verstoss gegen eine lokale Grenze ist kein Formgrund und meldet sofort,
+    denn keine neue Software lockert sie: Rastung, lokale Sicherheitswerte, Werte der Bindungsparameter ausserhalb
+    ihrer Grenzen (Schreibschutz, Wartezeit, Schrittweite, Mindestliste der Rueckstellung, erlaubte Schreibgruppen),
+    Positivliste und Entity-Art der Schreibziele sowie ungueltige Werte."""
+
+#: Regeln eines Verstosses gegen die Bindungsparameter (Fehler.details["regel"]), die eine neue Software lesen kann.
+_FORMGRUND_REGELN = ("fehlt", "unbekannt")
+
+
+def bindungsfehler(error: ValueError, parameter) -> ConfigError:
+    """Der Fehler der Bindungsparameter als Konfigurationsfehler: ConfigFormError, wenn nur eine neue Software ihn
+    beheben kann (fehlende Parameter, unbekannter Weg, Hebelsatz ohne Verfahren oder unbekannte Zaehlerart, andere
+    Felder als diese Software kennt), sonst ConfigError (Grenzen, die lokal gelten, und alles Unbekannte: sofort)."""
+    details = error.details if isinstance(error, Fehler) else {}
+    andere_felder = details.get("feld") == "bindungsparameter" and details.get("regel") == "ungueltig" and (
+        isinstance(parameter, Mapping) and set(parameter) != set(_PARAMETER_FELDER))
+    form = details.get("regel") in _FORMGRUND_REGELN or andere_felder
+    return (ConfigFormError if form else ConfigError)(f"Konfiguration: {error}")
+
+
 def _hebelsatz(konfiguration, kreis: int | None = None) -> str:
     hebelsatz = kreisansicht.sicht(konfiguration, kreis).get("hebelsatz")
     if not isinstance(hebelsatz, str) or hebelsatz not in LEVER_SETS:
-        raise ConfigError(f"Hebelsatz {hebelsatz!r} ist unbekannt – {RECONFIGURE_HINT}")
+        raise ConfigFormError(f"Hebelsatz {hebelsatz!r} ist unbekannt – {RECONFIGURE_HINT}")
     return hebelsatz
 
 
 def beschreibung(konfiguration, kreis: int | None = None) -> BindingDescription:
     """Wirksame Binding-Beschreibung des Kreises aus Hebelsatz und Bindungsparametern; keine Ersatztabelle."""
     hebelsatz = _hebelsatz(konfiguration, kreis)
+    sicht = kreisansicht.sicht(konfiguration, kreis)
     try:
-        sicht = kreisansicht.sicht(konfiguration, kreis)
         return _beschreibung(sicht.get("weg"), hebelsatz, sicht.get("bindungsparameter"))
     except ValueError as error:
-        raise ConfigError(f"Konfiguration: {error}") from None
+        raise bindungsfehler(error, sicht.get("bindungsparameter")) from None
 
 
 def sicherheit(konfiguration, kreis: int | None = None) -> LocalSafety:
     """Lokale Sicherheitswerte des Kreises fuer Hebelsatz und Verteilsystem (Regel 4)."""
     hebelsatz = _hebelsatz(konfiguration, kreis)
+    verteilsystem = kreisansicht.sicht(konfiguration, kreis).get("verteilsystem")
     try:
-        return resolve_local_safety(hebelsatz, kreisansicht.sicht(konfiguration, kreis).get("verteilsystem"))
+        return resolve_local_safety(hebelsatz, verteilsystem)
     except ValueError as error:
-        raise ConfigError(f"Konfiguration: {error}") from None
+        # Ein Verteilsystem ohne Sicherheitswerte kann eine neue Software kennen; verletzen die Werte selbst die
+        # Invarianten, ist das ein Verstoss gegen Regel 4 und meldet sofort.
+        form = not isinstance(verteilsystem, str) or (hebelsatz, verteilsystem) not in LOCAL_SAFETY
+        raise (ConfigFormError if form else ConfigError)(f"Konfiguration: {error}") from None
 
 
 def eingerichtet(konfiguration) -> bool:

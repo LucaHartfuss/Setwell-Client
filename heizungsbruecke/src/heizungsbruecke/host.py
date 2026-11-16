@@ -25,7 +25,7 @@ from smartheat_core import config_check, kreisansicht, meldungen, wallclock
 from smartheat_core.logtext import lesbar
 from smartheat_runtime import dokument_config, plan_quelle
 from smartheat_runtime.app import Loaded, Notice, RestoreParts, StartFailure
-from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError
+from smartheat_runtime.dokument_config import RECONFIGURE_HINT, ConfigError, ConfigFormError
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.plausibility import ROOM_TEMP_RANGE, is_plausible
 from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, TriggerSource
@@ -200,9 +200,10 @@ class HaHost:
             # Konfigurationsfehlers. Muster der Raumfuehler/Aussenquelle/Batterien/Handys und die Hinweise prueft der
             # Server (config_check); die Positivliste und Formen der Rollen prueft der Host selbst weiter unten
             # (_bindung_pruefen).
-            text = dokument.lokal_pruefen(self._konfiguration, self.kreis)
-            if text:
-                raise ConfigError(text)
+            befund = dokument.lokal_befund(self._konfiguration, self.kreis)
+            if befund is not None:
+                # fehlt eine Pflichtzuordnung, kann eine neue Software sie lesen; die Entity-Art der Schreibziele nicht
+                raise (ConfigFormError if dokument.ist_formgrund(befund) else ConfigError)(befund.text)
             b = dokument.bindung(self._konfiguration, self.kreis)
             geraet_trigger.pruefe_soll_ref(b.soll_entity)
             runtime = dokument_config.runtime_config(
@@ -230,13 +231,19 @@ class HaHost:
             plant_id = dokument.anlagen_kennung(b)
         except StartupError as error:
             raise StartFailure(str(error), error.key) from error
-        except (ConfigError, ManifestError) as error:
-            # Pruefungstexte sind deterministisch: der Text ist zugleich die Identitaet.
+        except ConfigFormError as error:
+            # Pruefungstexte sind deterministisch: der Text ist zugleich die Identitaet. Nur die Konfiguration selbst
+            # kann eine neue Software nicht lesen.
+            raise StartFailure(str(error), konfigurationsform=True) from error
+        except ConfigError as error:
+            # Rastung, lokale Sicherheitswerte, Positivliste und ungueltige Werte aendert keine neue Software.
+            raise StartFailure(str(error)) from error
+        except ManifestError as error:
             raise StartFailure(str(error)) from error
         _check_timezone(self._ha_api)
         self._bindung, self._runtime = b, runtime
         self.soll_entity = b.soll_entity
-        assert self.soll_entity is not None  # lokal_pruefen verlangt sie
+        assert self.soll_entity is not None  # lokal_befund verlangt sie
         bedienung, dirty = self._geraet.bedienung()
         bedient = bedienung_start(bedienung, self.kreis)
         start_value = bedient if bedient is not None else _angezeigter_start(self._ha_api, self.soll_entity)
@@ -428,8 +435,10 @@ def _bindung_pruefen(konfiguration, kreis: int | None = None) -> None:
     Entity (Regel 6)."""
     ablehnung = config_check.ha_bindung_pruefen(kreisansicht.sicht(konfiguration, kreis))
     if ablehnung is not None:
-        feld = (ablehnung.details or {}).get("feld", "bindung")
-        raise ConfigError(f"{feld}: Form der Zuordnung ungültig – {RECONFIGURE_HINT}")
+        details = ablehnung.details or {}
+        text = f"{details.get('feld', 'bindung')}: Form der Zuordnung ungültig – {RECONFIGURE_HINT}"
+        # Ein unbekanntes oder fehlendes Feld kann eine neue Software lesen; jede andere Form gilt lokal.
+        raise (ConfigFormError if details.get("regel") in ("fehlt", "unbekannt") else ConfigError)(text)
 
 
 def _rollen_pruefen_mit_wiederholung(ha_api, b: dokument.HaBindung) -> list[tuple[str, str]]:

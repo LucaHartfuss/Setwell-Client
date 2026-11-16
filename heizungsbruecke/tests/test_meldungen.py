@@ -46,6 +46,26 @@ def test_update_noetig_nennt_das_datum_der_ursprungswerte_und_die_fassung_ohne_d
         meldungen.neu("meldung.update_noetig", ende="01.12.2026")  # nur ein ISO-Datum
 
 
+def test_update_noetig_mindest_ist_orange_ohne_parameter_und_ohne_ziffer():
+    meldung = meldungen.neu("meldung.update_noetig_mindest")
+    assert meldung.stufe == "orange" and meldung.params == {}
+    text = meldungen.text(meldung)
+    assert "Add-on" in text and "regelt weiter" in text
+    assert not any(ziffer in text for ziffer in "0123456789")
+    assert meldungen.aus_dict(meldungen.zu_dict(meldung)) == meldung
+
+
+@pytest.mark.parametrize(("kritisch", "ende", "code", "stufe"), [
+    (False, None, "meldung.update_noetig_mindest", "orange"),
+    (False, "2026-12-01", "meldung.update_noetig_mindest", "orange"),  # ohne kritischen Eintrag gibt es kein Datum
+    (True, None, "meldung.update_noetig_unbekannt", "rot"),
+    (True, "2026-12-01", "meldung.update_noetig", "rot"),
+])
+def test_die_meldung_unter_update_noetig_folgt_dem_kritischen_eintrag_und_dem_datum(kritisch, ende, code, stufe):
+    meldung = meldungen.update_noetig(kritisch=kritisch, ende=ende)
+    assert (meldung.code, meldung.stufe) == (code, stufe)
+
+
 def test_integration_veraltet_ist_orange_ohne_parameter():
     meldung = meldungen.neu("meldung.integration_veraltet")
     assert meldung.stufe == "orange" and meldung.params == {}

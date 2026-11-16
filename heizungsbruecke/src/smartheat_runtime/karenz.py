@@ -5,9 +5,21 @@ darum KARENZ_NACH_UPDATE_S auf die neue Konfiguration. Zustand, Status und Ruhez
 
 Die Software, die zuletzt eine gueltige Konfiguration geladen hat, steht in einer kleinen Datei neben dem Zustand des
 Kreises. Weicht sie von der laufenden ab, laeuft die Karenz; ihr Beginn steht auf der monotonen Uhr (Port `clock`, nie
-die Wanduhr) in derselben Datei, damit ein Neustart in der Karenz sie nicht verlaengert. Springt die monotone Uhr
-zurueck (Neustart des Geraets), beginnt die Karenz neu: das schiebt die Meldung hoechstens um die Karenz je Neustart,
-nie unbegrenzt. Laesst sich der Beginn nicht merken, gibt es keine Karenz (lieber sofort melden als nie)."""
+die Wanduhr) in derselben Datei, damit ein Neustart in der Karenz sie nicht verlaengert. Zusammen mit dem Beginn steht
+dort die Software, fuer die die Karenz begann: je Softwarestand beginnt sie hoechstens einmal. Springt die monotone Uhr
+zurueck (Neustart des Geraets), beginnt deshalb keine zweite Karenz derselben Software; eine Boot-Schleife unter der
+Karenz haelt die Meldung nicht dauerhaft zurueck. Erst ein weiterer Softwarewechsel beginnt eine neue Karenz. Laesst
+sich der Beginn nicht merken, gibt es keine Karenz (lieber sofort melden als nie). Dateien des alten Stands ohne den
+Vermerk bleiben lesbar (dann beginnt die Karenz bei zurueckgesprungener Uhr einmal neu und wird vermerkt).
+
+Nur Startfehler, die die Form der Konfiguration betreffen (unbekannter Hebelsatz oder unbekanntes Verteilsystem,
+fehlende Bindungsparameter oder Pflichtzuordnungen), nutzen die Karenz; Rastung, lokale Sicherheitswerte, Positivliste
+und ungueltige Werte melden sofort (`StartFailure.konfigurationsform`).
+
+Grenzen: Springt die Uhr in einer laufenden Karenz zurueck (Neustart des Geraets), meldet die Meldung sofort, auch wenn
+die Karenz noch nicht abgelaufen waere; ein weiterer Softwarewechsel ohne Uhrsprung erbt den Beginn der vorigen Karenz,
+die Meldung geht dann nach deren Ende. Eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, haelt die
+Meldung bis zu KARENZ_NACH_UPDATE_S zurueck, weil ohne Boot-Kennung kein Neustart zu erkennen ist."""
 import logging
 import math
 from collections.abc import Callable
@@ -41,6 +53,8 @@ class Karenz:
         jetzt = self._clock()
         beginn = _zahl(gelesen.get("beginn") if isinstance(gelesen, dict) else None)
         if beginn is None or beginn > jetzt:
+            if self._schon_begonnen(gelesen):
+                return None  # die Karenz dieser Software lief schon; der Beginn ist nicht mehr zu deuten
             return KARENZ_NACH_UPDATE_S if self._beginn_merken(gelesen, jetzt) else None
         rest = beginn + KARENZ_NACH_UPDATE_S - jetzt
         return rest if rest > 0 else None
@@ -61,11 +75,15 @@ class Karenz:
             return gelesen["version"] != self._version
         return self._zustand_vorhanden
 
+    def _schon_begonnen(self, gelesen) -> bool:
+        return isinstance(gelesen, dict) and gelesen.get("karenz_fuer") == self._version
+
     def _beginn_merken(self, gelesen, jetzt: float) -> bool:
         alt = gelesen.get("version") if isinstance(gelesen, dict) else None
         try:
-            dateien.schreiben_json(self._pfad, {"version": alt if isinstance(alt, str) else None, "beginn": jetzt},
-                                   modus=dateien.PRIVAT)
+            dateien.schreiben_json(
+                self._pfad, {"version": alt if isinstance(alt, str) else None, "beginn": jetzt,
+                             "karenz_fuer": self._version}, modus=dateien.PRIVAT)
         except OSError:
             logger.warning("Beginn der Karenz nicht gespeichert, die Meldung geht sofort")
             return False
