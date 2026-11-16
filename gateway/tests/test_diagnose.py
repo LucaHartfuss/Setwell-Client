@@ -749,3 +749,54 @@ def test_der_sprachkopf_wird_nie_ausgegeben(lan_server, fremd):
         assert status == 200 and LANG_RE.search(page).group(1) == "en"
         assert fremd not in page and "evil" not in page and "<script" not in page and "fett" not in page
     assert "Accept-Language" not in page
+
+
+# --- Hinweis auf das uebernehmende Konto: dauerhaft, nicht nur im Fenster des Knopfs ---
+
+def test_die_seite_zeigt_uebernommen_und_die_maske_dauerhaft_ohne_offenes_fenster(geraet):
+    geraet.code_fenster_bis = None
+    stande = (
+        (_anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False), False),
+        (_anzeige("wartet_auf_einrichtung", eingerichtet=False, konto_hinweis="a***@e***.com"), True),
+        (_anzeige("regelt", konto_hinweis="a***@e***.com"), True),
+        (_anzeige("keine_verbindung", server_ok=False, konto_hinweis="a***@e***.com"), True),
+    )
+    for anzeige, uebernommen in stande:
+        geraet.letzte_anzeige = anzeige
+        seite_de = render_html(seite(geraet, geraet.device), "de")
+        assert ("übernommen · a***@e***.com" in seite_de) is uebernommen, anzeige.zustand
+        assert ("claimed · a***@e***.com" in render_html(seite(geraet, geraet.device), "en")) is uebernommen
+
+
+def test_die_seite_vor_der_uebernahme_und_ohne_anzeige_zeigt_keine_uebernahme(geraet):
+    geraet.letzte_anzeige = None
+    assert "übernommen" not in render_html(seite(geraet, geraet.device), "de")
+    geraet.letzte_anzeige = _anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False)
+    data = seite(geraet, geraet.device)
+    assert data["konto_hinweis"] is None and data["device_state"] == "nicht_uebernommen"
+    assert "übernommen" not in render_html(data, "de").replace(ZUSTAND_TEXTE["nicht_uebernommen"], "")
+
+
+def test_uebernommen_ohne_hinweis_zeigt_nur_uebernommen(geraet):
+    geraet.letzte_anzeige = _anzeige("regelt")
+    seite_de = render_html(seite(geraet, geraet.device), "de")
+    assert "<td>übernommen</td>" in seite_de and "·" not in seite_de
+    assert "<td>claimed</td>" in render_html(seite(geraet, geraet.device), "en")
+
+
+def test_nach_der_freigabe_zeigt_die_seite_keinen_hinweis_mehr(geraet):
+    geraet.letzte_anzeige = _anzeige("regelt", konto_hinweis="a***@e***.com")
+    assert "a***@e***.com" in render_html(seite(geraet, geraet.device), "de")
+    geraet.letzte_anzeige = _anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False)
+    assert "a***@e***.com" not in render_html(seite(geraet, geraet.device), "de")
+
+
+def test_der_hinweis_wird_wie_jedes_feld_maskiert_und_ist_nicht_im_diagnostics_auszug(geraet):
+    geraet.letzte_anzeige = _anzeige("regelt", konto_hinweis='a***@<b onload="x">***.com')
+    page = render_html(seite(geraet, geraet.device), "de")
+    assert "<b onload" not in page and "&lt;b onload=&quot;x&quot;&gt;" in page
+    assert "konto_hinweis" not in geraet.snapshot()
+
+
+def test_render_html_kennt_einen_auszug_ohne_die_neuen_felder():
+    assert "übernommen" not in render_html(SNAPSHOT, "de").replace(ZUSTAND_TEXTE["nicht_uebernommen"], "")

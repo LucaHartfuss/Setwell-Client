@@ -36,12 +36,12 @@ def test_blocked_and_update_needed_are_distinct_from_each_other_and_from_stoerun
 
 def test_all_patterns_are_pairwise_distinct():
     """F-1: der Kunde unterscheidet die Muster mit dem Auge, vor allem `reset_bereit` und `reset_laeuft` (Regel 4) von
-    `startet`, `keine_verbindung` und `regelt`. Gleich ist nur das Paar, das die Kurzanleitung gemeinsam beschreibt."""
+    `startet`, `keine_verbindung` und `regelt`. Jeder Zustand hat sein eigenes Muster."""
     gleiche: dict[tuple, set[str]] = {}
     for name, muster in led.MUSTER.items():
         gleiche.setdefault(muster, set()).add(name)
     doppelt = [namen for namen in gleiche.values() if len(namen) > 1]
-    assert doppelt == [{"nicht_uebernommen", "wartet_auf_einrichtung"}]
+    assert doppelt == []
     assert len(led.MUSTER) == len(led.PATTERNS) + len(led.KNOPF_MUSTER)  # kein Knopf-Muster ueberschreibt einen Zustand
 
 
@@ -348,3 +348,9 @@ def test_main_waehlt_das_muster_mit_vorrang_des_knopfs(tmp_path, monkeypatch):
     monkeypatch.setattr(led, "play", spielen)
     led.main()
     assert gesehen == ["reset_laeuft"]
+
+
+def test_wartet_auf_einrichtung_blinkt_anders_als_nicht_uebernommen():
+    """Wer das Gateway uebernommen hat, soll an der LED sehen, dass es nicht mehr auf einen Code wartet."""
+    assert led.PATTERNS["wartet_auf_einrichtung"] != led.PATTERNS["nicht_uebernommen"]
+    assert led.MUSTER["wartet_auf_einrichtung"] not in [m for n, m in led.MUSTER.items() if n != "wartet_auf_einrichtung"]

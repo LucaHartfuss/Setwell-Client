@@ -685,7 +685,7 @@ def test_display_reports_to_the_discovery_with_the_code_only_while_it_may_be_sho
     host.anzeigen(Anzeige("startet", False, "nicht_uebernommen", False, (), (), None))  # ohne Discovery: nichts
     assert supervisor.gemeldet == []
     host.discovery = discovery.Discovery(supervisor, tmp_path / "discovery.json", clock=clock)
-    host.claim_code = lambda: "ABCDEFGHIJKL"
+    host.claim_code = lambda: "ABCDEFGHIJKLMNOP"
     host.anzeigen(Anzeige("startet", True, "nicht_uebernommen", False, (), (), None))  # startet: noch kein Code
     host.anzeigen(Anzeige("nicht_uebernommen", True, "nicht_uebernommen", False, (), (), None))
     host.anzeigen(Anzeige("wartet_auf_einrichtung", True, "uebernommen", False, (), (), None))
@@ -694,7 +694,7 @@ def test_display_reports_to_the_discovery_with_the_code_only_while_it_may_be_sho
     host.anzeigen(Anzeige("gesperrt", False, "nicht_uebernommen", False, (), (), None))
     assert supervisor.gemeldet == [
         {"geraet_id": "shg-a", "zustand": "nicht_uebernommen"},
-        {"geraet_id": "shg-a", "zustand": "nicht_uebernommen", "claim_code": "ABCDEFGHIJKL"},
+        {"geraet_id": "shg-a", "zustand": "nicht_uebernommen", "claim_code": "ABCDEFGHIJKLMNOP"},
         {"geraet_id": "shg-a", "zustand": "uebernommen"},
         {"geraet_id": "shg-a", "zustand": "startet"},
         {"geraet_id": "shg-a", "zustand": "gesperrt"},

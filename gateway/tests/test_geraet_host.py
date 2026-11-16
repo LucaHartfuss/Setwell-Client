@@ -487,7 +487,7 @@ def test_snapshot_has_no_claim_code_and_only_known_host_fields(welt):
     snap = welt.host.snapshot()
     assert snap["geraet"] == "shg-aaaaaaaaaaaaaaaa" and snap["host"] == {"netz": True, "dns": False,
                                                                         "zeit_synchron": True}
-    assert "ABCDEFGHIJKL" not in json.dumps(snap) and snap["hinweise"] == [hinweis]
+    assert "ABCDEFGHIJKLMNOP" not in json.dumps(snap) and snap["hinweise"] == [hinweis]
 
 
 def test_wish_and_setpoint_source_go_to_the_device(welt):

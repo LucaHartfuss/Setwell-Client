@@ -258,7 +258,7 @@ def start_bridge(env, *, options, abo=entitlement.ACTIVE, abgemeldet=False, bedi
 
 
 DEVICE_ID = "shg-aaaaaaaaaaaaaaaa"
-CLAIM_CODE = "ABCDEFGHIJKL"
+CLAIM_CODE = "ABCDEFGHIJKLMNOP"
 
 
 class FakeThread:

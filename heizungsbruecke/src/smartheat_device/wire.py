@@ -29,7 +29,7 @@ MAX_CLOCK_SKEW_SECONDS = 300
 MAX_BODY_BYTES = 65536
 DEVICE_ID_PREFIX = "shg-"
 DEVICE_ID_HASH_CHARS = 16
-CLAIM_CODE_CHARS = 12
+CLAIM_CODE_CHARS = 16
 CSR_MAX_BYTES = 8192
 UNAUTHENTICATED_ERROR = "nicht authentifiziert"
 ROUTES: dict[str, tuple[str, str]] = {
@@ -44,7 +44,8 @@ REGISTER_OPTIONAL = ("werks_nachweis",)  # fehlt = kein Nachweis (Pruefung: eige
 CERTIFICATE_FIELDS = ("csr",)
 CAPABILITY_FIELDS = ("drivers", "zigbee")
 CAPABILITY_OPTIONAL = ("updater", "programm", "testphase", "kaelteschutz")  # fehlt = false
-BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca")
+BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca", "anker_signatur",
+                      "anker_id")
 BOOTSTRAP_OPTIONAL = ("mqtt_alpn",)  # fehlt = kein Rueckfall auf Port 443 (AN-3)
 DEVICE_STATES = ("nicht_uebernommen", "uebernommen", "gesperrt")
 
@@ -237,7 +238,8 @@ COMMANDS: dict[str, Command] = {
                          "stunden*3600+3600", ("filter",)),
     "sign_off": Command((), ("zurueckgesetzt", "werte"), 24 * 3600, ("nicht_eingerichtet", "keine_bestaetigung")),
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
-    "claim_state": Command(("device_state",), (), 24 * 3600),
+    # konto_hinweis: Maske der Adresse des uebernehmenden Kontos (`a***@e***.com`), nur an Gateways; fehlt = kein Hinweis.
+    "claim_state": Command(("device_state",), (), 24 * 3600, payload_optional=("konto_hinweis",)),
     "diagnostics": Command((), (), 300),
     # Liest an der Anbindung, ob der gewaehlte Weg dieselbe Anlage meint (Nutzlast: der Weg aus `WEGE`).
     "weg_pruefen": Command(("weg",), ("ergebnis",), 3600, ("weg_unbekannt", "weg_mehrfach")),
@@ -249,6 +251,12 @@ DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
 }
 #: Ergebnisse von `weg_pruefen`.
 WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
+#: Laengste Zeichenkette von `claim_state.konto_hinweis` (die Maske ist kuerzer; laenger lehnt der Server ab, das Geraet liest sie nicht).
+KONTO_HINWEIS_MAX_ZEICHEN = 100
+#: Form der Maske in `claim_state.konto_hinweis` (`a***@e***.com`, die Endung nur mit Punkt in der Domain; keine Sterne, Punkte,
+#: `@`, Leerraum oder Steuerzeichen in den sichtbaren Teilen). Der Server stellt nur eine Maske dieser Form zu (sonst keinen Hinweis),
+#: das Geraet speichert nur eine Maske dieser Form.
+KONTO_HINWEIS_MUSTER = r"[^\s*@.\x00-\x1f\x7f]\*\*\*@[^\s*@.\x00-\x1f\x7f]\*\*\*(\.[^\s*@.\x00-\x1f\x7f]+)?"
 # Spec Stufe 3 S5 6.1 (G-6): Fehler tragen Code und details, keine Texte. details nur mit diesen Schluesseln: `feld`
 # aus PRUEF_FELDER, `regel` aus PRUEF_REGELN, die uebrigen endliche Zahlen; freie Texte gibt es darin nicht.
 DETAIL_FIELDS = ("feld", "regel", "min", "max", "wert", "anzahl")

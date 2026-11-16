@@ -25,7 +25,7 @@ ERLAUBT = {
 DRITTE = {
     "smartheat_core": {},
     "smartheat_runtime": {},
-    "smartheat_device": {"cryptography": {"identity.py"}, "paho": {"link.py"}, "requests": {"bootstrap.py"}},
+    "smartheat_device": {"cryptography": {"identity.py", "anker.py"}, "paho": {"link.py"}, "requests": {"bootstrap.py"}},
     "heizungsbruecke": None,  # None: Drittpakete frei (requests, websocket ...), eigene Pakete nach ERLAUBT
     "smartheat_gateway": None,
 }

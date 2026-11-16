@@ -54,6 +54,7 @@ class Anzeige:
     hinweise: tuple[dict, ...]  # Befehl hinweis: {key, code, params, stufe}
     meldungen: tuple[dict, ...]  # eigene Meldungen des Geraets (wunsch_begrenzt, soll_quelle_aus): {key, text, code, params, stufe}
     konfiguration_abgelehnt: dict | None  # zuletzt abgelehnte Konfiguration als Meldung {code, params, stufe}
+    konto_hinweis: str | None = None  # Maske der Adresse des uebernehmenden Kontos (nur Gateway, nur uebernommen)
 
     @property
     def code_zeigen(self) -> bool:

@@ -30,6 +30,11 @@ services:
   runtime:
     ports: !override ["127.0.0.1:8080:8080", "127.0.0.1:8081:8081"]
     security_opt: ["label:disable"]
+    environment:   # nur der oeffentliche Teil der Test-PKI; die Datei gilt nur mit der Testkennung (nie im Release)
+      SMARTHEAT_ANKER_DATEI: /anker/anker.pem
+      SMARTHEAT_TESTKENNUNG: dev
+    volumes:
+      - ${SHG_FAKE_PKI:?SHG_FAKE_PKI fehlt}/anker.pub:/anker/anker.pem:ro
     depends_on:  # ergaenzt die Basisdatei; ohne Fake-Bootstrap wartete der erste Bootstrap-Versuch den Backoff ab
       fake-bootstrap: {condition: service_healthy}
       fake-broker: {condition: service_started}
@@ -58,6 +63,7 @@ services:
     environment:
       SHG_FAKE_CA_DIR: /pki
       SHG_FAKE_MQTT_HOST: fake-broker
+      SHG_FAKE_ANKER_SCHLUESSEL: /pki/anker.key   # signiert die Antworten wie der Server (Testschluessel der Test-PKI)
       PYTHONPATH: /app/src
     volumes:
       - ../tests:/gw-tests:ro

@@ -19,7 +19,9 @@ _PULSE = 0.15
 PATTERNS: dict[str, tuple[tuple[bool, float], ...]] = {
     "startet": ((True, 0.1), (False, 0.1)),
     "nicht_uebernommen": ((True, _PULSE), (False, _PULSE), (True, _PULSE), (False, 2.0 - 3 * _PULSE)),
-    "wartet_auf_einrichtung": ((True, _PULSE), (False, _PULSE), (True, _PULSE), (False, 2.0 - 3 * _PULSE)),
+    # Uebernommen, die Einrichtung steht aus: ruhiges langsames Blinken (eine Sekunde an, eine aus), anders als der
+    # Doppelblitz von nicht_uebernommen (wartet auf den Code).
+    "wartet_auf_einrichtung": ((True, 1.0), (False, 1.0)),
     "keine_verbindung": ((True, 0.5), (False, 0.5)),
     "regelt": ((True, 1.0),),
     "stoerung": ((True, _PULSE), (False, _PULSE)) * 2 + ((True, _PULSE), (False, 2.0 - 5 * _PULSE)),

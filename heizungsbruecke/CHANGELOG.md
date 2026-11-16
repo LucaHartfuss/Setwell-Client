@@ -5,6 +5,18 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
+  (`smartheat_device/anker.pem`, aktiver Schlüssel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
+  loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Kälteschutz laufen unverändert
+  weiter. Ohne Schlüssel in der Datei (Platzhalter) lehnt es jede Antwort ab; der Release-Weg verlangt dort die
+  öffentlichen Schlüssel.
+
+- Der Übernahme-Code hat 16 Zeichen (80 Bit) statt 12; eine vorhandene Datei mit dem alten Code wird beim Start durch
+  einen neuen ersetzt. Am Host `ha` gilt der Code weiter ohne Frist.
+
+- Die Datei `bootstrap.json` kann zusätzlich den Hinweis auf das übernehmende Konto (`konto_hinweis`, maskierte Adresse)
+  tragen, den der Server bei der Übernahme mitgibt; ältere Dateien ohne dieses Feld bleiben gültig.
+
 - Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
   die neue Software sie nicht lesen kann (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende
   Bindungsparameter, andere Felder der Bindungsparameter oder Pflichtzuordnungen); ein Verstoß gegen eine lokale Grenze

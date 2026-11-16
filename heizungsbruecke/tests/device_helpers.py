@@ -3,9 +3,12 @@ des Servers), dazu die Attrappen und Eingaben, die mehrere Testdateien teilen (v
 test_device_bootstrap.py, test_device_commands.py und test_device_documents.py gemeinsam genutzt): die Welt des
 Geraets (World), Bootstrap-Antworten, Befehle, Dokumente. Plain-Import (`from device_helpers import ...`), tests/ hat
 kein __init__.py."""
+import base64
 import datetime
+import hashlib
 import itertools
 import json
+from urllib.parse import urlparse
 
 import konfig_form
 from bindung_beispiele import parameter
@@ -14,7 +17,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from smartheat_device import bootstrap, device, identity
+from smartheat_device import bootstrap, device, identity, wire
 from smartheat_device import documents as docs
 
 
@@ -286,10 +289,39 @@ class World:
         self.device.schritt()
 
 
+#: Die Testkette des Vertrauensankers: aktiver Schluessel und Reserve, nur im Speicher erzeugt (nie eine Datei mit
+#: privatem Teil im Repo). Die Fixture `_anker_kette` (conftest.py) schreibt deren oeffentliche Teile in eine Datei.
+ANKER_AKTIV = ec.generate_private_key(ec.SECP256R1())
+ANKER_RESERVE = ec.generate_private_key(ec.SECP256R1())
+
+
+def anker_oeffentlich_pem(*keys) -> str:
+    """Die oeffentlichen Teile (Standard: aktiv und Reserve) als Inhalt einer anker.pem."""
+    return "".join(key.public_key().public_bytes(serialization.Encoding.PEM,
+                                                  serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+                   for key in (keys or (ANKER_AKTIV, ANKER_RESERVE)))
+
+
+def anker_signatur(antwort: dict, *, route: str, device_id: str, ts: int, key=None) -> dict:
+    """`anker_id` und `anker_signatur` so, wie der Server sie bildet (die Form steht hier bewusst noch einmal)."""
+    key = key or ANKER_AKTIV
+    inhalt = {k: v for k, v in antwort.items() if k not in ("anker_id", "anker_signatur")}
+    nachricht = json.dumps({"antwort": inhalt, "route": route, "device_id": device_id, "ts": ts}, sort_keys=True,
+                           separators=(",", ":")).encode()
+    signatur = key.sign(nachricht, ec.ECDSA(hashes.SHA256()))
+    der = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return {"anker_id": hashlib.sha256(der).hexdigest()[:16],
+            "anker_signatur": base64.b64encode(signatur).decode("ascii")}
+
+
 class FakeResponse:
-    def __init__(self, status: int, body=None) -> None:
+    """`signieren=True`: die Session signiert eine Objekt-Antwort ohne `anker_signatur` mit dem aktiven Testschluessel
+    fuer die gerade gestellte Anfrage; `False` liefert den Koerper unveraendert (fehlerhafte Signaturen)."""
+
+    def __init__(self, status: int, body=None, *, signieren: bool = True) -> None:
         self.status_code = status
         self._body = body
+        self.signieren = signieren
 
     def json(self):
         if self._body is None:
@@ -306,6 +338,11 @@ class FakeSession:
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
+        body = answer._body
+        if answer.signieren and answer.status_code == 200 and isinstance(body, dict) and "anker_signatur" not in body:
+            signatur = anker_signatur(body, route=f"{method} {urlparse(url).path}",
+                                      device_id=headers[wire.HEADER_DEVICE], ts=int(headers[wire.HEADER_TIMESTAMP]))
+            return FakeResponse(200, {**body, **signatur}, signieren=False)
         return answer
 
 

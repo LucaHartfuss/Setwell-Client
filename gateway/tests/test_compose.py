@@ -203,6 +203,17 @@ def test_dev_overlay_brings_bootstrap_and_broker():
     assert "@sha256:" in services["fake-broker"]["image"]
 
 
+def test_dev_overlay_gives_the_fake_bootstrap_the_key_and_the_runtime_only_the_public_part():
+    services = _services("docker-compose.dev.yml")
+    assert services["fake-bootstrap"]["environment"]["SHG_FAKE_ANKER_SCHLUESSEL"] == "/pki/anker.key"
+    runtime = services["runtime"]
+    assert runtime["environment"]["SMARTHEAT_ANKER_DATEI"] == "/anker/anker.pem"
+    assert runtime["environment"]["SMARTHEAT_TESTKENNUNG"]
+    anker_mounts = [v for v in runtime["volumes"] if v.endswith(":/anker/anker.pem:ro")]
+    assert len(anker_mounts) == 1 and "anker.pub" in anker_mounts[0] and "anker.key" not in anker_mounts[0]
+    assert not any("anker" in v for v in _services()["runtime"].get("volumes", []))  # die Basisdatei kennt keine Anker-Datei
+
+
 def test_mosquitto_requires_login():
     conf = (COMPOSE / "mosquitto.conf").read_text()
     assert "allow_anonymous false" in conf

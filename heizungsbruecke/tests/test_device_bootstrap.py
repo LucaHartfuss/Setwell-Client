@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from device_helpers import FakeResponse, FakeSession, GeraeteCa, csr_passt, zertifikat_fuer
 
-from smartheat_device import bootstrap, identity, nachrichten, wire
+from smartheat_device import anker, bootstrap, identity, nachrichten, wire
 
 NOW = 1_800_000_000
 BASE = "https://accounts.example.test"
@@ -338,7 +338,7 @@ def test_a_failing_host_callback_in_the_rescue_after_401_is_retried_later_too(tm
     assert "geheimer Parameter" not in caplog.text
 
 
-@pytest.mark.parametrize("feld", wire.BOOTSTRAP_RESPONSE)
+@pytest.mark.parametrize("feld", [f for f in wire.BOOTSTRAP_RESPONSE if f not in anker.ANKER_FELDER])
 def test_an_answer_without_a_required_field_is_unavailable(ident, ca, feld):
     body = _body(ident, ca)
     del body[feld]

@@ -19,7 +19,7 @@ make_pki "$TMP/pki" broker.test || { echo "FAIL: Test-PKI"; exit 1; }
 docker run --rm -i --security-opt label=disable -e PYTHONDONTWRITEBYTECODE=1 -v "$REPO:/src:ro" -v "$TMP/pki:/pki:ro" \
   "$DEBIAN_IMAGE" bash -c 'apt-get update -qq </dev/null \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends rauc openssl squashfs-tools python3 \
-         python3-cryptography </dev/null >/dev/null \
+         python3-cryptography python3-yaml </dev/null >/dev/null \
     && rauc --version && exec python3 -' <<'PYEOF' || { echo "FAIL: RAUC-Bundle mit der Release-Kette"; exit 1; }
 import collections
 import contextlib
