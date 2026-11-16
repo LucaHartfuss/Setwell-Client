@@ -219,19 +219,19 @@ expect_word() {  # $1 erwartetes Ergebnis, $2 Version; Log des Updaters (stderr)
     fail "Updater fuer $2: '$word' statt '$1'"
   fi
 }
-# Leere Konfiguration (anlage null, alle Grundfelder leer wie device_config.leer() des Servers, raumfuehler []) mit der
-# Soll-Version $1 als software, gesendet als Dienst auf down/config. Anders als configs.leer() der Gateway-Tests ohne
-# mindest_software (null): der Test haengt so nicht an der Version des Images. Eine leere Konfiguration wird immer
-# uebernommen, ihr software geht an den Updater; das Gateway bleibt "nicht eingerichtet".
+# Leere Konfiguration (anlage null, kreise [], alle uebrigen Felder des Vertrags leer wie device_config.leer() des Servers)
+# mit der Soll-Version $1 als software (mit einmalig false), gesendet als Dienst auf down/config. Die mindest_software ist
+# eine niedrige Version (null lehnt das Geraet ab), damit der Test nicht an der Version des Images haengt. Eine leere
+# Konfiguration wird immer uebernommen, ihr software geht an den Updater; das Gateway bleibt "nicht eingerichtet".
 set_desired() {
   CONFIG_VERSION=$((CONFIG_VERSION + 1))
   local body ok=0
   body="$(py 'import json, sys
 e = json.load(open(sys.argv[1]))[sys.argv[2]]
-leer = dict.fromkeys(("anlage", "profil", "hebelsatz", "verteilsystem", "bindung", "tagestick", "abo",
-                      "mindest_software"))
-print(json.dumps({"schema": 1, "version": int(sys.argv[3]), **leer, "raumfuehler": [],
-                  "software": {"version": sys.argv[2], **e}}))' "$DATA/bundles.json" "$1" "$CONFIG_VERSION")" \
+leer = dict.fromkeys(("anlage", "anlage_name", "weg", "tagestick", "mindest_integration", "bindungsparameter",
+                      "push_regeln", "update_noetig", "updates"))
+print(json.dumps({"schema": 2, "version": int(sys.argv[3]), **leer, "kreise": [], "mindest_software": "0.1.0",
+                  "software": {"version": sys.argv[2], **e, "einmalig": False}}))' "$DATA/bundles.json" "$1" "$CONFIG_VERSION")" \
     || die "Konfiguration fuer $1 nicht gebaut"
   dienst_pub "$NET" "$PKI" "smartheat/$DEVICE_ID/down/config" "$body" || die "Soll-Version $1 nicht gesendet"
   for _ in $(seq 1 30); do
