@@ -5,6 +5,18 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
+  (`smartheat_device/anker.pem`, aktiver Schlüssel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
+  loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Kälteschutz laufen unverändert
+  weiter. Ohne Schlüssel in der Datei (Platzhalter) lehnt es jede Antwort ab; der Release-Weg verlangt dort die
+  öffentlichen Schlüssel.
+
+- Der Übernahme-Code hat 16 Zeichen (80 Bit) statt 12; eine vorhandene Datei mit dem alten Code wird beim Start durch
+  einen neuen ersetzt. Am Host `ha` gilt der Code weiter ohne Frist.
+
+- Die Datei `bootstrap.json` kann zusätzlich den Hinweis auf das übernehmende Konto (`konto_hinweis`, maskierte Adresse)
+  tragen, den der Server bei der Übernahme mitgibt; ältere Dateien ohne dieses Feld bleiben gültig.
+
 - Gibt die Integration einen Push-Eintrag nach 24 Stunden ohne Zustellung auf (Ereignis `smartheat_push_aufgegeben`),
   meldet das Add-on das als orange Meldung an den Server (Portal): eine Meldung je Stufe und Kreis, die 24 Stunden nach
   dem letzten solchen Ereignis wieder schließt. Der Stand liegt nur im Speicher; nach einem Neustart ist die Meldung

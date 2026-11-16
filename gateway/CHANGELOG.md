@@ -2,6 +2,19 @@
 
 ## Unveroeffentlicht
 
+- Das Geraet nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
+  (`smartheat_device/anker.pem`, aktiver Schluessel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
+  loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Frostschutz laufen unveraendert
+  weiter. Ohne Schluessel in der Datei (Platzhalter) lehnt es jede Antwort ab; der Release-Weg verlangt dort die
+  oeffentlichen Schluessel.
+
+- Der Uebernahme-Code hat 16 Zeichen (80 Bit) statt 12 und gilt am Gateway 1 Stunde; eine vorhandene Datei mit dem alten
+  Code wird beim Start durch einen neuen ersetzt. Das Code-Fenster nach dem Knopfdruck bleibt bei 15 Minuten.
+
+- Die LAN-Seite zeigt bei uebernommenem Geraet die Zeile „uebernommen“ mit der maskierten Adresse des Kontos
+  (`a***@e***.com`), sobald der Server sie kennt. Der LED-Zustand `wartet_auf_einrichtung` blinkt jetzt gleichmaessig
+  1 s an, 1 s aus und ist damit vom Doppelblitz des Zustands `nicht_uebernommen` zu unterscheiden.
+
 - Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der urspruenglichen Werte geht jetzt auch an den
   Server und erreicht Eigentuemer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurueckgenommen.
 
