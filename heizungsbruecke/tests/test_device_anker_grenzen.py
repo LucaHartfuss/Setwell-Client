@@ -64,6 +64,12 @@ def test_nur_p256_schluessel_zaehlen(monkeypatch, tmp_path):
     assert anker.schluessel() == {}
 
 
+def test_ein_ec_schluessel_einer_anderen_kurve_wird_abgelehnt(monkeypatch, tmp_path):
+    _datei(monkeypatch, tmp_path, _oeffentlich(ec.generate_private_key(ec.SECP384R1())).encode())
+
+    assert anker.schluessel() == {}
+
+
 def test_fremde_schluessel_neben_dem_p256_schluessel_stoeren_nicht(monkeypatch, tmp_path):
     fremd = ec.generate_private_key(ec.SECP384R1())
     rsa_key = rsa.generate_private_key(65537, 2048)
