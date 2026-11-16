@@ -61,7 +61,7 @@ def test_render_replaces_build_by_the_digest_for_every_gateway_service():
     for name in ("mosquitto", "zigbee2mqtt"):
         assert "pull_policy" not in services[name], name  # Images aus Registries werden gezogen
     assert services["mosquitto"]["image"].startswith("eclipse-mosquitto:2@sha256:")
-    assert services["zigbee2mqtt"]["image"].startswith("koenkk/zigbee2mqtt:2.14.2@sha256:")
+    assert services["zigbee2mqtt"]["image"].startswith("koenkk/zigbee2mqtt:2.14.3@sha256:")
     archiv = bundles.Archiv(bundles.ARCHIVE_NAME, "e" * 64, 1000, "smartheat-gateway", "sha256:" + "a" * 64)
     bundles.check_compose(text, archiv)  # das Geraet akzeptiert genau diese Datei
 

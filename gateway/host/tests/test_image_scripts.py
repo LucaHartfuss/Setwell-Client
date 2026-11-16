@@ -183,7 +183,7 @@ def test_prepare_builds_the_stage(tmp_path):
     gateway = stage / "images" / (hashlib.sha256(archiv).hexdigest() + ".tar")
     assert gateway.read_bytes() == archiv
     fremde = sorted(p for p in (stage / "images").glob("*.tar") if p != gateway)
-    assert [p.read_text() for p in fremde] == _extern(bundle)
+    assert sorted(p.read_text() for p in fremde) == _extern(bundle)  # die Dateinamen sind SHA-256, ihre Reihenfolge ist beliebig
     assert len(fremde) == 2
     for pfad in (gateway, *fremde):
         assert pfad.name == hashlib.sha256(pfad.read_bytes()).hexdigest() + ".tar"
