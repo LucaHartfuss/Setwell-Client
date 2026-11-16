@@ -8,6 +8,7 @@ sondern ein Versuch nach Backoff. Zertifikat, Endpunkt und Uebernahmestatus lieg
 nicht zum eigenen TLS-Schluessel passt, wird nie gespeichert. Logs nennen Route und Status, nie Inhalte (Regel 6)."""
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -32,6 +33,9 @@ RETRY_MAX_SECONDS = 900
 TIMEOUT_SECONDS = 10.0
 _TRANSIENT_4XX = (408, 429)
 _PEM_CERT = "-----BEGIN CERTIFICATE-----"
+#: Maske der Adresse des uebernehmenden Kontos, wie der Server sie bildet (`a***@e***.com`, Endung nur mit Punkt in der
+#: Domain); alles andere (Steuerzeichen, Leerraum, volle Adressen) ist kein Hinweis und wird weder gespeichert noch gezeigt.
+_KONTO_HINWEIS = re.compile(r"[^\s*@.\x00-\x1f\x7f]\*\*\*@[^\s*@.\x00-\x1f\x7f]\*\*\*(\.[^\s*@.\x00-\x1f\x7f]+)?")
 (_ALPN,) = wire.BOOTSTRAP_OPTIONAL  # fehlt = kein Rueckfall auf Port 443; bei einer Drift scheitert der Import
 
 
@@ -151,8 +155,36 @@ def device_state(device_dir: Path) -> str | None:
 
 
 def device_state_speichern(device_dir: Path, state: str | None) -> None:
+    """Ein neuer Stand ersetzt die Datei ganz: der Hinweis auf das Konto gilt nur fuer den Stand, in dem er kam (jede
+    Freigabe loescht ihn). Derselbe Stand laesst die Datei und damit den Hinweis unberuehrt."""
     if state in wire.DEVICE_STATES and state != device_state(device_dir):
         dateien.schreiben_json(device_dir / STATE_FILE, {"device_state": state}, modus=dateien.PRIVAT)
+
+
+def konto_hinweis_gueltig(hinweis: object) -> str | None:
+    """Der Hinweis, wenn er die Laenge und Form der Maske hat (wire.KONTO_HINWEIS_MAX_ZEICHEN); sonst None."""
+    if (isinstance(hinweis, str) and len(hinweis) <= wire.KONTO_HINWEIS_MAX_ZEICHEN
+            and _KONTO_HINWEIS.fullmatch(hinweis)):
+        return hinweis
+    return None
+
+
+def konto_hinweis(device_dir: Path) -> str | None:
+    """Maske der Adresse des uebernehmenden Kontos; nur im Stand uebernommen, ohne Feld (alter Stand) oder bei
+    unbrauchbarem Inhalt None."""
+    raw = dateien.lesen_json(device_dir / STATE_FILE)
+    if not isinstance(raw, dict) or raw.get("device_state") != "uebernommen":
+        return None
+    return konto_hinweis_gueltig(raw.get("konto_hinweis"))
+
+
+def konto_hinweis_speichern(device_dir: Path, hinweis: str | None) -> None:
+    """Hinweis neben den Stand uebernommen schreiben, None loescht ihn; ohne diesen Stand oder bei gleichem Inhalt
+    bleibt die Datei, wie sie ist."""
+    if device_state(device_dir) != "uebernommen" or hinweis == konto_hinweis(device_dir):
+        return
+    inhalt = {"device_state": "uebernommen", **({"konto_hinweis": hinweis} if hinweis is not None else {})}
+    dateien.schreiben_json(device_dir / STATE_FILE, inhalt, modus=dateien.PRIVAT)
 
 
 def speichern(device_dir: Path, antwort: Antwort) -> None:

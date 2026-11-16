@@ -309,7 +309,8 @@ class Device:
                             for key, meldung in sorted(self._eigene.items())),
             konfiguration_abgelehnt=(
                 meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))
-                if ablehnung is not None else None))
+                if ablehnung is not None else None),
+            konto_hinweis=bootstrap.konto_hinweis(self._dir))
 
     # --- Geraete-Thread ---
 
@@ -679,7 +680,17 @@ class Device:
         state = payload.get("device_state")
         if state != "uebernommen":
             return commands.Failed("ungueltige_nutzlast", fehler.details("device_state", "unbekannt"))
+        hinweis = payload.get("konto_hinweis")
+        if hinweis is not None:
+            if not isinstance(hinweis, str):
+                return commands.Failed("ungueltige_nutzlast", fehler.details("konto_hinweis", "ungueltig"))
+            if len(hinweis) > wire.KONTO_HINWEIS_MAX_ZEICHEN:
+                return commands.Failed("ungueltige_nutzlast", fehler.details(
+                    "konto_hinweis", "bereich", max=wire.KONTO_HINWEIS_MAX_ZEICHEN))
+            if bootstrap.konto_hinweis_gueltig(hinweis) is None:
+                return commands.Failed("ungueltige_nutzlast", fehler.details("konto_hinweis", "format"))
         bootstrap.device_state_speichern(self._dir, state)
+        bootstrap.konto_hinweis_speichern(self._dir, hinweis)  # fehlt er, loescht das einen alten (Konto ohne Maske)
         return commands.Done({})
 
     def neuer_uebernahme_code(self) -> str:
