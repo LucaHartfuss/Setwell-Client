@@ -253,6 +253,10 @@ DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
 WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
 #: Laengste Zeichenkette von `claim_state.konto_hinweis` (die Maske ist kuerzer; laenger lehnt der Server ab, das Geraet liest sie nicht).
 KONTO_HINWEIS_MAX_ZEICHEN = 100
+#: Form der Maske in `claim_state.konto_hinweis` (`a***@e***.com`, die Endung nur mit Punkt in der Domain; keine Sterne, Punkte,
+#: `@`, Leerraum oder Steuerzeichen in den sichtbaren Teilen). Der Server stellt nur eine Maske dieser Form zu (sonst keinen Hinweis),
+#: das Geraet speichert nur eine Maske dieser Form.
+KONTO_HINWEIS_MUSTER = r"[^\s*@.\x00-\x1f\x7f]\*\*\*@[^\s*@.\x00-\x1f\x7f]\*\*\*(\.[^\s*@.\x00-\x1f\x7f]+)?"
 # Spec Stufe 3 S5 6.1 (G-6): Fehler tragen Code und details, keine Texte. details nur mit diesen Schluesseln: `feld`
 # aus PRUEF_FELDER, `regel` aus PRUEF_REGELN, die uebrigen endliche Zahlen; freie Texte gibt es darin nicht.
 DETAIL_FIELDS = ("feld", "regel", "min", "max", "wert", "anzahl")

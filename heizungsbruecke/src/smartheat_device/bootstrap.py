@@ -35,7 +35,7 @@ _TRANSIENT_4XX = (408, 429)
 _PEM_CERT = "-----BEGIN CERTIFICATE-----"
 #: Maske der Adresse des uebernehmenden Kontos, wie der Server sie bildet (`a***@e***.com`, Endung nur mit Punkt in der
 #: Domain); alles andere (Steuerzeichen, Leerraum, volle Adressen) ist kein Hinweis und wird weder gespeichert noch gezeigt.
-_KONTO_HINWEIS = re.compile(r"[^\s*@.\x00-\x1f\x7f]\*\*\*@[^\s*@.\x00-\x1f\x7f]\*\*\*(\.[^\s*@.\x00-\x1f\x7f]+)?")
+_KONTO_HINWEIS = re.compile(wire.KONTO_HINWEIS_MUSTER)
 (_ALPN,) = wire.BOOTSTRAP_OPTIONAL  # fehlt = kein Rueckfall auf Port 443; bei einer Drift scheitert der Import
 
 

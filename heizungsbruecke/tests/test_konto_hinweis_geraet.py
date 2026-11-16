@@ -89,17 +89,32 @@ def test_ein_fremder_hinweis_auf_der_platte_wird_nicht_gezeigt(tmp_path, roh):
     assert bootstrap.konto_hinweis(tmp_path) is None
 
 
-@pytest.mark.parametrize("roh, regel", [
-    ("anna@example.com", "format"), ("a***@e***.com\n", "format"), ("a***@<b>***.com", "format"), (7, "ungueltig"),
-    ("a***@e***." + "x" * wire.KONTO_HINWEIS_MAX_ZEICHEN, "bereich")])
-def test_ein_zu_langer_oder_fremdfoermiger_hinweis_wird_abgelehnt(tmp_path, roh, regel):
+@pytest.mark.parametrize("roh", [
+    "anna@example.com", "a***@e***.com\n", "a***@<b>***.com", 7, "a***@e***." + "x" * wire.KONTO_HINWEIS_MAX_ZEICHEN])
+def test_ein_ungueltiger_hinweis_wird_verworfen_der_stand_aber_gespeichert(tmp_path, roh):
+    """Ein Hinweis ist nur eine Anzeige: ein fremdfoermiger oder zu langer verwirft nur den Hinweis, die Uebernahme am Geraet
+    gilt trotzdem (sonst bliebe das Geraet beim Server uebernommen und am Geraet frei)."""
     world = _welt(tmp_path)
     world.empfangen("down/command", _command({"device_state": "uebernommen", "konto_hinweis": roh}))
     ergebnis = world.link.of("up/result")[-1]
-    assert ergebnis["ok"] is False and ergebnis["error"]["grund"] == "ungueltige_nutzlast"
-    assert ergebnis["error"]["details"]["feld"] == "konto_hinweis" and ergebnis["error"]["details"]["regel"] == regel
-    assert bootstrap.device_state(world.dir) == "nicht_uebernommen"  # nichts gespeichert
+    assert ergebnis["ok"] is True
+    assert bootstrap.device_state(world.dir) == "uebernommen"
     assert bootstrap.konto_hinweis(world.dir) is None
+    assert world.device.anzeige().konto_hinweis is None
+
+
+def test_ein_ungueltiger_hinweis_loescht_einen_alten(tmp_path):
+    world = _welt(tmp_path)
+    world.empfangen("down/command", _command({"device_state": "uebernommen", "konto_hinweis": MASKE}))
+    world.empfangen("down/command", _command({"device_state": "uebernommen", "konto_hinweis": "anna@example.com"}, "c2"))
+    assert bootstrap.device_state(world.dir) == "uebernommen"
+    assert bootstrap.konto_hinweis(world.dir) is None
+
+
+def test_das_muster_ist_die_einzige_quelle_der_form(tmp_path):
+    assert bootstrap.konto_hinweis_gueltig(MASKE) == MASKE
+    assert bootstrap.konto_hinweis_gueltig("a***@l***") == "a***@l***"
+    assert bootstrap.konto_hinweis_gueltig("anna@example.com") is None
 
 
 def test_die_domain_ohne_endung_ist_eine_gueltige_maske(tmp_path):
