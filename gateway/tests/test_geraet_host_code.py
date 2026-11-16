@@ -84,7 +84,7 @@ def test_druck_erzeugt_neuen_code_und_meldet_ihn(welt):
     assert welt.host.code_sichtbar() is True
     data = seite(welt.host, welt.device)
     assert data["code"] == welt.device.identity.claim_code and data["geraet"] == welt.device.identity.device_id
-    assert "ABCDEFGHIJKL" in render_html(data)
+    assert "ABCDEFGHIJKLMNOP" in render_html(data)
     # sofort in der LED-Datei, nicht erst im Minutentakt
     assert _led_datei(welt)["code_fenster"] is True
     _takt(welt)
@@ -105,7 +105,7 @@ def test_ohne_druck_keine_geraete_id_und_kein_code_auf_der_seite(welt):
     data = seite(welt.host, welt.device)
     assert data["code"] is None and data["geraet"] is None and data["code_hinweis"] is None
     page = render_html(data)
-    assert "ABCDEFGHIJKL" not in page and "shg-aaaaaaaaaaaaaaaa" not in page
+    assert "ABCDEFGHIJKLMNOP" not in page and "shg-aaaaaaaaaaaaaaaa" not in page
 
 
 @pytest.mark.parametrize(("abstand", "neu"), [(59.9, False), (60.0, True), (61.0, True)])
@@ -146,7 +146,7 @@ def test_code_nach_15_minuten_unsichtbar(welt, clock):
     clock.advance(gh.CODE_FENSTER_SEKUNDEN - 0.1)
     _takt(welt)
     assert welt.host.code_sichtbar() is True and _led_datei(welt)["code_fenster"] is True
-    assert seite(welt.host, welt.device)["code"] == "ABCDEFGHIJKL"
+    assert seite(welt.host, welt.device)["code"] == "ABCDEFGHIJKLMNOP"
     clock.advance(0.1)
     _takt(welt)
     assert welt.host.code_sichtbar() is False and _led_datei(welt)["code_fenster"] is False
@@ -163,7 +163,7 @@ def test_ohne_server_kein_code_und_hinweis(welt):
     data = seite(welt.host, welt.device)
     assert data["code"] is None and data["code_hinweis"] == "keine_verbindung"
     page = render_html(data, "de")
-    assert "Keine Verbindung zum Server – kein Code" in page and "ABCDEFGHIJKL" not in page
+    assert "Keine Verbindung zum Server – kein Code" in page and "ABCDEFGHIJKLMNOP" not in page
 
 
 def test_der_hinweis_verfaellt_nach_15_minuten(welt, clock):
@@ -196,7 +196,7 @@ def test_uebernommenes_geraet_zeigt_uebernommen(welt):
     assert data["code"] is None and data["code_hinweis"] == "uebernommen"
     page = render_html(data, "de")
     assert gruppe("de", "code_hinweis")["uebernommen"] == "übernommen"
-    assert "<p>übernommen</p>" in page and "ABCDEFGHIJKL" not in page
+    assert "<p>übernommen</p>" in page and "ABCDEFGHIJKLMNOP" not in page
 
 
 def test_ein_geraet_das_uebernommen_wird_schliesst_das_sichtbare_fenster(welt):

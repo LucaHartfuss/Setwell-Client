@@ -1,10 +1,15 @@
 """Fake-Bootstrap fuer die Docker-Pruefungen des Gateways: register und certificate (Routen aus
 wire.ROUTES) signieren den CSR mit der Test-CA aus ca_dir (ca.pem, ca.key; fake_ca) und nennen den Fake-Broker als
 Endpunkt; die Antwort traegt genau die Felder aus wire.BOOTSTRAP_RESPONSE. Der Fake dient ausserdem als Release-Host
-des Updater-Tests (/_e2e/files). Signaturen prueft er nicht (D1-Unit-Tests, echter Server in W Teil B). Steuer-Routen
-/_e2e/* nur fuer Tests. Start im Container (Gateway-Image, tests als /gw-tests): python /gw-tests/fake_bootstrap.py
-(Umgebung SHG_FAKE_CA_DIR, SHG_FAKE_MQTT_HOST, SHG_FAKE_PORT). Logs nennen nie Schluessel oder Zertifikate (Regel 6)."""
+des Updater-Tests (/_e2e/files). Signaturen der Anfragen prueft er nicht (D1-Unit-Tests, echter Server in W Teil B).
+Seine Antworten signiert er wie der Server mit dem Testschluessel des Vertrauensankers (anker_key, im Container die
+Datei SHG_FAKE_ANKER_SCHLUESSEL; Zeitstempel aus dem Kopf X-SHG-Timestamp der Anfrage); ohne Schluessel oder Zeitstempel
+liefert er die Antwort ohne Ankerfelder, die das Geraet verwirft. Das Geraet braucht dazu die oeffentliche Datei
+(SMARTHEAT_ANKER_DATEI, nur mit SMARTHEAT_TESTKENNUNG). Steuer-Routen /_e2e/* nur fuer Tests. Start im Container
+(Gateway-Image, tests als /gw-tests): python /gw-tests/fake_bootstrap.py (Umgebung SHG_FAKE_CA_DIR,
+SHG_FAKE_MQTT_HOST, SHG_FAKE_PORT, SHG_FAKE_ANKER_SCHLUESSEL). Logs nennen nie Schluessel oder Zertifikate (Regel 6)."""
 import base64
+import hashlib
 import json
 import os
 import re
@@ -13,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fake_ca import GeraeteCa
 
@@ -26,8 +33,9 @@ _CERTIFICATE = re.compile("^" + re.escape(wire.ROUTES["certificate"][1]).replace
 
 class FakeBootstrap:
     def __init__(self, ca_dir: Path, mqtt_host: str, *, host: str = "127.0.0.1", port: int = 0,
-                 mqtt_port: int = 8883) -> None:
+                 mqtt_port: int = 8883, anker_key: ec.EllipticCurvePrivateKey | None = None) -> None:
         self._ca = GeraeteCa.laden(ca_dir)
+        self._anker_key = anker_key
         self._mqtt_host, self._mqtt_port = mqtt_host, mqtt_port
         self.device_state = "uebernommen"
         self.device_ids: list[str] = []
@@ -80,6 +88,20 @@ class FakeBootstrap:
         return {"device_state": state, "certificate": pem, "mqtt_endpoint": self._mqtt_host,
                 "mqtt_port": self._mqtt_port, "mqtt_ca": self._ca.pem}
 
+    def _signiert(self, request, answer: dict, device_id: str) -> dict:
+        """Die Antwort mit anker_id und anker_signatur (Form wie der Server: kanonisches JSON aus Antwort, Route,
+        Geraete-ID und Zeitstempel der Anfrage); unveraendert, wenn Schluessel oder Zeitstempel fehlen."""
+        stempel = request.headers.get(wire.HEADER_TIMESTAMP, "")
+        if self._anker_key is None or not stempel.isdecimal():
+            return answer
+        nachricht = json.dumps({"antwort": answer, "route": f"POST {request.path}", "device_id": device_id,
+                                "ts": int(stempel)}, sort_keys=True, separators=(",", ":")).encode()
+        der = self._anker_key.public_key().public_bytes(serialization.Encoding.DER,
+                                                        serialization.PublicFormat.SubjectPublicKeyInfo)
+        signatur = self._anker_key.sign(nachricht, ec.ECDSA(hashes.SHA256()))
+        return {**answer, "anker_id": hashlib.sha256(der).hexdigest()[:16],
+                "anker_signatur": base64.b64encode(signatur).decode("ascii")}
+
     @staticmethod
     def _body(request) -> dict:
         length = int(request.headers.get("Content-Length") or 0)
@@ -116,7 +138,7 @@ class FakeBootstrap:
                 self.registrations += 1
             else:
                 self.certificates += 1
-        return self._send(request, 200, answer)
+        return self._send(request, 200, self._signiert(request, answer, device_id))
 
     def _get(self, request) -> None:
         if request.path == "/_e2e/state":
@@ -146,8 +168,10 @@ class FakeBootstrap:
 
 
 def main() -> None:  # pragma: no cover - Container-Einstieg
+    schluessel = os.environ.get("SHG_FAKE_ANKER_SCHLUESSEL")
+    anker_key = serialization.load_pem_private_key(Path(schluessel).read_bytes(), None) if schluessel else None
     server = FakeBootstrap(Path(os.environ["SHG_FAKE_CA_DIR"]), os.environ["SHG_FAKE_MQTT_HOST"], host="0.0.0.0",
-                           port=int(os.environ.get("SHG_FAKE_PORT", "8090")))
+                           port=int(os.environ.get("SHG_FAKE_PORT", "8090")), anker_key=anker_key)
     server.start()
     print(f"Fake-Bootstrap auf {server.url}, Broker {os.environ['SHG_FAKE_MQTT_HOST']}", flush=True)
     threading.Event().wait()

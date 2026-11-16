@@ -309,7 +309,8 @@ class Device:
                             for key, meldung in sorted(self._eigene.items())),
             konfiguration_abgelehnt=(
                 meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))
-                if ablehnung is not None else None))
+                if ablehnung is not None else None),
+            konto_hinweis=bootstrap.konto_hinweis(self._dir))
 
     # --- Geraete-Thread ---
 
@@ -679,7 +680,11 @@ class Device:
         state = payload.get("device_state")
         if state != "uebernommen":
             return commands.Failed("ungueltige_nutzlast", fehler.details("device_state", "unbekannt"))
+        # Der Hinweis ist nur eine Anzeige: ein ungueltiger (falsche Form, zu lang, kein Text) wird verworfen, der
+        # Uebernahmestand gilt trotzdem. Eine Ablehnung liesse das Geraet frei, waehrend der Server es als uebernommen fuehrt.
+        hinweis = bootstrap.konto_hinweis_gueltig(payload.get("konto_hinweis"))
         bootstrap.device_state_speichern(self._dir, state)
+        bootstrap.konto_hinweis_speichern(self._dir, hinweis)  # fehlt er, loescht das einen alten (Konto ohne Maske)
         return commands.Done({})
 
     def neuer_uebernahme_code(self) -> str:

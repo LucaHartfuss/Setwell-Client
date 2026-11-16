@@ -5,7 +5,8 @@ keine Version. Zeigt den Zustand des Geraetekerns (wie die LED), die Seriennumme
 (Befehl hinweis), eigene Meldungen (Wunsch begrenzt, Soll-Quelle aus), eine abgelehnte Konfiguration und, solange das
 Gateway nicht uebernommen ist (Anzeige.code_zeigen) und nach einem Knopfdruck das Code-Fenster (15 min) offen ist,
 Geraete-ID und Uebernahme-Code (kein QR-Code, kein Portal-Link mit Code, GW 7.1) - nur lokal; sonst nach einem Druck den Hinweis "keine Verbindung"
-bzw. "uebernommen".
+bzw. "uebernommen". Dauerhaft, auch ohne Fenster, zeigt die Tabelle im Stand uebernommen die Zeile "uebernommen" und
+die Maske der Adresse des Kontos (`a***@e***.com`, nie die volle Adresse), solange das Geraet eine hat.
 Die festen Texte stehen in lokale_texte.json (de, en); Accept-Language waehlt nur zwischen den beiden (sonst en) und wird nie ausgegeben.
 Den Uebernahmestand meldet der Server (claim_state, new_claim_code); bis dahin gilt der Stand des Bootstraps. /healthz
 fuer den Updater.
@@ -52,6 +53,9 @@ def seite(geraet, device) -> dict:
     data["code"] = device.identity.claim_code if device is not None and sichtbar else None
     data["geraet"] = device.identity.device_id if device is not None and sichtbar else None
     data["code_hinweis"] = geraet.code_hinweis()
+    anzeige = geraet.letzte_anzeige
+    data["device_state"] = anzeige.device_state if anzeige is not None else None
+    data["konto_hinweis"] = anzeige.konto_hinweis if anzeige is not None and anzeige.device_state == "uebernommen" else None
     return data
 
 
@@ -129,8 +133,14 @@ def render_html(data: dict, sprache: str = lokale_texte.STANDARD) -> str:
     zustaende = lokale_texte.gruppe(sprache, "zustand")
     host = data.get("host", {})
     zustand = data.get("zustand", "startet")
+    uebernahme = ""
+    if data.get("device_state") == "uebernommen":
+        hinweis = data.get("konto_hinweis")
+        text = t["wert.uebernommen"] + (f" · {hinweis}" if isinstance(hinweis, str) and hinweis else "")
+        uebernahme = _row(t["label.uebernahme"], text, t)
     rows = "".join([
         _row(t["label.zustand"], zustaende.get(zustand, zustand), t),
+        uebernahme,
         _row(t["label.eingerichtet"], data["eingerichtet"], t),
         _row(t["label.seriennummer"], data.get("seriennummer"), t),
         _row(t["label.server_ok"], data["server_ok"], t), _row(t["label.netz"], host.get("netz"), t),

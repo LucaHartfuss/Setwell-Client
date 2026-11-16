@@ -132,7 +132,7 @@ docker run -d --name "$BROKER" --network "$NET" --security-opt label=disable --u
   "$MOSQ_IMAGE" mosquitto -c /pki/mosquitto.conf >/dev/null || die "Fake-Broker startet nicht"
 docker run -d --name "$BOOT" --network "$NET" --security-opt label=disable --user "$PKI_USER" -p 127.0.0.1:18092:8090 \
   -v "$REPO/gateway/tests:/gw-tests:ro" -v "$PKI:/pki:ro" -e PYTHONPATH=/app/src -e SHG_FAKE_CA_DIR=/pki \
-  -e SHG_FAKE_MQTT_HOST="$BROKER" "$IMAGE" python /gw-tests/fake_bootstrap.py >/dev/null \
+  -e SHG_FAKE_MQTT_HOST="$BROKER" -e SHG_FAKE_ANKER_SCHLUESSEL=/pki/anker.key "$IMAGE" python /gw-tests/fake_bootstrap.py >/dev/null \
   || die "Fake-Bootstrap startet nicht"
 ok=0
 for _ in $(seq 1 30); do curl -fsS "$API_URL/_e2e/state" >/dev/null 2>&1 && { ok=1; break; }; sleep 1; done
@@ -141,8 +141,8 @@ for _ in $(seq 1 30); do curl -fsS "$API_URL/_e2e/state" >/dev/null 2>&1 && { ok
 # 4. Datenordner wie install.sh (die Container schreiben als uid 1000, daher 777 wie im Compose-Test)
 mkdir -p "$DATA/data" "$DATA/zigbee2mqtt" "$DATA/host" "$DATA/bus/mosquitto" "$DATA/bus/mosquitto-daten" \
          "$DATA/bus/credentials/runtime" "$DATA/bus/credentials/zigbee2mqtt" "$DATA/bundles" "$DATA/updater"
-printf 'SHG_ROOT=%s\nSHG_DEVICE_API_URL=http://%s:8090\nSHG_DIAG_HOSTNAMES=runtime\nTZ=Europe/Berlin\n' \
-  "$DATA" "$BOOT" >"$DATA/host/gateway.env"
+printf 'SHG_ROOT=%s\nSHG_DEVICE_API_URL=http://%s:8090\nSHG_DIAG_HOSTNAMES=runtime\nTZ=Europe/Berlin\nSHG_FAKE_PKI=%s\n' \
+  "$DATA" "$BOOT" "$PKI" >"$DATA/host/gateway.env"
 # Die Test-PKI bleibt 0700/0600 (gateway_lib.sh): ihre Leser laufen als PKI_USER.
 find "$DATA" -path "$PKI" -prune -o -path "$DATA/archives" -prune -o -exec chmod 777 {} +
 
@@ -219,19 +219,19 @@ expect_word() {  # $1 erwartetes Ergebnis, $2 Version; Log des Updaters (stderr)
     fail "Updater fuer $2: '$word' statt '$1'"
   fi
 }
-# Leere Konfiguration (anlage null, alle Grundfelder leer wie device_config.leer() des Servers, raumfuehler []) mit der
-# Soll-Version $1 als software, gesendet als Dienst auf down/config. Anders als configs.leer() der Gateway-Tests ohne
-# mindest_software (null): der Test haengt so nicht an der Version des Images. Eine leere Konfiguration wird immer
-# uebernommen, ihr software geht an den Updater; das Gateway bleibt "nicht eingerichtet".
+# Leere Konfiguration (anlage null, kreise [], alle uebrigen Felder des Vertrags leer wie device_config.leer() des Servers)
+# mit der Soll-Version $1 als software (mit einmalig false), gesendet als Dienst auf down/config. Die mindest_software ist
+# eine niedrige Version (null lehnt das Geraet ab), damit der Test nicht an der Version des Images haengt. Eine leere
+# Konfiguration wird immer uebernommen, ihr software geht an den Updater; das Gateway bleibt "nicht eingerichtet".
 set_desired() {
   CONFIG_VERSION=$((CONFIG_VERSION + 1))
   local body ok=0
   body="$(py 'import json, sys
 e = json.load(open(sys.argv[1]))[sys.argv[2]]
-leer = dict.fromkeys(("anlage", "profil", "hebelsatz", "verteilsystem", "bindung", "tagestick", "abo",
-                      "mindest_software"))
-print(json.dumps({"schema": 1, "version": int(sys.argv[3]), **leer, "raumfuehler": [],
-                  "software": {"version": sys.argv[2], **e}}))' "$DATA/bundles.json" "$1" "$CONFIG_VERSION")" \
+leer = dict.fromkeys(("anlage", "anlage_name", "weg", "tagestick", "mindest_integration", "bindungsparameter",
+                      "push_regeln", "update_noetig", "updates"))
+print(json.dumps({"schema": 2, "version": int(sys.argv[3]), **leer, "kreise": [], "mindest_software": "0.1.0",
+                  "software": {"version": sys.argv[2], **e, "einmalig": False}}))' "$DATA/bundles.json" "$1" "$CONFIG_VERSION")" \
     || die "Konfiguration fuer $1 nicht gebaut"
   dienst_pub "$NET" "$PKI" "smartheat/$DEVICE_ID/down/config" "$body" || die "Soll-Version $1 nicht gesendet"
   for _ in $(seq 1 30); do

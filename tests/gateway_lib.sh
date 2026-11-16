@@ -8,7 +8,8 @@
 # ohne Rechte fuer andere (sonst warnt Mosquitto 2.1 und kuenftige Versionen verweigern die ACL-Datei).
 PKI_USER="$(id -u):$(id -g)"
 
-# make_pki DIR BROKER_NAME: ca.pem/ca.key, broker.pem/broker.key (SAN DNS:BROKER_NAME), dienst.pem/dienst.key.
+# make_pki DIR BROKER_NAME: ca.pem/ca.key, broker.pem/broker.key (SAN DNS:BROKER_NAME), dienst.pem/dienst.key,
+# anker.key/anker.pub (Testschluessel des Vertrauensankers).
 make_pki() {
   local dir=$1 broker=$2 name cn
   mkdir -p "$dir" || return 1
@@ -26,7 +27,11 @@ make_pki() {
       -extfile "$dir/$name.ext" -out "$dir/$name.pem" 2>/dev/null || return 1
   done
   rm -f "$dir"/*.csr "$dir"/*.ext "$dir"/*.srl
-  chmod 0700 "$dir" && chmod 0600 "$dir"/*.pem "$dir"/*.key
+  # Testschluessel des Vertrauensankers: anker.key (PKCS8, nur der Fake-Bootstrap liest ihn), anker.pub (oeffentlich, 0644)
+  # fuer das Geraet, dessen Container als uid 1000 laufen (SMARTHEAT_ANKER_DATEI im Dev-Overlay).
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$dir/anker.key" 2>/dev/null || return 1
+  openssl pkey -in "$dir/anker.key" -pubout -out "$dir/anker.pub" || return 1
+  chmod 0700 "$dir" && chmod 0600 "$dir"/*.pem "$dir"/*.key && chmod 0644 "$dir/anker.pub"
 }
 
 # broker_conf DIR: mosquitto.conf und acl fuer den Fake-Broker (Geraete-Policy, Dienst darf alles).
