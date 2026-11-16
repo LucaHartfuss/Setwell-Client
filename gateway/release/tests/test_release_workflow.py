@@ -269,6 +269,22 @@ def test_leichter_tag_wird_abgelehnt(tag_repo):
     assert tag_repo.pruefen(ECHTER_TAG, _git(tag_repo.arbeit, "rev-parse", "HEAD")).returncode != 0
 
 
+def test_branch_gleichen_namens_aendert_das_ergebnis_nicht(tag_repo):
+    """Ein Branch mit dem Namen des Tags auf einem anderen Commit darf weder die Signaturpruefung noch den
+    Commit-Vergleich umlenken."""
+    tag_repo.signiert_taggen(ECHTER_TAG, tag_repo.freigeber[0])
+    getaggt = _git(tag_repo.arbeit, "rev-parse", "HEAD")
+    _git(tag_repo.arbeit, "push", "-q", "origin", f"refs/tags/{ECHTER_TAG}")
+    anderer = tag_repo.commit("spaeter", tag_repo.freigeber[1])
+    _git(tag_repo.arbeit, "push", "-q", "origin", "main")
+    assert tag_repo.pruefen("unbekannt", anderer).returncode != 0  # legt den Checkout an
+    _git(tag_repo.checkout, "branch", ECHTER_TAG, anderer)
+    gut = tag_repo.pruefen(ECHTER_TAG, getaggt)
+    assert gut.returncode == 0, gut.stdout + gut.stderr
+    schlecht = tag_repo.pruefen(ECHTER_TAG, anderer)
+    assert schlecht.returncode != 0 and "fuehrt" in schlecht.stdout, schlecht.stdout + schlecht.stderr
+
+
 def test_tag_namens_origin_main_lenkt_die_schluesselliste_nicht_um(tag_repo):
     """Ein Tag `origin/main` im Checkout schlaegt als Kurzname den Remote-Branch; die Liste muss trotzdem aus
     refs/remotes/origin/main kommen, nicht aus dem Tag des Angreifers (eigener Schluessel eingetragen)."""

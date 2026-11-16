@@ -44,9 +44,9 @@ if grep -q 'SMARTHEAT-PLATZHALTER' <<< "$schluesselzeilen"; then
   fehler ".github/allowed_signers auf origin/main ist noch der Platzhalter SMARTHEAT-PLATZHALTER: Signierschluessel eintragen (H-1), bevor ein echtes Release moeglich ist"
 fi
 
-git -c "gpg.ssh.allowedSignersFile=$liste" tag -v "$TAG" >/dev/null 2>"$protokoll" \
+git -c "gpg.ssh.allowedSignersFile=$liste" verify-tag "refs/tags/$TAG" >/dev/null 2>"$protokoll" \
   || { cat "$protokoll" >&2; fehler "keine gueltige SSH-Signatur eines Schluessels aus .github/allowed_signers (origin/main)"; }
 
-signiert="$(git rev-parse "$TAG^{commit}")"
+signiert="$(git rev-parse "refs/tags/$TAG^{commit}")"
 [ "$signiert" = "$SHA" ] || fehler "signierter Tag zeigt auf $signiert, der Lauf fuehrt $SHA aus"
 echo "Signatur von Tag $TAG gueltig (Schluessel aus origin/main), Commit $SHA."
