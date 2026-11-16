@@ -238,7 +238,8 @@ COMMANDS: dict[str, Command] = {
                          "stunden*3600+3600", ("filter",)),
     "sign_off": Command((), ("zurueckgesetzt", "werte"), 24 * 3600, ("nicht_eingerichtet", "keine_bestaetigung")),
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
-    "claim_state": Command(("device_state",), (), 24 * 3600),
+    # konto_hinweis: Maske der Adresse des uebernehmenden Kontos (`a***@e***.com`), nur an Gateways; fehlt = kein Hinweis.
+    "claim_state": Command(("device_state",), (), 24 * 3600, payload_optional=("konto_hinweis",)),
     "diagnostics": Command((), (), 300),
     # Liest an der Anbindung, ob der gewaehlte Weg dieselbe Anlage meint (Nutzlast: der Weg aus `WEGE`).
     "weg_pruefen": Command(("weg",), ("ergebnis",), 3600, ("weg_unbekannt", "weg_mehrfach")),
@@ -250,6 +251,8 @@ DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
 }
 #: Ergebnisse von `weg_pruefen`.
 WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
+#: Laengste Zeichenkette von `claim_state.konto_hinweis` (die Maske ist kuerzer; laenger lehnt der Server ab, das Geraet liest sie nicht).
+KONTO_HINWEIS_MAX_ZEICHEN = 100
 # Spec Stufe 3 S5 6.1 (G-6): Fehler tragen Code und details, keine Texte. details nur mit diesen Schluesseln: `feld`
 # aus PRUEF_FELDER, `regel` aus PRUEF_REGELN, die uebrigen endliche Zahlen; freie Texte gibt es darin nicht.
 DETAIL_FIELDS = ("feld", "regel", "min", "max", "wert", "anzahl")
