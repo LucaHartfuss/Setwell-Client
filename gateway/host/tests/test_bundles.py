@@ -399,7 +399,7 @@ def test_prune_removes_only_unreferenced_images_of_the_bundle_repositories(tmp_p
 def test_prune_matches_tagged_refs_and_registries_with_a_port(tmp_path):
     """Compose nennt Images mit Tag (eclipse-mosquitto:2@sha256:...), `docker image ls` zeigt das Repository ohne Tag;
     ein Registry-Port (localhost:5000/...) ist kein Tag."""
-    keep = {"eclipse-mosquitto:2@sha256:" + "e" * 64, "koenkk/zigbee2mqtt:2.14.2@sha256:" + "d" * 64,
+    keep = {"eclipse-mosquitto:2@sha256:" + "e" * 64, "koenkk/zigbee2mqtt:2.14.3@sha256:" + "d" * 64,
             "localhost:5000/smartheat-gateway@sha256:" + "a" * 64}
     listed = "\n".join([
         "eclipse-mosquitto@sha256:" + "e" * 64, "eclipse-mosquitto@sha256:" + "1" * 64,

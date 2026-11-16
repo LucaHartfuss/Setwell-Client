@@ -18,7 +18,7 @@ DATA="$(mktemp -d)"
 COMPOSE_IMAGE="docker:29-cli@sha256:b1805116a6a86cc591b5d5f60a910a0715cdcc9d18d866ad68b1457ead25c35c"
 # uid:gid des Gateway-Images und des Dienstes zigbee2mqtt (docker-compose.yml, user:).
 GATEWAY_UID="1000:1000"
-MOSQ_IMAGE="eclipse-mosquitto:2@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408"
+MOSQ_IMAGE="eclipse-mosquitto:2@sha256:75d6662dee52c947dc9dd9c29f1d8d7ffef78ddaf38001caa09755681e8bbc98"
 # Test-PKI (je Lauf neu) und Fake-Broker im Netz wan des Compose-Projekts (gateway_lib.sh: dienst_pub, dienst_wait).
 PKI="$DATA/pki"; BROKER="fake-broker"; NET="${PROJECT}_wan"
 # shellcheck source=tests/gateway_lib.sh
