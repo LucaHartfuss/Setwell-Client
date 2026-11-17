@@ -4,7 +4,6 @@ echte Hebel-Pipeline; die Entscheidung selbst steht in test_core_kaelteschutz.py
 import contextlib
 import dataclasses
 import logging
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,7 +134,10 @@ def _lauft(rt):
 
 @pytest.fixture
 def uhr():
-    return FakeClock(time.monotonic())
+    # Ganzzahliger Start: die Tests pruefen Wartezeiten genau auf der Grenze (30 min = zehnmal "+ 300 s" ab
+    # "letzter Start"). Bei einem Start mit Kommastellen (frueher die Betriebszeit des Rechners) liegt die Summe
+    # je nach Wert ein ulp darunter, der Check wartet dann einen Takt laenger (CI rot, z. B. Start 5148.339686724679).
+    return FakeClock(1_000_000.0)
 
 
 # --- Soll-Ausloeser ----------------------------------------------------------------------------------------------
