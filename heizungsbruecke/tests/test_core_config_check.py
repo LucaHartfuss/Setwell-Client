@@ -213,6 +213,25 @@ def test_leere_konfiguration_braucht_keine_bindungsparameter():
     assert _pruefen({"anlage": None, "raumfuehler": [], "bindungsparameter": None}) is None
 
 
+@pytest.mark.parametrize("feld", ["weg", "mindest_integration"])
+def test_ein_textfeld_der_leeren_konfiguration_darf_genau_200_zeichen_lang_sein(feld):
+    assert cc.TEXT_MAX_CHARS == 200
+    leer = {"anlage": None, "raumfuehler": [], "bindungsparameter": None}
+    assert _pruefen({**leer, feld: "x" * 200}) is None
+    assert _pruefen({**leer, feld: "x" * 201}) == cc.Ablehnung(cc.UNGUELTIG, {"feld": feld, "regel": "ungueltig"})
+
+
+def test_befund_ohne_regel_nennt_nur_das_feld():
+    assert cc.befund("weg") == {"feld": "weg"}
+    assert cc.befund() == {}
+
+
+def test_befund_mit_einer_regel_ausserhalb_der_vertragsregeln_wird_verworfen():
+    assert cc.befund("weg", "doppelt") == {"feld": "weg", "regel": "doppelt"}
+    with pytest.raises(AssertionError):
+        cc.befund("weg", "frei_erfunden")
+
+
 def test_rastung_wird_vor_den_bindungsparametern_geprueft():
     """Ein fremder Hebelsatz bleibt hebelsatz_eingerastet, auch ohne Parameter (Rastung zuerst)."""
     neu = gateway_konfiguration(hebelsatz="weishaupt_wwp", bindungsparameter=None)

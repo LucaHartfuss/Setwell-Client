@@ -192,6 +192,28 @@ def test_a_zone_that_stands_elsewhere_is_set_back_to_the_schedule_without_a_veto
     assert ha.modes[ZONE] == "auto"
 
 
+def test_a_dropped_setpoint_is_logged_when_the_zone_is_not_on_manual(make_store, clock, caplog):
+    pipeline, store, ha = _setup(make_store, clock, mode="auto")
+    _smartheat_laeuft(pipeline, clock, ha)
+    ha.modes[ZONE] = "auto"
+    caplog.set_level(logging.INFO)
+
+    pipeline.restore_and_clear(True)
+
+    assert any("Wert wuerde verworfen" in record.getMessage() for record in caplog.records)
+
+
+def test_nothing_is_logged_as_dropped_when_the_zone_is_on_manual(make_store, clock, caplog):
+    pipeline, store, ha = _setup(make_store, clock, mode=MANUAL_HVAC_MODE)
+    _smartheat_laeuft(pipeline, clock, ha)
+    caplog.set_level(logging.INFO)
+
+    pipeline.restore_and_clear(True)
+
+    assert ZONE_REF in ha.written
+    assert not any("Wert wuerde verworfen" in record.getMessage() for record in caplog.records)
+
+
 def test_the_levers_stay_in_the_lever_order_and_the_mode_after_all_of_them(make_store, clock):
     pipeline, _, ha = _setup(make_store, clock, mode="auto")
     _smartheat_laeuft(pipeline, clock, ha)

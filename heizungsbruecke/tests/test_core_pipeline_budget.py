@@ -499,3 +499,60 @@ def test_write_lever_is_not_exempt_from_the_daily_limit(make_store, clock):
     with pytest.raises(WriteBudgetExhausted):
         pipeline._write_lever("min_flow", 25.0)
     assert ha.writes == [("number.min_flow", 22.0)]
+
+
+def test_a_new_pipeline_has_no_refused_comfort_start(make_store, clock):
+    pipeline, _, _ = _weishaupt(make_store, clock)
+    assert pipeline.comfort_start_heute_gesperrt is False
+
+
+def test_a_refused_start_without_a_notifier_is_not_an_error(make_store, clock, caplog):
+    pipeline, _, ha = _weishaupt(make_store, clock, backup={"restore_point": POINT, "write_budget": AT_LIMIT})
+    with caplog.at_level(logging.ERROR):
+        assert pipeline.set_boosts(comfort=True, emergency=False) == (False, False)
+    assert caplog.records == []
+    assert ha.writes == []
+
+
+def _offene_transaktionen(monkeypatch):
+    """Zaehlt je physischem Schreiben, wie viele Transaktionen des Speichers gerade offen sind."""
+    from contextlib import contextmanager
+
+    from smartheat_runtime.state import StateStore
+    offen = {"jetzt": 0, "beim_schreiben": []}
+
+    @contextmanager
+    def spur(self):
+        offen["jetzt"] += 1
+        try:
+            yield
+        finally:
+            offen["jetzt"] -= 1
+
+    schreiben = Ha.set_number_value
+
+    def mit_spur(self, entity_id, value):
+        offen["beim_schreiben"].append(offen["jetzt"])
+        schreiben(self, entity_id, value)
+
+    monkeypatch.setattr(StateStore, "transaktion", spur)
+    monkeypatch.setattr(Ha, "set_number_value", mit_spur)
+    return offen["beim_schreiben"]
+
+
+def test_with_a_daily_limit_the_check_and_the_write_run_in_one_transaction(make_store, clock, monkeypatch):
+    beim_schreiben = _offene_transaktionen(monkeypatch)
+    pipeline, _, ha = _weishaupt(make_store, clock)
+    pipeline.apply_server_values({"curve": 0.9, "room_setpoint": 22.0, "heat_limit": 16.0})
+    assert ha.writes and set(beim_schreiben) == {1}
+
+
+def test_without_a_daily_limit_the_write_needs_no_transaction(make_store, clock, monkeypatch):
+    beim_schreiben = _offene_transaktionen(monkeypatch)
+    store = make_store()
+    ha = Ha({"number.curve": 0.7, "number.min_flow": 20.0})
+    manifest = ChannelManifest(refs={"curve_current": "number.curve", "min_flow": "number.min_flow"})
+    pipeline = LeverPipeline(store, HaPlantBinding(ha, manifest, VAILLANT_MYPYLLANT),
+                             resolve_local_safety("vaillant_vrc720", "Heizkoerper"), clock=clock)
+    assert pipeline._write_lever("min_flow", 22.0) == 22.0
+    assert ha.writes and set(beim_schreiben) == {0}
