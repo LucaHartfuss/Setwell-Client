@@ -696,3 +696,17 @@ def test_main_laesst_eine_anfrage_in_der_phase_loeschen_fuer_den_erststart_stehe
     with pytest.raises(EOFError):
         knopf.main(reset=lambda: pytest.fail("kein Reset"))
     assert json.loads((host / "werksreset.json").read_text()) == anfrage
+
+
+def test_werksreset_fuer_liefert_den_reset_der_den_werksreset_mit_dem_root_ausfuehrt(monkeypatch, tmp_path):
+    aufrufe = []
+    monkeypatch.setattr(knopf.werksreset, "ausfuehren", lambda root, compose, **kw: aufrufe.append((root, compose, kw)))
+    reset = knopf.werksreset_fuer(tmp_path)
+    assert callable(reset)
+    assert aufrufe == []  # erst der Aufruf des Resets fuehrt aus
+    reset()
+    assert len(aufrufe) == 1
+    root, compose, kw = aufrufe[0]
+    assert root == tmp_path
+    assert isinstance(compose, knopf.bundles.ComposeRunner)
+    assert set(kw) == {"warte", "jetzt", "neustart", "journal_leeren"}

@@ -59,6 +59,10 @@ def test_limit_first_reached_only_once_a_day():
     assert wb.limit_first_reached(entry, wb.RETURN_STAIRCASE, DAY) is False
 
 
+def test_without_an_entry_the_limit_is_not_reached_and_the_answer_is_a_plain_false():
+    assert wb.limit_first_reached(None, QUOTA, DAY) is False
+
+
 def test_put_is_best_effort_and_keeps_memory(make_store, monkeypatch):
     store = make_store()
 

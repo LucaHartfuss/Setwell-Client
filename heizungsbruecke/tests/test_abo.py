@@ -467,3 +467,35 @@ def test_nach_dem_update_ist_ein_aktives_abo_nach_der_frist_wieder_normalbetrieb
 
     rt.neustart.assert_called_once()  # die Quelle ist nicht mehr kritisch: kein Ende, Neustart im Normalbetrieb
     assert rt.store.state.abo_finished is False
+
+
+def test_ein_schon_festgehaltenes_ende_setzt_den_zustand_ohne_offenen_soll_merker(make_store, tmp_path):
+    rt = _runtime(tmp_path, make_store())
+    entitlement.mark_beendet(rt.config.entitlement_path)
+
+    assert abo.finish_grace(rt, always_restore=True, final_notice=False) is True
+
+    assert rt.store.state.abo_finished is True
+    assert rt.store.state.soll_ende_offen is False
+    assert _posted(rt).count(EV_SOLL_ENDE) == 1
+
+
+def test_die_gescheiterte_wiederherstellung_wird_kritisch_gemeldet():
+    notifier = MagicMock()
+
+    abo.report_restore(notifier, ok=False)
+
+    notifier.notify.assert_called_once()
+    assert notifier.notify.call_args.kwargs["critical"] is True
+
+
+def test_fristende_tut_nichts_wenn_das_ende_schon_festgehalten_ist(make_store, tmp_path, monkeypatch):
+    rt = _abgelaufen(tmp_path, make_store, monkeypatch, vertrauen=True)
+    entitlement.mark_beendet(rt.config.entitlement_path)  # Datei steht, der Zustand noch nicht
+
+    abo.check_grace_end(rt)
+
+    assert rt.store.state.abo_finished is False
+    assert _posted(rt) == []
+    rt.ha_api.set_number_value.assert_not_called()
+    rt.ha_api.send_notification.assert_not_called()

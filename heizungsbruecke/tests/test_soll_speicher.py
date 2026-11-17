@@ -268,3 +268,68 @@ def test_gespeicherter_wunsch_ohne_datei_legt_keine_an(tmp_path):
     pfad = tmp_path / "unter" / "room_target.json"
     assert gespeicherter_wunsch(pfad) is None
     assert not pfad.exists() and not pfad.parent.exists()
+
+
+# --- Fristen genau an der Grenze, Rueckgaben als Wahrheitswert ---------------------------------------------------
+
+def test_das_echo_fenster_dauert_sechzig_sekunden_und_endet_genau_dann(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(22.0)
+    store.note_own_write()
+    assert store.echo_rest() == 60
+
+    clock.advance(59.9)
+    assert store.apply_thermostat(19.0) is False  # noch im Echo-Fenster
+    assert store.value == 22.0
+
+    clock.advance(0.1)  # genau 60 Sekunden: das Fenster ist zu
+    assert store.echo_rest() == 0.0
+    assert store.apply_thermostat(19.0) is True and store.value == 19.0
+
+
+def test_ein_offener_befehl_verfaellt_nach_dreissig_minuten_genau(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+
+    clock.advance(1799)
+    assert store.apply_thermostat(20.0) is False  # alter Wert, Befehl noch offen
+
+    clock.advance(1)  # genau 1800 Sekunden: der Befehl ist verfallen, der Wert des Thermostats gilt
+    assert store.apply_thermostat(20.0) is True
+    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+
+
+def test_ein_zweiter_befehl_nach_genau_dreissig_minuten_erbt_die_alten_werte_nicht(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+    clock.advance(1800)  # der erste Befehl ist verfallen
+    store.apply_portal(23.0)
+    store.note_own_write()
+    clock.advance(300)
+
+    assert store.apply_thermostat(20.0) is True  # kein alter Wert mehr, sondern eine Eingabe am Thermostat
+    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+
+
+def test_die_rueckgaben_der_eingaenge_sind_wahrheitswerte(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.apply_portal(21.3) is False  # nicht im Raster
+    assert store.apply_portal(20.0) is False  # geltendes Soll
+    assert store.apply_lokal(40.0) is False
+    assert store.begrenzen(20.0) is False  # keine Aenderung
+
+    store.apply_portal(22.0)
+    store.note_own_write()
+    assert store.apply_thermostat(19.0) is False  # Echo-Fenster
+
+    clock.advance(120)
+    assert store.apply_thermostat(40.0) is False  # unplausibel
+    assert store.apply_thermostat(22.0) is False  # Bestaetigung des Schreibwerts
+    store.apply_portal(23.0)
+    store.note_own_write()
+    clock.advance(120)
+    assert store.apply_thermostat(22.0) is False  # veralteter Wert bei offenem Befehl
+    assert store.apply_thermostat(23.0) is False  # bestaetigt
+    assert store.apply_thermostat(23.0) is False  # geltendes Soll
