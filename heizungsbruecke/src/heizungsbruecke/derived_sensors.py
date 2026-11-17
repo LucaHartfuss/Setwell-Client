@@ -6,7 +6,9 @@ keine Hilfs-Entity. Der Server bildet alle Mittelwerte aus der Telemetrie.
 Namen und Tracking-Schluessel: Kreis 1 behaelt `SmartHeat <anlage> Raumtemperatur` und `room_temperature` (die Entity-ID
 einer bestehenden Anlage bleibt); jeder weitere Kreis n heisst `SmartHeat <anlage> K<n> Raumtemperatur` mit dem
 Schluessel `room_temperature:<n>`; der Sensor des Raums m im Kreis n `SmartHeat <anlage> K<n> R<m> Raumtemperatur` mit
-`room_temperature:<n>:<m>`. Kein Kundenname steht in einem Entity-Namen.
+`room_temperature:<n>:<m>`. Kein Kundenname steht in einem Entity-Namen. Die Anlagen-ID kommt vom Server und darf nur
+aus `A-Za-z0-9_-` (1 bis 64 Zeichen) bestehen, damit kein Jinja in einen Helfer gelangt; sonst wirft ensure_all
+ConfigError, ohne etwas anzulegen oder zu loeschen.
 
 Jeder Helfer merkt sich die Quelle (Text der Vorlage) und die Fuehlerliste, auf der er angelegt wurde
 (derived_sensors.json). Fehlt die Quelle oder weicht sie ab, wird er geloescht und neu angelegt; die Entity-ID bleibt
@@ -23,12 +25,32 @@ from pathlib import Path
 from heizungsbruecke.helper_templates import room_temperature_template
 from smartheat_core.logtext import lesbar
 from smartheat_runtime.backup_store import load_backup, save_backup
+from smartheat_runtime.dokument_config import ConfigError
 
 logger = logging.getLogger(__name__)
 
 # Tracking-Schluessel der Helfer, die dieses Add-on anlegt oder frueher angelegt hat (outdoor_temperature: nur noch zum
 # Entfernen der Anlage, ensure_all legt ihn nicht mehr an); jeder andere Eintrag ist ein Altrest.
 _RAUM_KEY = re.compile(r"room_temperature(:[1-9][0-9]*(:[0-9]+)?)?")
+
+
+# Die Anlagen-ID steht im Namen der Template-Helfer; den Namen rendert HA nicht als Vorlage, der Helfer aber seinen
+# Text: nur sichere Zeichen, damit ein Server-Text nie Jinja in einen Helfer bringt (fullmatch, kein `$`-Schlupfloch).
+_ANLAGEN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def anlage_sicher(tenant_id: object) -> bool:
+    return isinstance(tenant_id, str) and _ANLAGEN_ID.fullmatch(tenant_id) is not None
+
+
+def anlage_pruefen(tenant_id: object) -> None:
+    """Wirft ConfigError (der Start scheitert ohne Wiederholung), ohne den Rohwert zu nennen."""
+    if anlage_sicher(tenant_id):
+        return
+    grund = (f"{len(tenant_id)} Zeichen" if isinstance(tenant_id, str) and len(tenant_id) > 64
+             else "ungültige Zeichen")
+    logger.warning("Anlagen-ID unzulässig (%s): keine Hilfssensoren angelegt", grund)
+    raise ConfigError(f"Die Anlagen-ID ist unzulässig ({grund}); es werden keine Hilfssensoren angelegt.")
 
 
 def kreis_key(kreis: int) -> str:
@@ -58,6 +80,7 @@ def ensure_all(ha_api, tenant_id: str, room_sensors: list[str], state_path: Path
                raeume: tuple[tuple[int, tuple[str, ...]], ...] = ()) -> DerivedSensors:
     """Sensor des Kreises `kreis` (Mittel von `room_sensors`) und je Raum in `raeume` ((Nummer, Fuehler), nur Raeume mit
     Fuehlern) der Mittelwert-Sensor. Raum-Sensoren des Kreises, die das Dokument nicht mehr nennt, werden entfernt."""
+    anlage_pruefen(tenant_id)
     tracking = load_backup(state_path)
     replaced: list[str] = []
     sources: dict[str, str] = {}
@@ -132,7 +155,7 @@ def _ensure_entity(
     return entity_id, meldung
 
 
-def _drop_unused(ha_api, tracking: dict, key: str, state_path: Path, tenant_id: str) -> str | None:
+def _drop_unused(ha_api, tracking: dict, key: str, state_path: Path, tenant_id: str | None) -> str | None:
     """Ein Helfer der Anlage wird entfernt, erst in HA
     (ha_api.delete_helper mit dem Tenant fuer die Titelpruefung), dann aus dem Tracking. Gibt die entfernte
     Entity-ID zurueck, None ohne Tracking-Eintrag. Wirft, wenn das Loeschen scheitert; der Eintrag bleibt dann
@@ -147,12 +170,16 @@ def _drop_unused(ha_api, tracking: dict, key: str, state_path: Path, tenant_id: 
     return existing_id
 
 
-def entfernen(ha_api, tenant_id: str, state_path: Path) -> bool:
+def entfernen(ha_api, tenant_id: str | None, state_path: Path) -> bool:
     """Alle vom Add-on angelegten Hilfssensoren loeschen (Entfernen der Anlage): je Helfer erst in HA,
     dann aus dem Tracking (wie _drop_unused). Wirft nie. Ein nicht loeschbarer Helfer (HA antwortet nicht, Fehler)
     bleibt im Tracking fuer den naechsten Versuch, ins Log kommt nur die Fehlerart. Kaputte Eintraege ohne Entity-ID
     und Eintraege fremder Schluessel (Altreste frueherer Versionen) fallen ohne Loeschversuch weg. True, wenn kein
     Helfer mehr uebrig ist; dann ist auch die Datei weg."""
+    if not anlage_sicher(tenant_id):
+        # Kein Titelvergleich mit Rohtext: delete_helper erkennt dann nur Helfer mit `smartheat_`-Praefix.
+        logger.warning("Anlagen-ID unzulässig: Hilfssensoren nur nach Entity-ID-Präfix entfernt")
+        tenant_id = None
     try:
         tracking = load_backup(state_path)
     except (OSError, ValueError) as error:

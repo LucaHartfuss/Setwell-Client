@@ -3,7 +3,6 @@ auf der ACT-LED. Zustand aus data/agent_state.json (die Laufzeit schreibt mindes
 0.5.0); aelter als 5 min oder unlesbar = stoerung. Die Schluessel von PATTERNS sind genau die Zustaende des
 Geraetekerns. Dazu die Muster des Knopfs (KNOPF_MUSTER, nur am Host, GP8) mit dem Vorrang
 /run/smartheat/led_knopf.json (Knopf-Dienst, bis Wanduhr) > code_fenster in agent_state.json > Zustand."""
-import json
 import os
 import signal
 import time
@@ -50,7 +49,7 @@ def state_from_file(path: Path, now: Callable[[], float] = time.time) -> str:
         data, info = lesen.read_stat(path)  # data/ ist fuer Container schreibbar: begrenzt, ohne Symlink, ohne FIFO
         if now() - info.st_mtime > STALE_SECONDS:
             return "stoerung"
-        inhalt = json.loads(data)
+        inhalt = lesen.parse_json(data)
         zustand = inhalt.get("zustand")
         fenster = inhalt.get("code_fenster") is True
     except (OSError, ValueError, AttributeError):
@@ -64,7 +63,7 @@ def knopf_muster(path: Path, now: Callable[[], float] = time.time) -> str | None
     """Muster aus led_knopf.json, solange `bis` (Wanduhr, Sekunden) nicht erreicht ist; sonst None. Die Datei liegt in /run
     und gehoert root; trotzdem begrenzt und ohne Symlink gelesen, Fehler zeigen keinen Hinweis (kein Log je 0,5 s)."""
     try:
-        inhalt = json.loads(lesen.read_bytes(path))
+        inhalt = lesen.parse_json(lesen.read_bytes(path))
         muster, bis = inhalt.get("muster"), inhalt.get("bis")
     except (OSError, ValueError, AttributeError):
         return None

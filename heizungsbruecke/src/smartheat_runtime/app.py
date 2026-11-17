@@ -514,13 +514,14 @@ def _on_retry_due(rt: Runtime, event: Event) -> None:
 
 def _on_watchdog(rt: Runtime, event: Event) -> None:
     """Fallback bei getrenntem Trigger-Eingang: Cache frisch (ohne Entprellung) lesen, dann
-    lokaler Check. Bei verbundenem Trigger-Client passiert nichts, ausser die Uhr des Kaelteschutzes laeuft (ein
-    Ausloeser wird gezaehlt oder ein Lauf ist aktiv): ein Fuehler mit konstantem Messwert loest in HA kein Ereignis aus,
-    der Takt des Watchdogs treibt die Uhr weiter (ein Check ohne frisch gelesenes Soll, `room_target_fired` fehlt)."""
+    lokaler Check. Bei verbundenem Trigger-Client passiert nichts, ausser eine Uhr laeuft: die des Kaelteschutzes (ein
+    Ausloeser wird gezaehlt oder ein Lauf ist aktiv) oder ein Boost (Comfort- oder Notfall-Boost, dessen Hoechstdauer
+    bzw. Ende der lokale Check auswertet). Ein Fuehler mit konstantem Messwert loest in HA kein Ereignis aus, der Takt
+    des Watchdogs treibt die Uhr weiter (ein Check ohne frisch gelesenes Soll, `room_target_fired` fehlt)."""
     rt.worker.schedule(rt.config.local_check_interval, Event(EV_WATCHDOG))
     if rt.trigger_client is None or not rt.trigger_client.connected:
         rt.worker.post_coalesced(EV_LOCAL_CHECK, room_target_fired=True)
-    elif _kaelteschutz_uhr_laeuft(rt):
+    elif _kaelteschutz_uhr_laeuft(rt) or _boost_laeuft(rt):
         rt.worker.post_coalesced(EV_LOCAL_CHECK, room_target_fired=False)
 
 
@@ -528,6 +529,11 @@ def _kaelteschutz_uhr_laeuft(rt: Runtime) -> bool:
     state = rt.store.state
     zaehlung = state.kaelteschutz_zaehlung
     return state.kaelteschutz_art is not None or zaehlung.soll_seit is not None or bool(zaehlung.frost_seit)
+
+
+def _boost_laeuft(rt: Runtime) -> bool:
+    state = rt.store.state
+    return state.boost_active or state.emergency_boost_active
 
 
 def _on_connection_check(rt: Runtime, event: Event) -> None:

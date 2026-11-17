@@ -3,12 +3,16 @@ Wegwerf-Kette, Gate mit Leserecht, Tag-Signatur und Fast-Forward von main hinter
 signiert nichts fuer ein Release: das tut der Betreiber am eigenen Rechner (release_lokal.sh). Kein Signier-Secret, kein
 `packages: write`, kein Werks-Image in der CI (FR-26). Root-Code (siblings.sh, Gate) laeuft nur im Job `gate` ohne
 Schreibrecht (I-1)."""
+import os
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[3]
+TAG_PRUEFEN = REPO / "scripts" / "ci" / "tag_pruefen.sh"
 WORKFLOWS = REPO / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "release-gateway.yml"
 LOCK = REPO / "gateway" / "release" / "requirements.txt"
@@ -176,3 +180,121 @@ def test_keine_release_pub_mehr_der_schluesselbund_heisst_release_roots_pem():
     assert (REPO / "gateway" / "host" / "release-roots.pem").is_file()
     script = (REPO / "gateway" / "release" / "release_lokal.sh").read_text()
     assert "release.pub" not in script and "gateway/host/release-roots.pem" in script
+
+
+# --- Tag-Pruefung (scripts/ci/tag_pruefen.sh) gegen lokale Test-Repos, ohne Netz ---
+
+ECHTER_TAG = "v0.0.0"
+
+
+def _git(ordner: Path, *args: str) -> str:
+    umgebung = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "LC_ALL": "C",
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.org", "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.org"}
+    return subprocess.run(["git", "-C", str(ordner), "-c", "protocol.file.allow=always", *args], env=umgebung,
+                          capture_output=True, text=True, check=True, timeout=60).stdout.strip()
+
+
+def _schluessel(ordner: Path, name: str) -> tuple[Path, str]:
+    """Wegwerf-Schluesselpaar ohne Passwort: privater Schluessel und allowed_signers-Zeile des oeffentlichen."""
+    pfad = ordner / name
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", str(pfad)], check=True, timeout=60)
+    oeffentlich = pfad.with_suffix(".pub").read_text().split()
+    return pfad, f'{name} namespaces="git" {oeffentlich[0]} {oeffentlich[1]}\n'
+
+
+class _TagRepo:
+    """Origin (bare), Arbeits-Checkout zum Anlegen von Commits und Tags, Checkout des Release-Jobs."""
+
+    def __init__(self, wurzel: Path) -> None:
+        wurzel.joinpath("keys").mkdir()
+        self.freigeber = _schluessel(wurzel / "keys", "freigeber")
+        self.fremder = _schluessel(wurzel / "keys", "fremder")
+        self.origin, self.arbeit, self.checkout = wurzel / "origin.git", wurzel / "arbeit", wurzel / "checkout"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True, timeout=60)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.arbeit)], check=True, timeout=60)
+        _git(self.arbeit, "remote", "add", "origin", str(self.origin))
+        self.commit("main", self.freigeber[1])
+        _git(self.arbeit, "push", "-q", "origin", "main")
+
+    def commit(self, text: str, liste: str) -> str:
+        (self.arbeit / ".github").mkdir(exist_ok=True)
+        (self.arbeit / ".github" / "allowed_signers").write_text(liste)
+        (self.arbeit / "datei.txt").write_text(text)
+        _git(self.arbeit, "add", "-A")
+        _git(self.arbeit, "commit", "-q", "-m", text)
+        return _git(self.arbeit, "rev-parse", "HEAD")
+
+    def signiert_taggen(self, tag: str, schluessel: Path) -> None:
+        _git(self.arbeit, "-c", "gpg.format=ssh", "-c", f"user.signingkey={schluessel}", "tag", "-s", tag, "-m", tag)
+
+    def pruefen(self, tag: str, sha: str) -> subprocess.CompletedProcess:
+        if not self.checkout.exists():
+            subprocess.run(["git", "clone", "-q", "--no-tags", str(self.origin), str(self.checkout)], check=True,
+                           timeout=60)
+        umgebung = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "LC_ALL": "C",
+                    "GIT_ALLOW_PROTOCOL": "file"}
+        return subprocess.run(["bash", str(TAG_PRUEFEN), tag, sha], cwd=self.checkout, env=umgebung,
+                              capture_output=True, text=True, timeout=60)
+
+
+@pytest.fixture
+def tag_repo(tmp_path):
+    return _TagRepo(tmp_path)
+
+
+def test_gueltig_signierter_tag_wird_angenommen(tag_repo):
+    tag_repo.signiert_taggen(ECHTER_TAG, tag_repo.freigeber[0])
+    _git(tag_repo.arbeit, "push", "-q", "origin", f"refs/tags/{ECHTER_TAG}")
+    ergebnis = tag_repo.pruefen(ECHTER_TAG, _git(tag_repo.arbeit, "rev-parse", "HEAD"))
+    assert ergebnis.returncode == 0, ergebnis.stdout + ergebnis.stderr
+    assert "Signatur" in ergebnis.stdout
+
+
+def test_dryrun_tag_unter_echtem_namen_wird_abgelehnt(tag_repo):
+    """Die Signatur eines Probelauf-Tags gilt dem Namen -dryrun; dasselbe Tag-Objekt unter einem echten Namen darf
+    nicht als signiertes Release durchgehen."""
+    tag_repo.signiert_taggen(f"{ECHTER_TAG}-dryrun", tag_repo.freigeber[0])
+    objekt = _git(tag_repo.arbeit, "rev-parse", f"refs/tags/{ECHTER_TAG}-dryrun")
+    _git(tag_repo.arbeit, "update-ref", f"refs/tags/{ECHTER_TAG}", objekt)
+    _git(tag_repo.arbeit, "push", "-q", "origin", f"refs/tags/{ECHTER_TAG}")
+    ergebnis = tag_repo.pruefen(ECHTER_TAG, _git(tag_repo.arbeit, "rev-parse", "HEAD"))
+    assert ergebnis.returncode != 0, ergebnis.stdout + ergebnis.stderr
+    assert "Tag-Name" in ergebnis.stdout
+
+
+def test_leichter_tag_wird_abgelehnt(tag_repo):
+    _git(tag_repo.arbeit, "tag", ECHTER_TAG)
+    _git(tag_repo.arbeit, "push", "-q", "origin", f"refs/tags/{ECHTER_TAG}")
+    assert tag_repo.pruefen(ECHTER_TAG, _git(tag_repo.arbeit, "rev-parse", "HEAD")).returncode != 0
+
+
+def test_branch_gleichen_namens_aendert_das_ergebnis_nicht(tag_repo):
+    """Ein Branch mit dem Namen des Tags auf einem anderen Commit darf weder die Signaturpruefung noch den
+    Commit-Vergleich umlenken."""
+    tag_repo.signiert_taggen(ECHTER_TAG, tag_repo.freigeber[0])
+    getaggt = _git(tag_repo.arbeit, "rev-parse", "HEAD")
+    _git(tag_repo.arbeit, "push", "-q", "origin", f"refs/tags/{ECHTER_TAG}")
+    anderer = tag_repo.commit("spaeter", tag_repo.freigeber[1])
+    _git(tag_repo.arbeit, "push", "-q", "origin", "main")
+    assert tag_repo.pruefen("unbekannt", anderer).returncode != 0  # legt den Checkout an
+    _git(tag_repo.checkout, "branch", ECHTER_TAG, anderer)
+    gut = tag_repo.pruefen(ECHTER_TAG, getaggt)
+    assert gut.returncode == 0, gut.stdout + gut.stderr
+    schlecht = tag_repo.pruefen(ECHTER_TAG, anderer)
+    assert schlecht.returncode != 0 and "fuehrt" in schlecht.stdout, schlecht.stdout + schlecht.stderr
+
+
+def test_tag_namens_origin_main_lenkt_die_schluesselliste_nicht_um(tag_repo):
+    """Ein Tag `origin/main` im Checkout schlaegt als Kurzname den Remote-Branch; die Liste muss trotzdem aus
+    refs/remotes/origin/main kommen, nicht aus dem Tag des Angreifers (eigener Schluessel eingetragen)."""
+    angriff = tag_repo.commit("eigene Liste", tag_repo.fremder[1])
+    tag_repo.signiert_taggen(ECHTER_TAG, tag_repo.fremder[0])
+    _git(tag_repo.arbeit, "push", "-q", "origin", f"refs/tags/{ECHTER_TAG}")
+    ergebnis = tag_repo.pruefen("unbekannt", angriff)  # legt den Checkout an; der Lauf selbst scheitert
+    assert ergebnis.returncode != 0
+    _git(tag_repo.checkout, "fetch", "-q", "origin", f"+refs/tags/{ECHTER_TAG}:refs/tags/{ECHTER_TAG}")
+    _git(tag_repo.checkout, "tag", "origin/main", angriff)
+    ergebnis = tag_repo.pruefen(ECHTER_TAG, angriff)
+    assert ergebnis.returncode != 0, ergebnis.stdout + ergebnis.stderr
+    assert "keine gueltige SSH-Signatur" in ergebnis.stdout

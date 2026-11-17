@@ -24,7 +24,6 @@ getan sind. Scheitert das Anhalten oder Loeschen im laufenden Betrieb, bleibt di
 Geloescht wird nie einem Symlink nach (Ordner und Eintraege werden per Dateideskriptor mit O_NOFOLLOW behandelt)."""
 import contextlib
 import errno
-import json
 import logging
 import os
 import shutil
@@ -102,7 +101,7 @@ def _anfrage_zustand(root: Path) -> tuple[str, dict | None]:
     `ungueltig` (lesbar, aber kein vollstaendiger Inhalt oder unbekannte Phase), sonst die Phase (`angefordert` oder
     `loeschen`) mit der Anfrage. Nur `fehlt` und `ungueltig` sind sichere Aussagen; `unlesbar` loescht und startet nichts."""
     try:
-        roh = json.loads(lesen.read_bytes(_anfrage_pfad(root)))
+        roh = lesen.parse_json(lesen.read_bytes(_anfrage_pfad(root)))
     except FileNotFoundError:
         return "fehlt", None
     except lesen.UnsichereDatei:

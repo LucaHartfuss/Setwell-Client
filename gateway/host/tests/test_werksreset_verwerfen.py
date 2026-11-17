@@ -188,6 +188,17 @@ def test_eine_zu_grosse_anfragedatei_ist_sicher_ungueltig(geraet):
     assert not (geraet.root / "host" / "werksreset.json").exists()
 
 
+@pytest.mark.parametrize("inhalt", ["[" * 60000, '{"a":' * 12000], ids=["liste", "objekt"])
+def test_eine_tief_geschachtelte_anfrage_unter_der_lesegrenze_ist_sicher_ungueltig(geraet, inhalt):
+    # Die Anfragedatei schreibt der Host selbst; der Test sichert den Parser, falls je eine tief geschachtelte Datei dort liegt
+    # (der Container-Weg, `data/werksreset_bereit.json`, steht in test_werksreset.py).
+    assert len(inhalt) <= werksreset.lesen.MAX_BYTES
+    (geraet.root / "host").mkdir(exist_ok=True)
+    (geraet.root / "host" / "werksreset.json").write_text(inhalt)
+    assert werksreset.beim_start(geraet.root, Compose(), jetzt=geraet.jetzt, journal_leeren=lambda: None) is False
+    assert not (geraet.root / "host" / "werksreset.json").exists()
+
+
 def test_der_erststart_meldet_eine_unlesbare_anfrage_und_startet_nichts(geraet, unlesbar, tmp_path):
     from smartheat_host import firstboot
 

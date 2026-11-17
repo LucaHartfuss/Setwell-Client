@@ -2170,6 +2170,36 @@ def test_healthz_over_64_kib_is_not_healthy_but_exactly_64_kib_is_read(healthz_b
     assert updater.health_ok(updater.fetch_health(url + "/zuviel"), {"runtime": "healthy"}) is False
 
 
+def test_a_deeply_nested_healthz_is_not_healthy_instead_of_raising(healthz_bodies):
+    """60000 offene Klammern bleiben unter der Lesegrenze, lassen den JSON-Parser aber in die Rekursionsgrenze laufen:
+    das ist kein ValueError, darf den Updater aber nicht abbrechen, sondern gilt wie kaputtes JSON."""
+    url, bodies = healthz_bodies
+    bodies["/tief"] = b"[" * 60000
+    assert len(bodies["/tief"]) < 65536
+    assert updater.fetch_health(url + "/tief") is None
+    assert updater.health_ok(updater.fetch_health(url + "/tief"), {"runtime": "healthy"}, mit_server=False) is False
+
+
+def test_probestart_mit_tief_geschachteltem_healthz_faellt_regulaer_zurueck(tmp_path, healthz_bodies):
+    """Eine untergeschobene, tief geschachtelte /healthz-Antwort macht die lokale Gesundheit des Probestarts ungesund: der
+    Updater schaltet wie bei jeder anderen kaputten Antwort zurueck und lehnt die Version ab."""
+    url, bodies = healthz_bodies
+    bodies["/healthz"] = b"[" * 60000
+    world = _system_world(tmp_path)
+    _bis_zum_neustart(world)
+    _neustart(world, NEU)
+    world.updater._lokal_health = lambda version: updater.health_ok(
+        updater.fetch_health(url + "/healthz"), {"runtime": "healthy"}, mit_server=False)
+    world.updater.recover()
+    assert world.state().system["phase"] == "zurueck" and world.state().system["grund"] == "ungesund"
+    assert "bestaetigen" not in [aufruf[0] for aufruf in world.sa.aufrufe]
+    _im_alten_slot(world)
+    state = world.state()
+    assert _berichte(world) == [("ungesund", "rollback")]
+    assert state.rejected == [world.abgelehnt()] and (state.current, state.in_progress) == (ALT, None)
+    assert world.sa.primaer() == "A"
+
+
 @pytest.fixture
 def reload_updater(monkeypatch):
     """Laedt `updater` neu (die Standard-Uhr `clock=time.monotonic` wird beim Import gebunden) und stellt das Modul nach

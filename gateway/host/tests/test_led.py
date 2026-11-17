@@ -24,6 +24,16 @@ def test_known_states_have_patterns(tmp_path, zustand):
     assert sum(seconds for _, seconds in led.PATTERNS[zustand]) <= 2.0
 
 
+@pytest.mark.parametrize("inhalt", [pytest.param("[" * 60000, id="listen"),
+                                    pytest.param('{"a":' * 12000, id="objekte")])
+def test_eine_tief_geschachtelte_datei_zeigt_stoerung_bzw_kein_knopf_muster(tmp_path, inhalt):
+    """Der Container schreibt die Zustandsdatei; der LED-Dienst darf an einer tiefen Schachtelung nicht abbrechen."""
+    path = tmp_path / "agent_state.json"
+    path.write_text(inhalt)
+    assert led.state_from_file(path) == "stoerung"
+    assert led.knopf_muster(path) is None
+
+
 def test_patterns_cover_exactly_the_device_states():
     from smartheat_device import wire
 

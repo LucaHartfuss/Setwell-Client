@@ -88,7 +88,7 @@ from cryptography import x509
 from smartheat_core import dateien
 
 from smartheat_gateway.version import GATEWAY_VERSION
-from smartheat_host import bundles, kanal, kette
+from smartheat_host import bundles, kanal, kette, lesen
 from smartheat_host.startauswahl import RaucTryboot, Startauswahl, StartauswahlFehler
 
 logger = logging.getLogger(__name__)
@@ -711,7 +711,7 @@ def fetch_url_to_file(url: str, max_bytes: int, allow_http: bool, ziel: Path, fr
 def fetch_health(url: str) -> dict | None:
     try:
         with urllib.request.urlopen(url, timeout=5) as response:
-            data = json.loads(response.read(65536))
+            data = lesen.parse_json(response.read(65536))  # tief geschachtelt: ValueError statt RecursionError
     except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None

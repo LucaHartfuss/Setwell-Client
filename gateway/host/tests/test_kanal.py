@@ -148,6 +148,40 @@ def test_eine_unlesbare_einstellung_ist_ein_kanalfehler(tmp_path, inhalt):
         kanal.LokalerKanal(tmp_path).updates()
 
 
+TIEF = [pytest.param("[" * 60000, id="listen"), pytest.param('{"a":' * 12000, id="objekte"),
+        pytest.param('[{"a":' * 8000, id="gemischt")]  # unter der Lesegrenze, aber weit tiefer als der Parser erlaubt
+
+
+@pytest.mark.parametrize("inhalt", TIEF)
+def test_eine_tief_geschachtelte_datei_gilt_als_unlesbar_statt_den_dienst_abzubrechen(tmp_path, inhalt):
+    assert len(inhalt) < lesen.MAX_BYTES
+    (tmp_path / "x.json").write_text(inhalt)
+    assert lesen.read_json(tmp_path / "x.json") is None
+
+
+@pytest.mark.parametrize("inhalt", TIEF)
+def test_eine_tief_geschachtelte_soll_oder_einstellung_ist_ein_kanalfehler(tmp_path, inhalt):
+    (tmp_path / "software_soll.json").write_text(inhalt)
+    (tmp_path / "updates_soll.json").write_text(inhalt)
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).desired()
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).updates()
+
+
+@pytest.mark.parametrize("inhalt", TIEF)
+def test_tief_geschachtelte_meldungen_quittung_und_endpunkt_gelten_als_verloren(tmp_path, inhalt):
+    for name in ("software_meldungen.json", "software_quittung.json", "updates_veraltet.json"):
+        (tmp_path / name).write_text(inhalt)
+    (tmp_path / "device").mkdir()
+    (tmp_path / "device" / "endpoint.json").write_text(inhalt)
+    k = kanal.LokalerKanal(tmp_path)
+    assert k.erreichbar() is False
+    k.update_result("0.6.1", "ok", "")  # liest Meldungen und Quittung: ohne Abbruch
+    k.updates_veraltet(None)  # liest die Frische-Meldung: ohne Abbruch
+    assert json.loads((tmp_path / "software_meldungen.json").read_text())["meldungen"][0]["seq"] == 1
+
+
 def test_die_frische_meldung_liegt_fuer_die_laufzeit_lesbar_bereit(tmp_path):
     kanal.LokalerKanal(tmp_path).updates_veraltet(WARNUNG)
     datei = tmp_path / "updates_veraltet.json"

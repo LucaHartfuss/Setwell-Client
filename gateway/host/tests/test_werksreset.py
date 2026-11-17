@@ -175,6 +175,21 @@ def test_alte_bereit_datei_zaehlt_nicht(welt, bereit):
     assert ergebnis["ursprungswerte"] is False  # die alte Datei sagt true, gilt aber fuer eine andere Anfrage
 
 
+@pytest.mark.parametrize("inhalt", ["[" * 60000, '{"a":' * 12000], ids=["liste", "objekt"])
+def test_eine_tief_geschachtelte_bereit_datei_zaehlt_wie_keine_antwort(welt, inhalt, caplog):
+    """Der Container schreibt `data/werksreset_bereit.json`; eine tief geschachtelte Datei unter der Lesegrenze darf den
+    Reset nicht abbrechen: sie gilt wie eine fehlende oder unlesbare Antwort, der Reset laeuft ohne Ursprungswerte weiter."""
+    assert len(inhalt) <= werksreset.lesen.MAX_BYTES
+    welt.antwort = None
+    (welt.root / "data" / "werksreset_bereit.json").write_text(inhalt)
+    with caplog.at_level(logging.WARNING):
+        ergebnis = welt.ausfuehren(warte=lambda bedingung, frist: bedingung())
+    assert ergebnis["ursprungswerte"] is False and ergebnis["abgeschlossen"] is True
+    assert not (welt.root / "data" / "device").exists() and welt.neustarts == [1]
+    assert welt.protokoll()[0]["ursprungswerte"] is False
+    assert "keine Antwort" in caplog.text
+
+
 def test_eine_bereit_datei_derselben_anfrage_zaehlt_auch_mit_spaeterem_zeitpunkt(welt):
     welt.antwort = None
 
