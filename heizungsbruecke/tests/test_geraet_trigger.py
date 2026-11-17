@@ -29,7 +29,7 @@ SOLL = f"{CLIMATE}::temperature"
 
 class Aufbau:
     def __init__(self, tmp_path: Path, soll=SOLL, room_actual="sensor.raum", ha=None, stand=None, push_stand=None,
-                 anlagenkreise=None):
+                 anlagenkreise=None, quelle=None, kreis=1):
         self.clock = FakeClock()
         self.worker = RegulationWorker(self.clock)
         self.ha = ha or FakeHa()
@@ -42,7 +42,8 @@ class Aufbau:
             manifest, self.ha, self.worker, self.store, soll, tagestick="12:00", wache_s=300,
             wunsch=lambda v, h, d: self.wuensche.append((v, h, d)) or min(max(v, 15.0), 25.0),
             soll_quelle_aus=lambda aus, wirksam: self.aus.append((aus, wirksam)),
-            integration_stand=stand, push_stand=push_stand, anlagenkreise=anlagenkreise, uhr=self.clock)
+            integration_stand=stand, push_stand=push_stand, anlagenkreise=anlagenkreise, uhr=self.clock, quelle=quelle,
+            kreis=kreis)
         self.fire = self.client._on_trigger_event
 
     def run(self):
@@ -853,3 +854,213 @@ def test_a_sensor_target_never_owes_an_alignment(tmp_path):
     a.client._on_connected()  # nicht schreibbar: der gezeigte Wert ist eine Eingabe wie bisher
     a.run()
     assert a.ha.writes == [] and a.wuensche == [(21.0, "soll_entity", None)]
+
+
+# --- Schnittstelle der Soll-Quelle: Wahrheitswerte, nie None ---
+
+def test_a_refused_write_to_the_climate_entity_is_false_and_leaves_the_alignment_owed():
+    ha = FakeHa()
+    ha.states.update({SOLL: 21.0})
+    ha.write_error = RuntimeError("HA Core startet")
+    quelle = geraet_trigger.HaSollQuelle(ha, SOLL)
+    assert quelle.schreiben(22.0) is False
+    assert quelle.angleichen_offen is True and ha.writes == []
+
+
+def test_the_source_is_off_only_for_a_climate_entity_showing_off():
+    ha = FakeHa()
+    ha.states.update({CLIMATE: "off", "sensor.s": "off"})
+    assert geraet_trigger.HaSollQuelle(ha, SOLL).aus() is True
+    ha.states[CLIMATE] = "heat"
+    assert geraet_trigger.HaSollQuelle(ha, SOLL).aus() is False
+    assert geraet_trigger.HaSollQuelle(ha, "sensor.s").aus() is False  # kein Climate: nie aus
+
+
+@pytest.mark.parametrize("zustand", ["unavailable", "unknown"])
+def test_an_unreadable_mode_does_not_count_as_off(zustand):
+    ha = FakeHa()
+    ha.states[CLIMATE] = zustand
+    assert geraet_trigger.HaSollQuelle(ha, SOLL).aus() is False
+    ha.states[CLIMATE] = RuntimeError("HA nicht erreichbar")
+    assert geraet_trigger.HaSollQuelle(ha, SOLL).aus() is False
+
+
+# --- Gescheiterte Angleichung: Ende der Schuld ---
+
+def _mit_quelle(tmp_path):
+    ha = FakeHa()
+    quelle = geraet_trigger.HaSollQuelle(ha, SOLL)
+    return Aufbau(tmp_path, ha=ha, quelle=quelle), quelle
+
+
+def test_a_shown_value_at_the_frost_limit_ends_the_owed_alignment_without_a_write(tmp_path):
+    a, quelle = _mit_quelle(tmp_path)
+    _portal_waehrend_ha_down(a)
+    assert quelle.angleichen_offen is True
+    a.ha.write_error = None
+    a.ha.states[SOLL] = 7.0  # genau die Frostschutz-Grenze zaehlt noch als Stellung
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [] and quelle.angleichen_offen is False and a.store.value == 22.5
+
+
+def test_a_shown_value_above_the_frost_limit_is_written_over(tmp_path):
+    a, quelle = _mit_quelle(tmp_path)
+    _portal_waehrend_ha_down(a)
+    a.ha.write_error = None
+    a.ha.states[SOLL] = 7.5
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, 22.5)] and a.store.value == 22.5
+
+
+def test_a_shown_value_equal_to_the_target_ends_the_owed_alignment_without_a_write(tmp_path):
+    a, quelle = _mit_quelle(tmp_path)
+    _portal_waehrend_ha_down(a)
+    a.ha.write_error = None
+    a.ha.states[SOLL] = 22.5  # HA hat den Wert trotz Fehler uebernommen
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [] and quelle.angleichen_offen is False and a.store.value == 22.5
+
+
+def test_without_a_target_entity_the_reconnect_reads_nothing_even_with_a_given_source(tmp_path):
+    ha = FakeHa()
+    quelle = geraet_trigger.HaSollQuelle(ha, SOLL)
+    a = Aufbau(tmp_path, soll=None, ha=ha, quelle=quelle)
+    ha.states[SOLL] = 23.0
+    a.client._on_connected()
+    a.run()
+    assert a.wuensche == [] and a.store.value == 21.0
+
+
+# --- Nachlesen nach dem Echo-Fenster: Frist und Wiederholung ---
+
+def _portal_schreiben(a, wert):
+    a.worker.post(Event(EV_TARGET_INPUT, {"value": wert, "source": "portal"}))
+    a.run()
+
+
+def _lesungen(a):
+    gelesen = []
+    original = a.ha.get_state
+    a.ha.get_state = lambda ref: gelesen.append(ref) or original(ref)
+    return gelesen
+
+
+def test_the_reread_comes_one_second_after_the_echo_window_not_before_or_later(tmp_path):
+    a = Aufbau(tmp_path)
+    _portal_schreiben(a, 22.5)  # Echo-Fenster 60 s
+    gelesen = _lesungen(a)
+    a.clock.advance(10)
+    a.soll_aenderung(22.5)
+    a.run()
+    a.clock.advance(50.5)  # 60,5 s nach dem Schreiben: Fenster vorbei, die Pufferfrist noch nicht
+    a.run()
+    assert gelesen == []
+    a.clock.advance(0.5)  # 61,0 s
+    a.run()
+    assert gelesen == [SOLL]
+
+
+def test_a_report_in_the_last_second_of_the_window_is_still_reread(tmp_path):
+    a = Aufbau(tmp_path)
+    _portal_schreiben(a, 22.5)
+    gelesen = _lesungen(a)
+    a.clock.advance(59.5)
+    a.soll_aenderung(22.5)
+    a.run()
+    a.clock.advance(1.6)
+    a.run()
+    assert gelesen == [SOLL]
+
+
+def test_a_new_own_write_moves_the_reread_behind_its_window_plus_one_second(tmp_path):
+    a = Aufbau(tmp_path)
+    _portal_schreiben(a, 22.5)  # Fenster bis +60
+    gelesen = _lesungen(a)
+    a.clock.advance(1)
+    a.soll_aenderung(22.5)  # Nachlesen geplant fuer +61
+    a.run()
+    a.clock.advance(0.5)
+    _portal_schreiben(a, 23.0)  # neues Fenster bis +61,5
+    a.clock.advance(59.5)  # +61: das geplante Nachlesen ist faellig, das Fenster laeuft noch 0,5 s
+    a.run()
+    assert gelesen == []
+    a.clock.advance(1.4)  # +62,4: Fenster vorbei, aber noch vor der Pufferfrist (+62,5)
+    a.run()
+    assert gelesen == []
+    a.clock.advance(0.1)
+    a.run()
+    assert gelesen == [SOLL]
+
+
+def test_a_second_window_is_reread_again_after_the_first_reread(tmp_path):
+    a = Aufbau(tmp_path)
+    _portal_schreiben(a, 22.5)
+    gelesen = _lesungen(a)
+    a.clock.advance(5)
+    a.soll_aenderung(22.5)
+    a.run()
+    a.clock.advance(61)
+    a.run()
+    assert gelesen == [SOLL]
+    _portal_schreiben(a, 23.0)
+    a.clock.advance(5)
+    a.soll_aenderung(23.0)
+    a.run()
+    a.clock.advance(61)
+    a.run()
+    assert gelesen == [SOLL, SOLL]
+
+
+# --- Meldung ohne Zahl: genau der Rhythmus ---
+
+def test_the_no_number_line_comes_after_a_number_and_exactly_one_hour_and_not_otherwise(tmp_path, monkeypatch, caplog):
+    jetzt = [10000.0]
+    monkeypatch.setattr(geraet_trigger.time, "monotonic", lambda: jetzt[0])
+    a = Aufbau(tmp_path)
+
+    def zeilen():
+        return [r for r in caplog.records if "keinen Zahlenwert" in r.getMessage()]
+
+    with caplog.at_level(logging.INFO, logger="heizungsbruecke.geraet_trigger"):
+        a.soll_aenderung("unavailable")  # die erste Meldung ohne Zahl ist sichtbar
+        assert len(zeilen()) == 1
+        jetzt[0] = 10001.0
+        a.soll_aenderung(22.0)
+        jetzt[0] = 13599.0
+        a.soll_aenderung("unavailable")  # nach einer Zahl, aber 3599 s nach der letzten Zeile
+        assert len(zeilen()) == 1
+        jetzt[0] = 13599.5
+        a.soll_aenderung(22.0)
+        jetzt[0] = 13600.0
+        a.soll_aenderung("unavailable")  # genau 3600 s
+        assert len(zeilen()) == 2
+        jetzt[0] = 13700.0
+        a.soll_aenderung("unavailable")  # ohne Zahl dazwischen und kurz danach
+        assert len(zeilen()) == 2
+        jetzt[0] = 20000.0
+        a.soll_aenderung("unavailable")  # ohne Zahl dazwischen, auch nach Stunden: keine neue Zeile
+        assert len(zeilen()) == 2
+
+
+# --- HVAC-Modus und Kreise ---
+
+def test_a_mode_change_of_the_climate_entity_is_no_local_check(tmp_path):
+    a = Aufbau(tmp_path)
+    a.fire({"platform": "state", "entity_id": CLIMATE, "to_state": {"state": "off"}})
+    a.fire({"platform": "state", "entity_id": CLIMATE, "to_state": {"state": "heat"}})
+    a.run()
+    assert a.checks == [] and a.aus == [(True, 21.0), (False, None)]
+
+
+@pytest.mark.parametrize("kreis,meldet", [(1, True), (2, False)])
+def test_a_wish_for_an_unknown_circuit_is_reported_only_by_the_client_of_the_lowest_circuit(tmp_path, caplog, kreis, meldet):
+    a = Aufbau(tmp_path, anlagenkreise=frozenset({1, 2}), kreis=kreis)
+    with caplog.at_level("WARNING"):
+        a.fire({"platform": "event", "event": {"event_type": "smartheat_wunsch",
+                                               "data": {"raum_soll": 22.0, "kreis": 3}, "context": {}}})
+    a.run()
+    assert ("unbekanntem Kreis" in caplog.text) is meldet
+    assert a.wuensche == [] and a.store.value == 21.0
