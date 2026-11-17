@@ -402,3 +402,9 @@ def test_the_parameters_are_compared_in_a_stable_text_whatever_their_characters(
     assert a == rastung.ziele(_gw_bindung(treiber="vicäre")) and a != rastung.ziele(_gw_bindung(treiber="vicare"))
     assert rastung.ziele({"treiber": {"id": "x", "parameter": {"ä": "ö", "a": 1}}, "thermostat": None}) \
         == rastung.ziele({"treiber": {"id": "x", "parameter": {"a": 1, "ä": "ö"}}, "thermostat": None})
+
+
+def test_non_ascii_parameters_are_stored_as_readable_text_not_as_escapes():
+    """Das Ziel ist der JSON-Text der Parameter mit den Zeichen selbst; eine einmal gerastete Datei bleibt so lesbar."""
+    ziele = rastung.ziele({"treiber": {"id": "x", "parameter": {"ä": "ö"}}, "thermostat": None})
+    assert 'parameter={"ä": "ö"}' in ziele
