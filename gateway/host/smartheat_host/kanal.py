@@ -9,7 +9,6 @@ Erreichbarkeit fuer die Gesundheitspruefung: TCP-Verbindung zum Broker aus data/
 unabhaengig vom neuen Bundle). Standardbibliothek; smartheat_device ist auf dem Host nicht installiert, die Dateinamen
 haelt test_kanal gleich."""
 import contextlib
-import json
 import os
 import socket
 import stat
@@ -18,7 +17,7 @@ from pathlib import Path
 
 from smartheat_core import dateien
 
-from smartheat_host.lesen import read_bytes, read_json
+from smartheat_host.lesen import parse_json, read_bytes, read_json
 
 SOLL_FILE = "software_soll.json"
 MELDUNGEN_FILE = "software_meldungen.json"
@@ -47,7 +46,7 @@ class LokalerKanal:
 
     def desired(self) -> dict:
         try:
-            raw = json.loads(read_bytes(self._data / SOLL_FILE))  # begrenzt, ohne Symlink, nie an einer FIFO haengend
+            raw = parse_json(read_bytes(self._data / SOLL_FILE))  #begrenzt, ohne Symlink, nie an einer FIFO haengend
         except FileNotFoundError:
             raise KanalFehler("Soll-Software noch nicht bekannt (Laufzeit hat keine Konfiguration geschrieben)") from None
         except (OSError, ValueError) as error:
@@ -62,7 +61,7 @@ class LokalerKanal:
         """Einstellung des Kunden zu Updates (funktion, sicherheit); None: keine bekannt, also keine Einschraenkung.
         Eine unlesbare oder unsinnige Datei ist vorlaeufig (KanalFehler): der Updater installiert dann nichts."""
         try:
-            raw = json.loads(read_bytes(self._data / UPDATES_FILE))
+            raw = parse_json(read_bytes(self._data / UPDATES_FILE))
         except FileNotFoundError:
             return None  # die Laufzeit hat noch keine Konfiguration mit Einstellung geschrieben
         except (OSError, ValueError) as error:
