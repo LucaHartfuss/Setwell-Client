@@ -14,6 +14,7 @@ from smartheat_runtime.soll_eingang import (
     EV_TARGET_INPUT,
     SOLL_ENDE_WIEDERHOLUNG_S,
     SollEingang,
+    ende_schreiben,
 )
 from smartheat_runtime.soll_speicher import SOURCE_LOKAL, SOURCE_PORTAL, SOURCE_THERMOSTAT, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
@@ -523,3 +524,95 @@ def test_ende_der_regelung_holt_den_offenen_wunsch_nach_dem_entprellen_nach(tmp_
     a.clock.advance(30)
     a.worker.run_pending()
     assert len(erledigt) == 1 and a.store.value == 23.0 and a.quelle.geschrieben == []
+
+
+# --- Soll-Ende: Rueckgabe von ende_schreiben und Wiederholung ----------------------------------------------------
+
+def test_ende_schreiben_meldet_erledigt_bei_aus_und_nicht_erledigt_bei_unbekannter_anzeige_oder_fehlschlag():
+    aus = Quelle()
+    aus.aus = lambda: True
+    assert ende_schreiben(21.0, aus) is True
+    assert aus.geschrieben == []
+
+    unbekannt = Quelle(wert=None)
+    assert ende_schreiben(21.0, unbekannt) is False
+    assert unbekannt.geschrieben == []
+
+    gescheitert = Quelle(schreibbar=False, wert=17.5)
+    assert ende_schreiben(21.0, gescheitert) is False
+
+    geschrieben = []
+    assert ende_schreiben(21.0, Quelle(wert=17.5), geschrieben=geschrieben.append) is True
+    assert geschrieben == [17.5]
+
+
+def test_das_soll_ende_wird_nach_sechzig_sekunden_wiederholt_und_nicht_frueher(tmp_path):
+    a = Aufbau(tmp_path)
+    a.quelle.wert = None
+    _ende(a)
+    a.quelle.wert = 17.5
+
+    a.clock.advance(59.9)
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == []
+
+    a.clock.advance(0.1)
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0]
+
+
+def test_ein_wiederholtes_soll_ende_das_wieder_scheitert_wird_erneut_geplant(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = None
+    _ende(a)
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+    assert erledigt == []
+
+    a.quelle.wert = 17.5
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0] and len(erledigt) == 1
+
+
+def test_mehrere_gescheiterte_soll_enden_planen_eine_einzige_wiederholung(tmp_path):
+    a = Aufbau(tmp_path, schreibbar=False)
+    a.quelle.wert = 17.5
+    versuche = []
+    echte = a.quelle.schreiben
+    a.quelle.schreiben = lambda wert: versuche.append(wert) or echte(wert)
+    _ende(a)
+    _ende(a)
+    assert len(versuche) == 2
+
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+
+    assert len(versuche) == 3
+
+
+def test_ein_gescheitertes_soll_ende_gilt_bei_soll_quelle_aus_erst_mit_seiner_wiederholung_als_erledigt(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = None
+    _ende(a)
+    a.worker.post(Event(EV_SOLL_MODUS, {"mode": "off"}))
+    a.worker.run_pending()
+    assert erledigt == []
+
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+    assert len(erledigt) == 1
+
+
+def test_ein_erledigtes_soll_ende_wird_durch_spaetere_wuensche_nicht_wiederholt(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = 21.0
+    _ende(a)
+    assert len(erledigt) == 1
+
+    a.post(22.5, SOURCE_THERMOSTAT, herkunft="soll_entity")
+
+    assert len(erledigt) == 1

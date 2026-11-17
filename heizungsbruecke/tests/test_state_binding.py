@@ -176,3 +176,17 @@ def test_uebernahme_mit_neuer_einrichtung_bei_schreibfehler_ohne_uebernahmezeile
         bind_to_tenant(store, "s2", KREIS, frueher=FRUEHER)
     assert "Anlagen-Kennung aus dem Heizkreis übernommen" not in caplog.text
     assert load_backup(tmp_path / "backup.json")["plant_id"] == FRUEHER
+
+
+def test_neue_einrichtung_derselben_anlage_meldet_keine_uebernahme(tmp_path, caplog):
+    store = _store(tmp_path, {**OLD, "tenant_id": "s1", "plant_id": "anlage-a"})
+    with caplog.at_level(logging.INFO, logger="smartheat_runtime.state"):
+        assert bind_to_tenant(store, "s2", "anlage-a") == "neue_einrichtung"
+    assert "Anlagen-Kennung aus dem Heizkreis übernommen" not in caplog.text
+
+
+def test_uebernahme_mit_neuer_einrichtung_meldet_die_uebernahme_einmal(tmp_path, caplog):
+    store = _store(tmp_path, BESTAND_1_1_0)
+    with caplog.at_level(logging.INFO, logger="smartheat_runtime.state"):
+        assert bind_to_tenant(store, "s2", KREIS, frueher=FRUEHER) == "neue_einrichtung"
+    assert caplog.text.count("Anlagen-Kennung aus dem Heizkreis übernommen") == 1
