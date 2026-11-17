@@ -5,7 +5,7 @@ import contextlib
 import dataclasses
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -931,3 +931,39 @@ def test_nach_dem_ende_ist_die_monotone_marke_weg_und_ein_neuer_lauf_setzt_sie_n
     _lauf(rt, 3 * STUNDE + 5 * MINUTE)
 
     assert _lauft(rt) and rt.kaelteschutz_mono_start is not None and rt.kaelteschutz_mono_start > erste
+
+
+def test_ohne_referenzraeume_wird_ein_weiterer_raum_neben_dem_kreissensor_gelesen(make_store, wall, uhr):
+    rt = _neu(make_store, wall, uhr, {1: 3.0}, referenz=())  # der Kreissensor (21 Grad) ist warm, Raum 1 in Frostnaehe
+    _pruefen(rt)
+
+    _lauf(rt, 15 * MINUTE)
+
+    assert _lauft(rt) and rt.store.state.kaelteschutz_art == "frost"
+
+
+@pytest.mark.parametrize("merker", [{"kaelteschutz_art": "soll"}, {"kaelteschutz_seit": "2026-10-03T11:00:00+02:00"}])
+def test_ein_halber_laufmerker_gilt_nicht_als_lauf_und_wird_still_geloescht(make_store, wall, uhr, caplog, merker):
+    rt = _neu(make_store, wall, uhr, {1: 21.0})
+    rt.store.update(**merker)
+
+    with caplog.at_level(logging.INFO):
+        _pruefen(rt)
+
+    assert rt.store.state.kaelteschutz_art is None and rt.store.state.kaelteschutz_seit is None
+    assert "Kaelteschutz endet" not in caplog.text and _writes(rt) == []
+
+
+def test_ein_abgelehnter_start_laesst_die_laufmerker_unberuehrt(make_store, wall, uhr):
+    rt = _neu(make_store, wall, uhr, {1: 4.0},
+              backup={"write_budget": {write_budget.EMERGENCY_START: {"day": DAY, "count": 6}}})
+    rt.store.update(
+        kaelteschutz_art="frost",
+        kaelteschutz_zaehlung=KaelteschutzZustand(
+            None, None, None, ((1, wallclock.now() - timedelta(minutes=20)),), wallclock.now() - timedelta(minutes=1)),
+    )
+
+    _pruefen(rt)
+
+    assert not _lauft(rt) and _writes(rt) == [] and _starts(rt) == 6
+    assert rt.store.state.kaelteschutz_art == "frost"
