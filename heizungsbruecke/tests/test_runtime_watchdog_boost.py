@@ -7,6 +7,8 @@ from test_runtime import _regulation_writes, _start_in_notbetrieb_with_emergency
 from test_runtime_kaelteschutz import STUNDE, wall  # noqa: F401 - Fixture
 from test_runtime_watchdog_kaelteschutz import TAKT, _takte
 
+from smartheat_runtime.runtime import EV_LOCAL_CHECK
+
 COMFORT_BOOST_WERTE = [("number.curve_current", 1.5), ("number.shift_current", 25.0)]
 NORMALZUSTAND = [("number.curve_current", 0.9), ("number.shift_current", 22.0), ("number.heat_limit", 16.0)]
 
@@ -59,6 +61,25 @@ def test_der_notfall_boost_des_notbetriebs_haelt_bis_zur_ankunft_und_endet_mit_d
     _trigger(env, bridge, "sensor.room_actual")
 
     assert not bridge.store.state.emergency_boost_active
+
+
+def test_der_watchdog_stellt_bei_verbundenem_trigger_und_aktivem_notfall_boost_einen_check_ein(env, wall):  # noqa: F811
+    """Auch ohne Kaelteschutz-Uhr und ohne Comfort-Boost treibt der Notfall-Boost den Takt: der Watchdog stellt dann einen
+    lokalen Check ohne frisch gelesenes Soll ein (`room_target_fired` False), damit der Boost seine Auswertung bekommt."""
+    bridge = _start_in_notbetrieb_with_emergency_boost(env)
+    state = bridge.store.state
+    assert state.emergency_boost_active and not state.boost_active
+    assert state.kaelteschutz_art is None and state.kaelteschutz_zaehlung.soll_seit is None  # Kaelteschutz-Uhr aus
+    assert not state.kaelteschutz_zaehlung.frost_seit
+    assert env.trigger_clients[-1].connected
+    eingestellt = []
+    original = bridge.worker.post_coalesced
+    bridge.worker.post_coalesced = lambda kind, **flags: (eingestellt.append((kind, flags)), original(kind, **flags))[1]
+
+    _takte(env, bridge, wall, 1)
+
+    assert (EV_LOCAL_CHECK, {"room_target_fired": False}) in eingestellt
+    assert all(flags == {"room_target_fired": False} for kind, flags in eingestellt if kind == EV_LOCAL_CHECK)
 
 
 def test_ohne_boost_und_ohne_kaelteschutz_loest_der_watchdog_bei_verbundenem_trigger_keinen_check_aus(env, wall):  # noqa: F811
