@@ -72,7 +72,7 @@ def new_claim_code(randbytes: Callable[[int], bytes] = secrets.token_bytes) -> s
     return base64.b32encode(randbytes(_CODE_BYTES)).decode()
 
 
-def _code_gueltig(code: str) -> bool:
+def code_gueltig(code: str) -> bool:
     return len(code) == wire.CLAIM_CODE_CHARS and set(code) <= _CODE_ALPHABET
 
 
@@ -82,9 +82,10 @@ def load_or_create(device_dir: Path, randbytes: Callable[[int], bytes] = secrets
     code_path = device_dir / CLAIM_CODE_FILE
     try:
         code = code_path.read_text().strip()
-        if not _code_gueltig(code):
-            logger.warning("Uebernahme-Code hat nicht die vorgesehene Form (aelterer Stand); er wird neu erzeugt")
-            raise FileNotFoundError(code_path.name)
+        if not code_gueltig(code):
+            # Behalten: der Server kennt nur den Hash dieses Codes. Das Geraet meldet einen neuen Code erst beim
+            # Server und speichert ihn nach der Annahme (Device), nie vorher.
+            logger.warning("Uebernahme-Code hat nicht die vorgesehene Form (aelterer Stand); er wird beim Server erneuert")
     except FileNotFoundError:
         code = new_claim_code(randbytes)
         dateien.schreiben_text(code_path, code, modus=dateien.PRIVAT)

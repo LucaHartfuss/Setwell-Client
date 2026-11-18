@@ -11,8 +11,10 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
   weiter. Ohne Schlüssel in der Datei (Platzhalter) lehnt es jede Antwort ab; der Release-Weg verlangt dort die
   öffentlichen Schlüssel.
 
-- Der Übernahme-Code hat 16 Zeichen (80 Bit) statt 12; eine vorhandene Datei mit dem alten Code wird beim Start durch
-  einen neuen ersetzt. Am Host `ha` gilt der Code weiter ohne Frist.
+- Der Übernahme-Code hat 16 Zeichen (80 Bit) statt 12. Ein alter Code bleibt, bis das Gerät den neuen beim Server
+  gemeldet hat; erst nach dessen Annahme wird er gespeichert (ein noch nicht übernommenes Gerät bleibt so übernehmbar,
+  ein nicht erreichbarer Server wird mit wachsender Pause erneut gefragt, ein übernommenes Gerät meldet nichts). Ein noch
+  nie angemeldetes Gerät meldet gleich den neuen Code. Am Host `ha` gilt der Code weiter ohne Frist.
 
 - Die Datei `bootstrap.json` kann zusätzlich den Hinweis auf das übernehmende Konto (`konto_hinweis`, maskierte Adresse)
   tragen, den der Server bei der Übernahme mitgibt; ältere Dateien ohne dieses Feld bleiben gültig.

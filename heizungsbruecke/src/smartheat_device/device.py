@@ -145,6 +145,8 @@ class Device:
         self._client_stand: int | None = None  # client_nr des Links im letzten Takt
         self._hello_offen = False  # verbunden, hello noch nicht gesendet (Takt versucht es erneut)
         self._rettung = False
+        self._code_frei_ab = 0.0  # fruehestens dann meldet _code_erneuern wieder (Takt-Uhr)
+        self._code_fehler = 0
         self._kanaele: dict[int, RuntimeChannel] = {}  # je Kreis ein Kanal ueber denselben Link
         self._eigene: dict[str, meldungen.Meldung] = {}  # eigene Meldungen des Geraets: key -> Meldung
         self._meldungen: dict[str, dict] = {}  # offene Meldungen (Geraet und Laufzeit)
@@ -372,6 +374,7 @@ class Device:
             self._link_aufbauen()
         link = self.link
         if link is not None:
+            self._code_erneuern()
             link.port_wechseln_falls_noetig()
             self._client_pruefen(link)
             if link.connected:
@@ -407,6 +410,9 @@ class Device:
         if zugang is None:
             if not self._bootstrap.faellig():
                 return
+            if not identity.code_gueltig(self.identity.claim_code):
+                # nie registriert: der Server kennt keinen Hash, die erste Anmeldung meldet gleich den neuen Code
+                self.identity = identity.save_claim_code(self._dir, self.identity, identity.new_claim_code())
             faehigkeiten, gescheitert = self._host_wert("faehigkeiten", self.host.faehigkeiten)
             if gescheitert:
                 return  # Registrierung verschieben, der naechste Takt versucht es erneut (ohne Backoff)
@@ -414,6 +420,27 @@ class Device:
             if zugang is None:
                 return
         self._link_starten(zugang)
+
+    def _code_erneuern(self) -> None:
+        """Ein Code alter Form ist beim Server nur als Hash bekannt; ein registriertes, nicht uebernommenes Geraet
+        meldet den neuen Code ueber register (neuer_uebernahme_code). Eigene Pause, damit ein erreichbarer Server den
+        Bootstrap-Backoff nicht berührt und ein ausfallender nicht jeden Takt gefragt wird."""
+        if identity.code_gueltig(self.identity.claim_code) or self._clock() < self._code_frei_ab:
+            return
+        if bootstrap.device_state(self._dir) == "uebernommen":  # braucht den Code nicht
+            self._code_frei_ab = self._clock() + bootstrap.RETRY_MAX_SECONDS
+            return
+        try:
+            ergebnis = self.neuer_uebernahme_code()
+        except Exception as error:  # z. B. Faehigkeiten ausserhalb des Vertrags: nur Art und Ort, nie der Text
+            logger.error("Neuer Uebernahme-Code nicht gemeldet (%s)%s", type(error).__name__, commands.fehlerort(error))
+            ergebnis = "keine_verbindung"
+        if ergebnis == "keine_verbindung":
+            self._code_fehler += 1
+            self._code_frei_ab = self._clock() + min(
+                bootstrap.RETRY_MAX_SECONDS, bootstrap.RETRY_MIN_SECONDS * 2 ** min(self._code_fehler - 1, 5))
+        else:
+            self._code_fehler = 0
 
     def _link_starten(self, zugang: bootstrap.Zugang) -> None:
         link = self._link_factory(self.identity.device_id, zugang, identity.tls_key_pem(self.identity), self._ereignis)
