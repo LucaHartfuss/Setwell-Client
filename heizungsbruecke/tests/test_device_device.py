@@ -903,6 +903,22 @@ def test_die_antwort_uebernommen_beendet_das_melden_ohne_den_code_zu_speichern(t
     assert world.device.identity.claim_code == ALTER_CODE
 
 
+def test_ein_gesperrtes_geraet_fragt_den_server_nicht_in_jedem_takt(tmp_path):
+    """Antwortet der Server mit einem Stand ausser nicht_uebernommen und uebernommen (gesperrt), bleibt der alte Code
+    und das Geraet fragt erst nach der langen Pause wieder, nicht in jedem Takt."""
+    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+    world.client.script["register"] = [bootstrap.Antwort("gesperrt", world.zugang),
+                                       bootstrap.Antwort("gesperrt", world.zugang)]
+    for _ in range(5):
+        world.device.schritt()
+        world.clock.now += bootstrap.RETRY_MIN_SECONDS
+    assert len(world.client.calls) == 1
+    assert world.device.identity.claim_code == ALTER_CODE
+    world.clock.now += bootstrap.RETRY_MAX_SECONDS
+    world.device.schritt()
+    assert len(world.client.calls) == 2
+
+
 def test_ein_geraet_ohne_zugang_und_mit_altem_code_registriert_sich_gleich_mit_einem_neuen(tmp_path):
     world = _welt_mit_altem_code(tmp_path, access=False)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]

@@ -439,8 +439,10 @@ class Device:
             self._code_fehler += 1
             self._code_frei_ab = self._clock() + min(
                 bootstrap.RETRY_MAX_SECONDS, bootstrap.RETRY_MIN_SECONDS * 2 ** min(self._code_fehler - 1, 5))
-        else:
-            self._code_fehler = 0
+            return
+        self._code_fehler = 0
+        if ergebnis != "neu":  # uebernommen oder gesperrt: der Code bleibt alt, also nicht jeden Takt neu fragen
+            self._code_frei_ab = self._clock() + bootstrap.RETRY_MAX_SECONDS
 
     def _link_starten(self, zugang: bootstrap.Zugang) -> None:
         link = self._link_factory(self.identity.device_id, zugang, identity.tls_key_pem(self.identity), self._ereignis)
