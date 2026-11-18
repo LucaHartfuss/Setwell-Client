@@ -1,18 +1,18 @@
-"""Start, Startfehler und Start-Hilfen des HA-Hosts im Geraete-Pfad (bis 0.36 ueber __main__._start_bridge mit
-options.json): Konfigurationsfehler mit Ruhezustand, Neupruefung und Meldezustand, Warten auf HA, Budget fuer fehlende
+"""Start, Startfehler und Start-Hilfen des HA-Hosts im Geraete-Pfad: Konfigurationsfehler mit Ruhezustand, Neupruefung und Meldezustand, Warten auf HA, Budget fuer fehlende
 Entities und Hilfssensoren, Zeitzone. Die hostneutralen Handler der Laufzeit (Telemetrie, _prime, Verbindungswaechter)
 stehen mit der echten Laufzeit in test_runtime.py, der Einstieg main() in test_main_geraet.py."""
+import json
 import logging
 from unittest.mock import MagicMock, call
 
 import pytest
 import requests
 from geraet_helpers import konfiguration_aus_optionen
-from test_runtime import _start_bridge, env  # noqa: F401  (Fixture)
+from runtime_helpers import _start_bridge
 
 from heizungsbruecke import config, dokument
 from heizungsbruecke.ha_api import HomeAssistantApi
-from heizungsbruecke.helper_templates import outdoor_temperature_template, room_temperature_template
+from heizungsbruecke.helper_templates import room_temperature_template
 from heizungsbruecke.host import (
     DERIVED_SENSORS_RETRY_DELAYS_SECONDS,
     StartupError,
@@ -21,6 +21,7 @@ from heizungsbruecke.host import (
     _retry_with_budget,
     _wait_for_required_entities,
 )
+from smartheat_runtime.dokument_config import ConfigError
 
 #: Ungueltiger Tagestick im Konfigurationsdokument: ein Konfigurationsfehler beim Start. (Die Grenzen der Intervalle
 #: prueft nur noch config_check beim Annehmen des Dokuments, nicht mehr der Host.)
@@ -82,13 +83,14 @@ def test_verteilsystem_without_safety_values_is_a_configuration_error(env, caplo
 
 def test_der_grund_eines_konfigurationsfehlers_steht_auf_einer_logzeile(env, caplog, sleeps):
     """Sicherheitscheck zu a9756e8: der Grund traegt Text der Konfiguration (beim Gateway vom Server). Steuerzeichen
-    darin taeuschen keine eigene Logzeile vor: FEHLER-Zeile und Meldung schreiben sie als Escape."""
+    darin taeuschen keine eigene Logzeile vor: die FEHLER-Zeile schreibt sie als Escape; die Meldung nennt im Log
+    nur ihren Code."""
     with caplog.at_level(logging.INFO):
         result = _start_bridge(env, verteilsystem="Decke\r\nERROR    gefaelscht\x1b[31m")
 
     assert result.reason == "konfigurationsfehler"
     zeilen = [r.getMessage() for r in caplog.records if "Decke" in r.getMessage()]
-    assert len(zeilen) >= 2  # FEHLER-Zeile der Laufzeit und Logzeile der Meldung
+    assert len(zeilen) >= 1  # FEHLER-Zeile der Laufzeit
     assert any(zeile.startswith("FEHLER: ") for zeile in zeilen)
     for zeile in zeilen:
         assert "Decke\\r\\nERROR    gefaelscht\\x1b[31m" in zeile
@@ -96,7 +98,7 @@ def test_der_grund_eines_konfigurationsfehlers_steht_auf_einer_logzeile(env, cap
 
 
 def test_alte_konfiguration_ohne_parameter_startet_nicht(env, caplog, sleeps):
-    """Review Focus 1 (Spec Stufe 3 S4b 4.3): gespeicherte Konfiguration aus 1.0.0 ohne bindungsparameter:
+    """Gespeicherte Konfiguration aus 1.0.0 ohne bindungsparameter:
     Konfigurationsfehler statt Absturz, nichts wird geschrieben."""
     with caplog.at_level(logging.ERROR):
         result = _start_bridge(env, bindungsparameter=None)
@@ -115,8 +117,8 @@ def test_invalid_daily_trigger_time_is_a_configuration_error(env, caplog, sleeps
 
 
 def test_configuration_error_idles_with_heartbeat_and_rechecks_without_second_push(env, sleeps):
-    """Review Focus 1: kein Exit (Watchdog-Karussell), Lebenszeichen, nach 900 s Neupruefung per Neustart des Hosts
-    (Rueckruf neustart, Spec Stufe 3 S6 4.2), derselbe Fehler meldet nicht erneut. Bis 0.36 ausgeloest von veralteten
+    """Kein Exit (Watchdog-Karussell), Lebenszeichen, nach 900 s Neupruefung per Neustart des Hosts
+    (Rueckruf neustart), derselbe Fehler meldet nicht erneut. Bis 0.36 ausgeloest von veralteten
     Optionen, jetzt von einem ungueltigen Dokument."""
     neustarts = []
 
@@ -149,7 +151,7 @@ def test_repeated_start_error_does_not_push_again(env, sleeps):
 
 
 def test_repeated_helper_failure_with_changing_error_text_does_not_push_again(env, monkeypatch, sleeps):
-    """Review Focus 4: HA vergibt je Lauf eine neue Flow-ID; der Meldezustand darf daran nicht
+    """HA vergibt je Lauf eine neue Flow-ID; der Meldezustand darf daran nicht
     haengen, sonst meldet jeder Neustart erneut."""
     run = {"flow_id": ""}
 
@@ -172,8 +174,8 @@ def test_repeated_helper_failure_with_changing_error_text_does_not_push_again(en
     assert len(persistent) == 2
     assert "9f8e7d6c" in persistent[-1][1]
     grund = _status_events(env)[-1]["grund"]
-    assert "Hilfs-Entities konnten nicht angelegt werden" in grund
-    assert "9f8e7d6c" in grund  # der Status zeigt den aktuellen Fehler im Detail
+    assert grund == {"code": "status.grund_start_fehlgeschlagen", "params": {}}  # der Status nennt keinen Fehlertext
+    assert "9f8e7d6c" not in json.dumps(_status_events(env)[-1])
 
 
 def test_repeated_missing_entity_does_not_push_again(env, sleeps):
@@ -183,7 +185,8 @@ def test_repeated_missing_entity_does_not_push_again(env, sleeps):
     assert _start_bridge(env).reason == "konfigurationsfehler"
 
     assert len(env.ha.pushes) == 1
-    assert "Entity fehlt in Home Assistant: number.heat_limit" in _status_events(env)[-1]["grund"]
+    assert _status_events(env)[-1]["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
+    assert "number.heat_limit" not in json.dumps(_status_events(env)[-1])
 
 
 def test_start_waits_for_ha_before_reporting(env, sleeps):
@@ -217,7 +220,7 @@ def test_retry_with_budget_raises_startup_error_after_budget_when_ha_is_reachabl
 
 
 def test_unreachable_ha_never_becomes_a_start_error(sleeps):
-    """Review Focus 3: solange HA nicht antwortet (hier 30 Pruefungen lang, weit ueber dem
+    """Solange HA nicht antwortet (hier 30 Pruefungen lang, weit ueber dem
     Budget von 7 Versuchen), zaehlt das Budget nicht."""
     ha = {"down_checks": 30}
 
@@ -335,9 +338,21 @@ def test_helper_creation_failure_after_budget_is_a_start_error(monkeypatch, slee
         _ensure_derived_sensors_with_retry(_reachable(), _DERIVED_BINDUNG, "t1")
 
 
+def test_an_unsafe_plant_id_fails_the_start_at_once_without_retries(monkeypatch, sleeps):
+    """Ein Urteil ueber die Anlagen-ID wird nicht wiederholt: ConfigError, keine Wartezeit, nichts angelegt."""
+    ha_api = _reachable()
+
+    with pytest.raises(ConfigError):
+        _ensure_derived_sensors_with_retry(ha_api, _DERIVED_BINDUNG, "x{{ 1 }}")
+
+    ha_api.create_template_sensor.assert_not_called()
+    assert not sleeps
+
+
 def test_ensure_derived_sensors_with_retry_recovers_after_transient_failures(monkeypatch, sleeps, tmp_path):
     """Die echten Hilfssensoren (derived_sensors.ensure_all) an einer HA-Grenze, die zweimal nicht erreichbar ist: nach
-    5 und 10 s Pause legt der dritte Versuch Raum- und Aussen-Vorlage aus Raumfuehler, Wetter-Entity und Anlage an."""
+    5 und 10 s Pause legt der dritte Versuch die Raum-Vorlage aus Raumfuehler und Anlage an; fuer die Aussentemperatur
+    entsteht keine Hilfs-Entity."""
     monkeypatch.setattr(config, "DERIVED_SENSORS_PATH", tmp_path / "derived_sensors.json")
     ha_api = MagicMock(spec=HomeAssistantApi)
     ha_api.is_reachable.return_value = True
@@ -347,19 +362,19 @@ def test_ensure_derived_sensors_with_retry_recovers_after_transient_failures(mon
     def _create(name, template):
         if fehlversuche:
             raise fehlversuche.pop()
-        return "sensor.smartheat_t1_aussentemperatur" if "Außentemperatur" in name else "sensor.smartheat_t1_raumtemperatur"
+        return "sensor.smartheat_t1_raumtemperatur"
 
     ha_api.create_template_sensor.side_effect = _create
-    bindung = _bindung(room_sensors=["sensor.rt"], entity_outdoor_temp="weather.home")
+    bindung = _bindung(room_sensors=["sensor.rt"], entity_outdoor_temp="sensor.aussen")
 
     result = _ensure_derived_sensors_with_retry(ha_api, bindung, "t1")
 
-    assert result.entity_ids == {"room_actual": "sensor.smartheat_t1_raumtemperatur",
-                                 "outdoor_temp": "sensor.smartheat_t1_aussentemperatur"}
+    assert result.entity_ids == {"room_actual": "sensor.smartheat_t1_raumtemperatur"}
     assert sleeps == [5, 10]
-    assert ha_api.create_template_sensor.call_args_list[-2:] == [  # Wirkung als Aufruf an der HA-Grenze
+    # Wirkung als Aufrufe an der HA-Grenze: die Vorlage des Kreises und die des einen Raums, je aus dem Raumfuehler
+    assert ha_api.create_template_sensor.call_args_list[-2:] == [
         call(name="SmartHeat t1 Raumtemperatur", template=room_temperature_template(["sensor.rt"])),
-        call(name="SmartHeat t1 Außentemperatur", template=outdoor_temperature_template("weather.home")),
+        call(name="SmartHeat t1 K1 R1 Raumtemperatur", template=room_temperature_template(["sensor.rt"])),
     ]
 
 

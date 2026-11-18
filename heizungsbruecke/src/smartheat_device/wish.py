@@ -1,8 +1,8 @@
-"""Bedienwunsch (Spec 5b 3.2/3.3): ein lokal gestellter Sollwert wirkt sofort lokal (der Host wendet den begrenzten Wert
+"""Bedienwunsch: ein lokal gestellter Sollwert wirkt sofort lokal (der Host wendet den begrenzten Wert
 an, Boost wie heute). Das Geraet begrenzt ihn auf den Bedienbereich 15-25 °C und rundet kaufmaennisch auf 0,5 K (keine
-Sicherheitsgrenze, Spec 3.2), schickt ihn als up/wish mit der Version der Bedienung, auf der es steht (basis_version),
-und puffert ohne Verbindung nur den juengsten (<daten>/device/wunsch.json). Erledigt ist er mit dem PUBACK des Brokers;
-eine Trennung vorher schickt ihn nach dem naechsten hello erneut. Danach entscheidet der Server (Spec 3.3) und schickt
+Sicherheitsgrenze), schickt ihn als up/wish mit der Version der Bedienung, auf der es steht (basis_version),
+und puffert ohne Verbindung je Kreis nur den juengsten (<daten>/device/wunsch-<kreis>.json). Erledigt ist er mit dem
+PUBACK des Brokers; eine Trennung vorher schickt ihn nach dem naechsten hello erneut. Danach entscheidet der Server und schickt
 die Bedienung zurueck, falls der Wunsch verliert."""
 import math
 import time
@@ -12,27 +12,24 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from smartheat_core import dateien
+from smartheat_core import dateien, meldungen
+from smartheat_core.meldungen import Meldung
+from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_device import nachrichten, wire
 
-WUNSCH_FILE = "wunsch.json"
+WUNSCH_MUSTER = "wunsch-*.json"
 #: Nach einem PUBACK mit Fehlercode (typisch Drosselung, 0x97) geht der Wunsch fruehestens nach dieser Zeit erneut
 #: hinaus (monotone Uhr); ein neuer Wunsch und ein Verbindungsverlust heben die Sperre auf.
 WUNSCH_NACH_ABLEHNUNG_SECONDS = 60.0
 BEGRENZT_KEY = "wunsch_begrenzt"
 SOLL_QUELLE_AUS_KEY = "soll_quelle_aus"
-_QUELLE = {"thermostat": "Thermostat", "soll_entity": "Wunschtemperatur", "smartheat_entity": "Wunschtemperatur"}
 
 
 def begrenzen(wert) -> tuple[float, float | None]:
     """(begrenzter Wert, roh) - roh ist der gestellte Wert, wenn Bereich oder Rundung ihn veraendert haben."""
-    if isinstance(wert, bool) or not isinstance(wert, (int, float)):
+    if isinstance(wert, bool) or not isinstance(wert, int | float):
         raise ValueError("Wunsch ist keine Zahl")
-    try:
-        endlich = math.isfinite(wert)
-    except OverflowError:
-        endlich = False
-    if not endlich:
+    if not ist_endliche_zahl(wert):
         raise ValueError("Wunsch ist keine endliche Zahl")
     # erst in den Bereich, dann runden: riesige endliche Werte laufen so nicht in einen Ueberlauf (die Grenzen liegen
     # auf dem Raster, das Ergebnis ist dasselbe wie Runden und dann Begrenzen)
@@ -41,24 +38,27 @@ def begrenzen(wert) -> tuple[float, float | None]:
     return begrenzt, (None if begrenzt == wert else float(wert))
 
 
-def _zahl(value: float) -> str:
-    return f"{value:g}".replace(".", ",")
+def wunsch_datei(kreis: int) -> str:
+    return f"wunsch-{kreis}.json"
 
 
-def begrenzt_text(roh: float, begrenzt: float, herkunft: str | None) -> str:
-    quelle = _QUELLE.get(herkunft or "", "Wunschtemperatur")
-    return f"{quelle} auf {_zahl(roh)} °C gestellt, SmartHeat regelt auf {_zahl(begrenzt)} °C"
+def begrenzt_meldung(roh: float, begrenzt: float, herkunft: str | None) -> Meldung:
+    if herkunft is None:
+        return meldungen.neu("meldung.wunsch_begrenzt", roh=roh, begrenzt=begrenzt)
+    return meldungen.neu("meldung.wunsch_begrenzt", roh=roh, begrenzt=begrenzt, herkunft=herkunft)
 
 
-def soll_quelle_aus_text(wirksam: float | None) -> str:
-    """Ohne wirksames Soll (unbekannt) nennt der Text keinen Wert; die Meldung bleibt trotzdem offen (5b-D1-4)."""
-    regelt = "SmartHeat regelt weiter" if wirksam is None else f"SmartHeat regelt weiter auf {_zahl(wirksam)} °C"
-    return f"Thermostat ist aus, {regelt}; Heizung aus über die Sommersperre bzw. im Portal"
+def soll_quelle_aus_meldung(wirksam: float | None) -> Meldung:
+    """Ohne wirksames Soll (unbekannt) nennt die Meldung keinen Wert; sie bleibt trotzdem offen."""
+    if wirksam is None:
+        return meldungen.neu("meldung.soll_quelle_aus_unbekannt")
+    return meldungen.neu("meldung.soll_quelle_aus", wirksam=wirksam)
 
 
 @dataclass(frozen=True)
 class Wunsch:
     wish_id: str
+    kreis: int
     basis_version: int
     ts: str
     uhr_synchron: bool
@@ -69,7 +69,8 @@ class Wunsch:
 
     def payload(self) -> dict:
         werte = nachrichten.pruefen("wunsch.werte", {"raum_soll": self.raum_soll}, wire.WISH_WERTE)
-        body = {"schema": wire.SCHEMA, "wish_id": self.wish_id, "basis_version": self.basis_version, "ts": self.ts,
+        body = {"schema": wire.SCHEMA, "wish_id": self.wish_id, "kreis": self.kreis,
+                "basis_version": self.basis_version, "ts": self.ts,
                 "uhr_synchron": self.uhr_synchron, "werte": werte}
         for key in wire.WISH_OPTIONAL:
             value = getattr(self, key)
@@ -80,18 +81,25 @@ class Wunsch:
 
 def pruefen_herkunft(herkunft: str | None, durch: str | None) -> None:
     """ValueError, wenn herkunft oder durch kein Vertragswert ist (None = nicht angegeben). Device.wunsch prueft so
-    schon im aufrufenden Thread, wie bei einer nicht endlichen Zahl (5b-D1-4)."""
+    schon im aufrufenden Thread, wie bei einer nicht endlichen Zahl."""
     if herkunft is not None and herkunft not in wire.HERKUNFT:
         raise ValueError("herkunft unbekannt")
     if durch is not None and durch not in wire.DURCH:
         raise ValueError("durch unbekannt")
 
 
-def neu(raum_soll: float, roh: float | None, *, basis_version: int, uhr_synchron: bool, herkunft: str | None,
+def pruefen_kreis(kreis) -> None:
+    """ValueError, wenn kreis keine Kreisnummer ist (ganze Zahl von wire.KREIS_MIN bis KREIS_MAX, kein bool)."""
+    if isinstance(kreis, bool) or not isinstance(kreis, int) or not wire.KREIS_MIN <= kreis <= wire.KREIS_MAX:
+        raise ValueError("kreis ist keine Kreisnummer")
+
+
+def neu(raum_soll: float, roh: float | None, *, kreis: int, basis_version: int, uhr_synchron: bool, herkunft: str | None,
         durch: str | None, wall: float) -> Wunsch:
     pruefen_herkunft(herkunft, durch)
+    pruefen_kreis(kreis)
     ts = datetime.fromtimestamp(wall, UTC).isoformat(timespec="seconds")
-    return Wunsch(uuid.uuid4().hex, basis_version, ts, uhr_synchron, raum_soll, roh, herkunft, durch)
+    return Wunsch(uuid.uuid4().hex, kreis, basis_version, ts, uhr_synchron, raum_soll, roh, herkunft, durch)
 
 
 def _laden(path: Path) -> Wunsch | None:
@@ -102,47 +110,75 @@ def _laden(path: Path) -> Wunsch | None:
         wunsch = Wunsch(**raw)
     except TypeError:
         return None
-    gueltig = (isinstance(wunsch.wish_id, str) and isinstance(wunsch.basis_version, int)
+    gueltig = (isinstance(wunsch.wish_id, str) and isinstance(wunsch.kreis, int) and not isinstance(wunsch.kreis, bool)
+               and wire.KREIS_MIN <= wunsch.kreis <= wire.KREIS_MAX and isinstance(wunsch.basis_version, int)
                and isinstance(wunsch.ts, str) and isinstance(wunsch.uhr_synchron, bool)
                and isinstance(wunsch.raum_soll, int | float))
     return wunsch if gueltig else None
 
 
+class _Platz:
+    """Der Puffer eines Kreises: der Wunsch, die mid seines laufenden Sendens und die Sperre nach einer Ablehnung."""
+
+    def __init__(self, wunsch: Wunsch | None = None) -> None:
+        self.wunsch = wunsch
+        self.mid: int | None = None
+        self.gesperrt_bis: float | None = None  # monotone Uhr, nach einem abgelehnten PUBACK
+
+
 class WunschPuffer:
-    """Juengster ungesendeter Wunsch (persistiert) und die mid seines laufenden Sendens."""
+    """Je Kreis der juengste ungesendete Wunsch (persistiert in wunsch-<kreis>.json) und die mid seines laufenden
+    Sendens. Ein Wunsch eines Kreises ersetzt nie den eines anderen; mids sind je Link eindeutig."""
 
     def __init__(self, device_dir: Path, clock: Callable[[], float] = time.monotonic) -> None:
-        self._path = device_dir / WUNSCH_FILE
+        self._dir = device_dir
         self._clock = clock
-        self.wunsch = _laden(self._path)
-        self._mid: int | None = None
-        self._gesperrt_bis: float | None = None  # monotone Uhr, nach einem abgelehnten PUBACK
+        self._plaetze: dict[int, _Platz] = {}
+        for path in sorted(device_dir.glob(WUNSCH_MUSTER)):
+            wunsch = _laden(path)
+            if wunsch is not None and path.name == wunsch_datei(wunsch.kreis):  # Datei und Inhalt nennen denselben Kreis
+                self._plaetze[wunsch.kreis] = _Platz(wunsch)
 
-    def offen(self) -> bool:
-        """Zu senden: ein Wunsch liegt vor, ist nicht unterwegs und nicht wegen einer Ablehnung gesperrt."""
-        return (self.wunsch is not None and self._mid is None
-                and (self._gesperrt_bis is None or self._clock() >= self._gesperrt_bis))
+    def wunsch(self, kreis: int) -> Wunsch | None:
+        platz = self._plaetze.get(kreis)
+        return platz.wunsch if platz is not None else None
+
+    def kreise(self) -> list[int]:
+        """Die Kreise mit einem gepufferten Wunsch, aufsteigend."""
+        return sorted(kreis for kreis, platz in self._plaetze.items() if platz.wunsch is not None)
+
+    def offen(self, kreis: int) -> bool:
+        """Zu senden: der Kreis hat einen Wunsch, er ist nicht unterwegs und nicht wegen einer Ablehnung gesperrt."""
+        platz = self._plaetze.get(kreis)
+        return (platz is not None and platz.wunsch is not None and platz.mid is None
+                and (platz.gesperrt_bis is None or self._clock() >= platz.gesperrt_bis))
 
     def setzen(self, wunsch: Wunsch) -> None:
-        self.wunsch, self._mid, self._gesperrt_bis = wunsch, None, None
-        dateien.schreiben_json(self._path, asdict(wunsch), modus=dateien.PRIVAT)
+        platz = self._plaetze.setdefault(wunsch.kreis, _Platz())
+        platz.wunsch, platz.mid, platz.gesperrt_bis = wunsch, None, None
+        dateien.schreiben_json(self._dir / wunsch_datei(wunsch.kreis), asdict(wunsch), modus=dateien.PRIVAT)
 
-    def gesendet(self, mid: int | None) -> None:
-        self._mid = mid
+    def gesendet(self, kreis: int, mid: int | None) -> None:
+        platz = self._plaetze.get(kreis)
+        if platz is not None:
+            platz.mid = mid
 
     def bestaetigt(self, mid: int) -> bool:
-        if self.wunsch is None or self._mid is None or mid != self._mid:
-            return False
-        self.wunsch, self._mid = None, None
-        self._path.unlink(missing_ok=True)
-        return True
+        for kreis, platz in self._plaetze.items():
+            if platz.wunsch is not None and platz.mid is not None and platz.mid == mid:
+                platz.wunsch, platz.mid = None, None
+                (self._dir / wunsch_datei(kreis)).unlink(missing_ok=True)
+                return True
+        return False
 
     def abgelehnt(self, mid: int) -> None:
         """Der Broker lehnte die Nachricht ab (PUBACK mit Fehlercode): der Wunsch ist nicht unterwegs, er geht nach
         WUNSCH_NACH_ABLEHNUNG_SECONDS erneut hinaus (Drosselung nicht durch Sekundentakt verschaerfen)."""
-        if self._mid is not None and mid == self._mid:
-            self._mid = None
-            self._gesperrt_bis = self._clock() + WUNSCH_NACH_ABLEHNUNG_SECONDS
+        for platz in self._plaetze.values():
+            if platz.mid is not None and platz.mid == mid:
+                platz.mid = None
+                platz.gesperrt_bis = self._clock() + WUNSCH_NACH_ABLEHNUNG_SECONDS
 
     def verbindung_verloren(self) -> None:
-        self._mid, self._gesperrt_bis = None, None
+        for platz in self._plaetze.values():
+            platz.mid, platz.gesperrt_bis = None, None

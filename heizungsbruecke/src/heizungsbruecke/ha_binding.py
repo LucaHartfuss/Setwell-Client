@@ -1,8 +1,8 @@
-"""HA-Binding der Bruecke (Hersteller-Abstraktion, Plan 2 P2-2): liest und schreibt die Hebel ueber die HA-API.
-Alles mypyllant-Spezifische steht hier (vorher plant.py): die Zonen-Wunschtemperatur ist eine Climate-Entity, die
+"""HA-Binding der Bruecke (Hersteller-Abstraktion): liest und schreibt die Hebel ueber die HA-API.
+Alles mypyllant-Spezifische steht hier: die Zonen-Wunschtemperatur ist eine Climate-Entity, die
 nur im Modus "Manuell" (HA heat_cool, sonst Quick-Veto) wirkt und ueber ihr Attribut `temperature` gelesen wird; sie
 meldet 0, wenn die Zone gerade nicht heizt. Die Hebel haengen an den Manifest-Rollen der unveraenderten
-Rollen des Manifests (P2-3)."""
+Rollen des Manifests."""
 import logging
 import math
 from collections.abc import Mapping, Sequence
@@ -17,7 +17,14 @@ from smartheat_runtime.roles import LEVER_ROLES, ChannelManifest
 logger = logging.getLogger(__name__)
 
 MANUAL_HVAC_MODE = "heat_cool"
-# Darunter ist die Wunschtemperatur kein Sollwert, sondern "Zone inaktiv" (Plan-Praezisierung 11, TP11).
+# Betriebsart der Zone, in der das Zeitprogramm des Reglers gilt; dorthin geht die Zone beim Zurueckstellen.
+ZEITPROGRAMM_HVAC_MODE = "auto"
+# Betriebsarten, die eine Zone-Climate melden darf; nur sie gelten als Ursprungswert (vom Geraet gelesen oder vom Server).
+ZONEN_BETRIEBSARTEN = (ZEITPROGRAMM_HVAC_MODE, MANUAL_HVAC_MODE, "heat", "cool", "off")
+# Hilfs-Ursprungswert, wenn der Sollwert keine Zone-Climate ist (eine number-Entity hat keine Betriebsart): es gibt
+# nichts zurueckzustellen, der Wert ist nie zulaessig und wird nie geschrieben.
+KEINE_BETRIEBSART = "keine_betriebsart"
+# Darunter ist die Wunschtemperatur kein Sollwert, sondern "Zone inaktiv".
 ROOM_SETPOINT_READ_MIN = 5.0
 # Server-Plausibilitaet fuer room_setpoint (messages.PLAUSIBLE_RANGES, Contract-Check (Vertrag V1b)): darueber ist der
 # Wert ein Lesefehler und wird nie gemeldet.
@@ -37,7 +44,7 @@ class HaPlantBinding:
         self._ha_api = ha_api
         self._manifest = manifest
         self.description = description
-        # Plan 3b: erfolgreiche Service-Aufrufe (Schreiben, Vorbereitung, Hilfswerte), siehe PlantBinding.
+        # Erfolgreiche Service-Aufrufe (Schreiben, Vorbereitung, Hilfswerte), siehe PlantBinding.
         self.physical_writes = 0
 
     def has(self, lever: str) -> bool:
@@ -71,7 +78,7 @@ class HaPlantBinding:
         return live if live is not None else fallback
 
     def write(self, lever: str, value: float) -> None:
-        """AU-016: HA ueberspringt eine nicht verfuegbare Entity im Service-Aufruf still (HTTP 200); get_raw_state wirft
+        """HA ueberspringt eine nicht verfuegbare Entity im Service-Aufruf still (HTTP 200); get_raw_state wirft
         bei unavailable/unknown (lokaler HA-Read, kein Cloud-Aufruf)."""
         ref = self.ref(lever)
         entity_id = entity_of(ref)
@@ -83,7 +90,7 @@ class HaPlantBinding:
         self.physical_writes += 1
 
     def limits(self, lever: str) -> tuple[float, float] | None:
-        """Wertebereich der Ziel-Entity (Plan Client2-Bereitschaft): number min/max, climate min_temp/max_temp. None bei
+        """Wertebereich der Ziel-Entity: number min/max, climate min_temp/max_temp. None bei
         nicht zugeordnetem Hebel, fehlendem/nicht lesbarem Attribut oder unbrauchbarem Bereich. Verbindungsfehler zu
         HA werfen (die Pipeline behaelt dann den letzten guten Bereich)."""
         if not self.has(lever):
@@ -123,21 +130,42 @@ class HaPlantBinding:
         return True
 
     def read_aux(self) -> dict[str, str | float]:
-        """Vaillant hat keine Hilfs-Ursprungswerte (description.aux_originals leer)."""
-        return {}
+        """Hilfs-Ursprungswert der Zone (Vaillant): ihre Betriebsart, roh wie HA sie meldet. Wirft, wenn die Zone nicht
+        verfuegbar ist: ohne bekannte Betriebsart darf die Pipeline die Zone nicht umstellen."""
+        if "mode_select" not in self.description.aux_originals:
+            return {}
+        lever = self.description.prepared_lever
+        if lever is None or not self.needs_preparation():
+            return {"mode_select": KEINE_BETRIEBSART}
+        return {"mode_select": self._ha_api.get_raw_state(entity_of(self.ref(lever)))}
 
     def restore_aux(self, values: Mapping[str, str | float], levers: Mapping[str, float] | None = None) -> None:
-        return None
+        """Die Zone zurueck auf das Zeitprogramm, wenn sie davor darauf stand; jeder andere Ursprungswert (Kunde war schon
+        manuell, aus oder anders) wird gemerkt, aber nicht geschrieben: SmartHeat hat nichts anderes umgestellt als auf
+        Manuell. Die Betriebsart wird vorher nicht gelesen: HA zeigt eine eigene Umstellung erst nach dem naechsten
+        Abruf der Hersteller-Cloud, ein veraltetes "auto" liesse die Zone sonst fuer immer auf Manuell. Das Schreiben
+        ist idempotent; der Aufrufer ruft es einmal je Rueckstellung. Ohne Zone-Climate geschieht nichts."""
+        original = values.get("mode_select")
+        lever = self.description.prepared_lever
+        if original is None or original == KEINE_BETRIEBSART or lever is None or not self.needs_preparation():
+            return
+        if original != ZEITPROGRAMM_HVAC_MODE:
+            logger.warning("Betriebsart der Zone war %s: bleibt, wird nicht zurueckgestellt", lesbar(str(original)))
+            return
+        self._ha_api.set_hvac_mode(entity_of(self.ref(lever)), ZEITPROGRAMM_HVAC_MODE)
+        self.physical_writes += 1
+        logger.warning("Betriebsart der Zone auf den Ursprungswert %s (Zeitprogramm) zurueckgestellt",
+                       ZEITPROGRAMM_HVAC_MODE)
 
     def aux_zulaessig(self, name: str, wert: str) -> bool:
-        return False  # Vaillant hat keine Hilfswerte
+        return name == "mode_select" and name in self.description.aux_originals and wert in ZONEN_BETRIEBSARTEN
 
 
 # weishaupt_modbus nutzt als Select-Optionen Uebersetzungsschluessel, nicht Texte: 1.x "hz_operationmode_<modus>"
 # (entities.py, MySelectEntity), 2.0 "heating_circuit_operation_mode_<modus>" (modbus/descriptions/myenums.py). Die
 # Modi heissen in beiden gleich (automatic, comfort, normal, lowering, standby); das Schema steht im aktuellen Zustand.
 # Die Praefixe und der statische Normal-Bereich je Schema (1.x PARAMS_ROOMTEMP_MID 16-28, 2.0 ROOM_TEMP_NORMAL 18-25)
-# kommen vom Server (description.schemata, Spec Stufe 3 S4b); die Pipeline schneidet ihn mit den lokalen Grenzen.
+# kommen vom Server (description.schemata); die Pipeline schneidet ihn mit den lokalen Grenzen.
 WEISHAUPT_NORMAL = "normal"
 # Betriebsarten von weishaupt_modbus (in 1.x und 2.0 gleich, nur das Schema unterscheidet sich).
 WEISHAUPT_MODES = ("automatic", "comfort", WEISHAUPT_NORMAL, "lowering", "standby")
@@ -145,7 +173,7 @@ WEISHAUPT_MODES = ("automatic", "comfort", WEISHAUPT_NORMAL, "lowering", "standb
 
 def weishaupt_scheme(option: str, praefixe: tuple[str, ...]) -> str:
     """Schema (Praefix) einer Betriebsart-Option; ValueError bei einem unbekannten Schema (nie raten). Die Praefixe
-    kommen vom Server (bindungsparameter.schemata, Spec Stufe 3 S4b)."""
+    kommen vom Server (bindungsparameter.schemata)."""
     for scheme in praefixe:
         if option.startswith(scheme):
             return scheme
@@ -183,7 +211,7 @@ class WeishauptHaBinding(HaPlantBinding):
 
     def _set_number(self, role: str, value: float) -> None:
         entity_id = self._manifest.refs[role]
-        self._ha_api.get_raw_state(entity_id)  # AU-016: nicht verfuegbare Entity wirft statt still 200
+        self._ha_api.get_raw_state(entity_id)  # Nicht verfuegbare Entity wirft statt still 200
         self._ha_api.set_number_value(entity_id, value)
         self.physical_writes += 1
         logger.info("%s (%s) auf %s gesetzt", role, lesbar(entity_id), value)
@@ -275,10 +303,10 @@ class WeishauptHaBinding(HaPlantBinding):
                            lesbar(str(target)))
 
 
-# Plan 3b, Viessmann (HA-Core vicare, Spec 1.3/5.4). HA bildet das ViCare-Programm "normal" auf das Preset "home" ab
+# Viessmann (HA-Core vicare). HA bildet das ViCare-Programm "normal" auf das Preset "home" ab
 # (homeassistant/components/vicare/types.py, VICARE_TO_HA_PRESET_HEATING). Nur die vom Nutzer schaltbaren Programme
 # Komfort und Eco (CHANGABLE_HEATING_PROGRAMS) gelten als "nicht vorbereitet"; "reduced" (Preset sleep) setzt der
-# Zeitplan des Geraets selbst und bleibt unangetastet. Annahme bis zur Inventur (Spec 8: Verhalten von "normal" und der
+# Zeitplan des Geraets selbst und bleibt unangetastet. Annahme bis zur Inventur (Verhalten von "normal" und der
 # Sparschaltung).
 VIESSMANN_NORMAL_PRESET = "home"
 VIESSMANN_FOREIGN_PRESETS = ("comfort", "eco")
@@ -329,7 +357,7 @@ class ViessmannHaBinding(HaPlantBinding):
                        lesbar(str(preset)))
 
 
-# Plan 3b: HA-Umsetzung je Hebelsatz und die Rollen, die das Binding zum Lesen/Schreiben/Zurueckstellen braucht.
+# HA-Umsetzung je Hebelsatz und die Rollen, die das Binding zum Lesen/Schreiben/Zurueckstellen braucht.
 _BINDING_CLASSES: dict[str, type[HaPlantBinding]] = {
     "vaillant_vrc720": HaPlantBinding,
     "weishaupt_wwp": WeishauptHaBinding,

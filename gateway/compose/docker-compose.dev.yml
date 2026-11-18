@@ -1,4 +1,4 @@
-# Overlay fuer den Dev-Rechner (Spec SHG G2 7.2; Fake-Bootstrap und Fake-Broker ab Plan 5b D2 Task 10):
+# Overlay fuer den Dev-Rechner (Fake-Bootstrap und Fake-Broker):
 # Fake-Zigbee2MQTT statt Zigbee2MQTT (kein Stick), Fake-Bootstrap und Fake-Broker statt Server, Diagnoseseite auf
 # 127.0.0.1:8080, Steuer-Routen des Fake-Bootstraps auf 127.0.0.1:18090. Der Fake-Bootstrap signiert den CSR mit der
 # Test-CA und nennt den Fake-Broker (Mosquitto mit TLS und Client-Zertifikat, ACL wie die Geraete-Policy). Test-PKI
@@ -28,8 +28,13 @@ services:
   zigbee2mqtt:
     profiles: ["hardware"]          # am Dev-Rechner nicht starten
   runtime:
-    ports: !override ["127.0.0.1:8080:8080"]
+    ports: !override ["127.0.0.1:8080:8080", "127.0.0.1:8081:8081"]
     security_opt: ["label:disable"]
+    environment:   # nur der oeffentliche Teil der Test-PKI; die Datei gilt nur mit der Testkennung (nie im Release)
+      SMARTHEAT_ANKER_DATEI: /anker/anker.pem
+      SMARTHEAT_TESTKENNUNG: dev
+    volumes:
+      - ${SHG_FAKE_PKI:?SHG_FAKE_PKI fehlt}/anker.pub:/anker/anker.pem:ro
     depends_on:  # ergaenzt die Basisdatei; ohne Fake-Bootstrap wartete der erste Bootstrap-Versuch den Backoff ab
       fake-bootstrap: {condition: service_healthy}
       fake-broker: {condition: service_started}
@@ -58,6 +63,7 @@ services:
     environment:
       SHG_FAKE_CA_DIR: /pki
       SHG_FAKE_MQTT_HOST: fake-broker
+      SHG_FAKE_ANKER_SCHLUESSEL: /pki/anker.key   # signiert die Antworten wie der Server (Testschluessel der Test-PKI)
       PYTHONPATH: /app/src
     volumes:
       - ../tests:/gw-tests:ro
@@ -68,7 +74,7 @@ services:
       timeout: 3s
       retries: 15
   fake-broker:
-    image: eclipse-mosquitto:2@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408
+    image: eclipse-mosquitto:2@sha256:75d6662dee52c947dc9dd9c29f1d8d7ffef78ddaf38001caa09755681e8bbc98
     security_opt: ["label:disable"]
     command: ["mosquitto", "-c", "/pki/mosquitto.conf"]
     user: ${SHG_FAKE_USER:?SHG_FAKE_USER fehlt}

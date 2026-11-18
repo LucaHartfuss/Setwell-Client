@@ -1,5 +1,5 @@
-"""Hebel-Pipeline, Plan 3b: Ursprungswerte aller angefassten Hebel und Hilfs-Ursprungswerte (Betriebsart,
-Komfort-/Absenk-Soll) -- gemerkt vor dem ersten Schreiben, zurueckgestellt bei Abo-Ende und Abmelden (Spec 5.4)."""
+"""Hebel-Pipeline: Ursprungswerte aller angefassten Hebel und Hilfs-Ursprungswerte (Betriebsart,
+Komfort-/Absenk-Soll) -- gemerkt vor dem ersten Schreiben, zurueckgestellt bei Abo-Ende und Abmelden."""
 import logging
 import math
 
@@ -36,7 +36,7 @@ class Ha:
 
 
 class AuxBinding(HaPlantBinding):
-    """HaPlantBinding mit Hilfswerten wie das Weishaupt-Binding (Task 7), ohne Betriebsart-Umschaltung."""
+    """HaPlantBinding mit Hilfswerten wie das Weishaupt-Binding, ohne Betriebsart-Umschaltung."""
 
     def __init__(self, ha):
         super().__init__(ha, MANIFEST, WEISHAUPT_MODBUS)
@@ -117,6 +117,17 @@ def test_restore_and_clear_returns_every_lever_and_the_aux_values(make_store, cl
     assert store.state.restore_point == {"curve": 0.75, "room_setpoint": 20.0, "heat_limit": 18.0}
 
 
+def test_an_original_heat_limit_below_10_degrees_is_restored_as_10(make_store, clock):
+    pipeline, store, ha, binding = _setup(make_store, clock)
+    ha.states["number.swu"] = 8.0
+    pipeline.capture_originals()
+    assert store.state.originals["heat_limit"] == 8.0
+    pipeline.apply_server_values({"curve": 0.9, "room_setpoint": 22.0, "heat_limit": 16.0})
+    assert pipeline.restore_and_clear(always_restore=False) is True
+    assert [wert for entity, wert in ha.writes if entity == "number.swu"][-1] == 10.0
+    assert store.state.restore_point["heat_limit"] == 10.0
+
+
 def test_restore_with_unknown_originals_keeps_the_learned_values_without_crashing(make_store, clock, caplog):
     pipeline, store, ha, binding = _setup(
         make_store, clock, backup={"restore_point": {"curve": 0.9, "room_setpoint": 22.0, "heat_limit": 16.0}},
@@ -175,10 +186,10 @@ def test_a_successful_restore_clears_the_aux_values_and_is_not_repeated(make_sto
     assert store.state.aux_originals == {**AUX, "mode_select": "Komfort"}
 
 
-# --- Spec Stufe 3 S3 5.2 (5b-W-4): Ursprungswerte des Servers ---------------------------------------------------------
+# --- Ursprungswerte des Servers ---------------------------------------------------------
 
 def test_server_originals_win_for_levers(make_store, clock):
-    """5b-W-4: nach einem Ersetzen hat das neue Geraet SmartHeat-Werte als Ursprung gemerkt; der erste Wert der Anlage
+    """Nach einem Ersetzen hat das neue Geraet SmartHeat-Werte als Ursprung gemerkt; der erste Wert der Anlage
     liegt auf dem Server und gilt."""
     pipeline, store, ha, binding = _setup(
         make_store, clock,
@@ -188,6 +199,24 @@ def test_server_originals_win_for_levers(make_store, clock):
     assert pipeline.restore_and_clear(always_restore=True)
     assert ha.states["number.hk"] == 0.6 and ha.states["number.normal"] == 20.0 and ha.states["number.swu"] == 16.0
     assert store.state.restore_point == {"curve": 0.6, "room_setpoint": 20.0, "heat_limit": 16.0}
+
+
+def test_sign_off_values_are_the_values_restore_and_clear_writes(make_store, clock):
+    """Die Meldung beim gescheiterten Abmelden nennt dem Kunden, was zurueckgeschrieben wird (BR-KK-2): Server vor
+    lokal, auf die lokalen Grenzen gebracht, Hebel ohne bekannten Ursprungswert fehlen."""
+    pipeline, store, ha, binding = _setup(
+        make_store, clock,
+        backup={"originals": {"curve": 0.7, "room_setpoint": 21.0}, "restore_point": {"curve": 0.9}},
+        server={"curve": 0.6, "heat_limit": 1e9})
+    werte = pipeline.sign_off_values()
+    assert werte == {"curve": 0.6, "room_setpoint": 21.0, "heat_limit": 23.0}
+    assert pipeline.restore_and_clear(always_restore=True)
+    assert (ha.states["number.hk"], ha.states["number.normal"], ha.states["number.swu"]) == (0.6, 21.0, 23.0)
+
+
+def test_sign_off_values_leave_out_a_lever_without_any_original(make_store, clock):
+    pipeline, store, ha, binding = _setup(make_store, clock, backup={"originals": {"curve": 0.7}})
+    assert pipeline.sign_off_values() == {"curve": 0.7}
 
 
 @pytest.mark.parametrize("unsinn", ["0.6", math.nan, math.inf, True, None, [1], 10**400, -(10**400)])
@@ -303,7 +332,7 @@ def test_server_values_do_not_retrigger_a_successful_restore(make_store, clock):
 
 
 def test_replacement_device_without_local_values_does_not_restore_the_server_aux_values(make_store, clock):
-    """Heutiges Verhalten, Restpunkt S3S3-Ersatz: ein Ersatzgeraet, das vor seinem ersten regulaeren Start abgemeldet
+    """Heutiges Verhalten: ein Ersatzgeraet, das vor seinem ersten regulaeren Start abgemeldet
     wird (kein lokal gemerkter Wert, kein Boost, Hebel auf dem Ursprungswert), stellt die Hilfswerte des Servers nicht
     wieder her; die Anlage steht dabei auf einer anderen Betriebsart als der Server-Ursprungswert."""
     pipeline, store, ha, binding = _setup(
@@ -350,7 +379,7 @@ def test_server_lever_values_do_not_retrigger_a_successful_restore(make_store, c
     assert binding.restored == []
 
 
-# --- Mutationsprobe Stufe 3 S4b (A5-22 Rest): halber Schritt beim Ursprungswert, Bereich der Hilfswerte, Zaehlung ---
+# --- Mutationsprobe: halber Schritt beim Ursprungswert, Bereich der Hilfswerte, Zaehlung ---
 
 @pytest.mark.parametrize(("learned", "after"), [
     (18.25, 18.25),  # genau ein halber Schritt (0,5 / 2) neben dem Ursprungswert: gilt als gleich, kein Zuruecksetzen
@@ -394,7 +423,7 @@ def test_the_aux_restore_counts_once_after_the_lever_writes(make_store, clock):
 
 
 def test_unreadable_aux_values_log_the_foreign_error_text_only_escaped(make_store, clock, caplog):
-    """T6-Rest, R-c: der Fehlertext beim Lesen der Hilfswerte aus HA steht nur als Escape im Log."""
+    """Der Fehlertext beim Lesen der Hilfswerte aus HA steht nur als Escape im Log."""
     pipeline, _, _, binding = _setup(make_store, clock)
     binding.aux_error = RuntimeError(FREMDTEXT)
     with caplog.at_level(logging.WARNING, logger="smartheat_core.pipeline"):

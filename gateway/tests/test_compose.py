@@ -1,4 +1,4 @@
-"""Compose-Datei nach Spec SHG G2 7.2, ab 0.6.0 Spec 5b 5.3 (statisch geprueft; der Lauf steckt in
+"""Compose-Datei (statisch geprueft; der Lauf steckt in
 tests/test_gateway_docker_build.sh)."""
 import ast
 import re
@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+PUBLISHED_PORT = "0.0.0.0:80:8080"  # nur IPv4 (P-C2 b)
+HEALTH_PUBLISHED_PORT = "127.0.0.1:8081:8081"  # nur /healthz, nur Loopback des Hosts (S-10)
 GATEWAY = Path(__file__).resolve().parents[1]
 COMPOSE = GATEWAY / "compose"
 
@@ -27,7 +29,7 @@ def test_hardening_everywhere():
         assert service.get("cap_drop") == ["ALL"], name
         assert "no-new-privileges:true" in service.get("security_opt", []), name
         assert service.get("restart") == ("no" if name == "init" else "unless-stopped"), name
-        # journald statt json-file (L4-18): ein Stromausfall laesst keine beschaedigte Logdatei zurueck, Groesse und
+        # journald statt json-file: ein Stromausfall laesst keine beschaedigte Logdatei zurueck, Groesse und
         # Rotation regelt das Journal des Hosts; kein Dienst ueberschreibt den Anker mit einem eigenen Block.
         assert service["logging"] == {"driver": "journald", "options": {"tag": "{{.Name}}"}}, name
 
@@ -41,7 +43,7 @@ def test_networks_ports_and_mounts():
     assert services["mosquitto"]["networks"] == ["bus"] and "ports" not in services["mosquitto"]
     assert services["zigbee2mqtt"]["networks"] == ["bus"]
     runtime = services["runtime"]
-    assert runtime["networks"] == ["bus", "wan"] and runtime["ports"] == ["80:8080"]
+    assert runtime["networks"] == ["bus", "wan"] and runtime["ports"] == [PUBLISHED_PORT, HEALTH_PUBLISHED_PORT]
     assert "network_mode" not in runtime
     targets = [_container_target(v) for v in runtime["volumes"]]
     assert targets == ["/data", "/host", "/run/shg-bus"]
@@ -50,13 +52,20 @@ def test_networks_ports_and_mounts():
     assert networks["bus"]["internal"] is True
 
 
+def test_the_diagnostic_port_is_published_on_ipv4_only():
+    """Ohne Host-Adresse veroeffentlicht Docker den Port auch auf `[::]:80` (docker-proxy), die
+    Firewall-Regel `tcp dport 80 accept` gaelte dann auch fuer IPv6. Mit `0.0.0.0` als Host-Adresse lauscht nur IPv4."""
+    ports = _services()["runtime"]["ports"]
+    assert ports == ["0.0.0.0:80:8080", "127.0.0.1:8081:8081"]
+
+
 def test_only_the_runtime_publishes_a_port_and_only_80_to_8080():
     """Docker-Ports laufen per DNAT an der input-Kette der Firewall vorbei: ueber alle Dienste der Compose-Datei (nicht
-    nur die bekannten) hat nur `runtime` `ports`, genau `80:8080`; Mosquitto, Zigbee2MQTT und init veroeffentlichen
-    nichts."""
+    nur die bekannten) hat nur `runtime` `ports`, genau `0.0.0.0:80:8080`; Mosquitto, Zigbee2MQTT und init veroeffentlichen
+    nichts. Dazu `127.0.0.1:8081:8081` (nur /healthz, nur Loopback des Hosts)."""
     services = _services()
     assert {name for name, service in services.items() if "ports" in service} == {"runtime"}
-    assert services["runtime"]["ports"] == ["80:8080"]
+    assert services["runtime"]["ports"] == [PUBLISHED_PORT, HEALTH_PUBLISHED_PORT]
     assert {"init", "mosquitto", "zigbee2mqtt"} <= set(services)
 
 
@@ -78,10 +87,16 @@ def test_runtime_environment_and_healthcheck():
     env = runtime["environment"]
     assert env["SHG_DEVICE_API_URL"] == "${SHG_DEVICE_API_URL:?SHG_DEVICE_API_URL fehlt}"
     assert env["SHG_DIAG_HOSTNAMES"] == "${SHG_DIAG_HOSTNAMES:-}"
-    assert env["SHG_HOST_DIR"] == "/host" and env["SHG_DATA_DIR"] == "/data"
+    assert {"SHG_HOST_DIR", "SHG_DATA_DIR"}.isdisjoint(env)  # Die Ordner sind die Standardwerte des Codes (/host, /data)
     assert "SHG_BUS_LOST_EXIT_SECONDS" not in env  # Netz-Wache entfaellt mit dem Tunnel
     test = " ".join(runtime["healthcheck"]["test"])
-    assert "http://127.0.0.1:8080/healthz" in test and "/tmp/shg-runtime-alive" in test
+    from smartheat_gateway import runtime_main
+
+    # Der Healthcheck fragt den eigenen Gesundheitsserver, nicht die Diagnoseseite, deren Plaetze das LAN fuellen kann
+    assert f"http://127.0.0.1:{runtime_main.HEALTH_PORT}/healthz" in test and "/tmp/shg-runtime-alive" in test
+    assert PUBLISHED_PORT.endswith(f":{runtime_main.DIAG_PORT}")  # DIAG_PORT ist der Container-Port der Compose-Datei
+    assert f"127.0.0.1:{runtime_main.HEALTH_PORT}:{runtime_main.HEALTH_PORT}" == HEALTH_PUBLISHED_PORT
+    assert runtime_main.HEALTH_PORT != runtime_main.DIAG_PORT
 
 
 def test_runtime_stops_only_after_the_device_thread_has_disconnected():
@@ -117,6 +132,7 @@ def test_init_has_no_network_and_writes_bus_zigbee_and_data():
     assert "networks" not in init and "ports" not in init
     targets = [_container_target(volume) for volume in init["volumes"]]
     assert targets == ["/bus", "/zigbee2mqtt", "/data", "/host"]
+    assert set(init["environment"]) == {"ZIGBEE_ADAPTER"}  # Die Ordner sind die Standardwerte von init.py
 
 
 def test_runtime_gets_only_its_own_bus_credentials_and_sees_the_device_keys():
@@ -175,17 +191,27 @@ def test_the_image_carries_every_package_the_gateway_imports():
 def test_dev_overlay_only_adjusts_existing_services_and_adds_the_fakes():
     dev = _services("docker-compose.dev.yml")
     assert set(dev) - set(_services()) == {"fake-zigbee2mqtt", "fake-bootstrap", "fake-broker"}
-    assert dev["runtime"]["ports"] == ["127.0.0.1:8080:8080"]
+    assert dev["runtime"]["ports"] == ["127.0.0.1:8080:8080", "127.0.0.1:8081:8081"]
 
 
-def test_dev_overlay_brings_bootstrap_and_broker_but_no_device_api():
+def test_dev_overlay_brings_bootstrap_and_broker():
     services = _services("docker-compose.dev.yml")
     assert {"fake-bootstrap", "fake-broker"} <= set(services)
-    assert "fake-device-api" not in services and "agent" not in services and "tunnel" not in services
     # Der Fake-Broker ist der Endpunkt aus der Bootstrap-Antwort; der Geraetekern startet erst nach dem Fake-Bootstrap.
     assert services["fake-bootstrap"]["environment"]["SHG_FAKE_MQTT_HOST"] == "fake-broker"
     assert services["runtime"]["depends_on"]["fake-bootstrap"] == {"condition": "service_healthy"}
     assert "@sha256:" in services["fake-broker"]["image"]
+
+
+def test_dev_overlay_gives_the_fake_bootstrap_the_key_and_the_runtime_only_the_public_part():
+    services = _services("docker-compose.dev.yml")
+    assert services["fake-bootstrap"]["environment"]["SHG_FAKE_ANKER_SCHLUESSEL"] == "/pki/anker.key"
+    runtime = services["runtime"]
+    assert runtime["environment"]["SMARTHEAT_ANKER_DATEI"] == "/anker/anker.pem"
+    assert runtime["environment"]["SMARTHEAT_TESTKENNUNG"]
+    anker_mounts = [v for v in runtime["volumes"] if v.endswith(":/anker/anker.pem:ro")]
+    assert len(anker_mounts) == 1 and "anker.pub" in anker_mounts[0] and "anker.key" not in anker_mounts[0]
+    assert not any("anker" in v for v in _services()["runtime"].get("volumes", []))  # die Basisdatei kennt keine Anker-Datei
 
 
 def test_mosquitto_requires_login():
@@ -193,3 +219,17 @@ def test_mosquitto_requires_login():
     assert "allow_anonymous false" in conf
     assert "password_file /mosquitto/config/bus/passwd" in conf and "acl_file /mosquitto/config/bus/acl" in conf
     assert _services()["mosquitto"]["user"] == "1000:1000"
+
+
+def test_mosquitto_persists_to_its_own_data_folder():
+    """Retained Nachrichten und Sitzungen ueberleben einen Neustart: Daten auf `bus/mosquitto-daten` (beschreibbar, uid 1000,
+    von smartheat-ablage angeglichen), die Konfiguration bleibt schreibgeschuetzt in `bus/mosquitto`."""
+    conf = (COMPOSE / "mosquitto.conf").read_text().splitlines()
+    assert "persistence true" in conf and "persistence_location /mosquitto/data/" in conf
+    assert "persistence false" not in conf
+    volumes = _services()["mosquitto"]["volumes"]
+    daten = [v for v in volumes if _container_target(v) == "/mosquitto/data"]
+    assert daten == ["${SHG_ROOT:-/var/lib/smartheat}/bus/mosquitto-daten:/mosquitto/data"]  # kein :ro
+    konfig = [v for v in volumes if _container_target(v) == "/mosquitto/config/bus"]
+    assert konfig == ["${SHG_ROOT:-/var/lib/smartheat}/bus/mosquitto:/mosquitto/config/bus:ro"]
+    assert _services()["mosquitto"]["read_only"] is True and _services()["mosquitto"]["user"] == "1000:1000"

@@ -1,18 +1,20 @@
-"""Leer heisst abmelden (Audit 5, A5-23; Spec Stufe 3 S3 Abschnitt 4), beide Hosts gleich. Beim Wechsel von eingerichtet
+"""Leer heisst abmelden, beide Hosts gleich. Beim Wechsel von eingerichtet
 auf leer schreibt der Host die Markierung aufraeumen.json mit der alten Konfiguration und startet neu. Der naechste
 Start setzt mit ihr zurueck wie sign_off (Laufzeit im Modus abgemeldet); gelingt das, wird die Markierung
 `zurueckgesetzt`, der Prozess startet neu, und erst dann loescht der Host den anlagengebundenen Zustand. So kann kein
 Server-Pfad (device release, ersetzen, _fail) die Anlage auf SmartHeat-Werten zuruecklassen. Ohne gespeicherte
-Konfiguration (Markierung aus 1.0.0, kaputt) wird geloescht wie bisher. Ist die Markierung da, aber nicht lesbar (EIO,
-EACCES; auch ihr Vorhandensein ist dann nicht feststellbar), bleibt sie, und nichts wird geloescht (BEHALTEN, S3S3-
-Marker): ein Lesefehler ist keine fehlende Konfiguration, der naechste Start versucht es erneut.
+Konfiguration (Markierung kaputt) wird geloescht. Ist die Markierung da, aber nicht lesbar (EIO,
+EACCES; auch ihr Vorhandensein ist dann nicht feststellbar), bleibt sie, und nichts wird geloescht (BEHALTEN):
+ein Lesefehler ist keine fehlende Konfiguration, der naechste Start versucht es erneut.
 
-Bedrohungsmodell (Spec 2): die Markierung schreibt das Geraet selbst aus seiner gespeicherten, schon geprueften
+Bedrohungsmodell: die Markierung schreibt das Geraet selbst aus seiner gespeicherten, schon geprueften
 Konfiguration; der Server liefert hier nichts. Nennt die Konfiguration der Markierung eine andere Anlage als die
-Markierung, gilt sie als fehlend (loeschen wie bisher), und die Laufzeit prueft sie vor dem Zuruecksetzen ohnehin gegen
+Markierung, gilt sie als fehlend (loeschen), und die Laufzeit prueft sie vor dem Zuruecksetzen ohnehin gegen
 die Rastung (sign_off_parts)."""
 import json
 import logging
+import os
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +23,9 @@ from smartheat_core import dateien
 from smartheat_runtime.dokument_config import eingerichtet
 
 logger = logging.getLogger(__name__)
+
+# Die Kreise setzen auf eigenen Faeden zurueck: Lesen, Ergaenzen und Schreiben von `kreise_fertig` ist ein Zug.
+_sperre = threading.Lock()
 
 KEINE, VERWERFEN, ZURUECKSETZEN, LOESCHEN, BEHALTEN = "keine", "verwerfen", "zuruecksetzen", "loeschen", "behalten"
 
@@ -65,51 +70,55 @@ def _auswerten(name: str, inhalt: bytes) -> Markierung | None:
     return Markierung(roh["anlage"], konfiguration if passend else None, roh.get("zurueckgesetzt") is True)
 
 
-def entscheiden(pfad: Path, gespeichert) -> str:
-    """Vor dem Start des Geraetekerns: KEINE, VERWERFEN (wieder eingerichtet, Zustand bleibt), ZURUECKSETZEN (Markierung
-    bleibt, die Laufzeit setzt zurueck), LOESCHEN (Zustand und Markierung weg) oder BEHALTEN (Markierung unlesbar:
-    nichts loeschen). Die Markierung wird genau einmal gelesen (S3S6-Reste 3): verschwunden heisst KEINE, ein Lesefehler
-    BEHALTEN; ein zweites Lesen koennte einen voruebergehenden Fehler sonst als kaputte Markierung (LOESCHEN) werten."""
+def entscheiden(pfad: Path, gespeichert) -> tuple[str, Markierung | None]:
+    """Vor dem Start des Geraetekerns: (Entscheidung, Markierung). Entscheidung ist KEINE, VERWERFEN (wieder
+    eingerichtet, Zustand bleibt), ZURUECKSETZEN (Markierung bleibt, die Laufzeit setzt zurueck), LOESCHEN (Zustand und
+    Markierung weg) oder BEHALTEN (Markierung unlesbar: nichts loeschen). Die Markierung wird genau einmal gelesen:
+    verschwunden heisst KEINE, ein Lesefehler BEHALTEN; ein zweites Lesen koennte einen
+    voruebergehenden Fehler sonst als kaputte Markierung (LOESCHEN) werten. Nur bei ZURUECKSETZEN kommt die gelesene
+    Markierung (mit Konfiguration, nicht zurueckgesetzt) mit zurueck: der Host reicht sie an die Laufzeit weiter
+    (GeraetHostBasis.start_markierung), statt die Datei ein zweites Mal zu lesen; sonst None."""
     try:
-        da = pfad.exists()  # wirft bei EIO/EACCES im stat (nur fehlende Datei ergibt False)
+        os.stat(pfad)  # nicht Path.exists: ab Python 3.14 ergibt ein EIO/EACCES im stat dort False statt Fehler
+    except (FileNotFoundError, NotADirectoryError):
+        return KEINE, None
     except OSError as error:
         logger.warning("%s nicht pruefbar (%s): Markierung bleibt, nichts wird geloescht", pfad.name,
                        type(error).__name__)
-        return BEHALTEN
-    if not da:
-        return KEINE
+        return BEHALTEN, None
     if eingerichtet(gespeichert):
-        return VERWERFEN
+        return VERWERFEN, None
     try:
         inhalt = pfad.read_bytes()
-    except FileNotFoundError:  # zwischen exists und dem Lesen verschwunden
-        return KEINE
+    except FileNotFoundError:  # zwischen stat und dem Lesen verschwunden
+        return KEINE, None
     except OSError as error:
         logger.warning("%s nicht lesbar (%s): Markierung bleibt, nichts wird geloescht", pfad.name,
                        type(error).__name__)
-        return BEHALTEN
+        return BEHALTEN, None
     markierung = _auswerten(pfad.name, inhalt)
     if markierung is None or markierung.konfiguration is None or markierung.zurueckgesetzt:
-        return LOESCHEN
-    return ZURUECKSETZEN
+        return LOESCHEN, None
+    return ZURUECKSETZEN, markierung
 
 
-def laufzeit_konfiguration(gespeichert, pfad: Path) -> tuple[dict, bool]:
-    """(Konfiguration fuer die Laufzeit, im Modus abgemeldet starten?). Steht das Zuruecksetzen aus, die alte
-    Konfiguration aus der Markierung; sonst die gespeicherte (leer: {})."""
-    if not eingerichtet(gespeichert):
+def zurueckgesetzt(pfad: Path, anlage: str, kreis: int = 1, kreise_der_anlage: int = 1) -> bool:
+    """Nach gelungenem Zuruecksetzen des Kreises `kreis`: True, wenn damit die offene Markierung dieser Anlage erledigt
+    ist. Bei mehreren Kreisen merkt die Markierung die fertigen (`kreise_fertig`) und ist erst erledigt, wenn alle
+    `kreise_der_anlage` fertig sind: der Neustart danach loescht den Zustand der ganzen Anlage."""
+    with _sperre:
         markierung = lesen(pfad)
-        if markierung is not None and markierung.konfiguration is not None and not markierung.zurueckgesetzt:
-            return dict(markierung.konfiguration), True
-    return dict(gespeichert or {}), False
+        if markierung is None or markierung.anlage != anlage or markierung.konfiguration is None \
+                or markierung.zurueckgesetzt:
+            return False
+        fertig = sorted(set(_fertige(pfad)) | {kreis})
+        erledigt = len(fertig) >= kreise_der_anlage
+        dateien.schreiben_json(pfad, {"anlage": markierung.anlage, "konfiguration": markierung.konfiguration,
+                                      "zurueckgesetzt": erledigt, "kreise_fertig": fertig}, modus=dateien.PRIVAT)
+        return erledigt
 
 
-def zurueckgesetzt(pfad: Path, anlage: str) -> bool:
-    """Nach gelungenem Zuruecksetzen: True, wenn damit die offene Markierung dieser Anlage erledigt ist."""
-    markierung = lesen(pfad)
-    if markierung is None or markierung.anlage != anlage or markierung.konfiguration is None \
-            or markierung.zurueckgesetzt:
-        return False
-    dateien.schreiben_json(pfad, {"anlage": markierung.anlage, "konfiguration": markierung.konfiguration,
-                                  "zurueckgesetzt": True}, modus=dateien.PRIVAT)
-    return True
+def _fertige(pfad: Path) -> list[int]:
+    roh = dateien.lesen_json(pfad)
+    fertig = roh.get("kreise_fertig") if isinstance(roh, dict) else None
+    return [k for k in fertig if type(k) is int] if isinstance(fertig, list) else []

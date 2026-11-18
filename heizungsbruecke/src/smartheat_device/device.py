@@ -1,22 +1,20 @@
-"""Das Geraet (Spec 5b 5.1): verbindet Identitaet, Bootstrap, Link, Dokumente, Befehle, Bedienwunsch und Inventur und
+"""Das Geraet: verbindet Identitaet, Bootstrap, Link, Dokumente, Befehle, Bedienwunsch und Inventur und
 laeuft in einem eigenen Thread (run). paho, Host und Laufzeit stellen nur Ereignisse in die Warteschlange; nur dieser
 Thread aendert Zustand und ruft den Host.
 
 Ablauf: Identitaet laden; ohne Zugang registrieren (Backoff); Link starten. Nach jedem Verbinden zuerst hello (schemata,
-Versionen, Faehigkeiten, boot_id, uhr_synchron, bekannter Uebernahmestand; claim_state und new_claim_code setzen ihn,
-Spec 5c F1), dann Status, gepufferter Wunsch und offene Meldungen. Host-Rueckrufe des Takts laufen ueber _host_wert
-(5b-D1-4: ein werfender Rueckruf verschiebt Registrierung bzw. hello, laesst up/status dieses Takts aus (runtime_status,
+Versionen, Faehigkeiten, boot_id, uhr_synchron, bekannter Uebernahmestand; claim_state und new_claim_code setzen ihn), dann Status, gepufferter Wunsch und offene Meldungen. Host-Rueckrufe des Takts laufen ueber _host_wert
+(ein werfender Rueckruf verschiebt Registrierung bzw. hello, laesst up/status dieses Takts aus (runtime_status,
 raum), gilt bei uhr_synchron als None und bei ursprungswerte als {}, die Anzeige entfaellt; je Rueckruf und Fehlerart
 eine Logzeile). Dokumente gehen an den Dokumentspeicher, das Ergebnis als up/result, das Uebernommene an den Host;
 das Software-Angebot jeder Konfiguration mit bekanntem Schema (documents.angebot_aus) geht an den Host, auch wenn die
-Konfiguration abgelehnt wurde (Plan-Praezisierung). Befehle gehen an das Register, down/setpoints an die Laufzeit.
+Konfiguration abgelehnt wurde. Befehle gehen an das Register, down/setpoints an die Laufzeit.
 Drei Anmeldefehler in Folge am Broker -> Rettungsweg (bootstrap.Bootstrap); gesperrt -> Link aus, neuer Versuch nach
-6 h. up/status nur bei inhaltlicher Aenderung (ohne Zeitstempel, A4-35), hoechstens alle STATUS_MIN_SECONDS;
+6 h. up/status nur bei inhaltlicher Aenderung (ohne Zeitstempel), hoechstens alle STATUS_MIN_SECONDS;
 up/notifications gebuendelt hoechstens alle MELDUNGEN_MIN_SECONDS (Drossel des Dienstes: 20 Nachrichten/min, Plan
 S2)."""
 import json
 import logging
-import math
 import queue
 import threading
 import time
@@ -26,15 +24,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from smartheat_core import config_check
+from smartheat_core import config_check, kreisansicht, meldungen
 from smartheat_core.logtext import lesbar
+from smartheat_core.zahlen import ist_endliche_zahl
+from smartheat_core.zeitquelle import echte_epoche, fachliche_epoche
 from smartheat_device import bootstrap, commands, fehler, identity, inventory, nachrichten, wire, wish
-from smartheat_device.documents import BEDIENUNG, KONFIGURATION, DocumentStore, angebot_aus
+from smartheat_device.documents import ANZEIGE, BEDIENUNG, KONFIGURATION, DocumentStore, angebot_aus
 from smartheat_device.host import Anzeige, DeviceHost
 from smartheat_device.laufzeit import RuntimeChannel
 from smartheat_device.link import ANMELDUNG_SCHEITERT, GESENDET, GETRENNT, NACHRICHT, VERBUNDEN, Link
 from smartheat_runtime import dokument_config
-from smartheat_runtime.notifier import category
+from smartheat_runtime.soll_speicher import KREIS
 from smartheat_runtime.worker import RegulationWorker
 
 logger = logging.getLogger(__name__)
@@ -43,12 +43,12 @@ DEVICE_DIR = "device"
 TICK_SECONDS = 1.0
 STATUS_MIN_SECONDS = 10
 MELDUNGEN_MIN_SECONDS = 10
+HELLO_NACHSENDEN_MIN_SECONDS = 60
 MELDUNGEN_JE_NACHRICHT = 50
 SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
-#: Lokaler Hinweis bei einer abgelehnten Konfiguration (Spec Stufe 3 S5 6.3, Entscheidung E2 A): den Text der Ablehnung
-#: bildet der Server, das Geraet nennt nur den Code.
-ABLEHNUNG_ANZEIGE = "Die Einrichtung wurde abgelehnt (Code {grund}). Die Begründung zeigt der Einrichtungsassistent."
+#: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
+ENTFERNT_WIEDERHOLUNG_SECONDS = 60
 #: Down-Topic eines Dokuments -> Dokumentart (wire.DOKUMENT_TOPICS umgekehrt)
 _DOKUMENT_ART = {topic: art for art, topic in wire.DOKUMENT_TOPICS.items()}
 _RUNNING = ("regelt", "abo_inaktiv")
@@ -91,8 +91,7 @@ def _ursprungswert_ok(wert) -> bool:
     if isinstance(wert, bool):
         return False
     if isinstance(wert, int | float):
-        # Betrag zuerst: math.isfinite wirft bei riesigen int (OverflowError); NaN faellt beim Vergleich durch.
-        return abs(wert) <= wire.URSPRUNG_WERT_MAX and math.isfinite(wert)
+        return ist_endliche_zahl(wert) and abs(wert) <= wire.URSPRUNG_WERT_MAX
     return isinstance(wert, str) and 0 < len(wert) <= wire.URSPRUNG_HEBEL_MAX_CHARS
 
 
@@ -101,22 +100,25 @@ def _ursprungsname_ok(name) -> bool:
 
 
 def _vergleichbar(body: dict) -> dict:
-    """Status ohne Zeitstempel (A4-35: raum traegt bei jeder Veroeffentlichung einen frischen ts)."""
-    raum = body.get("raum")
-    return {**body, "raum": {k: v for k, v in raum.items() if k != "ts"} if isinstance(raum, dict) else raum}
+    """Status ohne Zeitstempel (der Raum jedes Kreises traegt bei jeder Veroeffentlichung einen frischen ts)."""
+    def ohne_ts(raum):
+        return {k: v for k, v in raum.items() if k != "ts"} if isinstance(raum, dict) else raum
+    return {**body, "kreise": [{**eintrag, "raum": ohne_ts(eintrag["raum"])} for eintrag in body["kreise"]]}
 
 
 class Device:
     def __init__(self, host: DeviceHost, data_dir: Path, bootstrap_url: str, *,
-                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = fachliche_epoche,
+                 echt: Callable[[], float] = echte_epoche,
                  bootstrap_client: Callable[[identity.Identity], bootstrap.BootstrapClient] | None = None,
                  link_factory: Callable[..., Link] = Link,
                  befehl_fehler: Callable[[Exception], commands.Failed | None] = lambda error: None) -> None:
         self.host = host
         self._dir = data_dir / DEVICE_DIR
         self._clock, self._wall = clock, wall
+        # wall ist die fachliche Zeit der Nachrichten; die Signaturzeit des Bootstraps prueft der Server gegen die echte
         self._client_for = bootstrap_client or (
-            lambda ident: bootstrap.BootstrapClient(bootstrap_url, ident, now=wall))
+            lambda ident: bootstrap.BootstrapClient(bootstrap_url, ident, now=echt))
         self._link_factory = link_factory
         self._inbox: queue.Queue = queue.Queue()
         self._stop = threading.Event()
@@ -131,6 +133,8 @@ class Device:
         self.befehle.register("hinweis", self.hinweise.handler)
         self.befehle.register("new_claim_code", self._new_claim_code)
         self.befehle.register("claim_state", self._claim_state)
+        # Die Wegpruefung liest an der Anbindung der Anlage; bis ein Host sie kann, lehnt das Geraet sie ab.
+        self.befehle.register("weg_pruefen", lambda _nutzlast: commands.Failed("nicht_unterstuetzt"))
         host.befehle_eintragen(self.befehle)
         self.wunsch_puffer = wish.WunschPuffer(self._dir, clock)
         self._bootstrap = bootstrap.Bootstrap(
@@ -141,13 +145,20 @@ class Device:
         self._client_stand: int | None = None  # client_nr des Links im letzten Takt
         self._hello_offen = False  # verbunden, hello noch nicht gesendet (Takt versucht es erneut)
         self._rettung = False
-        self._channel: RuntimeChannel | None = None
-        self._eigene: dict[str, str] = {}  # eigene Meldungen des Geraets: key -> Text
+        self._kanaele: dict[int, RuntimeChannel] = {}  # je Kreis ein Kanal ueber denselben Link
+        self._eigene: dict[str, meldungen.Meldung] = {}  # eigene Meldungen des Geraets: key -> Meldung
         self._meldungen: dict[str, dict] = {}  # offene Meldungen (Geraet und Laufzeit)
         self._meldungen_neu: dict[str, dict] = {}  # geaendert, noch nicht gesendet
         self._meldungen_at: float | None = None
         self._status: dict | None = None
         self._status_at: float | None = None
+        self._entfernt_mid: int | None = None  # mid des gesendeten up/entfernt, solange das PUBACK aussteht
+        self._entfernt_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung von up/entfernt
+        #: Nach hello muss ein Status hinaus; gescheitert der Rueckruf dabei, bleibt der Merker, bis
+        #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
+        self._status_erzwingen = False
+        self._hello_stand: dict | None = None  # Host-Felder des zuletzt gesendeten hello (ha), sonst None
+        self._hello_nachgesendet_at: float | None = None  # Takt-Uhr des zuletzt nachgesendeten hello (_hello_nachsenden)
         self._hello_fehler: str | None = None  # letzte Fehlerart beim Bauen von hello (je Art einmal loggen)
         self._status_fehler: str | None = None  # letzter Vertragsverstoss beim Bauen (je Text einmal loggen)
         self._wunsch_fehler: str | None = None  # dito beim Bauen von up/wish
@@ -157,6 +168,7 @@ class Device:
         self._host_fehler: set[tuple[str, str]] = set()  # (Rueckruf, Fehlerart) gescheiterter Host-Werte, schon geloggt
         self._zurueckgehalten: dict[str, dict] = {}  # Dokument, dessen Pruefung vorlaeufig nicht moeglich war
         self._pruefung_at = 0.0
+        self._speicher_gemeldet: set[str] = set()  # Arten, deren Zurueckhalten wegen OSError schon geloggt ist
         self._started_at = clock()
         self._last_ok: float | None = None
 
@@ -179,7 +191,7 @@ class Device:
                 item = self._inbox.get(timeout=TICK_SECONDS)
             except queue.Empty:
                 item = None
-            if self._stop.is_set():  # 5b-D2-4: nach stop() kein Takt mehr (er koennte einen neuen Link oeffnen)
+            if self._stop.is_set():  # Nach stop() kein Takt mehr (er koennte einen neuen Link oeffnen)
                 break
             self._sicher(item)
 
@@ -193,12 +205,13 @@ class Device:
             self._sicher(item, takt=False)
         self._sicher(None)
 
-    def wunsch(self, wert, *, herkunft: str | None, durch: str | None = None) -> float:
+    def wunsch(self, wert, *, herkunft: str | None, durch: str | None = None, kreis: int = KREIS) -> float:
         """Lokaler Sollwert vom Host: sofort begrenzt zurueck (der Host wendet ihn an), Versand im Geraete-Thread.
-        ValueError, wenn der Wert keine endliche Zahl ist oder herkunft bzw. durch kein Vertragswert (dann kommt nichts
-        in die Inbox). Geloggt wird je Grund einmal, ohne den Wert (der Host kann wiederholen)."""
+        ValueError, wenn der Wert keine endliche Zahl ist, herkunft bzw. durch kein Vertragswert oder kreis keine
+        Kreisnummer ist (dann kommt nichts in die Inbox). Heute regelt jeder Host einen Kreis (Standard). Geloggt wird je Grund einmal, ohne den Wert (der Host kann wiederholen)."""
         try:
             wish.pruefen_herkunft(herkunft, durch)
+            wish.pruefen_kreis(kreis)
             begrenzt, roh = wish.begrenzen(wert)
         except ValueError as error:
             grund = str(error)  # feste Texte aus wish ohne Wert
@@ -206,28 +219,35 @@ class Device:
                 self._wunsch_abgelehnt.add(grund)
                 logger.error("Bedienwunsch verworfen (%s)", grund)
             raise
-        self._inbox.put(("wunsch", begrenzt, roh, herkunft, durch))
+        self._inbox.put(("wunsch", begrenzt, roh, herkunft, durch, kreis))
         return begrenzt
 
     def soll_quelle_aus(self, aus: bool, wirksam: float | None = None) -> None:
-        """Soll-Quelle aus (Thermostat aus/Frostschutz, Spec 3.2): kein Wunsch, nur die Meldung soll_quelle_aus. Ohne
+        """Soll-Quelle aus (Thermostat aus/Frostschutz): kein Wunsch, nur die Meldung soll_quelle_aus. Ohne
         wirksames Soll bleibt sie offen, nur ohne Wert im Text; schliessen kann sie nur aus=False."""
-        text = wish.soll_quelle_aus_text(wirksam) if aus else None
-        self._inbox.put(("eigene", wish.SOLL_QUELLE_AUS_KEY, text))
+        meldung = wish.soll_quelle_aus_meldung(wirksam) if aus else None
+        self._inbox.put(("eigene", wish.SOLL_QUELLE_AUS_KEY, meldung))
 
-    def meldung(self, key: str, text: str, *, offen: bool, kritisch: bool = True) -> None:
-        """Meldung der Laufzeit (NotifySink des Hosts): Upsert je key ueber up/notifications."""
-        self._inbox.put(("meldung", nachrichten.meldung(key=key, kategorie=category(key), kritisch=kritisch, text=text,
-                                                        offen=offen, ts=_iso(self._wall()))))
+    def meldung(self, key: str, meldung: meldungen.Meldung | None, *, offen: bool) -> None:
+        """Meldung der Laufzeit (NotifySink des Hosts): Upsert je key ueber up/notifications. Auf den Draht gehen
+        Code, Parameter des Katalogs und Stufe der Meldung (meldungen.draht), nie ein Text oder Name; der Key wird zu
+        einem Draht-Key ohne Namen, ein Kreispraefix zum Feld kreis (nachrichten.draht_key). Ohne Meldung (None) kann
+        nur geschlossen werden. Eine Erzeugermeldung traegt zusaetzlich `quelle` und `roh` (meldungen.erzeuger_angaben)."""
+        draht_key, kreis = nachrichten.draht_key(key)
+        draht = meldungen.draht(meldung) if meldung is not None else {"code": None, "params": {}, "stufe": None}
+        angaben = meldungen.erzeuger_angaben(meldung) if meldung is not None else {}
+        self._inbox.put(("meldung", nachrichten.meldung(key=draht_key, offen=offen, ts=_iso(self._wall()),
+                                                        kreis=kreis, quelle=angaben.get("quelle"),
+                                                        roh=angaben.get("roh"), **draht)))
 
     def im_geraete_thread(self, aufgabe: Callable[[], None]) -> None:
-        """Eine Aufgabe des Hosts (z. B. lokales Abmelden ueber stdin, L4-06) im Geraete-Thread ausfuehren lassen: aus
+        """Eine Aufgabe des Hosts (z. B. lokales Abmelden ueber stdin) im Geraete-Thread ausfuehren lassen: aus
         jedem Thread aufrufbar, die Aufgabe laeuft in der Reihe der Ereignisse und nie nebenlaeufig zum Register. Eine
         Ausnahme faengt _sicher (Fehlerart und Ort im Log)."""
         self._inbox.put(("aufgabe", aufgabe))
 
     def ergebnis_software(self, version: str, ok: bool, grund: str | None = None) -> bool:
-        """Ergebnis eines Updates (Spec 5.3: up/result mit dokument software, version = Software-Version). Nur nach
+        """Ergebnis eines Updates (up/result mit dokument software, version = Software-Version). Nur nach
         hello; False = nicht gesendet (der Host versucht es spaeter erneut). Der Grund muss in SOFTWARE_ERRORS stehen;
         den Text bildet der Server."""
         if not ok and grund not in wire.SOFTWARE_ERRORS:
@@ -239,12 +259,13 @@ class Device:
         body = nachrichten.ergebnis_dokument(wire.DOKUMENT_SOFTWARE, version, ok, error)
         return self._publish_nach_hello("up/result", body) is not None
 
-    def laufzeit_kanal(self, worker: RegulationWorker) -> RuntimeChannel:
-        """mqtt_factory fuer app.start (Spec 5b 5.2): Tick und Telemetrie ueber den Link."""
+    def laufzeit_kanal(self, worker: RegulationWorker, kreis: int) -> RuntimeChannel:
+        """mqtt_factory fuer app.start: Tick und Telemetrie des Kreises `kreis` ueber den Link. Jeder Kreis hat seinen
+        Kanal und seinen Worker; down/setpoints geht nach seinem Feld `kreis` an genau einen von ihnen."""
         channel = RuntimeChannel(self._publish_nach_hello,
                                  lambda: self._bereit and (link := self.link) is not None and link.connected,
                                  lambda: link.connect_failures if (link := self.link) is not None else 0)
-        self._channel = channel
+        self._kanaele[kreis] = channel
         channel.binden(worker)
         return channel
 
@@ -254,9 +275,14 @@ class Device:
     def bedienung(self) -> dict | None:
         return self.documents.inhalt(BEDIENUNG)
 
-    def abo_status(self) -> str:
-        """abo_source der Laufzeit (dokument_config.runtime_config)."""
-        return dokument_config.abo_status(self.konfiguration())
+    def abo_status(self, kreis: int | None = None) -> str:
+        """abo_source der Laufzeit (dokument_config.runtime_config): das Abo des Kreises, ohne Angabe des ersten."""
+        return dokument_config.abo_status(self.konfiguration(), kreis)
+
+    def update_noetig_kritisch(self) -> bool:
+        """update_noetig_source der Laufzeit: ob eine kritische Mindestversion mit Datum gilt (das Datum allein, so
+        gespeichert wie `documents.update_noetig_ab`); sie loest den Notbetrieb mit der 30-Tage-Frist aus."""
+        return self.documents.update_noetig_ab is not None
 
     def zustand(self) -> str:
         """Scheitert der Rueckruf runtime_status, gilt die Laufzeit als startend (_LAUFZEIT_UNBEKANNT)."""
@@ -279,9 +305,12 @@ class Device:
             zustand=self.zustand(), server_ok=(link := self.link) is not None and link.connected,
             device_state=bootstrap.device_state(self._dir), eingerichtet=self.documents.eingerichtet(),
             hinweise=self.hinweise.alle(),
-            meldungen=tuple({"key": key, "text": text} for key, text in sorted(self._eigene.items())),
-            konfiguration_abgelehnt=(ABLEHNUNG_ANZEIGE.format(grund=ablehnung[1]) if ablehnung is not None
-                                     else None))
+            meldungen=tuple({"key": key, "text": meldungen.text(meldung), **meldungen.zu_dict(meldung)}
+                            for key, meldung in sorted(self._eigene.items())),
+            konfiguration_abgelehnt=(
+                meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))
+                if ablehnung is not None else None),
+            konto_hinweis=bootstrap.konto_hinweis(self._dir))
 
     # --- Geraete-Thread ---
 
@@ -308,6 +337,7 @@ class Device:
                 self._verbunden()
             elif art == GETRENNT:
                 self._bereit = False
+                self._entfernt_mid = None  # ein neuer Client zaehlt mids wieder ab 1
                 self.wunsch_puffer.verbindung_verloren()
             elif art == ANMELDUNG_SCHEITERT:
                 self._rettung = True
@@ -316,6 +346,9 @@ class Device:
             elif art == GESENDET:
                 mid, client_nr, ok = daten
                 if self.link is not None and client_nr == self.link.client_nr:  # nie das PUBACK eines alten Clients
+                    if ok and mid == self._entfernt_mid:
+                        self._entfernt_mid = None
+                        self._host_wert("entfernen_erledigt", self.host.entfernen_erledigt)
                     if ok:
                         self.wunsch_puffer.bestaetigt(mid)
                         self.befehle.inventur_bestaetigt(mid)
@@ -347,15 +380,18 @@ class Device:
                     self._hello_senden()
         if self._bereit:
             self._zurueckgehaltene_pruefen(now)
+            if link is not None and link.connected:
+                self._hello_nachsenden(now)
         self.befehle.pruefen()
         self._wunsch_senden()
-        self._status_senden(now, force=False)
+        self._status_senden(now, force=self._status_erzwingen)
+        self._entfernt_senden(now)
         self._meldungen_senden(now)
         self._host_wert("anzeigen", self.host.anzeigen, self.anzeige())  # gescheitert: diese Anzeige entfaellt
 
     def _client_pruefen(self, link: Link) -> None:
         """Ein neuer paho-Client (Portwechsel, neuer Link) kennt die Nachrichten des alten nicht und zaehlt mids wieder
-        ab 1: offene Inventurteile gehen neu hinaus (L4-02). Dass kein PUBACK des alten Clients eine neue mid
+        ab 1: offene Inventurteile gehen neu hinaus. Dass kein PUBACK des alten Clients eine neue mid
         bestaetigt, sichert die Client-Nummer im Ereignis GESENDET (_verarbeiten), nicht die Reihenfolge der Inbox."""
         if self._client_stand is not None and self._client_stand != link.client_nr:
             self.befehle.inventur_neu_senden()
@@ -421,20 +457,49 @@ class Device:
         return mid
 
     def _publish_nach_hello(self, name: str, payload: dict) -> int | None:
-        """Laufzeit-Nachrichten (Snapshot, Telemetrie) erst nach hello (Spec 5b 5.1: hello zuerst)."""
+        """Laufzeit-Nachrichten (Snapshot, Telemetrie) erst nach hello (hello zuerst)."""
         return self._publish(name, payload) if self._bereit else None
 
     def _hello(self) -> dict | None:
         """None: der Rueckruf faehigkeiten ist gescheitert (geloggt), hello wartet auf einen spaeteren Takt."""
         faehigkeiten, gescheitert = self._host_wert("faehigkeiten", self.host.faehigkeiten)
-        if gescheitert:
+        wege, wege_gescheitert = self._host_wert("wege", self.host.wege)
+        if gescheitert or wege_gescheitert:
             return None
-        # device_state: Spec 5c F1, der Server gleicht ab
+        # device_state: der Server gleicht ab
         return nachrichten.hello(
             konfiguration_version=self.documents.version(KONFIGURATION),
-            bedienung_version=self.documents.version(BEDIENUNG), software_version=self.host.version,
-            host=self.host.host, faehigkeiten=faehigkeiten, boot_id=self.boot_id,
-            uhr_synchron=self._uhr_synchron() is True, device_state=bootstrap.device_state(self._dir))
+            bedienung_version=self.documents.version(BEDIENUNG), anzeige_version=self.documents.version(ANZEIGE),
+            software_version=self.host.version, host=self.host.host, faehigkeiten=faehigkeiten, wege=wege,
+            boot_id=self.boot_id,
+            uhr_synchron=self._uhr_synchron() is True, device_state=bootstrap.device_state(self._dir),
+            **self._hello_felder_jetzt())
+
+    def _hello_felder_jetzt(self) -> dict:
+        """Die hello-Felder, die nur der Host ha sendet (auto_update, integration_version): None heisst unbekannt
+        (Rueckruf gescheitert oder Wert unbrauchbar). Der Gateway sendet beide Felder nie und fragt den Host nicht."""
+        if self.host.host != "ha":
+            return {}
+        werte, gescheitert = self._host_wert("hello_felder", self.host.hello_felder)
+        if gescheitert or not isinstance(werte, dict):
+            werte = {}
+        auto_update = werte.get("auto_update")
+        version = werte.get("integration_version")
+        return {"auto_update": auto_update if isinstance(auto_update, bool) else None,
+                "integration_version": version if nachrichten.integration_version_gueltig(version) else None}
+
+    def _hello_nachsenden(self, now: float) -> None:
+        """Aendert sich eines der Host-Felder des hello, geht ein neues hello hinaus (verbunden und bereit), zwischen
+        zwei nachgesendeten hellos mindestens HELLO_NACHSENDEN_MIN_SECONDS: ein Feld, das schnell hin und her kippt,
+        loest sonst jede Sekunde ein hello aus (und beim Server jedes Mal das erneute Senden aller Meldungen). Eine
+        Aenderung im Abstand geht nicht verloren, der Stand bleibt verschieden und das naechste Fenster sendet sie."""
+        if self._hello_stand is None or self.host.host != "ha":
+            return
+        if self._hello_nachgesendet_at is not None and now - self._hello_nachgesendet_at < HELLO_NACHSENDEN_MIN_SECONDS:
+            return
+        if self._hello_felder_jetzt() != self._hello_stand:
+            self._hello_nachgesendet_at = now
+            self._hello_senden()
 
     def _uhr_synchron(self) -> bool | None:
         """Rueckruf uhr_synchron; gescheitert gilt als None (unbekannt = nicht synchron), auch fuer Bootstrap."""
@@ -467,20 +532,22 @@ class Device:
             return
         if self._publish("up/hello", hello) is None:
             return  # schon wieder getrennt: das naechste "verbunden" schickt hello
+        self._hello_stand = {feld: hello[feld] for feld in nachrichten.HELLO_NUR_HA if feld in hello}
         self._hello_offen = False
         self._bereit = True
         now = self._clock()
         self._last_ok = now
+        self._status_erzwingen = True
         self._status_senden(now, force=True)
         self._wunsch_senden()
         self._meldungen_neu.update(self._meldungen)
         self._meldungen_at = None
         self._meldungen_senden(now)
-        if self._channel is not None:
-            self._channel.verbunden()
+        for kanal in tuple(self._kanaele.values()):
+            kanal.verbunden()
 
     def _nachricht(self, name: str, raw: bytes) -> None:
-        if name not in wire.DOWN_TOPICS:  # Spec 2.1: unbekannte Topics ignorieren, ohne die Nachricht zu lesen
+        if name not in wire.DOWN_TOPICS:  # Unbekannte Topics ignorieren, ohne die Nachricht zu lesen
             logger.debug("Topic %s unbekannt, ignoriert (Spec 2.1)", lesbar(name))
             return
         if len(raw) > wire.MAX_MESSAGE_BYTES:
@@ -497,19 +564,34 @@ class Device:
             self._dokument(_DOKUMENT_ART[name], body)
         elif name == "down/command":
             self.befehle.empfangen(body)
-        elif name == "down/setpoints" and self._channel is not None:
-            self._channel.setpoints(body)
+        elif name == "down/setpoints":
+            self._setpoints(body)
+
+    def _setpoints(self, body: dict) -> None:
+        """Die Antwort geht an den Kanal ihres Kreises; ohne brauchbaren oder bekannten Kreis an keinen (die Laufzeit
+        verwirft eine Antwort ohne Kreis ohnehin, und die Nummer gehoert nicht ins Log)."""
+        kreis = body.get("kreis")
+        if type(kreis) is not int:
+            logger.debug("down/setpoints ohne brauchbaren Kreis, verworfen")
+            return
+        kanal = self._kanaele.get(kreis)
+        if kanal is None:
+            logger.debug("down/setpoints fuer einen Kreis ohne Laufzeit, verworfen")
+            return
+        kanal.setpoints(body)
 
     def _dokument(self, art: str, body: dict) -> None:
         """Erst das Ergebnis und die Uebergabe, dann software: jeder Host-Rueckruf ist einzeln abgesichert, damit ein
         gescheiterter die anderen nicht verhindert (das Dokument ist dann schon gespeichert).
 
         Kann der Host jetzt nicht pruefen (config_check.NichtPruefbar, HA aus) oder scheitert seine Vorbereitung vor dem
-        Speichern (konfiguration_vorbereiten, Aufraeum-Markierung): weder Ergebnis noch Uebernahme. Der
+        Speichern (konfiguration_vorbereiten, Aufraeum-Markierung) oder der Datentraeger (OSError beim Speichern): weder
+        Ergebnis noch Uebernahme. Der
         Server stellt ein Dokument nur einmal je Verbindung zu und eine abgelehnte Version nie erneut; das Geraet haelt
         es deshalb zurueck und prueft alle PRUEFUNG_WIEDERHOLEN_SECONDS erneut. Eine neue Zustellung ersetzt es."""
         self._zurueckgehalten.pop(art, None)
         alt = self.documents.inhalt(art)
+        kritisch_vorher = self.update_noetig_kritisch()
         try:
             ergebnis = self.documents.empfangen(art, body)
         except config_check.NichtPruefbar:
@@ -518,6 +600,17 @@ class Device:
             self._zurueckgehalten[art] = body
             self._pruefung_at = self._clock() + PRUEFUNG_WIEDERHOLEN_SECONDS
             return
+        except OSError as error:
+            # Datentraeger beim Speichern: wie NichtPruefbar zurueckhalten; je Zurueckhalten eine ERROR-Zeile
+            # (nur die Fehlerart, Regel 6), die Wiederholung alle 30 s bleibt still
+            if art not in self._speicher_gemeldet:
+                self._speicher_gemeldet.add(art)
+                logger.error("%s zurueckgehalten: Speichern gescheitert (%s), neuer Versuch in %s s", art,
+                             type(error).__name__, PRUEFUNG_WIEDERHOLEN_SECONDS)
+            self._zurueckgehalten[art] = body
+            self._pruefung_at = self._clock() + PRUEFUNG_WIEDERHOLEN_SECONDS
+            return
+        self._speicher_gemeldet.discard(art)
         if ergebnis is None:
             return
         self._publish("up/result", ergebnis.payload())
@@ -528,12 +621,16 @@ class Device:
                 if not config_check.ist_leer(neu):
                     bootstrap.device_state_speichern(self._dir, "uebernommen")
                 self._host_rufen("konfiguration_uebernommen", self.host.konfiguration_uebernommen, alt, neu)
-            else:
+            elif art == BEDIENUNG:
                 self._host_rufen("bedienung_uebernommen", self.host.bedienung_uebernommen, neu)
         if (angebot := angebot_aus(art, body)) is not None:
             # dasselbe Angebot, das der Speicher merkt, auch aus einer abgelehnten Konfiguration (ein Update kann der
             # Ausweg sein); ein ungueltiges laesst das vorherige stehen (R15, documents.angebot_aus)
             self._host_rufen("software_soll", self.host.software_soll, angebot.software)
+        if art == KONFIGURATION:  # die Einstellung des Kunden zu Updates, ebenso auch aus einer abgelehnten Konfiguration
+            self._host_rufen("updates_soll", self.host.updates_soll, self.documents.updates)
+            if (kritisch := self.update_noetig_kritisch()) != kritisch_vorher:  # auch aus einer abgelehnten Konfiguration
+                self._host_rufen("update_noetig_geaendert", self.host.update_noetig_geaendert, kritisch)
 
     def _zurueckgehaltene_pruefen(self, now: float) -> None:
         if not self._zurueckgehalten or now < self._pruefung_at:
@@ -550,7 +647,7 @@ class Device:
             logger.error("Host-Rueckruf %s gescheitert (%s)%s", name, type(error).__name__, commands.fehlerort(error))
 
     def _host_wert(self, name: str, rueckruf: Callable[..., _T], *args) -> tuple[_T | None, bool]:
-        """Host-Rueckruf im Takt (5b-D1-4): (Wert, gescheitert). Gescheitert loggt je Rueckruf und Fehlerart einmal
+        """Host-Rueckruf im Takt: (Wert, gescheitert). Gescheitert loggt je Rueckruf und Fehlerart einmal
         (der Takt ruft jede Sekunde, Regel 6: nur Art und Ort); nach einem Erfolg meldet sich ein neuer Fehler wieder.
         Was ein gescheiterter Rueckruf bedeutet, entscheidet die Aufrufstelle (nie ein erfundener Wert zum Server)."""
         try:
@@ -577,45 +674,61 @@ class Device:
         return None if None in mids else [mid for mid in mids if mid is not None]
 
     def _claim_state(self, payload: dict) -> commands.Outcome:
-        """Uebernahmestand vom Server (Spec 5c F1): Discovery, Seite und Zustand folgen im naechsten Takt. Gueltig ist
+        """Uebernahmestand vom Server: Discovery, Seite und Zustand folgen im naechsten Takt. Gueltig ist
         nur uebernommen: frei wird das Geraet nur ueber new_claim_code mit neuem Code (der Server sendet claim_state
-        nie anders); nicht_uebernommen zeigte hier den alten Code wieder, den der vorige Besitzer kennt (Final-Review
-        F-3)."""
+        nie anders); nicht_uebernommen zeigte hier den alten Code wieder, den der vorige Besitzer kennt."""
         state = payload.get("device_state")
         if state != "uebernommen":
             return commands.Failed("ungueltige_nutzlast", fehler.details("device_state", "unbekannt"))
+        # Der Hinweis ist nur eine Anzeige: ein ungueltiger (falsche Form, zu lang, kein Text) wird verworfen, der
+        # Uebernahmestand gilt trotzdem. Eine Ablehnung liesse das Geraet frei, waehrend der Server es als uebernommen fuehrt.
+        hinweis = bootstrap.konto_hinweis_gueltig(payload.get("konto_hinweis"))
         bootstrap.device_state_speichern(self._dir, state)
+        bootstrap.konto_hinweis_speichern(self._dir, hinweis)  # fehlt er, loescht das einen alten (Konto ohne Maske)
         return commands.Done({})
 
-    def _new_claim_code(self, payload: dict) -> commands.Outcome:
-        """Neuer Uebernahme-Code (Spec 3.4): erst beim Server melden (register mit neuem Code-Hash; der Server
-        uebernimmt ihn nur fuer ein nicht uebernommenes Geraet), dann speichern."""
+    def neuer_uebernahme_code(self) -> str:
+        """Neuer Uebernahme-Code: erst beim Server melden (register mit neuem Code-Hash; der Server uebernimmt ihn nur
+        fuer ein nicht uebernommenes Geraet), dann speichern. "neu" = gespeichert, "keine_verbindung" = der Server
+        hat den Hash nicht angenommen (der alte Code bleibt), "uebernommen" = das Geraet ist uebernommen. Nur im
+        Geraete-Thread (Befehl new_claim_code, Rueckruf des Hosts); blockiert fuer die Dauer der Anfrage."""
         code = identity.new_claim_code()
         kandidat = replace(self.identity, claim_code=code)
         try:
             antwort = self._client_for(kandidat).register(**self._register_args())
         except bootstrap.BootstrapError as error:
             logger.warning("Neuer Uebernahme-Code nicht gemeldet (%s)", error)
-            return commands.Failed("intern")
+            return "keine_verbindung"
         bootstrap.device_state_speichern(self._dir, antwort.device_state)
         if antwort.device_state != "nicht_uebernommen":
-            return commands.Failed("bereits_uebernommen")
+            return "uebernommen"
         self.identity = identity.save_claim_code(self._dir, self.identity, code)
+        return "neu"
+
+    def _new_claim_code(self, payload: dict) -> commands.Outcome:
+        """Befehl new_claim_code (HA und Server): dieselbe Methode wie der Knopfdruck des Gateways."""
+        ergebnis = self.neuer_uebernahme_code()
+        if ergebnis == "keine_verbindung":
+            return commands.Failed("intern")
+        if ergebnis == "uebernommen":
+            return commands.Failed("bereits_uebernommen")
         return commands.Done({})
 
-    def _wunsch(self, begrenzt: float, roh: float | None, herkunft: str | None, durch: str | None) -> None:
-        # herkunft und durch hat Device.wunsch schon geprueft (wish.pruefen_herkunft)
-        neu = wish.neu(begrenzt, roh, basis_version=self.documents.version(BEDIENUNG),
+    def _wunsch(self, begrenzt: float, roh: float | None, herkunft: str | None, durch: str | None, kreis: int) -> None:
+        # herkunft, durch und kreis hat Device.wunsch schon geprueft (wish.pruefen_herkunft, wish.pruefen_kreis)
+        neu = wish.neu(begrenzt, roh, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall())
         self.wunsch_puffer.setzen(neu)
         self.documents.mark_dirty()
-        text = wish.begrenzt_text(roh, begrenzt, herkunft) if roh is not None else None
-        self._eigene_meldung(wish.BEGRENZT_KEY, text)
+        meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
+        self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:
-        wunsch = self.wunsch_puffer.wunsch
-        if self._bereit and wunsch is not None and self.wunsch_puffer.offen():
+        for kreis in self.wunsch_puffer.kreise():
+            wunsch = self.wunsch_puffer.wunsch(kreis)
+            if not self._bereit or wunsch is None or not self.wunsch_puffer.offen(kreis):
+                continue
             try:
                 body = wunsch.payload()
             except nachrichten.Vertragsfehler as error:
@@ -626,18 +739,44 @@ class Device:
                     logger.error("up/wish nicht gebaut: %s", error)
                 return
             self._wunsch_fehler = None
-            self.wunsch_puffer.gesendet(self._publish("up/wish", body))
+            self.wunsch_puffer.gesendet(kreis, self._publish("up/wish", body))
 
-    def _eigene_meldung(self, key: str, text: str | None) -> None:
+    def _entfernt_senden(self, now: float) -> None:
+        """Hat der Nutzer beim Entfernen gewaehlt, das Geraet aus dem Konto zu loesen, geht die Wahl erst nach hello und
+        nachdem der Status "abgemeldet" hinaus ist (der Server wirkt nur auf ein abgemeldetes Geraet). Der Host loescht
+        die Wahl erst auf das PUBACK; ohne PUBACK geht sie nach ENTFERNT_WIEDERHOLUNG_SECONDS erneut hinaus."""
+        if not self._bereit or now < self._entfernt_frei_ab:
+            return
+        if ((self._status or {}).get("runtime_status") or {}).get("status") != "abgemeldet":
+            return
+        wahl, gescheitert = self._host_wert("entfernen_wahl", self.host.entfernen_wahl)
+        if gescheitert or wahl is None:
+            return
+        try:
+            body = nachrichten.entfernt(wahl=wahl, ts=_iso(self._wall()))
+        except nachrichten.Vertragsfehler as error:
+            # Programmierfehler (nur Feldnamen im Text); je Text einmal loggen, der Takt ruft das jede Sekunde
+            if self._publish_fehler.get("up/entfernt") != str(error):
+                self._publish_fehler["up/entfernt"] = str(error)
+                logger.error("up/entfernt nicht gebaut: %s", error)
+            return
+        self._entfernt_mid = self._publish("up/entfernt", body)
+        if self._entfernt_mid is not None:
+            self._entfernt_frei_ab = now + ENTFERNT_WIEDERHOLUNG_SECONDS
+
+    def _eigene_meldung(self, key: str, meldung: meldungen.Meldung | None) -> None:
         if key not in wire.MELDUNGEN:
             raise nachrichten.Vertragsfehler("eigene Meldung: key steht nicht in MELDUNGEN")
-        if self._eigene.get(key) == text:
+        if self._eigene.get(key) == meldung:
             return
         vorher = self._eigene.pop(key, None)
-        if text is not None:
-            self._eigene[key] = text
-        self._meldung_merken(nachrichten.meldung(key=key, kategorie=key, kritisch=False, text=text or vorher or "",
-                                                 offen=text is not None, ts=_iso(self._wall())))
+        if meldung is not None:
+            self._eigene[key] = meldung
+        # geschlossen wird mit der zuletzt offenen Meldung: so bleiben Code und Stufe des Items die der Meldung
+        gesendet = meldung or vorher
+        inhalt = (meldungen.draht(gesendet) if gesendet is not None
+                  else {"code": None, "params": {}, "stufe": None})
+        self._meldung_merken(nachrichten.meldung(key=key, offen=meldung is not None, ts=_iso(self._wall()), **inhalt))
 
     def _meldung_merken(self, item: dict) -> None:
         key = item["key"]
@@ -660,11 +799,18 @@ class Device:
             if self._meldungen_neu.get(item["key"]) is item:
                 del self._meldungen_neu[item["key"]]
 
+    def _kreisnummern(self) -> list[int]:
+        """Die Kreise der gespeicherten Konfiguration; ohne eingerichtete Anlage nur Kreis 1 (der Ruhezustand meldet
+        seinen Raum unter 1)."""
+        nummern = [k for eintrag in kreisansicht.kreise(self.konfiguration() or {})
+                   if isinstance(k := eintrag.get("kreis"), int) and not isinstance(k, bool)]
+        return nummern or [KREIS]
+
     def _ursprungswerte_neu(self) -> dict:
-        """Spec Stufe 3 S3 5.1: nur Namen, die in der Konfiguration (ursprungswerte, vom Server gespiegelt) fehlen, in
+        """Nur Namen, die in der Konfiguration (ursprungswerte, vom Server gespiegelt) fehlen, in
         den Grenzen von V1; was nicht passt, geht nicht hinaus (Log ohne Wert)."""
         konfiguration = self.konfiguration() or {}
-        bekannt = konfiguration.get("ursprungswerte")
+        bekannt = kreisansicht.erste(konfiguration).get("ursprungswerte")  # bis zum Mehrkreisbetrieb: Kreis 1
         bekannt = bekannt if isinstance(bekannt, dict) else {}
         werte: dict = {}
         gemerkt, gescheitert = self._host_wert("ursprungswerte", self.host.ursprungswerte)
@@ -693,10 +839,16 @@ class Device:
         if not self._bereit:
             return
         runtime_status, gescheitert = self._host_wert("runtime_status", self.host.runtime_status)
-        raum, raum_gescheitert = self._host_wert("raum", self.host.raum)
-        if gescheitert or raum_gescheitert:
+        kreise = []
+        for kreis in self._kreisnummern():
+            raum, raum_gescheitert = self._host_wert("raum", self.host.raum, kreis)
+            if raum_gescheitert:
+                gescheitert = True
+            kreise.append({"kreis": kreis, "raum": raum})
+        if gescheitert:
             return  # kein Status mit erfundenem Laufzeitstatus oder Raum; der naechste Takt versucht es erneut
-        felder = {"zustand": self._zustand(runtime_status), "runtime_status": runtime_status, "raum": raum,
+        felder = {"zustand": self._zustand(runtime_status), "runtime_status": runtime_status,
+                  "kreise": kreise,
                   "ursprungswerte": self._ursprungswerte_neu() or None}
         try:
             body = nachrichten.status(**felder, ts=_iso(self._wall()))
@@ -716,3 +868,4 @@ class Device:
                 return
         if self._publish("up/status", body) is not None:
             self._status, self._status_at = vergleich, now
+            self._status_erzwingen = False

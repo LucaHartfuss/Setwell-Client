@@ -1,4 +1,4 @@
-"""Plan 5b D2 Task 10: Fake-Bootstrap fuer die Docker-Pruefungen (signiert CSRs, nennt den Fake-Broker)."""
+"""Fake-Bootstrap fuer die Docker-Pruefungen (signiert CSRs, nennt den Fake-Broker)."""
 import json
 import subprocess
 import urllib.error
@@ -6,10 +6,14 @@ import urllib.request
 
 import pytest
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fake_bootstrap import FakeBootstrap
 
-from smartheat_device import bootstrap, identity, wire
+from smartheat_device import anker, bootstrap, identity, wire
+
+NOW = 1_800_000_000
 
 
 @pytest.fixture
@@ -21,16 +25,31 @@ def ca_dir(tmp_path):
 
 
 @pytest.fixture
-def fake(ca_dir):
-    server = FakeBootstrap(ca_dir, "fake-broker")
+def anker_key(tmp_path, monkeypatch):
+    """Eigener Testschluessel des Vertrauensankers; das Geraet liest seinen oeffentlichen Teil aus einer Datei in tmp_path
+    (Override gilt nur mit Testkennung)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    datei = tmp_path / "anker-test.pem"
+    datei.write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM,
+                                                    serialization.PublicFormat.SubjectPublicKeyInfo))
+    monkeypatch.setenv(anker.ENV_DATEI, str(datei))
+    monkeypatch.setenv("SMARTHEAT_TESTKENNUNG", "gateway-tests")
+    return key
+
+
+@pytest.fixture
+def fake(ca_dir, anker_key):
+    server = FakeBootstrap(ca_dir, "fake-broker", anker_key=anker_key)
     server.start()
     yield server
     server.stop()
 
 
-def _post(url: str, body: dict) -> dict:
-    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json"})
+def _post(url: str, body: dict, *, ts: int | None = NOW) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if ts is not None:
+        headers[wire.HEADER_TIMESTAMP] = str(ts)
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers=headers)
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read())
 
@@ -46,6 +65,21 @@ def test_register_signs_the_csr_and_names_the_broker(fake, tmp_path, ca_dir):
     assert cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == ident.device_id
     assert identity.passt_zum_schluessel(ident, answer["certificate"])
     assert fake.device_ids == [ident.device_id] and fake.registrations == 1
+    assert anker.pruefen(answer, route="POST /devices/register", device_id=ident.device_id, ts=NOW)
+
+
+def test_without_key_or_timestamp_the_answer_carries_no_anchor_fields(ca_dir, fake, tmp_path):
+    ident = identity.load_or_create(tmp_path / "device")
+    body = {"csr": identity.csr_pem(ident)}
+    ohne_zeit = _post(f"{fake.url}/devices/register", body, ts=None)
+    assert not set(anker.ANKER_FELDER) & set(ohne_zeit)
+    ohne_schluessel = FakeBootstrap(ca_dir, "fake-broker")
+    ohne_schluessel.start()
+    try:
+        antwort = _post(f"{ohne_schluessel.url}/devices/register", body)
+    finally:
+        ohne_schluessel.stop()
+    assert not set(anker.ANKER_FELDER) & set(antwort)
 
 
 def test_the_d1_bootstrap_client_accepts_the_answers(fake, tmp_path):

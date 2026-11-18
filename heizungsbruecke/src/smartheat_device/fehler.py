@@ -1,28 +1,19 @@
-"""Fehler an den Server (Spec Stufe 3 S5 6.1/6.2, G-6): Code und details, keine Texte. details nur mit den Schluesseln
+"""Fehler an den Server (G-6): Code und details, keine Texte. details nur mit den Schluesseln
 aus wire.DETAIL_FIELDS -- feld aus wire.PRUEF_FELDER, regel aus wire.PRUEF_REGELN, die uebrigen endliche Zahlen. Den
 Text bildet der Server (geraete/texte.py); lokale Anzeigen (Meldungen, Diagnoseseite, Log) haben eigene Texte."""
 import json
-import math
 from collections.abc import Iterable
 
+from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_device import wire
 
 ZAHLEN = tuple(key for key in wire.DETAIL_FIELDS if key not in ("feld", "regel"))
 
 
-def _zahl(value) -> bool:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return False
-    try:
-        return math.isfinite(value)
-    except OverflowError:
-        return False
-
-
 def kodierbar(wert) -> bool:
     """Ein Wert aus dem Netz (json.loads) laesst sich als UTF-8 speichern. json.loads liefert aus "\\ud800" ein einzelnes
     Surrogat, das smartheat_core.dateien.schreiben_json (ensure_ascii=False) nicht kodieren kann: wer solche Texte
-    annaehme, scheiterte beim Speichern mit einer Ausnahme statt mit einer Ablehnung (Testoffensive T2, Task 13)."""
+    annaehme, scheiterte beim Speichern mit einer Ausnahme statt mit einer Ablehnung."""
     try:
         json.dumps(wert, ensure_ascii=False).encode()
     except UnicodeEncodeError:
@@ -39,7 +30,7 @@ def gueltig(details) -> bool:
     feld, regel = details.get("feld"), details.get("regel")
     return ((feld is None or (isinstance(feld, str) and feld in wire.PRUEF_FELDER))
             and (regel is None or (isinstance(regel, str) and regel in wire.PRUEF_REGELN))
-            and all(_zahl(details[key]) for key in ZAHLEN if key in details))
+            and all(ist_endliche_zahl(details[key]) for key in ZAHLEN if key in details))
 
 
 def details(feld: str | None = None, regel: str | None = None, **zahlen: float) -> dict:

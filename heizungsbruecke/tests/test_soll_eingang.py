@@ -1,12 +1,21 @@
-"""Spec 5c 1.3 / 5b 3.2-3.3: Soll-Eingang hostneutral (Gateway und HA-Add-on)."""
+"""Soll-Eingang hostneutral (Gateway und HA-Add-on)."""
 import logging
 from pathlib import Path
 
 import pytest
-from conftest import FakeClock
+from fakes import FakeClock
 
 from smartheat_runtime.runtime import EV_LOCAL_CHECK
-from smartheat_runtime.soll_eingang import EV_SOLL_MODUS, EV_TARGET_INPUT, SollEingang
+from smartheat_runtime.soll_eingang import (
+    EV_SOLL_ENDE,
+    EV_SOLL_ENDE_ERLEDIGT,
+    EV_SOLL_MODUS,
+    EV_SOLL_QUELLE,
+    EV_TARGET_INPUT,
+    SOLL_ENDE_WIEDERHOLUNG_S,
+    SollEingang,
+    ende_schreiben,
+)
 from smartheat_runtime.soll_speicher import SOURCE_LOKAL, SOURCE_PORTAL, SOURCE_THERMOSTAT, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
@@ -24,6 +33,9 @@ class Quelle:
 
     def angezeigt(self):
         return self.wert
+
+    def aus(self):
+        return False
 
 
 class Aufbau:
@@ -78,6 +90,23 @@ def test_hvac_off_then_on_restores_the_display(tmp_path):
     assert a.quelle.geschrieben == [23.0] and a.aus[-1] == (False, None)
 
 
+@pytest.mark.parametrize("mode", [None, 0, False], ids=["null", "zahl", "bool"])
+def test_ein_modus_ohne_text_aendert_nichts(tmp_path, mode):
+    """Fail closed: `system_mode: null` (Zigbee2MQTT) oder ein anderer Nicht-Text ist keine
+    Aussage ueber den Modus. Er schaltet die Soll-Quelle weder an (kein „wieder an“, kein Schreiben an die Quelle)
+    noch aus."""
+    a = Aufbau(tmp_path)
+    _modus(a, "off")
+    a.post(23.0, SOURCE_PORTAL)
+    a.quelle.wert = 21.0
+    _modus(a, mode)
+    assert a.eingang.aus and a.quelle.geschrieben == [] and a.aus == [(True, 21.0)]
+    _modus(a, "heat")  # Gegenprobe: ein Text-Modus schaltet wieder an
+    assert not a.eingang.aus and a.quelle.geschrieben == [23.0] and a.aus[-1] == (False, None)
+    _modus(a, mode)  # an bleibt an
+    assert not a.eingang.aus and a.aus[-1] == (False, None) and len(a.aus) == 2
+
+
 def test_ha_source_echo_is_not_a_wish(tmp_path):
     a = Aufbau(tmp_path)
     a.post(22.0, SOURCE_PORTAL)
@@ -88,8 +117,8 @@ def test_ha_source_echo_is_not_a_wish(tmp_path):
 
 def test_local_event_wish_aligns_the_entity(tmp_path):
     a = Aufbau(tmp_path)
-    a.post(22.0, SOURCE_LOKAL, herkunft="smartheat_entity", durch="automation")
-    assert a.wuensche == [(22.0, "smartheat_entity", "automation")]
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha", durch="automation")
+    assert a.wuensche == [(22.0, "ha", "automation")]
     assert a.store.value == 22.0 and a.store.source == SOURCE_LOKAL and a.quelle.geschrieben == [22.0]
 
 
@@ -111,8 +140,8 @@ def test_gateway_debounce_still_waits(tmp_path):
 
 def test_clamped_local_wish_keeps_source_lokal_and_writes_back(tmp_path):
     a = Aufbau(tmp_path)
-    a.post(30.0, SOURCE_LOKAL, herkunft="smartheat_entity")
-    assert a.wuensche == [(30.0, "smartheat_entity", None)]
+    a.post(30.0, SOURCE_LOKAL, herkunft="ha")
+    assert a.wuensche == [(30.0, "ha", None)]
     assert a.store.value == 25.0 and a.store.source == SOURCE_LOKAL and a.quelle.geschrieben == [25.0]
 
 
@@ -144,7 +173,7 @@ def test_local_wish_while_source_is_off_is_discarded(tmp_path):
     a = Aufbau(tmp_path)
     a.worker.post(Event(EV_SOLL_MODUS, {"mode": "off"}))
     a.worker.run_pending()
-    a.post(22.0, SOURCE_LOKAL, herkunft="smartheat_entity", durch="automation")
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha", durch="automation")
     assert a.wuensche == [] and a.store.value == 21.0 and a.quelle.geschrieben == []
     assert a.aus == [(True, 21.0)] and a.checks == []
     a.quelle.wert = 21.0
@@ -155,9 +184,9 @@ def test_local_wish_while_source_is_off_is_discarded(tmp_path):
 
 def test_repeated_identical_local_wish_is_not_repeated(tmp_path):
     a = Aufbau(tmp_path)
-    a.post(22.0, SOURCE_LOKAL, herkunft="smartheat_entity")
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha")
     assert len(a.wuensche) == 1 and len(a.checks) == 1
-    a.post(22.0, SOURCE_LOKAL, herkunft="smartheat_entity")
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha")
     assert len(a.wuensche) == 1 and len(a.checks) == 1 and a.quelle.geschrieben == [22.0]
 
 
@@ -187,7 +216,7 @@ def test_switching_off_during_an_open_local_wish_keeps_the_local_value_without_a
     """Ein lokaler Wunsch merkt kein Soll davor: Modus off vor dem Entprellen verwirft ihn als Wunsch, der lokale Wert
     bleibt stehen (wie heute)."""
     a = Aufbau(tmp_path, entprellen_s=10.0)
-    a.post(23.0, SOURCE_LOKAL, herkunft="smartheat_entity")
+    a.post(23.0, SOURCE_LOKAL, herkunft="ha")
     assert a.store.value == 23.0 and a.wuensche == []
     _modus(a, "off")
     assert a.store.value == 23.0 and a.store.source == SOURCE_LOKAL and a.aus == [(True, 23.0)]
@@ -204,7 +233,7 @@ class AblehnenderAufbau(Aufbau):
 
 
 def test_a_wish_the_device_refuses_keeps_the_entered_value_without_write_back(tmp_path):
-    """Device.wunsch lehnt mit ValueError ab (keine endliche Zahl, herkunft oder durch kein Vertragswert, 5b-D1-4):
+    """Device.wunsch lehnt mit ValueError ab (keine endliche Zahl, herkunft oder durch kein Vertragswert):
     der Soll-Eingang faengt das, der eingegebene Wert gilt lokal, nichts wird an die Quelle zurueckgeschrieben, und
     die lokale Pruefung laeuft."""
     a = AblehnenderAufbau(tmp_path)
@@ -217,7 +246,7 @@ def test_a_wish_the_device_refuses_keeps_the_entered_value_without_write_back(tm
 def test_portal_confirming_an_open_thermostat_wish_with_the_same_value_keeps_the_wish(tmp_path):
     """Nr. 40 im Soll-Eingang: bestaetigt der Server waehrend der Entprellung genau den Wert des offenen
     Thermostat-Wunschs, aendert sich nichts (apply_portal ohne Wirkung); der Wunsch geht nach der Entprellung einmal an
-    den Geraetekern (bis Task 6 verwarf die Bestaetigung ihn als Bedienung des Servers). Eine Bestaetigung danach loest
+    den Geraetekern (die Bestaetigung verwirft ihn nicht als Bedienung des Servers). Eine Bestaetigung danach loest
     keinen weiteren Wunsch aus."""
     a = Aufbau(tmp_path, entprellen_s=10.0)
     a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
@@ -330,3 +359,260 @@ def test_a_frost_value_also_counts_as_usable_for_the_warning(tmp_path, caplog):
         a.post(7.0, SOURCE_THERMOSTAT)  # Frostschutz-Stellung: brauchbar
         a.post("abc", SOURCE_THERMOSTAT)
     assert len(_warnungen(caplog)) == 2 and "abc" not in caplog.text
+
+
+def test_jeder_wechsel_von_soll_quelle_aus_geht_als_ereignis_an_die_laufzeit(tmp_path):
+    a = Aufbau(tmp_path)
+    gemeldet = []
+    a.worker.register(EV_SOLL_QUELLE, lambda event: gemeldet.append(event.data["aus"]))
+
+    a.post(7.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # Frostschutz-Stellung
+    a.post(7.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # unveraendert: kein weiterer Wechsel
+    a.worker.post(Event(EV_SOLL_MODUS, {"mode": "off"}))  # zweiter Grund: die Quelle bleibt aus
+    a.worker.run_pending()
+    assert gemeldet == [True]
+
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # nur der Modus haelt sie noch aus
+    a.worker.post(Event(EV_SOLL_MODUS, {"mode": "heat"}))
+    a.worker.run_pending()
+
+    assert gemeldet == [True, False]
+
+
+def test_die_laufzeit_merkt_soll_quelle_aus_aus_dem_ereignis():
+    from types import SimpleNamespace
+
+    from smartheat_runtime import app
+
+    clock = FakeClock()
+    rt = SimpleNamespace(worker=RegulationWorker(clock), soll_quelle_aus=False, idle=False)
+    rt.worker.after_each = lambda *args: None  # nur die Zuordnung der Ereignisse
+    app._register_handlers(rt, lambda: None)  # type: ignore[arg-type]
+
+    rt.worker.post(Event(EV_SOLL_QUELLE, {"aus": True}))
+    rt.worker.run_pending()
+    assert rt.soll_quelle_aus is True
+
+    rt.worker.post(Event(EV_SOLL_QUELLE, {"aus": False}))
+    rt.worker.run_pending()
+    assert rt.soll_quelle_aus is False
+
+
+def _ende(a: Aufbau) -> None:
+    a.worker.post(Event(EV_SOLL_ENDE, {}))
+    a.worker.run_pending()
+
+
+def test_ende_der_regelung_bringt_die_quelle_auf_den_gemerkten_wunsch(tmp_path):
+    a = Aufbau(tmp_path)
+    a.quelle.wert = 17.5  # was eine Betriebsart (Plan kuehl, Abwesend) in die Quelle geschrieben hat
+    _ende(a)
+    assert a.quelle.geschrieben == [21.0] and a.store.value == 21.0
+
+
+def test_ende_der_regelung_senkt_die_quelle_nie_ab(tmp_path):
+    a = Aufbau(tmp_path)
+    a.quelle.wert = 23.0  # die Quelle zeigt mehr als der gemerkte Wunsch: so lassen
+    _ende(a)
+    assert a.quelle.geschrieben == [] and a.quelle.wert == 23.0
+    a.quelle.wert = 21.0  # zeigt schon den Wunsch: nichts
+    _ende(a)
+    assert a.quelle.geschrieben == []
+
+
+def test_ende_der_regelung_schreibt_nicht_bei_soll_quelle_aus(tmp_path):
+    a = Aufbau(tmp_path)
+    a.worker.post(Event(EV_SOLL_MODUS, {"mode": "off"}))
+    a.worker.run_pending()
+    a.quelle.wert = 17.5
+    _ende(a)
+    assert a.quelle.geschrieben == []
+    a.post(7.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # Frostschutz-Stellung bleibt unangetastet
+    _ende(a)
+    assert a.quelle.geschrieben == []
+
+
+def test_ende_der_regelung_laesst_einen_offenen_wunsch_stehen(tmp_path):
+    a = Aufbau(tmp_path, entprellen_s=30.0)
+    a.post(23.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # noch nicht entprellt: der Kunde dreht gerade
+    a.quelle.wert = 23.0
+    _ende(a)
+    assert a.quelle.geschrieben == []
+
+
+def test_ende_der_regelung_ohne_schreibbare_quelle_tut_nichts(tmp_path):
+    a = Aufbau(tmp_path, schreibbar=False)
+    a.quelle.wert = 17.5
+    _ende(a)
+    assert a.quelle.geschrieben == [] and a.store.value == 21.0
+
+
+def _erledigt(a: Aufbau) -> list:
+    """Wie oft das Soll-Ende als erledigt gemeldet wurde (die Laufzeit loescht daraufhin den Merker)."""
+    gemeldet: list = []
+    a.worker.register(EV_SOLL_ENDE_ERLEDIGT, lambda event: gemeldet.append(event))
+    return gemeldet
+
+
+def test_ende_der_regelung_bei_unbekannter_anzeige_schreibt_nicht_und_holt_es_nach(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = None  # die Quelle meldet nichts: ein hoeherer Wert des Kunden koennte dort stehen
+    _ende(a)
+    assert a.quelle.geschrieben == [] and erledigt == []
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.quelle.wert = 17.5  # jetzt bekannt und niedriger als der Wunsch
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0] and len(erledigt) == 1
+
+
+def test_ende_der_regelung_meldet_erst_nach_erfolg_und_wiederholt_ein_scheiterndes_schreiben(tmp_path):
+    a = Aufbau(tmp_path, schreibbar=False)
+    erledigt = _erledigt(a)
+    a.quelle.wert = 17.5
+    _ende(a)
+    assert erledigt == []
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.quelle.schreibbar = True
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0] and len(erledigt) == 1
+
+
+def test_ende_der_regelung_plant_nicht_mehrere_wiederholungen(tmp_path):
+    a = Aufbau(tmp_path, schreibbar=False)
+    a.quelle.wert = 17.5
+    _ende(a)
+    _ende(a)
+    a.quelle.schreibbar = True
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0]  # eine Kette: nicht zweimal geschrieben
+
+
+@pytest.mark.parametrize("anzeige", [21.0, 23.0, 7.0])
+def test_ende_der_regelung_ist_erledigt_wenn_die_quelle_den_wunsch_oder_mehr_oder_frost_zeigt(tmp_path, anzeige):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = anzeige
+    _ende(a)
+    assert a.quelle.geschrieben == [] and len(erledigt) == 1
+
+
+def test_ende_der_regelung_ist_bei_soll_quelle_aus_oder_ohne_quelle_erledigt(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.worker.post(Event(EV_SOLL_MODUS, {"mode": "off"}))
+    a.worker.run_pending()
+    _ende(a)
+    assert len(erledigt) == 1
+    worker = RegulationWorker(FakeClock())
+    ohne = []
+    worker.register(EV_SOLL_ENDE_ERLEDIGT, lambda event: ohne.append(event))
+    SollEingang(worker, a.store, None, wunsch=lambda *args: 21.0, soll_quelle_aus=lambda *args: None, entprellen_s=0.0)
+    worker.post(Event(EV_SOLL_ENDE, {}))
+    worker.run_pending()
+    assert len(ohne) == 1
+
+
+def test_ende_der_regelung_holt_den_offenen_wunsch_nach_dem_entprellen_nach(tmp_path):
+    a = Aufbau(tmp_path, entprellen_s=30.0)
+    erledigt = _erledigt(a)
+    a.post(23.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # der Kunde dreht gerade
+    a.quelle.wert = 23.0
+    _ende(a)
+    assert a.quelle.geschrieben == [] and erledigt == []  # der Merker bleibt offen
+    a.clock.advance(30)
+    a.worker.run_pending()
+    assert len(erledigt) == 1 and a.store.value == 23.0 and a.quelle.geschrieben == []
+
+
+# --- Soll-Ende: Rueckgabe von ende_schreiben und Wiederholung ----------------------------------------------------
+
+def test_ende_schreiben_meldet_erledigt_bei_aus_und_nicht_erledigt_bei_unbekannter_anzeige_oder_fehlschlag():
+    aus = Quelle()
+    aus.aus = lambda: True
+    assert ende_schreiben(21.0, aus) is True
+    assert aus.geschrieben == []
+
+    unbekannt = Quelle(wert=None)
+    assert ende_schreiben(21.0, unbekannt) is False
+    assert unbekannt.geschrieben == []
+
+    gescheitert = Quelle(schreibbar=False, wert=17.5)
+    assert ende_schreiben(21.0, gescheitert) is False
+
+    geschrieben = []
+    assert ende_schreiben(21.0, Quelle(wert=17.5), geschrieben=geschrieben.append) is True
+    assert geschrieben == [17.5]
+
+
+def test_das_soll_ende_wird_nach_sechzig_sekunden_wiederholt_und_nicht_frueher(tmp_path):
+    a = Aufbau(tmp_path)
+    a.quelle.wert = None
+    _ende(a)
+    a.quelle.wert = 17.5
+
+    a.clock.advance(59.9)
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == []
+
+    a.clock.advance(0.1)
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0]
+
+
+def test_ein_wiederholtes_soll_ende_das_wieder_scheitert_wird_erneut_geplant(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = None
+    _ende(a)
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+    assert erledigt == []
+
+    a.quelle.wert = 17.5
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0] and len(erledigt) == 1
+
+
+def test_mehrere_gescheiterte_soll_enden_planen_eine_einzige_wiederholung(tmp_path):
+    a = Aufbau(tmp_path, schreibbar=False)
+    a.quelle.wert = 17.5
+    versuche = []
+    echte = a.quelle.schreiben
+    a.quelle.schreiben = lambda wert: versuche.append(wert) or echte(wert)
+    _ende(a)
+    _ende(a)
+    assert len(versuche) == 2
+
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+
+    assert len(versuche) == 3
+
+
+def test_ein_gescheitertes_soll_ende_gilt_bei_soll_quelle_aus_erst_mit_seiner_wiederholung_als_erledigt(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = None
+    _ende(a)
+    a.worker.post(Event(EV_SOLL_MODUS, {"mode": "off"}))
+    a.worker.run_pending()
+    assert erledigt == []
+
+    a.clock.advance(SOLL_ENDE_WIEDERHOLUNG_S)
+    a.worker.run_pending()
+    assert len(erledigt) == 1
+
+
+def test_ein_erledigtes_soll_ende_wird_durch_spaetere_wuensche_nicht_wiederholt(tmp_path):
+    a = Aufbau(tmp_path)
+    erledigt = _erledigt(a)
+    a.quelle.wert = 21.0
+    _ende(a)
+    assert len(erledigt) == 1
+
+    a.post(22.5, SOURCE_THERMOSTAT, herkunft="soll_entity")
+
+    assert len(erledigt) == 1

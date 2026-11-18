@@ -1,4 +1,4 @@
-"""Init-Schritt (Plan G2b-1 Task 7, Spec G2b-1 3)."""
+"""Init-Schritt."""
 import base64
 import hashlib
 import json
@@ -28,7 +28,6 @@ def test_first_run_creates_everything_private(tmp_path):
     assert stat.S_IMODE((tmp_path / "zigbee2mqtt" / "configuration.yaml").stat().st_mode) == 0o600
     for name in ("device",):
         assert stat.S_IMODE((tmp_path / "data" / name).stat().st_mode) == 0o700
-    assert not (tmp_path / "data" / "agent").exists()
     assert "bus/mosquitto/passwd" in written
 
 
@@ -81,11 +80,48 @@ def test_a_passwd_from_0_5_0_with_the_agent_user_is_rebuilt(tmp_path):
     assert not any(line.startswith("agent:") for line in passwd.read_text().splitlines())
 
 
-def test_adapter_from_the_host_file(tmp_path, monkeypatch):
+def test_adapter_from_the_host_file(tmp_path, monkeypatch, caplog):
     (tmp_path / "host").mkdir()
     (tmp_path / "host" / "zigbee_adapter").write_text("zstack\n")
-    assert init.adapter(tmp_path / "host", default="ember") == "zstack"
-    assert init.adapter(tmp_path / "nichtda", default="ember") == "ember"
+    assert init.adapter(tmp_path / "host") == "zstack"
+    assert init.adapter(tmp_path / "nichtda") is None  # ohne Datei kein Abgleich
+    (tmp_path / "host" / "zigbee_adapter").write_text("\n")
+    assert init.adapter(tmp_path / "host") is None
+    assert caplog.records == []  # leer ist kein Fehler
+    (tmp_path / "host" / "zigbee_adapter").write_text("zstack\nschlecht: 1\n")  # kein Name eines Adapters
+    assert init.adapter(tmp_path / "host") is None
+    assert "kein Adaptername" in caplog.text and "schlecht" not in caplog.text
+
+
+def _run_mit_adapter(tmp_path, adapter_name):
+    return init.ensure(tmp_path / "bus", tmp_path / "zigbee2mqtt", tmp_path / "data", adapter_name,
+                       token=lambda n=32: "test-pw")
+
+
+def test_a_stick_swap_changes_the_adapter(tmp_path):
+    """Ein anderer Stick (Host-Datei zigbee_adapter) aendert nach dem ersten Schreiben nur serial.adapter."""
+    _run_mit_adapter(tmp_path, "zstack")
+    config = tmp_path / "zigbee2mqtt" / "configuration.yaml"
+    vorher = config.read_text()
+    assert _run_mit_adapter(tmp_path, "ember") == ["zigbee2mqtt/configuration.yaml (Adapter)"]
+    assert config.read_text() == vorher.replace("adapter: zstack", "adapter: ember")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert _run_mit_adapter(tmp_path, "ember") == []  # zweiter Lauf schweigt
+
+
+def test_without_the_host_file_the_adapter_stays(tmp_path):
+    """Ohne Host-Datei (None) bleibt der Adapter einer bestehenden Konfiguration; der Standard gilt nur beim ersten
+    Schreiben."""
+    _run_mit_adapter(tmp_path, "zstack")
+    config = tmp_path / "zigbee2mqtt" / "configuration.yaml"
+    vorher = config.read_text()
+    assert _run_mit_adapter(tmp_path, None) == []
+    assert config.read_text() == vorher
+    erste = tmp_path / "neu"
+    init.ensure(erste / "bus", erste / "zigbee2mqtt", erste / "data", None, token=lambda n=32: "test-pw")
+    assert "  adapter: ember\n" in (erste / "zigbee2mqtt" / "configuration.yaml").read_text()
+    init.ensure(erste / "bus2", erste / "z2", erste / "data", None, token=lambda n=32: "test-pw", default_adapter="zstack")
+    assert "  adapter: zstack\n" in (erste / "z2" / "configuration.yaml").read_text()
 
 
 def test_unreadable_credentials_are_replaced_and_passwd_follows(tmp_path):
@@ -97,7 +133,7 @@ def test_unreadable_credentials_are_replaced_and_passwd_follows(tmp_path):
 
 
 def test_stale_passwd_is_rebuilt(tmp_path):
-    """Zurueckgespielte Sicherung: bus/passwd passt nicht mehr zu den Zugangsdateien (Plan G2b-2 Task 3)."""
+    """Zurueckgespielte Sicherung: bus/passwd passt nicht mehr zu den Zugangsdateien."""
     _run(tmp_path)
     passwd = tmp_path / "bus" / "mosquitto" / "passwd"
     passwd.write_text("".join(f"{s}:{init.mosquitto_hash('test-veraltet')}\n" for s in init.SERVICES))
@@ -126,7 +162,7 @@ def test_new_zigbee2mqtt_password_reaches_its_configuration(tmp_path):
 
 
 def test_an_existing_configuration_without_retain_is_healed_and_reported(tmp_path):
-    """L4-17: Gateways mit alter Grundkonfiguration bekommen device_options.retain: true; ein zweiter Lauf schweigt."""
+    """Gateways mit alter Grundkonfiguration bekommen device_options.retain: true; ein zweiter Lauf schweigt."""
     _run(tmp_path)
     config = tmp_path / "zigbee2mqtt" / "configuration.yaml"
     config.write_text(config.read_text().replace("device_options:\n  retain: true\n", ""))

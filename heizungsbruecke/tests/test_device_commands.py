@@ -1,23 +1,16 @@
-"""Spec 5b 3.4: Befehle hoechstens einmal ausgefuehrt, Ergebnis vor dem Senden gespeichert, Gruende aus dem Vertrag;
+"""Befehle hoechstens einmal ausgefuehrt, Ergebnis vor dem Senden gespeichert, Gruende aus dem Vertrag;
 Befehl hinweis (jedes Geraet)."""
 import json
 import logging
 
 import pytest
+from device_helpers import Sent, _command
 
 from smartheat_device import commands as cmd
 from smartheat_device import fehler, nachrichten, wire
 
-
-class Sent:
-    def __init__(self, ok: bool = True) -> None:
-        self.results: list[dict] = []
-        self.ok = ok
-
-    def __call__(self, body: dict) -> bool:
-        self.results.append(body)
-        return self.ok
-
+HINWEIS_DOPPELT = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
+HINWEIS_LOESCHEN = {"key": "geraet_doppelt", "code": None, "params": {}, "stufe": None}
 
 class Clock:
     def __init__(self) -> None:
@@ -27,17 +20,12 @@ class Clock:
         return self.now
 
 
-def _command(kind="diagnostics", command_id="c1", payload=None):
-    return {"schema": 1, "command_id": command_id, "kind": kind, "payload": {} if payload is None else payload,
-            "expires_at": "2027-01-15T09:00:00+00:00"}
-
-
 def _ok(command_id="c1", result=None):
-    return {"schema": 1, "command_id": command_id, "ok": True, "result": result or {}, "error": None}
+    return {"schema": 2, "command_id": command_id, "ok": True, "result": result or {}, "error": None}
 
 
 def _fail(grund, details=None, command_id="c1"):
-    return {"schema": 1, "command_id": command_id, "ok": False, "result": None, "error": fehler.body(grund, details)}
+    return {"schema": 2, "command_id": command_id, "ok": False, "result": None, "error": fehler.body(grund, details)}
 
 
 def test_a_command_runs_once_and_its_result_goes_up(tmp_path):
@@ -121,11 +109,29 @@ def test_a_foreign_field_in_a_command_is_refused_and_does_not_run(tmp_path, feld
     assert calls == [] and sent.results == [_fail("ungueltige_nutzlast", erwartet)]
 
 
+@pytest.mark.parametrize("schema", [1, 3, 0, None, "2", 2.5, True, [2], {"v": 2}])
+def test_a_command_with_a_schema_outside_the_contract_is_refused_and_does_not_run(tmp_path, schema):
+    sent, calls = Sent(), []
+    register = cmd.CommandRegister(tmp_path, sent)
+    register.register("diagnostics", lambda payload: calls.append(1) or cmd.Done({}))
+    register.empfangen({**_command(), "schema": schema})
+    assert calls == [] and sent.results == [_fail("ungueltige_nutzlast", {"feld": "schema", "regel": "unbekannt"})]
+
+
+def test_a_command_with_a_known_schema_runs(tmp_path):
+    sent, calls = Sent(), []
+    register = cmd.CommandRegister(tmp_path, sent)
+    register.register("diagnostics", lambda payload: calls.append(1) or cmd.Done({}))
+    for schema in wire.SCHEMATA:
+        register.empfangen({**_command(command_id=f"s{schema}"), "schema": schema})
+    assert len(calls) == len(wire.SCHEMATA)
+
+
 @pytest.mark.parametrize("kind, payload, erwartet", [
     ("diagnostics", {"zukunft": 1}, {"regel": "unbekannt"}),
     ("diagnostics", {"stunden": 1}, {"feld": "stunden", "regel": "unbekannt"}),
     ("inventory", {"stunden": 1, "extra": 2}, {"regel": "unbekannt"}),
-    ("hinweis", {"key": "k", "stufe": "info", "text": "t", "zukunft": 1}, {"regel": "unbekannt"}),
+    ("hinweis", {**HINWEIS_DOPPELT, "zukunft": 1}, {"regel": "unbekannt"}),
 ])
 def test_a_foreign_payload_field_is_refused_and_does_not_run(tmp_path, kind, payload, erwartet):
     sent, calls = Sent(), []
@@ -139,8 +145,10 @@ def test_a_foreign_payload_field_is_refused_and_does_not_run(tmp_path, kind, pay
     ("claim_state", {}, "device_state"),
     ("zigbee_permit_join", {}, "seconds"),
     ("inventory", {"filter": {"treiber": "simulation"}}, "stunden"),
-    ("hinweis", {"key": "k", "stufe": "info"}, "text"),
-    ("hinweis", {"stufe": "info", "text": "t"}, "key"),
+    ("hinweis", {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}}, "stufe"),
+    ("hinweis", {"code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}, "key"),
+    ("hinweis", {"key": "geraet_doppelt", "params": {}, "stufe": "rot"}, "code"),
+    ("hinweis", {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "stufe": "rot"}, "params"),
 ])
 def test_a_missing_required_payload_field_is_refused_and_does_not_run(tmp_path, kind, payload, feld):
     sent, calls = Sent(), []
@@ -152,7 +160,7 @@ def test_a_missing_required_payload_field_is_refused_and_does_not_run(tmp_path, 
 
 @pytest.mark.parametrize("kind, payload", [
     ("claim_state", {"device_state": "uebernommen"}), ("new_claim_code", {}), ("sign_off", {}), ("diagnostics", {}),
-    ("hinweis", {"key": "k", "stufe": "info", "text": "t"}), ("inventory", {"stunden": 0}),
+    ("hinweis", HINWEIS_DOPPELT), ("hinweis", HINWEIS_LOESCHEN), ("inventory", {"stunden": 0}),
     ("inventory", {"stunden": 1, "filter": {"treiber": "simulation"}}), ("zigbee_permit_join", {"seconds": 60}),
     ("zigbee_devices", {}),
 ])
@@ -255,7 +263,7 @@ def test_exceptions_become_reasons(tmp_path):
 
 
 def test_kein_ergebnis_traegt_einen_text(tmp_path):
-    """Spec Stufe 3 S5 8: jeder Fehlerweg des Registers meldet nur Felder aus ERROR_FIELDS."""
+    """Jeder Fehlerweg des Registers meldet nur Felder aus ERROR_FIELDS."""
     def zu_gross(command_id, daten):
         raise ValueError("zu gross")
 
@@ -330,7 +338,7 @@ def test_inventory_data_goes_out_before_the_result(tmp_path):
         send_inventory=lambda command_id, daten: order.append(("inventur", command_id, daten)) or [7])
     register.register("inventory", lambda payload: cmd.Done({}, inventur={"k": [1]}))
     register.empfangen(_command("inventory", payload={"stunden": 1}))
-    assert order == [("inventur", "c1", {"k": [1]})]  # das Ergebnis erst nach dem PUBACK (L4-02)
+    assert order == [("inventur", "c1", {"k": [1]})]  # das Ergebnis erst nach dem PUBACK
     register.inventur_bestaetigt(7)
     register.pruefen()
     assert order == [("inventur", "c1", {"k": [1]}), ("result", "c1")]
@@ -364,7 +372,7 @@ def _inventur_register(tmp_path, sent, mids, *, clock=None, calls=None, wiederho
 
 
 def test_ergebnis_der_inventur_erst_nach_puback_der_teile(tmp_path):
-    """L4-02 (b): Ergebnis und Journal erst, wenn jedes Inventurteil bestaetigt ist; bis dahin steht der Marker."""
+    """Ergebnis und Journal erst, wenn jedes Inventurteil bestaetigt ist; bis dahin steht der Marker."""
     sent, calls = Sent(), []
     register = _inventur_register(tmp_path, sent, [[1, 2, 3]], calls=calls)
     register.empfangen(_command("inventory", payload={"stunden": 1}))
@@ -455,7 +463,7 @@ def test_das_neusenden_der_inventur_endet_nach_drei_versuchen_mit_keine_bestaeti
 
 
 def test_wiederholbare_inventur_laeuft_nach_neustart_erneut_statt_intern(tmp_path):
-    """L4-02 (a): der Neustart fiel in die Erkennung (Marker, kein Ergebnis); die erneute Zustellung fuehrt sie noch
+    """Der Neustart fiel in die Erkennung (Marker, kein Ergebnis); die erneute Zustellung fuehrt sie noch
     einmal aus, das Ergebnis ist ok, die Inventur geht hinaus. Ein weiteres Duplikat laeuft nicht noch einmal."""
     sent, calls = Sent(), []
     erste = _inventur_register(tmp_path, sent, [None], calls=calls)  # offline: die Erkennung ist gelaufen, nichts weg
@@ -492,7 +500,7 @@ def test_a_too_large_inventory_fails_intern(tmp_path):
 
 
 def test_the_log_line_of_a_failed_inventory_escapes_the_command_id_of_the_server(tmp_path, caplog):
-    """Fixrunde 1 zu T6-Rest Task 3: die command_id kommt vom Server (bis 64 Zeichen, UTF-8-kodierbar, Steuerzeichen
+    """Die command_id kommt vom Server (bis 64 Zeichen, UTF-8-kodierbar, Steuerzeichen
     erlaubt); im Log steht sie mit Escape auf einer Zeile, keine vorgetaeuschte zweite Logzeile."""
     def too_large(command_id, daten):
         raise ValueError("zu gross")
@@ -617,34 +625,69 @@ def test_a_broken_store_counts_as_empty(tmp_path):
 
 def test_a_hint_is_set_persisted_and_cleared(tmp_path):
     hinweise = cmd.Hinweise(tmp_path)
-    assert hinweise.handler({"key": "geraet_doppelt", "stufe": "kritisch", "text": "Kopie stoppen"}) == cmd.Done({})
-    assert hinweise.alle() == ({"key": "geraet_doppelt", "stufe": "kritisch", "text": "Kopie stoppen"},)
+    assert hinweise.handler(HINWEIS_DOPPELT) == cmd.Done({})
+    assert hinweise.alle() == ({"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {},
+                                "stufe": "rot"},)
     assert cmd.Hinweise(tmp_path).alle() == hinweise.alle()
-    hinweise.handler({"key": "geraet_doppelt", "stufe": "kritisch", "text": ""})
+    hinweise.handler(HINWEIS_LOESCHEN)
     assert hinweise.alle() == () and cmd.Hinweise(tmp_path).alle() == ()
 
 
-@pytest.mark.parametrize("payload", [
-    {"key": "", "stufe": "info", "text": "x"}, {"key": "k", "stufe": "laut", "text": "x"},
-    {"key": "k", "stufe": "info", "text": 5}, {"key": "k" * 65, "stufe": "info", "text": "x"},
+def test_a_hint_with_parameters_keeps_them(tmp_path):
+    hinweise = cmd.Hinweise(tmp_path)
+    hinweise.handler({"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt",
+                      "params": {"roh": 30, "begrenzt": 25}, "stufe": "orange"})
+    assert cmd.Hinweise(tmp_path).alle() == (
+        {"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt", "params": {"roh": 30, "begrenzt": 25},
+         "stufe": "orange"},)
+
+
+@pytest.mark.parametrize(("payload", "feld"), [
+    ({**HINWEIS_DOPPELT, "key": ""}, "key"),
+    ({**HINWEIS_DOPPELT, "key": "erfunden"}, "key"),
+    ({**HINWEIS_DOPPELT, "key": "x" * 65}, "key"),
+    ({**HINWEIS_DOPPELT, "code": "meldung.erfunden"}, "code"),
+    ({**HINWEIS_DOPPELT, "code": "meldung.gesperrt"}, "code"),  # Code gehoert zu einem anderen Schluessel
+    ({**HINWEIS_DOPPELT, "code": 5}, "code"),
+    ({**HINWEIS_DOPPELT, "stufe": "kritisch"}, "stufe"),  # alte Stufenwoerter sind keine Stufen mehr
+    ({**HINWEIS_DOPPELT, "stufe": "orange"}, "stufe"),  # die Stufe gehoert zum Code
+    ({**HINWEIS_DOPPELT, "stufe": None}, "stufe"),
+    ({**HINWEIS_DOPPELT, "params": {"fremd": 1}}, "params"),
+    ({**HINWEIS_DOPPELT, "params": []}, "params"),
+    ({"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt", "params": {"roh": 30}, "stufe": "orange"},
+     "params"),
+    ({"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt", "params": {"roh": True, "begrenzt": 1},
+      "stufe": "orange"}, "params"),
+    ({**HINWEIS_LOESCHEN, "stufe": "rot"}, "stufe"),  # Loeschen traegt weder Parameter noch Stufe
+    ({**HINWEIS_LOESCHEN, "params": {"a": 1}}, "params"),
 ])
-def test_invalid_hints_are_refused(tmp_path, payload):
+def test_invalid_hints_are_refused(tmp_path, payload, feld):
+    hinweise = cmd.Hinweise(tmp_path)
     with pytest.raises(cmd.InvalidPayload) as error:
-        cmd.Hinweise(tmp_path).handler(payload)
-    assert error.value.details["feld"] in ("key", "stufe", "text")
+        hinweise.handler(payload)
+    assert error.value.details["feld"] == feld
+    assert hinweise.alle() == () and not (tmp_path / cmd.HINWEISE_FILE).exists()
 
 
 def test_the_hint_command_through_the_register(tmp_path):
     sent = Sent()
     register = cmd.CommandRegister(tmp_path, sent)
     register.register("hinweis", cmd.Hinweise(tmp_path).handler)
-    register.empfangen(_command("hinweis", payload={"key": "k", "stufe": "laut", "text": "x"}))
+    register.empfangen(_command("hinweis", payload={**HINWEIS_DOPPELT, "stufe": "laut"}))
     assert sent.results[0]["error"]["grund"] == "ungueltige_nutzlast"
+
+
+def test_an_old_hint_file_with_texts_is_dropped(tmp_path):
+    """Kein Lesen des alten Formats: eine Datei mit Klartext-Hinweisen bleibt ohne Wirkung."""
+    (tmp_path / cmd.HINWEISE_FILE).write_text(
+        '{"geraet_doppelt": {"stufe": "kritisch", "text": "Kopie stoppen"},'
+        ' "gesperrt": {"code": "meldung.update_noetig", "params": {}, "stufe": "rot"}}')
+    assert cmd.Hinweise(tmp_path).alle() == ()
 
 
 def test_a_command_id_with_a_lone_surrogate_is_dropped_like_an_invalid_one(tmp_path):
     """Das Ergebnis steht unter der command_id in befehle.json: ein einzelnes Surrogat liesse sich nicht speichern
-    (UnicodeEncodeError aus empfangen). Es gilt wie jede ungueltige ID (Testoffensive T2, Task 13)."""
+    (UnicodeEncodeError aus empfangen). Es gilt wie jede ungueltige ID."""
     sent, calls = Sent(), []
     register = cmd.CommandRegister(tmp_path, sent)
     register.register("diagnostics", lambda payload: calls.append(payload) or cmd.Done({}))
@@ -656,12 +699,15 @@ def test_a_command_id_with_a_lone_surrogate_is_dropped_like_an_invalid_one(tmp_p
 
 def test_a_hint_with_a_lone_surrogate_is_refused_and_does_not_poison_the_stored_hints(tmp_path):
     """Der Befehl hinweis legte den Hinweis erst in den Speicher und scheiterte dann beim Schreiben; jeder spaetere Hinweis
-    scheiterte mit (Testoffensive T2, Task 13)."""
+    scheiterte mit."""
     sent = Sent()
     register, hinweise = cmd.CommandRegister(tmp_path, sent), cmd.Hinweise(tmp_path)
     register.register("hinweis", hinweise.handler)
-    register.empfangen(_command("hinweis", "c1", {"key": "k", "stufe": "info", "text": "a\ud800"}))
-    register.empfangen(_command("hinweis", "c2", {"key": "k", "stufe": "info", "text": "gut"}))
+    register.empfangen(_command("hinweis", "c1", {"key": "wunsch_begrenzt", "code": "meldung.wunsch_begrenzt",
+                                                  "params": {"roh": 30, "begrenzt": 25, "herkunft": "a\ud800"},
+                                                  "stufe": "orange"}))
+    register.empfangen(_command("hinweis", "c2", HINWEIS_DOPPELT))
     assert [(r["command_id"], r["ok"]) for r in sent.results] == [("c1", False), ("c2", True)]
     assert sent.results[0]["error"]["grund"] == "ungueltige_nutzlast"
-    assert hinweise.alle() == ({"key": "k", "stufe": "info", "text": "gut"},)
+    assert hinweise.alle() == ({"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {},
+                                "stufe": "rot"},)

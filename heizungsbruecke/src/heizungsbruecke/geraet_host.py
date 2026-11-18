@@ -1,14 +1,14 @@
-"""Das HA-Add-on als Host des Geraetekerns (Spec 5c 1.3): liefert Faehigkeiten (keine Treiber, kein Zigbee, kein
+"""Das HA-Add-on als Host des Geraetekerns: liefert Faehigkeiten (keine Treiber, kein Zigbee, kein
 updater), Uhr aus dem Supervisor, den HA-Teil der Konfigurationspruefung, die Befehle (inventory, sign_off,
 diagnostics; HA-fremde Befehle nicht_unterstuetzt) und nimmt Konfiguration und Bedienung entgegen. Alle Rueckrufe laufen
 im Geraete-Thread und werfen nicht (ausser NichtPruefbar aus treiber_pruefen, siehe dokument.zuordnung_pruefen, und
 einem OSError der Markierung aus konfiguration_vorbereiten, siehe geraet_host_basis). Eine laufzeitrelevante neue
 Konfiguration fordert einen Neustart an (geraet_host_basis.EV_RELOAD im Regel-Worker), ebenso eine neue, nicht leere
-Konfiguration derselben Anlage, die die Abmelde-Markierung aufhebt (5b-D2-7); der Wechsel von eingerichtet auf leer
-markiert das Aufraeumen vor dem Speichern (A4-07).
+Konfiguration derselben Anlage, die die Abmelde-Markierung aufhebt; der Wechsel von eingerichtet auf leer
+markiert das Aufraeumen vor dem Speichern.
 Eine neue Bedienung geht als Soll-Eingang (portal) an den Worker, der Soll-Eingang schreibt sie in den Soll-Speicher und
 gleicht die Soll-Entity an; kommt sie vor dem Binden, stellt worker_binden die letzte nach. Status
-(runtime_status_event, Task 7) und Raum (raum_merken, HaHost) legt der Worker-Thread hier ab, der Geraete-Thread liest
+(runtime_status_event) und Raum (raum_merken je Kreis, HaHost) legt der Worker-Thread hier ab, der Geraete-Thread liest
 sie fuer up/status. Meldungen der Laufzeit gehen wie beim Gateway (MeldungSink) als up/notifications an den Server und
 zusaetzlich an HA (notify_sink_fuer). anzeigen meldet Geraete-ID, Uebernahmestand und Code an die Supervisor-Discovery
 (discovery.Discovery)."""
@@ -21,21 +21,38 @@ from heizungsbruecke import config, dokument, inventur
 from heizungsbruecke.discovery import Discovery
 from heizungsbruecke.geraet_status import GeraetStatus
 from heizungsbruecke.ha_sinks import GeraetUndHaSink, HaNotifySink
+from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import PushStand
 from heizungsbruecke.version import ADDON_VERSION
-from smartheat_core import dateien
+from smartheat_core import meldungen
 from smartheat_device import fehler, nachrichten, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Outcome, Waiting
-from smartheat_device.geraet_host_basis import GeraetHostBasis
+from smartheat_device.geraet_host_basis import SIGN_OFF_WAIT_SECONDS, GeraetHostBasis, abmeldung_abwarten
 from smartheat_device.host import Anzeige
 from smartheat_runtime import dokument_config
-from smartheat_runtime.status import STATUS_ABGEMELDET
 
 logger = logging.getLogger(__name__)
 
+#: Weg-ID des Server-Katalogs je Schreib-Plattform der Home-Assistant-Integration; eine neue Plattform ohne Eintrag
+#: faellt im Test auf.
+WEG_JE_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
+                    "weishaupt_modbus": "weishaupt_modbus"}
 UHR_CACHE_SECONDS = 60
+AUTO_UPDATE_CACHE_SECONDS = 60
 INVENTUR_SECONDS = 120
-SIGN_OFF_WAIT_SECONDS = 24 * 3600
 _FREMD = ("zigbee_permit_join", "zigbee_devices", "driver_login")
+#: Schluessel der Meldung zur veralteten Integration (Kennung der Persistent Notification in HA).
+INTEGRATION_VERALTET = "integration_veraltet"
+
+
+def _push_key(stufe: str, kreis: int | None) -> str:
+    """Schluessel der Geraete-Meldung je Stufe und Kreis (ein Kreis geht als Praefix, nachrichten.draht_key)."""
+    key = f"push_nicht_zugestellt_{stufe}"
+    return key if kreis is None else f"kreis-{kreis}:{key}"
+
+
+def _push_ordnung(eintrag: tuple[str, int | None]) -> tuple[int, str]:
+    return (eintrag[1] or 0, eintrag[0])
 
 
 def _nicht_unterstuetzt(payload: dict) -> Failed:
@@ -47,18 +64,22 @@ class HaDeviceHost(GeraetHostBasis):
     version = ADDON_VERSION
     wunsch_herkunft = "soll_entity"
 
-    def __init__(self, ha_api, supervisor, *, clock: Callable[[], float] = time.monotonic,
-                 wall: Callable[[], float] = time.time) -> None:
-        # wall: Teil der Schnittstelle (wie GatewayDeviceHost), hier ungenutzt: der HA-Host braucht keine Wanduhr (den
-        # Zeitstempel des Raums setzt HaHost aus smartheat_core.wallclock), deshalb nicht gespeichert.
+    def __init__(self, ha_api, supervisor, *, clock: Callable[[], float] = time.monotonic) -> None:
         super().__init__()
         self._ha, self._supervisor, self._clock = ha_api, supervisor, clock
+        self.geraet_id: str | None = None  # ID des Geraets fuer das Ereignis smartheat_meldung (__main__.verdrahten)
         self.status_sink: GeraetStatus | None = None  # StatusSink der Laufzeit und Anzeige (__main__.verdrahten)
         self.discovery: Discovery | None = None  # Supervisor-Meldung (__main__.verdrahten)
         self.claim_code: Callable[[], str | None] = lambda: None  # Uebernahme-Code des Geraets (__main__.verdrahten)
-        self.runtime_status_event: dict | None = None  # letztes Status-Ereignis der Laufzeit (Task 7: laufzeit_merken)
-        self._raum: dict | None = None
+        self.runtime_status_event: dict | None = None  # letztes Status-Ereignis der Laufzeit (laufzeit_merken)
+        self.integration_stand = IntegrationStand()  # Lebenszeichen der Integration (geraet_trigger.build)
+        self._integration_veraltet_offen = False  # Meldung zur veralteten Integration in HA offen (_integration_pruefen)
+        self.push_stand = PushStand()  # aufgegebene Push-Eintraege der Integration (geraet_trigger.build)
+        self._push_offen: set[tuple[str, int | None]] = set()  # als Geraete-Meldung offen (_push_pruefen)
+        self._push_start_geschlossen = False  # die Meldungen eines frueheren Prozesses sind geschlossen
+        self._raeume: dict[int, dict | None] = {}  # je Kreis der Raum des letzten Takts
         self._uhr: tuple[float, bool | None] | None = None
+        self._auto_update: tuple[float, bool | None] | None = None
 
     def aufraeumen_pfad(self) -> Path:
         return config.AUFRAEUMEN_PATH
@@ -66,22 +87,31 @@ class HaDeviceHost(GeraetHostBasis):
     def abgemeldet_pfad(self) -> Path:
         return config.ABGEMELDET_PATH
 
+    def entitlement_pfad(self, kreis: int) -> Path:
+        return config.entitlement_path(kreis)
+
     # --- Sicht der Laufzeit (HaHost) ---
 
     def notify_sink_fuer(self, services: list[str]) -> GeraetUndHaSink:
-        """Meldungen der Laufzeit an den Geraetekern (Portal, Betreiber-Alarm geraetemeldung; Spec 5c 3: HA-Geraete wie
+        """Meldungen der Laufzeit an den Geraetekern (Portal, Betreiber-Alarm geraetemeldung; HA-Geraete wie
         Gateways) und an HA (Notify-Dienste, persistent_notification)."""
-        return GeraetUndHaSink(self.notify_sink, HaNotifySink(self._ha, services))
+        return GeraetUndHaSink(self.notify_sink, HaNotifySink(self._ha, services), lambda: self.geraet_id)
 
-    def raum_merken(self, raum: dict | None) -> None:
-        """Worker-Thread (raum.RaumPublisher): {ist, soll, soll_quelle, ts} fuer up/status."""
-        self._raum = raum
+    def raum_merken(self, kreis: int, raum: dict | None) -> None:
+        """Worker-Thread des Kreises (raum.RaumPublisher): {ist, soll, soll_quelle, ts} fuer up/status."""
+        self._raeume[kreis] = raum
 
     # --- DeviceHost ---
 
     def faehigkeiten(self) -> dict:
-        return nachrichten.pruefen("faehigkeiten", {"drivers": [], "zigbee": False}, wire.CAPABILITY_FIELDS,
+        return nachrichten.pruefen("faehigkeiten", {"drivers": [], "zigbee": False, "testphase": True,
+                                                    "kaelteschutz": True},
+                                   wire.CAPABILITY_FIELDS,
                                    wire.CAPABILITY_OPTIONAL)
+
+    def wege(self) -> list[str]:
+        """Wege des Katalogs, die dieser Host ueber seine Schreib-Plattformen bedient (Plattform -> Weg-ID)."""
+        return sorted({WEG_JE_PLATTFORM[plattform] for plattform in dokument.SCHREIB_PLATTFORM.values()})
 
     def uhr_synchron(self) -> bool | None:
         """dt_synchronized aus GET /host/info; kein bool oder Fehler = unbekannt (gilt als nicht synchron). Der Aufruf
@@ -99,16 +129,31 @@ class HaDeviceHost(GeraetHostBasis):
         self._uhr = (now, result)
         return result
 
+    def hello_felder(self) -> dict:
+        """Die Felder des hello, die nur dieser Host sendet: der Schalter fuer automatische Updates des Add-ons (nur
+        gelesen, hoechstens einmal je AUTO_UPDATE_CACHE_SECONDS; unlesbar = None) und die Version der Integration (None
+        ohne frisches Lebenszeichen)."""
+        now = self._clock()
+        if self._auto_update is None or now - self._auto_update[0] >= AUTO_UPDATE_CACHE_SECONDS:
+            try:
+                wert = self._supervisor.addon_auto_update()
+                schalter = wert if isinstance(wert, bool) else None
+            except Exception as error:
+                logger.warning("Schalter fuer automatische Updates unbekannt (%s)", type(error).__name__)
+                schalter = None
+            self._auto_update = (now, schalter)
+        return {"auto_update": self._auto_update[1], "integration_version": self.integration_stand.version(now)}
+
     def treiber_pruefen(self, konfiguration: dict) -> dict | None:
-        """HA-Teil der Pruefung (config_check gibt fuer Host ha die ganze Konfiguration): details oder None. Gegen die
-        uebernommene Konfiguration (Dokumentspeicher, ohne Sperre lesbar): bleiben Bindung, Raumfuehler und Hebelsatz
-        gleich, entfaellt der HA-Teil. Wirft NichtPruefbar, wenn HA gerade nicht antwortet (der Geraetekern prueft
-        spaeter erneut)."""
+        """HA-Teil der Pruefung (config_check gibt fuer Host ha ein Dokument mit dem einen Kreis, der geprueft wird; sein
+        Referenzraum traegt die Fuehler aller Raeume): details oder None. Gegen die uebernommene Konfiguration
+        (Dokumentspeicher, ohne Sperre lesbar): bleiben Bindung, Raumfuehler und Hebelsatz gleich, entfaellt der HA-Teil.
+        Wirft NichtPruefbar, wenn HA gerade nicht antwortet (der Geraetekern prueft spaeter erneut)."""
         return dokument.zuordnung_pruefen(konfiguration, self._ha, self.konfiguration())
 
     def befehle_eintragen(self, register: CommandRegister) -> None:
         # inventory liest nur: fiel ein Neustart in die Erkennung, laeuft sie bei der erneuten Zustellung noch einmal,
-        # statt mit "intern" zu enden (L4-02). Grenze: hoechstens eine Abfrage je Neustart, solange der Server den
+        # statt mit "intern" zu enden. Grenze: hoechstens eine Abfrage je Neustart, solange der Server den
         # Befehl zustellt (bis expires_at); eine Neustart-Schleife wiederholte sie je Neustart.
         register.register("inventory", self._inventory, wiederholbar=True)
         # sign_off ist idempotent (die Markierung setzt den Neustart nur einmal): nach dem Neustart laeuft es erneut,
@@ -119,16 +164,20 @@ class HaDeviceHost(GeraetHostBasis):
             register.register(kind, _nicht_unterstuetzt)
 
     def software_soll(self, software: dict | None) -> None:
-        """HA-Add-ons aktualisiert der Supervisor; die Faehigkeit updater fehlt (Spec 5c 1.3)."""
+        """HA-Add-ons aktualisiert der Supervisor; die Faehigkeit updater fehlt."""
+
+    def updates_soll(self, updates: dict | None) -> None:
+        """Ebenso: ohne Updater gibt es nichts, was die Einstellung zu Updates liest."""
 
     def runtime_status(self) -> dict | None:
         return self.runtime_status_event
 
-    def raum(self) -> dict | None:
-        return self._raum
+    def raum(self, kreis: int = 1) -> dict | None:
+        return self._raeume.get(kreis)
 
     def anzeigen(self, anzeige: Anzeige) -> None:
         self.letzte_anzeige = anzeige
+        self.update_noetig_melden(anzeige)
         sink = self.status_sink
         if sink is not None and hasattr(sink, "anzeige"):
             try:
@@ -144,11 +193,63 @@ class HaDeviceHost(GeraetHostBasis):
                                              self.claim_code() if anzeige.code_zeigen else None)
             except Exception as error:
                 logger.warning("Discovery nicht aktualisiert (%s)", type(error).__name__)
+        try:
+            self._integration_pruefen()
+        except Exception as error:
+            logger.warning("Meldung zur Integration nicht gesetzt (%s)", type(error).__name__)
+        try:
+            self._push_pruefen()
+        except Exception as error:
+            logger.warning("Meldung zum Push nicht gesetzt (%s)", type(error).__name__)
+
+    def _push_pruefen(self) -> None:
+        """Je (Stufe, Kreis) eine Geraete-Meldung: offen, solange die Integration binnen der Frist einen Push-Eintrag
+        dieser Stufe und dieses Kreises aufgegeben hat, sonst zu. Der Stand wird erst nach dem Melden uebernommen; schlaegt
+        es fehl, versucht der naechste Takt es erneut."""
+        if self.device is None:
+            return
+        offen = set(self.push_stand.offen(self._clock()))
+        self._push_start_schliessen(offen)
+        for stufe, kreis in sorted(offen - self._push_offen, key=_push_ordnung):
+            self._melden(_push_key(stufe, kreis), meldungen.neu(meldungen.PREFIX + "push_nicht_zugestellt", stufe=stufe),
+                         offen=True)
+            self._push_offen.add((stufe, kreis))
+        for stufe, kreis in sorted(self._push_offen - offen, key=_push_ordnung):
+            self._melden(_push_key(stufe, kreis), None, offen=False)
+            self._push_offen.discard((stufe, kreis))
+
+    def _push_start_schliessen(self, offen: set[tuple[str, int | None]]) -> None:
+        """Einmal je Start, sobald die Kreise bekannt sind: beide Stufen anlagenweit und je Kreis zu melden. Der Stand
+        der aufgegebenen Eintraege ueberlebt keinen Neustart, der Server schliesst Geraete-Meldungen aber nicht von
+        selbst: eine vor dem Neustart offene Meldung bliebe sonst fuer immer stehen. Ein Schliessen ohne offene Meldung
+        ist beim Server wirkungslos. Gemeldet wird nach dem Eintragen der Kreise im ersten Takt, in dem die Konfiguration
+        da ist; scheitert ein Aufruf, wiederholt der naechste Takt alles."""
+        if self._push_start_geschlossen or self.konfiguration() is None:
+            return
+        for kreis in (None, *self.kreis_nummern()):
+            for stufe in ("rot", "orange"):
+                if (stufe, kreis) not in offen:
+                    self._melden(_push_key(stufe, kreis), None, offen=False)
+        self._push_start_geschlossen = True
+
+    def _integration_pruefen(self) -> None:
+        """Offen, solange die Integration veraltet ist, sonst zu (auch nach Ablauf der Frist des Lebenszeichens).
+        Nur diese Persistent Notification: die Integration kann sie nicht selbst zeigen, der Server erfaehrt nichts.
+        Schlaegt HA fehl, bleibt der Stand unveraendert und der naechste Takt versucht es erneut."""
+        veraltet = self.integration_stand.veraltet(self._clock())
+        if veraltet == self._integration_veraltet_offen:
+            return
+        sink = HaNotifySink(self._ha, [])
+        if veraltet:
+            sink.show(INTEGRATION_VERALTET, meldungen.neu("meldung.integration_veraltet"))
+        else:
+            sink.withdraw(INTEGRATION_VERALTET)
+        self._integration_veraltet_offen = veraltet
 
     # --- Befehle ---
 
     def _inventory(self, payload: dict) -> Outcome:
-        """Momentaufnahme nach dem Filter des Servers (stunden 0, Spec 5c 1.3) im Hintergrund: die HA-API (Registry per
+        """Momentaufnahme nach dem Filter des Servers (stunden 0) im Hintergrund: die HA-API (Registry per
         WebSocket, Zustaende, Dienste) haelt den Geraete-Thread nie auf. Antwortet HA bis INVENTUR_SECONDS nicht, endet
         der Befehl mit ha_nicht_erreichbar. Nur die Fehlerart ins Log, nie Inhalte (Regel 6). Verletzt die Inventur
         den Vertrag (Vertragsfehler: nur Feldnamen), endet der Befehl mit intern."""
@@ -176,27 +277,33 @@ class HaDeviceHost(GeraetHostBasis):
 
         return Waiting(check, frist)
 
-    def _abmelden(self) -> tuple[str, bool] | None:
+    def _abmelden(self, freigeben: bool = False) -> tuple[str, bool] | None:
         """Gemeinsamer Schritt von sign_off und lokal_abmelden: Abmelde-Markierung fuer die Anlage setzen und bei einer
-        neuen Markierung neu starten (dieselbe Quelle wie konfiguration_uebernommen). Liefert (Anlage, neu) mit neu =
-        Markierung eben gesetzt, None, wenn das Geraet nicht eingerichtet ist (dann geschieht nichts). OSError der
-        Markierung geht an den Aufrufer."""
+        neuen Markierung neu starten (dieselbe Quelle wie konfiguration_uebernommen). Mit freigeben traegt die
+        Markierung die Wahl, das Geraet aus dem Konto zu loesen. Liefert (Anlage, neu) mit neu = Markierung eben
+        gesetzt, None, wenn das Geraet nicht eingerichtet ist (dann geschieht nichts). OSError der Markierung geht an
+        den Aufrufer."""
         konfiguration = self.konfiguration()
         if not dokument_config.eingerichtet(konfiguration):
             return None
         assert konfiguration is not None
         anlage = konfiguration["anlage"]
-        neu = dokument_config.abmelden(self.abgemeldet_pfad(), anlage)
+        neu = dokument_config.abmelden(self.abgemeldet_pfad(), anlage, freigeben)
         if neu:
             self.neustart_anfordern()
         return anlage, neu
 
-    def lokal_abmelden(self) -> None:
-        """Der HA-Eintrag wurde geloescht (stdin-Befehl der Integration, L4-06 Variante C): wie sign_off ohne
+    def lokal_freigeben(self) -> None:
+        """Wie lokal_abmelden, und das Geraet verlaesst nach der Abmeldung das Konto (Wahl des Nutzers beim Entfernen
+        des HA-Eintrags)."""
+        self.lokal_abmelden(freigeben=True)
+
+    def lokal_abmelden(self, freigeben: bool = False) -> None:
+        """Der HA-Eintrag wurde geloescht (stdin-Befehl der Integration): wie sign_off ohne
         Befehls-Ergebnis. Geraete-Thread (Device.im_geraete_thread); nicht eingerichtet: nichts zu tun. Ein OSError der
         Markierung wird zu einer WARNING mit der Fehlerart; jeden anderen Fehler faengt Device._sicher als ERROR."""
         try:
-            ergebnis = self._abmelden()
+            ergebnis = self._abmelden(freigeben)
         except OSError as error:
             logger.warning("Lokales Abmelden gescheitert (%s)", type(error).__name__)
             return
@@ -208,7 +315,7 @@ class HaDeviceHost(GeraetHostBasis):
             logger.info("HA-Eintrag geloescht: Geraet ist schon abgemeldet")
 
     def _sign_off(self, payload: dict) -> Outcome:
-        """Abmelden (Spec TP7 3.3, 5b 4.5) wie beim Gateway: Markierung fuer die Anlage, dann startet die Laufzeit als
+        """Abmelden (5b 4.5) wie beim Gateway: Markierung fuer die Anlage, dann startet die Laufzeit als
         "abgemeldet" neu und setzt die Anlage zurueck. Fertig, sobald der Status "abgemeldet" fuer diese Anlage zeigt;
         werte ist der Wiederherstellungspunkt danach."""
         ergebnis = self._abmelden()
@@ -216,13 +323,8 @@ class HaDeviceHost(GeraetHostBasis):
             return Failed("nicht_eingerichtet")
         anlage = ergebnis[0]
 
-        def check() -> Done | None:
-            status = self.runtime_status_event
-            if not status or status.get("status") != STATUS_ABGEMELDET or status.get("tenant_id") != anlage:
-                return None
-            return Done({"zurueckgesetzt": status.get("grund") is None, "werte": _restore_values()})
-
-        return Waiting(check, self._clock() + SIGN_OFF_WAIT_SECONDS)
+        return abmeldung_abwarten(anlage, lambda: self.runtime_status_event, config.backup_path(dokument_config.kreisnummer(self.konfiguration())),
+                                  self._clock() + SIGN_OFF_WAIT_SECONDS)
 
     def _diagnostics(self, payload: dict) -> Done:
         anzeige = self.letzte_anzeige
@@ -231,9 +333,3 @@ class HaDeviceHost(GeraetHostBasis):
                      "eingerichtet": anzeige.eingerichtet if anzeige else False,
                      "server_ok": anzeige.server_ok if anzeige else False, "laufzeit": status.get("status"),
                      "uhr_synchron": self._uhr[1] if self._uhr else None})
-
-
-def _restore_values() -> dict:
-    backup = dateien.lesen_json(config.BACKUP_PATH)
-    point = backup.get("restore_point") if isinstance(backup, dict) else None
-    return dict(point) if isinstance(point, dict) else {}

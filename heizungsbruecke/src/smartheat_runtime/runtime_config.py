@@ -1,11 +1,13 @@
-"""Hostneutrale, gepruefte Konfiguration der Laufzeit (Spec SHG 3.3). Beide Hosts (HA-Add-on und Gateway) fuellen sie
-ueber den Geraetekern aus dem Konfigurationsdokument des Servers (dokument_config.runtime_config, Spec 5b 5.2)."""
+"""Hostneutrale, gepruefte Konfiguration der Laufzeit. Beide Hosts (HA-Add-on und Gateway) fuellen sie
+ueber den Geraetekern aus dem Konfigurationsdokument des Servers (dokument_config.runtime_config)."""
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from smartheat_core import kreisansicht
 from smartheat_core.levers import LeverSet
 from smartheat_core.safety import LocalSafety
+from smartheat_runtime.plan_quelle import PlanEingabe
 
 BATTERY_PERCENT = "prozent"
 BATTERY_LOW_FLAG = "niedrig_flag"
@@ -13,7 +15,7 @@ BATTERY_LOW_FLAG = "niedrig_flag"
 
 @dataclass(frozen=True)
 class BatteryRef:
-    """Batterie-Signal eines Fuehlers/Thermostats (Spec SHG G2 2.2): `art` legt der Host fest (HA: aus dem Praefix
+    """Batterie-Signal eines Fuehlers/Thermostats: `art` legt der Host fest (HA: aus dem Praefix
     binary_sensor., Gateway: aus den Zigbee-Faehigkeiten); die Laufzeit liest kein Praefix."""
     ref: str
     art: str  # BATTERY_PERCENT oder BATTERY_LOW_FLAG
@@ -21,7 +23,7 @@ class BatteryRef:
 
 @dataclass(frozen=True)
 class BootInfo:
-    """Was vor der Konfigurationspruefung feststeht (Plan SHG G1, Praezisierung 3): Status und Meldungen arbeiten schon,
+    """Was vor der Konfigurationspruefung feststeht: Status und Meldungen arbeiten schon,
     bevor die Konfiguration geprueft ist. Der Host liest es tolerant und wirft nie."""
     configured: bool
     signed_off: bool
@@ -32,14 +34,40 @@ class BootInfo:
     local_check_interval: float
     backup_path: Path
     failsafe_path: Path
-    # Spec Stufe 3 S3 Abschnitt 4: Aufraeum-Markierung des Hosts; nach gelungenem Zuruecksetzen erledigt die Laufzeit
+    # Nummer des Heizkreises, den diese Laufzeit fuehrt (V1b: `kreis` auf dem Draht).
+    kreis: int
+    # Aufraeum-Markierung des Hosts; nach gelungenem Zuruecksetzen erledigt die Laufzeit
     # sie und startet neu (None: der Host hat keine).
     aufraeumen_path: Path | None = None
+    # Pfad der Sicherung im Format vor der Kreisordnung; sie wird nie gelesen, nur ihr Vorhandensein stoppt den Start
+    # (None: der Host hat keinen alten Pfad).
+    alter_zustand: Path | None = None
+    # Datei der Zaehler der ganzen Anlage (Schreibbudget der Anlage, Lebensdauer) neben den Kreisordnern; None: die Zaehler
+    # liegen im Zustand des Kreises (nur Tests).
+    anlage_budget_path: Path | None = None
+    # Zahl der Heizkreise des Dokuments; sie teilen die Zaehler der Anlage (bei mehr als einem Kreis setzt eine andere
+    # Anlage eines Kreises diese Zaehler nicht zurueck).
+    kreise_der_anlage: int = 1
+    # Liest den Zustand des Kreises (`kreise[n].zustand`) frisch aus dem Dokument; das Status-Ereignis meldet ihn, auch
+    # im Ruhezustand ohne Laufzeit-Konfiguration.
+    zustand_source: Callable[[], str] = lambda: kreisansicht.IN_BETRIEB
+    # Hat der Geraetekern die zuletzt gelieferte Konfiguration abgelehnt? Dann meldet ein Konfigurationsfehler sofort
+    # (nach einem Softwarewechsel wartet die Meldung sonst auf die neue Konfiguration, karenz.py).
+    konfiguration_abgelehnt: Callable[[], bool] = lambda: False
+
+
+def _in_betrieb() -> str:
+    return kreisansicht.IN_BETRIEB
+
+
+def _kein_plan() -> PlanEingabe | None:
+    return None
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     tenant_id: str
+    kreis: int
     lever_set_id: str
     local_safety: LocalSafety
     daily_trigger_time: str | None
@@ -51,6 +79,19 @@ class RuntimeConfig:
     battery_refs: tuple[BatteryRef, ...]
     # Datei der Abo-inaktiv-Frist (entitlement.py).
     entitlement_path: Path
-    # Spec 5b (Plan D1): Abo-Status aus dem Konfigurationsdokument (entitlement.ACTIVE/INACTIVE/UNKNOWN). Die MQTT-
+    # Abo-Status aus dem Konfigurationsdokument (entitlement.ACTIVE/INACTIVE/UNKNOWN). Die MQTT-
     # Verbindung haelt smartheat_device (app.start mqtt_factory), die Laufzeit fragt keinen Server selbst.
     abo_source: Callable[[], str]
+    # Referenzraeume des Kreises mit Fuehlern als (Raumnummer, Versatz in Kelvin); die Regelung rechnet ihr Delta nur
+    # ueber diese (leer: der Host kennt keine Raeume, dann gilt der Kreissensor room_actual).
+    referenzraeume: tuple[tuple[int, float], ...] = ()
+    # Zustand des Kreises aus dem laufenden Konfigurationsdokument (kreisansicht.ZUSTAENDE); die Laufzeit liest ihn bei
+    # jedem Check frisch, ein Wechsel loest keinen Neustart aus. Ohne Quelle gilt der Betrieb.
+    zustand_source: Callable[[], str] = _in_betrieb
+    # Ob die Software unter einer kritischen Mindestversion mit Datum liegt (smartheat_device update_noetig_ab): der
+    # Kreis geht dann in den Notbetrieb wie bei inaktivem Abo, mit derselben 30-Tage-Frist. Ohne Quelle: nie.
+    update_noetig_source: Callable[[], bool] = lambda: False
+    # Liest die Planeingabe des Kreises (Zeitzone, Bedienung und Konfiguration des Kreises) frisch aus den Dokumenten;
+    # der Check rechnet daraus das geltende Soll. None: keine Eingabe (ohne Zeitzone oder Kreiseintrag), dann gilt der
+    # Wunsch. Ohne Quelle gilt kein Plan.
+    plan_source: Callable[[], PlanEingabe | None] = _kein_plan

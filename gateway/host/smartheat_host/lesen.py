@@ -1,4 +1,4 @@
-"""Begrenztes, sicheres Lesen von Dateien, die ein Container schreiben kann (Plan 5b D2, Sicherheit): die Host-Dienste
+"""Begrenztes, sicheres Lesen von Dateien, die ein Container schreiben kann (Sicherheit): die Host-Dienste
 laufen als root, ${SHG_ROOT}/data gehoert dem Container-Benutzer (uid 1000). Eine untergeschobene Datei darf weder per
 Symlink auf Fremdes zeigen (O_NOFOLLOW), noch den Dienst an einer FIFO festhalten (O_NONBLOCK, nur regulaere Dateien),
 noch den Speicher fuellen (hoechstens `cap` Bytes). Jeder Fehler ist ein OSError (UnsichereDatei fuer die Faelle,
@@ -43,10 +43,19 @@ def read_bytes(path: Path, cap: int = MAX_BYTES) -> bytes:
     return read_stat(path, cap)[0]
 
 
+def parse_json(data: bytes):
+    """`json.loads` fuer Eingaben aus dem Container: eine tief geschachtelte Datei innerhalb der Lesegrenze wirft im Parser
+    einen RecursionError (kein ValueError) und wuerde den Host-Dienst abbrechen; sie gilt hier wie kaputtes JSON."""
+    try:
+        return json.loads(data)
+    except RecursionError:
+        raise ValueError("zu tief geschachtelt") from None
+
+
 def read_json(path: Path, cap: int = MAX_BYTES):
     """Geparster Inhalt; fehlt die Datei oder ist sie unsicher/unlesbar/kein JSON, gilt sie als leer (None)."""
     try:
-        return json.loads(read_bytes(path, cap))
+        return parse_json(read_bytes(path, cap))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as error:

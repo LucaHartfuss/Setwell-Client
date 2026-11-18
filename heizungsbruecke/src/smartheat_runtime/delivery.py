@@ -11,8 +11,9 @@ seqs speichert der Server nicht, ein Retry wird mit frischen Werten neu gerechne
 """
 from dataclasses import dataclass, replace
 
+from smartheat_core import meldungen
+from smartheat_core.meldungen import Meldung
 from smartheat_runtime.entitlement import INACTIVE
-from smartheat_runtime.texts import HA_TEXTS, HostTexts
 
 ACK_TIMEOUT_SECONDS = 30
 NOTBETRIEB_AFTER_SERVER_FAILURES = 2
@@ -29,7 +30,7 @@ STATUS_REJECTED = "rejected"
 SOURCE_LOCAL = "local"
 SOURCE_SERVER = "server"
 SOURCE_WRITE = "write"
-# Rolle des lokalen Datenfehlers "Datentraeger nicht beschreibbar" (TP12b). Vorhandene Vertragswerte:
+# Rolle des lokalen Datenfehlers "Datentraeger nicht beschreibbar". Vorhandene Vertragswerte:
 # im Status-Event {"art": "lokal", "rollen": ["datentraeger"]}.
 ROLE_DATENTRAEGER = "datentraeger"
 
@@ -41,7 +42,7 @@ NOTIFY_DATENFEHLER_RESOLVED = "datenfehler_resolved"
 NOTIFY_DATENFEHLER_WRITE = "datenfehler_write"
 NOTIFY_WRITE_RESOLVED = "write_resolved"
 
-_NO_REASON = "ohne Begründung"
+_NO_CODE = "grund_fehlt"
 
 # Phase des offenen Ticks (nur im Speicher): sending -> awaiting_ack -> (querying_entitlement ->)
 # waiting_retry -> sending ...
@@ -125,7 +126,7 @@ class Published:
 class Ack:
     seq: str
     status: str
-    reason: str | None = None
+    code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,8 +156,8 @@ class WriteFailed:
 
 @dataclass(frozen=True)
 class AnsweredLocalFault:
-    """Der Server hat geantwortet, die Antwort liess sich lokal nicht uebernehmen (TP12b, AU-012:
-    Wiederherstellungspunkt nicht speicherbar). Zaehlt wie eine Antwort: kein Notbetrieb."""
+    """Der Server hat geantwortet, die Antwort liess sich lokal nicht uebernehmen (Wiederherstellungspunkt
+    nicht speicherbar). Zaehlt wie eine Antwort: kein Notbetrieb."""
     seq: str
     roles: tuple[str, ...]
 
@@ -217,7 +218,7 @@ class EndEmergencyBoost:
 @dataclass(frozen=True)
 class ClearStaleNotbetrieb:
     """Start mit aktivem Abo: Notbetrieb ohne offenen Tick (nach dem Abo-inaktiv-Modus oder aus
-    einer failsafe_state.json von 0.15.0) kann nie von selbst enden. Still beenden (TP12b, AU-014);
+    einer failsafe_state.json von 0.15.0) kann nie von selbst enden. Still beenden;
     ein Pruef-Tick klaert danach den Server."""
 
 
@@ -354,7 +355,7 @@ def _ack(state, event):
     if not accepts_ack(state, event.seq):
         return state, []
     if event.status == STATUS_REJECTED:
-        fault = DataFault(SOURCE_SERVER, (event.reason or _NO_REASON,))
+        fault = DataFault(SOURCE_SERVER, (event.code or _NO_CODE,))
         return _answered_with_fault(state, fault, NOTIFY_DATENFEHLER_SERVER)
     actions = _notbetrieb_end(state)
     if state.datenfehler is not None:
@@ -392,7 +393,7 @@ def _mqtt_connected(state):
 
 def _storage_writable(state):
     """Wartet der offene Tick wegen eines Datentraeger-Datenfehlers auf seinen Daten-Retry (bis 3600 s), holt der
-    naechste Versuch die Antwort sofort (TP12b). Neue Generation, der geplante Retry laeuft ins Leere; die Stufe
+    naechste Versuch die Antwort sofort. Neue Generation, der geplante Retry laeuft ins Leere; die Stufe
     bleibt. Jede andere Wartezeit bleibt."""
     pending = state.pending
     if pending is None or pending.phase != PHASE_WAITING_RETRY or not is_storage_fault(state.datenfehler):
@@ -411,6 +412,11 @@ def _ack_timeout(state, event):
         querying = replace(pending, phase=PHASE_QUERYING_ENTITLEMENT)
         return replace(state, pending=querying), [QueryEntitlement(pending.seq)]
     new_state, retry = _retry(state, SERVER_RETRY_DELAYS_SECONDS, ORIGIN_SERVER)
+    if state.server_failures == NOTBETRIEB_AFTER_SERVER_FAILURES and state.notbetrieb:
+        # Stiller Notbetrieb (Neustart mit altem Notbetrieb, Abo unbekannt): der Pruef-Tick bleibt zweimal
+        # unbeantwortet, der Server schweigt also wirklich. Der Notifier meldet nur beim Zustandswechsel, eine
+        # schon offene Meldung bleibt still; der Notbetrieb im Betrieb hat die Schwelle beim Eintritt ueberschritten.
+        return new_state, [Notify(NOTIFY_NOTBETRIEB_ON), retry]
     return new_state, [retry]
 
 
@@ -479,31 +485,20 @@ def _parse_fault(raw) -> DataFault | None:
     return DataFault(source=source, detail=tuple(detail))
 
 
-def notification_text(
-    kind: str, detail: tuple[str, ...], refs: dict[str, str], texts: HostTexts = HA_TEXTS,
-) -> str:
-    prefix = texts.delivery_prefix
+def notification_meldung(kind: str, detail: tuple[str, ...], refs: dict[str, str]) -> Meldung:
     if kind == NOTIFY_NOTBETRIEB_ON:
-        return f"{prefix}: Server antwortet nicht, Notbetrieb aktiv. Die Heizung wird bei Bedarf lokal abgesichert."
+        return meldungen.neu("meldung.notbetrieb")
     if kind == NOTIFY_NOTBETRIEB_OFF:
-        return f"{prefix}: Serververbindung wiederhergestellt, Notbetrieb beendet."
+        return meldungen.neu("meldung.notbetrieb_ok")
     if kind == NOTIFY_DATENFEHLER_LOCAL:
         sensors = ", ".join(f"{role} ({refs.get(role, 'nicht zugeordnet')})" for role in detail)
-        return (
-            f"{prefix}: Sensor(en) ohne gültigen Wert: {sensors}. Die Heizkurve bleibt "
-            f"unverändert, bis die Werte wieder verfügbar sind (z. B. Batterie prüfen)."
-        )
+        return meldungen.neu("meldung.datenfehler_lokal", rollen=sensors)
     if kind == NOTIFY_DATENFEHLER_SERVER:
-        reason = detail[0] if detail else _NO_REASON
-        return f"{prefix}: Server hat die Messwerte abgelehnt ({reason}). Die Heizkurve bleibt unverändert."
+        return meldungen.neu("meldung.datenfehler_server", grund=detail[0] if detail else _NO_CODE)
     if kind == NOTIFY_DATENFEHLER_RESOLVED:
-        return f"{prefix}: Messwerte wieder gültig, Heizkurve wird wieder angepasst."
+        return meldungen.neu("meldung.datenfehler_ok")
     if kind == NOTIFY_DATENFEHLER_WRITE:
-        detail_text = detail[0] if detail else "unbekannt"
-        return (
-            f"{prefix}: Neue Heizkurve konnte nicht an die Anlage übertragen werden ({detail_text}). "
-            f"Wird automatisch erneut versucht."
-        )
+        return meldungen.neu("meldung.datenfehler_schreiben", detail=detail[0] if detail else "unbekannt")
     if kind == NOTIFY_WRITE_RESOLVED:
-        return f"{prefix}: Anlage wieder erreichbar, Heizkurve übertragen."
+        return meldungen.neu("meldung.datenfehler_schreiben_ok")
     raise ValueError(f"Unbekannte Meldungsart: {kind!r}")

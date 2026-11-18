@@ -1,4 +1,4 @@
-"""Spec 5b 2/3.4: Inventur in Teilen unter der Nachrichtengrenze (AN-10: 120 KB)."""
+"""Inventur in Teilen unter der Nachrichtengrenze (AN-10: 120 KB)."""
 import json
 import time
 
@@ -13,7 +13,7 @@ def _gesendet(message) -> int:
 
 
 def _server_merge(parts):
-    """Zusammenfuehren wie der Dienst (Plan S2 Task 5, geraete/inventur.merge)."""
+    """Zusammenfuehren wie der Dienst (geraete/inventur.merge)."""
     merged = {}
     for part in parts:
         for key, value in part.items():
@@ -26,7 +26,7 @@ def _server_merge(parts):
 
 def test_a_small_inventory_is_one_part():
     assert inventory.nachrichten("c1", {"k": [1]}) == [
-        {"schema": 1, "command_id": "c1", "teil": 1, "teile": 1, "daten": {"k": [1]}}]
+        {"schema": 2, "command_id": "c1", "teil": 1, "teile": 1, "daten": {"k": [1]}}]
 
 
 def test_every_part_has_exactly_the_contract_fields():

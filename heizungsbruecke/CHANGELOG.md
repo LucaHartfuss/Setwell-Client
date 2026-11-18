@@ -3,6 +3,233 @@
 Wird im Update-Dialog des Supervisors angezeigt. Pro Version ein Abschnitt `## X.Y.Z`; der
 Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Release.
 
+## Unveröffentlicht
+
+- Das Gerät nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
+  (`smartheat_device/anker.pem`, aktiver Schlüssel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
+  loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Kälteschutz laufen unverändert
+  weiter. Ohne Schlüssel in der Datei (Platzhalter) lehnt es jede Antwort ab; der Release-Weg verlangt dort die
+  öffentlichen Schlüssel.
+
+- Der Übernahme-Code hat 16 Zeichen (80 Bit) statt 12; eine vorhandene Datei mit dem alten Code wird beim Start durch
+  einen neuen ersetzt. Am Host `ha` gilt der Code weiter ohne Frist.
+
+- Die Datei `bootstrap.json` kann zusätzlich den Hinweis auf das übernehmende Konto (`konto_hinweis`, maskierte Adresse)
+  tragen, den der Server bei der Übernahme mitgibt; ältere Dateien ohne dieses Feld bleiben gültig.
+
+- Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
+  die neue Software sie nicht lesen kann (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende
+  Bindungsparameter, andere Felder der Bindungsparameter oder Pflichtzuordnungen); ein Verstoß gegen eine lokale Grenze
+  meldet sofort: Rastung, lokale Sicherheitswerte, Schreibschutz, Wartezeit, Schrittweite, Mindestliste der
+  Rückstellung und erlaubte Schreibgruppen der Bindungsparameter, Positivliste, Entity-Art der Schreibziele, ungültige
+  Werte sowie Treiber-, Kanal- und Anlagenfehler. Die Wartezeit beginnt je Softwarestand höchstens einmal: eine
+  Boot-Schleife unter 15 Minuten hält die Meldung nicht mehr dauerhaft zurück. Grenzen: Ein Neustart des Geräts in der
+  laufenden Karenz meldet sofort; eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, hält die Meldung
+  bis zu 15 Minuten zurück.
+
+- Gibt die Integration einen Push-Eintrag nach 24 Stunden ohne Zustellung auf (Ereignis `smartheat_push_aufgegeben`),
+  meldet das Add-on das als orange Meldung an den Server (Portal): eine Meldung je Stufe und Kreis, die 24 Stunden nach
+  dem letzten solchen Ereignis wieder schließt. Der Stand liegt nur im Speicher; nach einem Neustart ist die Meldung
+  zu, bis die Integration neue Einträge aufgibt; beide Stufen aller Kreise schließt das Add-on dazu bei jedem Start
+  einmal ausdrücklich, weil der Server offene Meldungen bei einem Neustart nicht selbst schließt.
+
+- Liegt die Software nur unter einer gewöhnlich angehobenen Mindestversion und steht kein kritischer Eintrag in der
+  Konfiguration (kein Notbetrieb, kein Datum), meldet das Add-on die orange Meldung `update_noetig_mindest` („bei
+  Gelegenheit aktualisieren“) statt der roten, in Home Assistant und an den Server; Rot bleibt dem kritischen Eintrag
+  vorbehalten.
+
+- Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der ursprünglichen Werte geht jetzt auch an den
+  Server und erreicht Eigentümer und Bedienende im Portal, per Push und per Mail. Nach einem Neustart mit der
+  Mindestversion nimmt die erste Anzeige sie zurück, auch ohne neuen Konfigurationsstand; ohne die Mindestversion
+  meldet sie dieselbe Anzeige wieder.
+
+- Unter einer kritischen Mindestversion nennt die Meldung `update_noetig` das Datum, an dem das Gerät die
+  ursprünglichen Werte wieder einstellt (Beginn der lokalen Frist plus 30 Tage); ohne bekannten Beginn (unklare Uhr)
+  erscheint die Fassung ohne Datum. Ist die Integration veraltet, zeigt das Add-on in Home Assistant die Meldung
+  „Integration veraltet“, bis sie aktuell ist oder ihr Lebenszeichen 15 Minuten fehlt.
+
+- Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
+  Notbetrieb mit unveränderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
+  30 Tage zählen lokal ab dem ersten Empfang mit vertrauenswürdiger Uhr und überstehen Neustarts (eine unklare Uhr zählt
+  nicht). Danach stellt die Laufzeit die ursprünglichen Werte wieder her wie beim Abo-Ende. Ein Update auf die
+  Mindestversion oder ein Konfigurationsstand ohne `update_noetig` hebt den Zustand ohne Neustart des Add-ons auf, auch
+  nach den 30 Tagen; erreicht die laufende Version die gemerkte Mindestversion, bleibt das Gerät auch ohne neuen
+  Konfigurationsstand nicht im Notbetrieb, und die 30 Tage zählen nicht weiter (liegt die Version darunter, bleibt
+  alles wie bisher). Der Zustand `update_noetig` geht dem Zustand „keine Verbindung“ vor. Neuer Rückruf
+  `update_noetig_geaendert` des Geräts an den Host; der Beginn steht mit dem Zusatz `kritisch` in
+  `entitlement_state.json` (neues Feld, keine Migration). Die Abo-Meldungen erscheinen dabei nicht.
+
+- Neue Meldung `meldung.updates_veraltet` (Stufe `orange`, Parameter `grund`: `ablauf` oder `kein_angebot`) und ein
+  Rückruf `updates_soll` des Geräts an den Host: nach jeder Konfiguration (auch einer abgelehnten) gibt das Gerät die
+  Einstellung `updates` an den Host weiter. Der Home-Assistant-Host ignoriert sie (kein Updater).
+
+- Das Gerät liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
+  Soll-Software (auch aus einer abgelehnten Konfiguration; Unlesbares blockiert nie und lässt den gemerkten Wert stehen),
+  merkt sie in `dokumente.json` (ältere Dateien ohne die Schlüssel starten ohne gemerkten Wert) und meldet
+  `update_noetig` auch dann, wenn eine Konfiguration wegen unbekannter Felder abgelehnt wird und ihre lesbare
+  `mindest_software` über der eigenen liegt. Das `hello` des Home-Assistant-Hosts trägt `auto_update` (Schalter
+  „Automatisch aktualisieren“ des Add-ons, nur gelesen, höchstens einmal je Minute) und `integration_version`
+  (`null` = unbekannt); ändert sich einer der Werte, geht ein neues `hello` hinaus, zwischen zwei so nachgesendeten
+  `hello` mindestens 60 Sekunden (die letzte Änderung geht dabei nicht verloren).
+- Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
+  auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
+  und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
+  keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+
+- Ist die Uhr nicht vertrauenswürdig und ruht deshalb eine gesetzte Betriebsart (Wochenplan, Abwesenheit, Leerstand,
+  Übersteuerung), meldet das Gerät das je Kreis einmal als offene Meldung `meldung.uhr_unklar` (gelb, ohne Parameter und
+  ohne Zeiten) und nimmt sie ohne Push zurück, sobald die Uhr wieder stimmt oder keine Betriebsart mehr gesetzt ist.
+  Kein erneutes Melden je Takt; die Regelung ändert sich nicht.
+
+- Neue Grenzen für Abwesend, Leerstand und Übersteuerung im Gerät: die Temperatur darf nicht über den Bedienbereich
+  (höchstens 25 °C) steigen; Abwesend gilt höchstens 365 Tage voraus (wie der Leerstand); die Übersteuerung in der
+  kühlen Phase geht nicht unter 16 °C (Absenk-Untergrenze), Abwesend und Leerstand bleiben ab 15 °C. Ein Wert außerhalb
+  macht den Teil ungültig, das Soll fällt auf Plan bzw. Wunsch zurück.
+
+- Ohne vertrauenswürdige Uhr rückt der Tag der Tageszähler nach der monotonen Uhr vor (je volle 24 Stunden einer, nie
+  zurück): der Start-Zähler, den der Kälteschutz teilt, hängt so nicht bis zum Neustart fest. Einträge eines späteren
+  Tages (Uhr stand beim Start vor) zählen als heute. Ein Fehler bei der Plan-Eingabe, beim Uhrurteil oder beim
+  Fortschreiben des Tages hält Kälteschutz und Watchdog nicht an (es gilt der Wunsch). Fehlt die Plan-Eingabe nach
+  einer Absenkung kurz, gilt der Anstieg des Wunsches nicht als der des Kunden.
+
+- Ein Sprung der Uhr über Mitternacht setzt die Tageszähler nicht mehr zurück: das Tageslimit des Schreibbudgets und
+  „Durchsetzen höchstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswürdiger Uhr. Ohne Vertrauen (Zeitdienst
+  nie synchron seit dem Start, Wanduhr gegen die monotone Uhr gesprungen) bleibt der alte Tag, es wird dann eher weniger
+  geschrieben. Die Grenzwerte sind unverändert.
+
+- Der Prüftakt rechnet jetzt je Heizkreis das geltende Soll aus dem Wunsch am Thermostat und der Bedienung des Kreises
+  (Wochenplan, Abwesenheit, Leerstand, Übersteuerung). Kälteschutz und Notfall-Boost lesen dieses Soll; ist die
+  Soll-Quelle aus (Thermostat aus, Frostschutz-Stellung), schreibt der Plan nichts. Ein Anstieg durch den Plan startet
+  den Comfort-Boost nur beim Profil „Boost“ (ein Anstieg des Kunden wie bisher immer). Ohne Plan, ohne Zeitzone oder
+  in der Testphase gilt unverändert der Wunsch; ein Fehler der Rechnung hält die Regelung nicht an.
+
+- Die Rechnung des geltenden Solls nimmt das Urteil über die Uhr entgegen: ist die Uhr nicht vertrauenswürdig, ruhen
+  Wochenplan, Abwesenheit, Leerstand und Übersteuerung, das Soll ist der Wunsch (die warme Richtung), und das Ergebnis
+  trägt einen Merker für die spätere Meldung „Uhr unklar“. Sobald die Uhr wieder vertrauenswürdig ist, gilt der Plan an
+  der aktuellen Stelle. Noch ohne Wirkung: die Rechnung wird erst mit der Verdrahtung in die Hosts angewendet.
+
+- Das Gerät rechnet jetzt das geltende Soll aus Wochenplan, Abwesenheit und Leerstand (Vorrang: Leerstand, Abwesend,
+  Plan kühl, Wunsch), mit Absenkung in der kühlen Phase und Aufheizen vor dem Ende der Phase, in der Zeitzone der
+  Anlage und über die Sommerzeit hinweg; es meldet die Art des Solls und den nächsten Wechsel. Ohne Wochenplan bleibt
+  das Soll der Wunsch. Noch ohne Wirkung: die Rechnung wird erst mit der Verdrahtung in die Hosts angewendet.
+- Das Gerät kennt jetzt die Grenzen der kommenden Betriebsarten (Absenkung nie unter 16 °C, Leerstand nie unter
+  15 °C und höchstens 365 Tage, jede Phase mindestens 60 Minuten, Abwesenheits-Vorschlag 17 °C bzw. 19 °C je
+  Verteilsystem). Noch ohne Wirkung: sie werden erst mit dem Wochenplan angewendet.
+- Der Comfort-Boost kennt jetzt das Aufheizen des Profils: bei einem Anstieg des Solls durch den Plan, das Ende von
+  Abwesend oder Leerstand startet er nur beim Profil „boost“, bei „kurve“ bleibt er aus. Die Erhöhung durch den Kunden
+  und die Quote (höchstens 6 Starts am Tag, 1800 Sekunden Abstand) bleiben unverändert. Noch ohne Wirkung: der Plan
+  wird erst mit dem Wochenplan angebunden. Ein vergessener Parameter öffnet den Boost nicht mehr still: Profil und
+  Herkunft des Anstiegs müssen immer angegeben werden.
+- Die Höchstdauer des Leerstands gilt jetzt auch ab der Uhr des Geräts, nicht nur ab dem vom Server gesetzten Beginn,
+  und wird in absoluter Zeit gerechnet (auch über den Sommerzeitwechsel); eine unbrauchbare Zahl oder Zeitzone wird als
+  ungültig verworfen, statt die Rechnung abzubrechen.
+- Eine Störung des Wärmeerzeugers (`erzeuger.stoerung`) hat die Stufe `rot` statt `orange`: Die Integration meldet sie
+  sofort, auch in der Ruhezeit, und erinnert, solange sie offen ist. Wartungshinweise (`erzeuger.hinweis`) bleiben `gelb`,
+  die Bestätigung nach 15 Minuten ändert sich nicht.
+- Das Status-Ereignis `smartheat_status` trägt statt `geraet_hinweise` (Schlüssel, Stufe, Text) die Liste `meldungen`
+  mit `key`, `code`, `params`, `kreis` (nur bei Kreismeldungen) und `stufe` (`rot`, `orange`, `gelb`), ohne Text und ohne
+  Raum- oder Entity-Namen, sowie die Push-Regeln `push_regeln`. Zu jedem Übergang einer Meldung (neu, aktualisiert,
+  geschlossen) feuert das Add-on das neue Ereignis `smartheat_meldung` mit `schema`, `geraet_id`, `key`, `code`, `params`,
+  `kreis`, `stufe` und `offen`. Der bisherige Push und die Dauermeldung von Home Assistant bleiben bis zur Auswertung in
+  der Integration unverändert. Das Ereignis kommt je Übergang genau einmal (bei einer kritischen Meldung nicht mehr
+  zusätzlich vom Push) und auch dann, wenn Home Assistant die offene Meldung nicht anlegen kann.
+- Eine offene kritische Meldung ohne gültige gespeicherte Meldung (Bestand aus einer älteren Version) wird bei der
+  nächsten Prüfung, die den Zustand bestätigt, einmal neu gemeldet, statt für immer still offen zu bleiben.
+- Störungen des Wärmeerzeugers: Das Gerät liest über die Rolle `fault_codes` die Fehlercodes der Anlage (Attribut
+  `diagnostic_trouble_codes` der Entity `binary_sensor.<anlage>_trouble_codes` der Integration `mypyllant`, deren Option
+  `fetch_dtc` standardmäßig aus ist). Steht eine Kennung 15 Minuten ununterbrochen an, meldet das Gerät `erzeuger.stoerung`
+  (Wartungshinweise `erzeuger.hinweis`), je Kreis höchstens 8 offene Meldungen; fällt sie weg, schließt die Meldung ohne
+  Push. Wechselt eine offene Kennung zwischen Wartungshinweis und Störung, schließt die alte Meldung ohne Push, und die
+  neue Art zählt ihre eigenen 15 Minuten. Die Telemetrie trägt je Kreis das neue Feld `erzeuger_stoerung` (älteste offene Störung als Kennung oder `null`).
+  Es geht nur die normalisierte Kennung auf den Draht, nie ein Herstellertext, und das Gerät deutet sie nicht.
+- Das Gerät prüft die Typen seiner Dokumente strenger: `mindest_software` muss ein Versionstext `X.Y.Z` sein, `ts` der
+  Bedienung ein nichtleerer Text, `ursprungswerte` ein Objekt aus höchstens 16 Namen mit Wahrheitswerten, Zahlen oder
+  kurzen Texten, und in einer leeren Konfiguration müssen auch `anlage_name`, `weg`, `tagestick`, `kreise`,
+  `bindungsparameter` und `mindest_integration` den richtigen Typ haben. Ein Befehl mit unbekanntem `schema` wird mit
+  `ungueltige_nutzlast` abgelehnt, ohne dass ein Handler läuft. Der Server schreibt alle diese Felder schon richtig.
+- Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard): Ruhezeit (Standard 22 bis 7 Uhr) und
+  Tageslimit der Pushes (1 bis 5, Standard 5). Ein ungültiger Wert wird nicht abgelehnt, das Gerät nimmt dafür den
+  Standard. Ein Dokument ohne das Feld lehnt das Gerät ab; `client1` bekommt es mit dem nächsten `refresh`.
+- Neue optionale Leserolle `fault_codes` (Störungsanzeige des Erzeugers, `binary_sensor` der Klasse `problem`); die
+  Inventur lässt für Binärsensoren nun neben `battery` auch die Klasse `problem` durch. Der Hinweis `raumfuehler` entfällt
+  aus `hinweise_aus`; ein Dokument, das ihn noch nennt, lehnt das Gerät ab.
+- Der Befehl `hinweis` trägt `key`, `code`, `params` und `stufe` statt eines fertigen Textes; das Gerät nimmt nur
+  Codes der eigenen Meldungstabelle an. Der Laufzeitstatus nennt den Grund einer Störung als Code mit Parametern
+  (`status.grund_*`) statt als Satz, ein Startfehler trägt dort keinen Fehlertext mehr (die Meldung an den Kunden bleibt).
+  Hinweise im alten Textformat in `hinweise.json` werden verworfen. Im Ereignis `smartheat_status` ist `grund` damit ein
+  Objekt `{code, params}` statt eines Strings.
+- Neuer Befehl `weg_pruefen` im Geräte-Vertrag (Ergebnis `gleiche_anlage`, `abweichung` oder `nicht_lesbar`); das Gerät
+  lehnt ihn vorerst mit `nicht_unterstuetzt` ab. Die Anmeldephase `password` und das Feld `ciphertext` des Befehls
+  `driver_login` entfallen, weil kein Treiber sie nutzt.
+- Wählt der Nutzer beim Entfernen des Eintrags „Gerät aus dem Konto lösen“, trägt die stdin-Zeile
+  `entfernen <Geräte-ID> freigeben` die Wahl in die Abmelde-Markierung. Nach der Abmeldung meldet das Gerät dem Server
+  einmalig `up/entfernt` mit der Wahl (`behalten` oder `freigeben`) und wiederholt es nach 60 Sekunden, bis der Broker
+  es bestätigt. Ohne die Wahl bleibt das Gerät im Konto, wie bisher.
+- Lehnt der Server einen Snapshot ab, liest das Add-on nur noch den kurzen Code der Antwort (Feld `code`, Kleinbuchstaben,
+  Ziffern, Unterstrich) und zeigt ihn in der Meldung als „Code …“; Freitext und Werte aus der Serverantwort gelangen
+  weder in die Meldung noch in den Speicher oder das Log. Ist der Code unleserlich, steht `grund_fehlt`. Für unbrauchbare
+  Antworten nennt das Add-on selbst `antwort_schema_unbekannt`, `antwort_kreis_unpassend` oder `antwort_ungueltig`.
+- Das Add-on liest das Lebenszeichen der Integration (Version, gelesene Status-Schemata; nach 900 Sekunden ohne
+  Ereignis gilt die Version als unbekannt) und kann den Schalter „Automatisch aktualisieren“ des Add-ons lesen
+  (nur lesen, nie setzen; ist er nicht lesbar, gilt er als unbekannt). Sichtbar wird das erst mit der Meldung an den
+  Server.
+- Die Dokumentation (Abschnitt „Entfernen“) nennt jetzt die Reihenfolge zum vollständigen Entfernen (Eintrag löschen,
+  „Abgemeldet“ im Portal abwarten, Add-on deinstallieren, Integration in HACS entfernen), die Warnung vor der falschen
+  Reihenfolge und das Löschen der Hilfssensoren von Hand nach hartem Entfernen.
+- Das Status-Ereignis für die Integration trägt zwei weitere Anlagenfelder: die Notify-Dienste der Handys für den Push
+  (`benachrichtigung`, nur Dienste `notify.mobile_app_…`, höchstens 10) und die stummgeschalteten Hinweis-Kategorien
+  (`hinweise_aus`). Ohne Konfiguration sind beide Listen leer.
+- Uhrbeurteilung genauer: Ein Sprung der Systemuhr innerhalb von 30 Sekunden nach einer „synchron“-Meldung des
+  Zeitdienstes nimmt jetzt das Vertrauen in die Uhr (der Beleg stammt vom Zeitpunkt der Antwort, nicht des Aufrufs);
+  zur Zeitumstellung gilt die tatsächlich vergangene Zeit, kein Sprung. Die kritische Mindestversion im Status-Ereignis
+  nimmt nur ASCII-Ziffern und als Endung `-…`, `+…` oder `.devN` an.
+- Das Status-Ereignis für die Integration trägt zwei neue Anlagenfelder: die Version des Konfigurationsdokuments
+  (`konfig_version`) und dessen kritische Mindestversion der Integration (`mindest_integration`, nur in der Form einer
+  Versionsnummer, sonst leer). Die Integration entfernt Kreis-Geräte erst, wenn zwei Ereignisse dieselbe Version tragen.
+- Ende der Regelung: Mit dem Ende der Abo-Frist und beim Rückstellen eines Kreises „ausser Betrieb“ zeigt die
+  Soll-Quelle (Thermostat bzw. Soll-Entity) den gemerkten Wunsch, nie weniger als vorher. Bei ausgeschalteter Soll-Quelle
+  und bei einem Wunsch, der gerade gedreht wird, ändert sich nichts. Die Abo-Frist beginnt und endet nur bei
+  vertrauenswürdiger Uhr: ohne verlässliche Uhr verlängert sie sich höchstens, sie beginnt nachträglich, sobald die Uhr
+  stimmt. Haken für die kritische Mindestversion (30 Tage, lokal ab dem ersten Empfang gezählt) ist vorbereitet, aber noch
+  nicht verdrahtet.
+- Das Ende der Regelung übersteht den Neustart: es wird dauerhaft gemerkt (`entitlement_state.json`, Feld `beendet`), ein
+  Neustart danach bleibt auch bei unsicherer Uhr und bei unbekanntem Abo-Status im Ruhezustand und schreibt nichts; nur ein
+  aktives Abo hebt das Ende auf. Nur das erste Ende braucht eine vertrauenswürdige Uhr. Scheitert das Speichern des Endes,
+  wird es im Takt wiederholt, bis es gelungen ist. Das Zurückstellen der Soll-Quelle auf den gemerkten Wunsch wird
+  vorgemerkt und nach einem Neustart und im Ruhezustand nachgeholt, bis es gelungen ist: höchstens bis zur ersten bekannten
+  Anzeige nach dem Ende, danach gilt die gezeigte Einstellung als Wert des Kunden. Bei unbekannter Anzeige, bei „aus“ und bei
+  Frostschutz-Stellung wird nichts geschrieben. Ein bereits beendetes Gerät durchläuft das erste Ende einmal erneut (mit
+  vertrauenswürdiger Uhr), danach gilt das gemerkte Ende.
+- Das Abmelden schreibt nie auf das Thermostat bzw. die Soll-Entity: die Einstellung des Kunden bleibt, wie sie ist.
+
+- Neue Abhängigkeit `tzdata` 2026.5 (mit Hash): das Image hat keine Systemzonendaten, die Zone `Europe/Berlin` kommt aus dem
+  Paket.
+- Der Standard der Option `bootstrap_url` ist jetzt `https://accounts.setwell.de` (vorher `https://accounts.hartfussha.org`).
+  Ist die Option nicht gesetzt, meldet sich das Add-on nach dem Update dort an. Wer sein Gerät noch am bisherigen Server
+  betreibt, setzt `bootstrap_url` vor dem Update ausdrücklich auf `https://accounts.hartfussha.org`.
+  Beim Start steht im Log eine Zeile zur Quelle der Adresse: im Standardfall der Hostname (`Standard accounts.setwell.de`),
+  sonst nur „aus Option bootstrap_url“ ohne Wert.
+- Scheitert beim Abmelden das Zurücksetzen der Heizung, nennt die Meldung jetzt die Werte, die SmartHeat selbst
+  geschrieben hätte (Ursprungswert des Servers, auf die lokalen Grenzen gebracht), nicht den lokalen Ursprungswert.
+  Geschrieben wird unverändert dasselbe.
+- Meldungen entstehen im Gerätekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der
+  Host zusammen (Wortlaut, Meldetext der Handys und der Hinweise in Home Assistant bleiben gleich). Der Meldungszustand
+  in der `backup.json` jedes Kreises heißt jetzt `notify_meldungen`; die alten Felder `notify_states` und
+  `notify_messages` liest das Gerät nicht mehr. Beim Update einmal im Wartungsfenster
+  `python -m smartheat_device.meldungszustand_migration --device-dir <Ordner> --release <Version>` aufrufen: der Lauf
+  sichert jede betroffene Datei als `backup.json.pre-<Version>` und entfernt die beiden Felder. Danach beginnt der
+  Meldungszustand leer: ein noch bestehender Anlass wird einmal neu gemeldet, der Notbetrieb wird aus dem
+  Failsafe-Zustand wieder gesät. Offene Hinweise in Home Assistant, die vor dem Update gemeldet wurden, räumt das Gerät
+  danach nicht mehr selbst ab. Rückweg: die Sicherung zurückspielen.
+- `up/notifications` trägt je Meldung `code`, `params` und `stufe` statt `kategorie` und `text`, dazu optional `kreis`.
+  Auf den Draht gehen nur Parameter des Katalogs; Namen (Entity, Raum, Anlage) und Freitext bleiben lokal und füllen nur
+  den Text in Home Assistant. Ein Textparameter geht nur als Code, sonst als `unbekannt`. Ein Schlüssel mit Namen
+  oder Kreis wird zu `<art>:<Prüfsumme>`; der Kreis geht als eigenes Feld. Schließt das Gerät eine Meldung, die es nicht
+  mehr kennt, steht `code` auf `null`. Der Server von vor diesem Stand liest das neue Format nicht.
+- Beim Start schaltet nur noch eine Kategorie aus der Liste der Hinweise stumm. Ein gespeichertes Dokument von vor dem
+  Streichen von `raumfuehler` hätte sonst Raumfühler-Ausfälle still unterdrückt, ohne dass der Status es zeigt; das
+  Gerät verwirft solche Einträge und schreibt nur ihre Zahl ins Log.
+
 ## 1.1.0
 
 - `certifi` 2026.10.19 statt 2026.7.22 (Sicherheitsmeldung GHSA-6q48-6c7w-9gw2: kompromittierte emSign-Root-CAs im

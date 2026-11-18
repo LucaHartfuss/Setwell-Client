@@ -46,10 +46,16 @@ from smartheat_runtime.delivery import (
     accepts_ack,
     from_persisted,
     is_storage_fault,
-    notification_text,
+    notification_meldung,
     step,
     to_persisted,
 )
+from smartheat_runtime.texts import HA_TEXTS  # noqa: E402
+
+
+def notification_text(kind, detail, refs):
+    """Der Text der Meldung beim HA-Host."""
+    return HA_TEXTS.text(notification_meldung(kind, detail, refs))
 
 
 def _run(state, *events):
@@ -261,8 +267,26 @@ def test_timeout_during_notbetrieb_does_not_query_entitlement_again():
     assert [type(action) for action in actions] == [ScheduleRetry]
 
 
+def test_unbeantworteter_pruef_tick_im_stillen_notbetrieb_meldet():
+    """Ein Notbetrieb ohne Meldung (Neustart mit altem Notbetrieb, Abo unbekannt) bleibt
+    still, bis zwei Ack-Timeouts des Pruef-Ticks den Server als stumm zeigen; dann geht "Notbetrieb aktiv" hinaus (der
+    Notifier meldet nur beim Zustandswechsel). Schwelle, Retry-Stufen und Abo-Abfrage bleiben wie zuvor."""
+    state, _ = _published("s1", notbetrieb=True)
+
+    state, actions = step(state, AckTimeout("s1", 1))
+    assert [type(action) for action in actions] == [ScheduleRetry]  # der erste Timeout meldet noch nicht
+
+    state, _ = _run(state, RetryDue("s1", 2), Published("s1"))
+    state, actions = step(state, AckTimeout("s1", state.pending.gen))
+
+    assert state.server_failures == 2
+    assert [type(action) for action in actions] == [Notify, ScheduleRetry]
+    assert actions[0] == Notify(NOTIFY_NOTBETRIEB_ON)
+    assert actions[1].delay_s == 300  # Retry-Stufe wie im Notbetrieb ueblich
+
+
 def test_late_ack_during_retry_wait_ends_tick_and_old_retry_becomes_stale():
-    # Review Focus 3: Antwort des ersten Versuchs kommt kurz nach dem Ack-Timeout.
+    # Antwort des ersten Versuchs kommt kurz nach dem Ack-Timeout.
     state, _ = _published("s1")
     state, _ = step(state, AckTimeout("s1", 1))
 
@@ -361,52 +385,32 @@ def test_rejected_ack_is_server_fault_ends_notbetrieb_and_retries():
     state, _ = _in_notbetrieb("s1")
     state, _ = _run(state, RetryDue("s1", state.pending.gen), Published("s1"))
     gen = state.pending.gen
-    reason = "unplausibler Wert für dat: 99 (erlaubt -40–45)"
+    code = "wert_unplausibel"
 
-    state, actions = step(state, Ack("s1", "rejected", reason))
+    state, actions = step(state, Ack("s1", "rejected", code))
 
     assert state.notbetrieb is False
     assert state.server_failures == 0
-    assert state.datenfehler == DataFault(SOURCE_SERVER, (reason,))
+    assert state.datenfehler == DataFault(SOURCE_SERVER, (code,))
     assert actions == [
         EndEmergencyBoost(), Notify(NOTIFY_NOTBETRIEB_OFF),
-        Notify(NOTIFY_DATENFEHLER_SERVER, (reason,)), ScheduleRetry("s1", gen + 1, 900),
+        Notify(NOTIFY_DATENFEHLER_SERVER, (code,)), ScheduleRetry("s1", gen + 1, 900),
     ]
 
 
-def test_rejected_with_same_reason_does_not_notify_again():
+def test_rejected_with_same_code_does_not_notify_again():
     state, _ = _published("s1")
-    state, _ = step(state, Ack("s1", "rejected", "fehlende Rolle: dat"))
+    state, _ = step(state, Ack("s1", "rejected", "hebel_fehlen"))
 
-    state, actions = _run(state, RetryDue("s1", 2), Published("s1"), Ack("s1", "rejected", "fehlende Rolle: dat"))
+    state, actions = _run(state, RetryDue("s1", 2), Published("s1"), Ack("s1", "rejected", "hebel_fehlen"))
 
     assert actions == [ScheduleRetry("s1", 4, 300)]
 
 
-def test_rejected_with_only_the_value_changed_does_not_notify_or_change_state_again():
-    """Der R4-Grund des Servers enthaelt den Messwert; ein driftender Wert ist dieselbe
-    Stoerung. Keine zweite Meldung, und der gespeicherte Fehler (erste Begruendung)
-    bleibt unveraendert -- sonst wuerde failsafe_state.json bei jedem Retry neu
-    geschrieben."""
-    first = "unplausibler Wert für dat: 99 (erlaubt -40–45)"
+def test_rejected_with_another_code_notifies_with_that_code():
     state, _ = _published("s1")
-    state, first_actions = step(state, Ack("s1", "rejected", first))
-    persisted = to_persisted(state)
-
-    state, actions = _run(
-        state, RetryDue("s1", 2), Published("s1"), Ack("s1", "rejected", "unplausibler Wert für dat: 99.5 (erlaubt -40–45)"),
-    )
-
-    assert first_actions[0] == Notify(NOTIFY_DATENFEHLER_SERVER, (first,))
-    assert actions == [ScheduleRetry("s1", 4, 300)]
-    assert state.datenfehler == DataFault(SOURCE_SERVER, (first,))
-    assert to_persisted(state) == persisted
-
-
-def test_rejected_for_another_role_notifies_with_full_reason():
-    state, _ = _published("s1")
-    state, _ = step(state, Ack("s1", "rejected", "unplausibler Wert für dat: 99 (erlaubt -40–45)"))
-    other = "unplausibler Wert für dart: 60 (erlaubt 5–35)"
+    state, _ = step(state, Ack("s1", "rejected", "wert_unplausibel"))
+    other = "readonly_ungueltig"
 
     state, actions = _run(state, RetryDue("s1", 2), Published("s1"), Ack("s1", "rejected", other))
 
@@ -422,13 +426,13 @@ def test_rejected_after_local_fault_with_same_text_is_a_new_fault():
     assert actions[0] == Notify(NOTIFY_DATENFEHLER_SERVER, ("dat",))
 
 
-def test_rejected_without_reason_uses_placeholder():
+def test_rejected_without_code_uses_placeholder():
     state, _ = _published("s1")
 
     state, actions = step(state, Ack("s1", "rejected"))
 
-    assert state.datenfehler == DataFault(SOURCE_SERVER, ("ohne Begründung",))
-    assert actions[0] == Notify(NOTIFY_DATENFEHLER_SERVER, ("ohne Begründung",))
+    assert state.datenfehler == DataFault(SOURCE_SERVER, ("grund_fehlt",))
+    assert actions[0] == Notify(NOTIFY_DATENFEHLER_SERVER, ("grund_fehlt",))
 
 
 def test_rejected_retry_first_waits_thirty_seconds():
@@ -668,7 +672,7 @@ def test_old_file_with_only_failsafe_active_is_read():
     {"datenfehler": {"source": "local", "detail": [1]}},
 ])
 def test_garbage_persisted_content_falls_back_to_defaults(raw):
-    # Review Focus 4: kaputte/fremde Datei darf den Start nie verhindern.
+    # kaputte/fremde Datei darf den Start nie verhindern.
     assert from_persisted(raw) == DeliveryState()
 
 
@@ -691,8 +695,8 @@ def test_notification_text_for_unmapped_role_says_so():
 
 
 def test_notification_texts_for_server_fault_and_state_changes():
-    assert notification_text(NOTIFY_DATENFEHLER_SERVER, ("fehlende Rolle: dat",), {}) == (
-        "Heizungsbrücke: Server hat die Messwerte abgelehnt (fehlende Rolle: dat). Die Heizkurve bleibt unverändert."
+    assert notification_text(NOTIFY_DATENFEHLER_SERVER, ("hebel_fehlen",), {}) == (
+        "Heizungsbrücke: Server hat die Messwerte abgelehnt (Code hebel_fehlen). Die Heizkurve bleibt unverändert."
     )
     assert notification_text(NOTIFY_NOTBETRIEB_ON, (), {}) == (
         "Heizungsbrücke: Server antwortet nicht, Notbetrieb aktiv. Die Heizung wird bei Bedarf lokal abgesichert."
@@ -703,6 +707,25 @@ def test_notification_texts_for_server_fault_and_state_changes():
     assert notification_text(NOTIFY_DATENFEHLER_RESOLVED, (), {}) == (
         "Heizungsbrücke: Messwerte wieder gültig, Heizkurve wird wieder angepasst."
     )
+
+
+def test_every_notification_kind_is_a_code_with_its_params():
+    local = notification_meldung(NOTIFY_DATENFEHLER_LOCAL, ("dat", "room_actual"), {"dat": "sensor.dat"})
+    assert (local.code, local.params) == (
+        "meldung.datenfehler_lokal", {"rollen": "dat (sensor.dat), room_actual (nicht zugeordnet)"})
+    server = notification_meldung(NOTIFY_DATENFEHLER_SERVER, ("hebel_fehlen",), {})
+    assert (server.code, server.params) == ("meldung.datenfehler_server", {"grund": "hebel_fehlen"})
+    assert notification_meldung(NOTIFY_DATENFEHLER_SERVER, (), {}).params == {"grund": "grund_fehlt"}
+    write = notification_meldung(NOTIFY_DATENFEHLER_WRITE, ("curve",), {})
+    assert (write.code, write.params) == ("meldung.datenfehler_schreiben", {"detail": "curve"})
+    assert notification_meldung(NOTIFY_DATENFEHLER_WRITE, (), {}).params == {"detail": "unbekannt"}
+    codes = {kind: notification_meldung(kind, (), {}).code for kind in (
+        NOTIFY_NOTBETRIEB_ON, NOTIFY_NOTBETRIEB_OFF, NOTIFY_DATENFEHLER_RESOLVED, NOTIFY_WRITE_RESOLVED)}
+    assert codes == {
+        NOTIFY_NOTBETRIEB_ON: "meldung.notbetrieb", NOTIFY_NOTBETRIEB_OFF: "meldung.notbetrieb_ok",
+        NOTIFY_DATENFEHLER_RESOLVED: "meldung.datenfehler_ok", NOTIFY_WRITE_RESOLVED: "meldung.datenfehler_schreiben_ok"}
+    with pytest.raises(ValueError, match="Meldungsart"):
+        notification_meldung("gibt_es_nicht", (), {})
 
 
 # --- Broker wieder verbunden (F3) ---
@@ -785,7 +808,7 @@ def test_retry_origin_and_unsent_are_not_persisted():
     }
 
 
-# --- TP12b: Antwort da, lokal nicht speicherbar (AU-012) ---
+# --- Antwort da, lokal nicht speicherbar ---
 
 def test_answered_local_fault_counts_as_answer_without_notification():
     state, _ = _published(server_failures=1)
@@ -829,7 +852,7 @@ def test_clear_stale_notbetrieb_keeps_a_notbetrieb_with_open_tick():
     assert step(state, ClearStaleNotbetrieb()) == (state, [])
 
 
-# --- TP12b (2): Datentraeger wieder beschreibbar ---
+# --- Datentraeger wieder beschreibbar ---
 
 def test_storage_writable_attempts_a_tick_waiting_on_a_storage_fault_at_once():
     state, _ = _published()

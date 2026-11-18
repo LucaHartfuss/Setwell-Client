@@ -1,25 +1,27 @@
-"""Einstieg des Gateways (Spec 5b 5.3, Plan D2): ein Prozess fuer Geraetekern (smartheat_device, eigener Thread) und
-Laufzeit (smartheat_runtime, Regel-Worker im Hauptthread). Agent-Container, HTTPS-Polling und Tunnel entfallen; Tick
+"""Einstieg des Gateways: ein Prozess fuer Geraetekern (smartheat_device, eigener Thread) und
+Laufzeit (smartheat_runtime, Regel-Worker im Hauptthread). Tick
 und Telemetrie laufen ueber den Link des Geraets (mqtt_factory).
 
 Neustart und Ende teilen sich beide Hosts in smartheat_device.prozess: eine laufzeitrelevante neue Konfiguration oder
 sign_off fordert den Neustart an (EV_RELOAD), ebenso die Neustarts der Laufzeit selbst (Rueckruf
-prozess.neustart_der_laufzeit aus app.start: Neupruefung im Ruhezustand Konfigurationsfehler, Abo am Fristende wieder
-aktiv, Neustart nach dem Zuruecksetzen). Der Worker endet mit prozess.Neustart, beenden trennt zuerst den Link sauber
+prozess.neustart_der_laufzeit aus app.start: Neustart nach dem Zuruecksetzen aller Kreise). Die Laufzeit
+(smartheat_runtime.kreise) fuehrt je Heizkreis eine Instanz mit eigenem Worker; der GatewayAnlagenHost liefert je Kreis
+Treiber, Zigbee-Fuehler und Thermostat. Neupruefung im Ruhezustand Konfigurationsfehler und Abo am Fristende wieder
+aktiv nehmen nur den betroffenen Kreis wieder auf (Laufzeit.wiederaufnehmen), ohne Prozessneustart. Der Worker endet mit prozess.Neustart, beenden trennt zuerst den Link sauber
 (MQTT-DISCONNECT; sonst meldet IoT Core DUPLICATE_CLIENTID, wenn der neue Prozess verbindet, und der Dienst saehe nach
-drei Aenderungen eine Kopie, Spec 4.2), laesst den Geraete-Thread sein laufendes Ereignis abschliessen, und main kehrt
+drei Aenderungen eine Kopie), laesst den Geraete-Thread sein laufendes Ereignis abschliessen, und main kehrt
 zurueck: Exit 0, Compose startet neu.
 Nach einem unerwarteten Fehler der Laufzeit trennt das Gateway ebenso, meldet sich ungesund (vor_der_pause), wartet
 60 s und startet dann neu; ebenso nach einem Fehler in den Schritten davor (vorbereiten: Aufraeumen, Geraete-Host,
-Geraetekern, Diagnoseserver; S3S6-Startabbruch). SIGTERM (docker stop) endet ueber beenden ohne Neustart. Jeder Start
+Geraetekern, Diagnoseserver). SIGTERM (docker stop) endet ueber beenden ohne Neustart. Jeder Start
 reicht das gemerkte Software-Angebot erneut an den Updater (software_soll_nachholen).
 
 Nach dem Entfernen (Markierung aufraeumen.json) setzt der naechste Start die Anlage erst zurueck wie sign_off (Laufzeit
 im Modus abgemeldet mit der alten Konfiguration aus der Markierung, die Treiber-Anmeldung braucht es dafuer noch) und
-startet danach neu; erst dieser Start loescht den anlagengebundenen Zustand (A4-07, Spec Stufe 3 S3 Abschnitt 4), bevor
+startet danach neu; erst dieser Start loescht den anlagengebundenen Zustand, bevor
 der Geraetekern startet - aber nur, solange die gespeicherte Konfiguration noch leer ist: kam vor dem Neustart schon
 eine neue Einrichtung, bleibt ihre frische Treiber-Anmeldung. Die Konfigurationswache haelt nur noch das Lebenszeichen
-fuer den Compose-Health-Check frisch (G2 7.2)."""
+fuer den Compose-Health-Check frisch."""
 import contextlib
 import logging
 import os
@@ -34,13 +36,15 @@ from smartheat_device.device import Device
 from smartheat_device.documents import KONFIGURATION, DocumentStore
 from smartheat_gateway import befehle, diagnose
 from smartheat_gateway import geraet_host as geraet_host_module
-from smartheat_gateway.bus import LocalBus, credentials_from_env
+from smartheat_gateway.anmeldung import WERK_DATEI, Zugang
+from smartheat_gateway.bus import BUS_PORT, LocalBus, credentials_from_env
 from smartheat_gateway.geraet_host import GatewayDeviceHost
-from smartheat_gateway.host import GatewayHost
+from smartheat_gateway.host import GatewayAnlagenHost, GatewayHost
 from smartheat_gateway.paths import Paths, from_env
 from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import ZigbeeMirror
-from smartheat_runtime import app
+from smartheat_runtime import app, kreise
+from smartheat_runtime.aufraeumen import Markierung
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.status import STATUS_STARTET
 from smartheat_runtime.worker import Event
@@ -51,10 +55,14 @@ EV_CONFIG_WATCH = "shg_config_watch"
 EV_RAUM = "shg_raum"
 CONFIG_WATCH_SECONDS = 30
 RAUM_SECONDS = 30
+DIAG_PORT = 8080  # Port der Diagnoseseite im Container; die Compose-Datei veroeffentlicht ihn als 0.0.0.0:80
+# Port nur fuer /healthz (Compose-Healthcheck im Container, Updater am Host); die Compose-Datei veroeffentlicht ihn nur
+# als 127.0.0.1:8081. Eigener Server: Verbindungen aus dem LAN auf Port 80 nehmen ihm keine Plaetze weg (S-10).
+HEALTH_PORT = 8081
 
 
 def _alive_file() -> Path:
-    """Lebenszeichen fuer den Health-Check von Compose (G2 7.2): die Wache beruehrt es alle 30 s."""
+    """Lebenszeichen fuer den Health-Check von Compose: die Wache beruehrt es alle 30 s."""
     return Path(os.environ.get("SHG_ALIVE_FILE", "/tmp/shg-runtime-alive"))
 
 
@@ -63,10 +71,12 @@ def _touch_alive() -> None:
         _alive_file().touch()
 
 
-def aufraeumen(paths: Paths) -> None:
+def aufraeumen(paths: Paths) -> Markierung | None:
     """Markierung aufraeumen.json vor dem Start des Geraetekerns (prozess.aufraeumen_beim_start): noch nichts schreibt,
-    und ein driver_login direkt nach hello kann nicht mit dem Loeschen kollidieren. Geloescht wird mit vergessen."""
-    prozess.aufraeumen_beim_start(
+    und ein driver_login direkt nach hello kann nicht mit dem Loeschen kollidieren. Geloescht wird mit vergessen.
+    Rueckgabe: die Markierung, wenn das Zuruecksetzen aussteht (_vorbereiten reicht sie an
+    GatewayDeviceHost.start_markierung; die Laufzeit liest sie nicht erneut)."""
+    return prozess.aufraeumen_beim_start(
         paths.aufraeumen,
         lambda: DocumentStore(paths.device_dir, host=GatewayDeviceHost.host,
                               software_version=GATEWAY_VERSION, rasten=False).inhalt(KONFIGURATION),
@@ -78,40 +88,56 @@ def _vergessen(paths: Paths) -> bool:
 
 
 def software_soll_nachholen(geraet: GatewayDeviceHost, device: Device) -> None:
-    """Das gemerkte Software-Angebot (DocumentStore.software_angebot, 5b-D2-3) erneut an den Updater (idempotent),
+    """Das gemerkte Software-Angebot (DocumentStore.software_angebot) erneut an den Updater (idempotent),
     bevor der Geraete-Thread laeuft: ein Neustart (EV_RELOAD aus konfiguration_uebernommen) oder ein verlorener
     Schreibvorgang kann software_soll.json fehlen lassen, und der Server stellt eine bestaetigte oder abgelehnte Version
-    nicht erneut zu (Review Focus 4). Gemerkt ist das zuletzt gueltige Angebot, auch aus einer abgelehnten
+    nicht erneut zu. Gemerkt ist das zuletzt gueltige Angebot, auch aus einer abgelehnten
     Konfiguration; ein zurueckgezogenes (software null) geht als null weiter (der Updater liest es als "kein Angebot"),
     damit keine zurueckgezogene Version aus einer alten software_soll.json installiert wird. Ohne gemerktes Angebot
-    (dokumente.json ohne software_angebot) wird der Updater nicht gerufen."""
+    (dokumente.json ohne software_angebot) wird der Updater nicht gerufen. Mit einer gespeicherten Konfiguration
+    geht ebenso die gemerkte Einstellung zu Updates (auch null) an den Updater."""
     angebot = device.documents.software_angebot()
-    if angebot is None:
-        return
+    if angebot is not None:
+        try:
+            geraet.software_soll(angebot.software)
+        except Exception as error:  # ein Schreibfehler darf den Start nicht verhindern; der naechste versucht es erneut
+            logger.error("Soll-Software nicht nachgeholt (%s)", type(error).__name__)
+    if device.documents.inhalt(KONFIGURATION) is None:
+        return  # ohne gespeicherte Konfiguration gibt es keine Einstellung des Kunden
     try:
-        geraet.software_soll(angebot.software)
-    except Exception as error:  # ein Schreibfehler darf den Start nicht verhindern; der naechste versucht es erneut
-        logger.error("Soll-Software nicht nachgeholt (%s)", type(error).__name__)
+        geraet.updates_soll(device.documents.updates)  # ebenso die Einstellung zu Updates, auch null
+    except Exception as error:
+        logger.error("Einstellung zu Updates nicht nachgeholt (%s)", type(error).__name__)
 
 
 def start(paths: Paths, bus, mirror: ZigbeeMirror, geraet: GatewayDeviceHost, device: Device, clock=time.monotonic,
-          *, driver_threads: bool = True) -> tuple[Runtime | app.IdleBridge, GatewayHost]:
-    host = GatewayHost(paths, bus, mirror, geraet, clock=clock, driver_threads=driver_threads)
-    result = app.start(host, clock, mqtt_factory=device.laufzeit_kanal, neustart=prozess.neustart_der_laufzeit)
-    attach(result, host, geraet)
-    return result, host
+          *, driver_threads: bool = True) -> tuple[kreise.Laufzeit, GatewayAnlagenHost]:
+    """Laufzeit der Anlage auf dem Link des Geraets starten (mqtt_factory): ein Worker je Kreis. Alle Neustarts des
+    Prozesses gehen ueber prozess.Neustart (der Rueckruf neustart der Laufzeit und EV_RELOAD des Geraete-Hosts); ein
+    Kreis mit wieder aktivem Abo oder geaenderter Konfiguration startet allein neu (Laufzeit.konfiguration_geaendert,
+    vom Geraete-Host nach jedem Konfigurationsdokument gefragt)."""
+    anlage = GatewayAnlagenHost(paths, bus, mirror, geraet, clock=clock, driver_threads=driver_threads)
+
+    def gestartet(kreis: int, ergebnis: Runtime | app.IdleBridge) -> None:
+        attach(ergebnis, anlage.hosts[kreis], geraet, kreis)
+
+    laufzeit = kreise.start(anlage, clock, mqtt_factory=device.laufzeit_kanal, neustart=prozess.neustart_der_laufzeit,
+                            gestartet=gestartet)
+    prozess.reload_anhaengen(laufzeit)
+    geraet.laufzeit_binden(laufzeit)
+    return laufzeit, anlage
 
 
-def attach(result: Runtime | app.IdleBridge, host: GatewayHost, geraet: GatewayDeviceHost) -> None:
-    """Haengt die Gateway-Ereignisse (Lebenszeichen, Raum) an den Worker; EV_RELOAD geht ueber
-    prozess.reload_anhaengen, die Neustarts der Laufzeit selbst ueber den Rueckruf aus start."""
+def attach(result: Runtime | app.IdleBridge, host: GatewayHost, geraet: GatewayDeviceHost, kreis: int = 1) -> None:
+    """Haengt die Gateway-Ereignisse (Lebenszeichen, Raum) an den Worker des Kreises und bindet ihn an den Geraetekern;
+    EV_RELOAD geht ueber prozess.reload_anhaengen, die Neustarts der Laufzeit selbst ueber den Rueckruf aus start.
+    Laeuft nach jedem Start und jeder Wiederaufnahme des Kreises mit dessen neuem Worker."""
     worker = result.worker
 
     def _watch(event: Event) -> None:
         worker.schedule(CONFIG_WATCH_SECONDS, Event(EV_CONFIG_WATCH))  # zuerst: die Wache darf nie abreissen
         _touch_alive()
 
-    prozess.reload_anhaengen(result)
     worker.register(EV_CONFIG_WATCH, _watch)
     worker.schedule(CONFIG_WATCH_SECONDS, Event(EV_CONFIG_WATCH))
     _touch_alive()
@@ -125,10 +151,10 @@ def attach(result: Runtime | app.IdleBridge, host: GatewayHost, geraet: GatewayD
         worker.register(EV_RAUM, _raum)
         worker.schedule(0, Event(EV_RAUM))
     elif isinstance(result, app.IdleBridge):
-        geraet.zustand.raum = None  # Ruhezustand: kein Raum der vorigen Einrichtung
+        geraet.raum_merken(kreis, None)  # Ruhezustand: kein Raum der vorigen Einrichtung
         if result.reason == app.IDLE_NOT_CONFIGURED:
             geraet.zustand.status = None
-    geraet.worker_binden(worker, soll_eingang=isinstance(result, Runtime))  # Ruhezustand: kein Soll-Eingang
+    geraet.worker_binden(worker, kreis=kreis, soll_eingang=isinstance(result, Runtime))  # Ruhezustand: kein Soll-Eingang
 
 
 def _starten(paths: Paths, bus, mirror: ZigbeeMirror, geraet: GatewayDeviceHost, device: Device):
@@ -138,8 +164,8 @@ def _starten(paths: Paths, bus, mirror: ZigbeeMirror, geraet: GatewayDeviceHost,
 
 
 def vor_der_pause(geraet: GatewayDeviceHost | None) -> None:
-    """Rueckruf vor_pause fuer prozess.laufen und prozess.starten (Abschlussreview S6 I-2, S3S6-Startabbruch): nach
-    einem unerwarteten Fehler meldet sich das Gateway fuer die 60-s-Pause ungesund, damit der Updater (G2 8.4) ein
+    """Rueckruf vor_pause fuer prozess.laufen und prozess.starten: nach
+    einem unerwarteten Fehler meldet sich das Gateway fuer die 60-s-Pause ungesund, damit der Updater ein
     Update, dessen Laufzeit gleich nach dem Start wirft, zurueckrollt. Der Prozess bleibt in der Pause oben: das
     Lebenszeichen waere frisch (Compose-Health-Check "healthy"; im Start nur ohne tmpfs auf /tmp aus dem vorigen Lauf
     im selben Container, Compose legt /tmp als tmpfs an), und /healthz hinge nur an server_ok aus dem letzten Takt des
@@ -166,23 +192,26 @@ def _terminate(signum, frame) -> None:
 def _vorbereiten(paths: Paths, mirror: ZigbeeMirror,
                  angelegt: Callable[[GatewayDeviceHost], None]) -> tuple[GatewayDeviceHost, Device]:
     """Die Host-Schritte vor laufen; angelegt bekommt den Geraete-Host, sobald es ihn gibt (fuer vor_der_pause)."""
-    aufraeumen(paths)  # vor dem Geraetekern: kein Rennen mit driver_login oder inventory nach hello
-    geraet = GatewayDeviceHost(paths, mirror, host_dir=Path(os.environ.get("SHG_HOST_DIR", "/host")))
+    ausstehend = aufraeumen(paths)  # vor dem Geraetekern: kein Rennen mit driver_login oder inventory nach hello
+    host_dir = Path(os.environ.get("SHG_HOST_DIR", "/host"))
+    geraet = GatewayDeviceHost(paths, mirror, host_dir=host_dir)
+    geraet.start_markierung = ausstehend
     angelegt(geraet)
     device = Device(geraet, paths.data, os.environ["SHG_DEVICE_API_URL"], befehl_fehler=befehle.fehler_uebersetzen)
     geraet.verbinden(device)
-    portal = os.environ.get("SHG_PORTAL_BASE_URL", "")
-    diagnose.start_server(
-        int(os.environ.get("SHG_DIAG_PORT", "8080")), lambda: diagnose.seite(geraet, device),
-        lambda: diagnose.qr_url(portal, device), diagnose.parse_hostnames(os.environ.get("SHG_DIAG_HOSTNAMES", "")),
-    )
+    hostnames = diagnose.parse_hostnames(os.environ.get("SHG_DIAG_HOSTNAMES", ""))
+    # Die Seite auf Port 80 verlangt die Anmeldung mit dem Etikett-Passwort aus werk.json (Kopie des Hosts, GW 8)
+    diagnose.start_server(DIAG_PORT, lambda: diagnose.seite(geraet, device), hostnames,
+                          zugang=Zugang(host_dir / WERK_DATEI))
+    # Dieselben erlaubten Host-Namen: der Docker-Test des Updaters fragt den Dienst `runtime` im Test-Netz.
+    diagnose.start_server(HEALTH_PORT, lambda: diagnose.seite(geraet, device), hostnames, nur_health=True)
     software_soll_nachholen(geraet, device)  # vor dem Geraete-Thread: kein Rennen mit einer neuen Konfiguration
     return geraet, device
 
 
 def vorbereiten(paths: Paths, mirror: ZigbeeMirror) -> tuple[GatewayDeviceHost, Device] | None:
     """prozess.starten mit _vorbereiten, Exit 0 als Neustart und vor_der_pause: ein Fehler vor laufen (Aufraeumen,
-    DocumentStore, Geraete-Host, Diagnoseport) endet ungesund in der 60-s-Pause, dann None (S3S6-Startabbruch)."""
+    DocumentStore, Geraete-Host, Diagnoseport) endet ungesund in der 60-s-Pause, dann None."""
     angelegt: list[GatewayDeviceHost] = []
     return prozess.starten(lambda: _vorbereiten(paths, mirror, angelegt.append), lambda: None,
                            vor_pause=lambda: vor_der_pause(angelegt[0] if angelegt else None))
@@ -194,7 +223,7 @@ def main() -> None:  # pragma: no cover - Container-Einstieg
     # Bus, Spiegel und Zugangsdaten bewusst vor prozess.starten: ein Fehler hier endet ohne Pause (Compose-Backoff;
     # noch kein Geraetekern, IoT Core unberuehrt)
     paths = from_env()
-    bus = LocalBus(os.environ.get("SHG_BUS_HOST", "mosquitto"), int(os.environ.get("SHG_BUS_PORT", "1883")),
+    bus = LocalBus(os.environ.get("SHG_BUS_HOST", "mosquitto"), BUS_PORT,
                    "shg-runtime", credentials=credentials_from_env())
     mirror = ZigbeeMirror(bus, time.monotonic)
     mirror.start()

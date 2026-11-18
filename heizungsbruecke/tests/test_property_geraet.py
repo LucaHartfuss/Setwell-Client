@@ -1,6 +1,6 @@
-"""Testoffensive T2 (Spec §4, §5, §12 Nr. 20): Property- und Angriffstests der Leser von Geraeteeingaben im Add-on
-(V1 und V1b): Bootstrap-Antwort, Dokumente, Befehle und die Serverantwort `handle_setpoints`. Spec §5 "kompromittierter
-Server": ein Server, der beliebige Bytes sendet, bringt weder den Geraete-Thread noch den Regel-Worker zum Stehen und
+"""Property- und Angriffstests der Leser von Geraeteeingaben im Add-on
+(V1 und V1b): Bootstrap-Antwort, Dokumente, Befehle und die Serverantwort `handle_setpoints`. Kompromittierter
+Server: ein Server, der beliebige Bytes sendet, bringt weder den Geraete-Thread noch den Regel-Worker zum Stehen und
 bringt keinen Wert ausserhalb der lokalen Grenzen (Regel 4) auf die Anlage. Strategien und Pfadhilfen aus
 strategien.py (eigene Kopie, die Repos teilen keine Testhilfen). Beispielzahl, Seed und Frist (keine: ein Beispiel der
 Laufzeit-Tests startet eine ganze Laufzeit) kommen aus den Profilen in conftest.py (schnell 50 mit festem Seed, voll
@@ -13,25 +13,40 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from conftest import FakeClock
-from device_helpers import GeraeteCa, zertifikat_fuer
-from fakes import VIESSMANN_OPTIONEN, VIESSMANN_ZUSTAND, FakeHa, trigger_klasse
+from device_helpers import (
+    FakeResponse,
+    FakeSession,
+    GeraeteCa,
+    Sent,
+    _bedienung,
+    _command,
+    _konfiguration,
+    _leer,
+    _store,
+    zertifikat_fuer,
+)
+from fakes import FakeClock
 from hypothesis import given
 from hypothesis import strategies as st
+from runtime_helpers import (
+    NICHT_NUMERISCH,
+    OPTIONS,
+    SAETZE,
+    _endlich,
+    _Fehlerlog,
+    _frische_umgebung,
+    _ha_verbunden,
+    _mqtt,
+    _start,
+)
 from strategien import JSON_WERT, SURROGATTEXT, WEG, ersetze, pfade
-from test_device_bootstrap import FakeResponse, FakeSession
-from test_device_commands import Sent, _command
-from test_device_documents import _bedienung, _konfiguration, _leer, _store
-from test_runtime import OPTIONS, _ha_verbunden, _mqtt, _start
-from test_runtime_plan3b import WEISHAUPT, WEISHAUPT_STATES
 
-from heizungsbruecke.derived_sensors import DerivedSensors
+from smartheat_core import meldungen
 from smartheat_core.safety import LOCAL_SAFETY
 from smartheat_device import bootstrap, wire
 from smartheat_device import commands as cmd
 from smartheat_device import identity as identity_module
 from smartheat_device.tls import ALPN_443, IOT_PORTS
-from smartheat_runtime import entitlement
 
 
 @pytest.fixture(autouse=True)
@@ -182,7 +197,7 @@ def test_die_gute_bootstrap_antwort_wird_gelesen_und_gespeichert(ident, gute_ant
 
 # --- Dokumente (V1, DocumentStore.empfangen) ---
 
-KONFIG_OPTIONAL = ("ursprungswerte",)  # Namen der Spec, nicht wire.KONFIGURATION_OPTIONAL
+KONFIG_OPTIONAL = ("ursprungswerte",)  # Namen aus dem Vertrag als Literal, nicht wire.KONFIGURATION_OPTIONAL
 DOKUMENTE = [
     ("konfiguration", "konfiguration", _konfiguration(), KONFIG_OPTIONAL),
     ("konfiguration_mit_ursprung", "konfiguration", _konfiguration(ursprungswerte={"heat_limit": 18.0}), KONFIG_OPTIONAL),
@@ -283,24 +298,24 @@ _NICHT_ENDLICH = [float("nan"), float("inf"), float("-inf"), 10**400, -(10**400)
 _FORMEN = [lambda zahl: zahl, lambda zahl: [zahl], lambda zahl: {"x": zahl}, lambda zahl: {"x": [zahl]}]
 
 
-#: Felder, die der Leser nicht auf Typ und Zahl prueft (Befund Task 13, niedrig, Restpunkt TO-client-kern-T8): `mindest_software`
-#: und `ts` liest im Geraet keine Stelle als Zahl; `ursprungswerte` liest nur die Pipeline und filtert dort jede nicht
-#: endliche Zahl (`_is_finite_number`, Rueckweg auf den lokalen Wert) und klemmt auf die lokalen Grenzen. Eine leere Konfiguration ist "immer gueltig" (nur `anlage` None zaehlt):
-#: sie fehlt in dieser Aufzaehlung ganz.
-UNGEPRUEFT = {"konfiguration": ("mindest_software", "ursprungswerte"),
-              "konfiguration_mit_ursprung": ("mindest_software", "ursprungswerte"), "bedienung": ("ts",)}
+#: Felder, die der Leser nicht ablehnt: `push_regeln` lehnt das Dokument nie ab, der Leser
+#: (`config_check.push_regeln_lesen`) nimmt nur ganze Zahlen im Bereich und sonst den Standard. Alles andere prueft der
+#: Leser auf Typ und Zahl, auch die leere Konfiguration und `ursprungswerte`.
+UNGEPRUEFT = {"konfiguration": ("push_regeln",), "konfiguration_mit_ursprung": ("push_regeln",),
+              "konfiguration_leer": ("push_regeln",), "bedienung": ()}
 
 
 @pytest.mark.parametrize("dokument", [d for d in DOKUMENTE if d[0] in UNGEPRUEFT], ids=list(UNGEPRUEFT))
 def test_nicht_endliche_zahl_an_jeder_stelle_wird_abgelehnt_oder_nie_gespeichert(tmp_path, dokument):
     """Erschoepfend: jede Stelle x jede nicht endliche Zahl x jede Form. Angenommen nur, wenn die Zahl nicht im
     gespeicherten Dokument landet (Feld ohne Wirkung). Ausgenommen: die Versionen (Zaehler: eine riesige Ganzzahl ist dort
-    eine gueltige Ganzzahl, _is_version liest sie nur als Zaehler), die Treiberparameter (`bindung.treiber.parameter`: sie
+    eine gueltige Ganzzahl, _is_version liest sie nur als Zaehler), die Treiberparameter (`kreise[0].bindung.treiber.parameter`: sie
     prueft der Treiber ueber den Rueckruf des Hosts, den dieser Store hier nicht hat; Gateway-Host-Tests) und UNGEPRUEFT."""
     name, art, gut, _optional = dokument
     zaehler = 0
     for pfad in pfade(gut):
-        if not pfad or pfad[0] in ("version", "schema", *UNGEPRUEFT[name]) or pfad[:3] == ("bindung", "treiber", "parameter"):
+        if (not pfad or pfad[0] in ("version", "schema", *UNGEPRUEFT[name])
+                or pfad[:5] == ("kreise", 0, "bindung", "treiber", "parameter")):
             continue
         for zahl in _NICHT_ENDLICH:
             if isinstance(zahl, int) and pfad[:2] == ("bindungsparameter", "schreibschutz"):
@@ -330,9 +345,9 @@ def test_text_mit_einzelnem_surrogat_wird_abgelehnt_oder_ist_speicherbar(stelle,
 
 # --- Befehle (V1, CommandRegister.empfangen) ---
 
-COMMAND_FELDER = ("schema", "command_id", "kind", "payload", "expires_at")  # Namen der Spec, nicht der Konstante
+COMMAND_FELDER = ("schema", "command_id", "kind", "payload", "expires_at")  # Namen aus dem Vertrag als Literal, nicht der Konstante
 BEFEHLE = [
-    ("diagnostics", {}), ("hinweis", {"key": "k", "stufe": "info", "text": "t"}), ("sign_off", {}),
+    ("diagnostics", {}), ("hinweis", {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}), ("sign_off", {}),
     ("zigbee_permit_join", {"seconds": 30}), ("claim_state", {"device_state": "uebernommen"}),
     ("inventory", {"stunden": 1}), ("inventory", {"stunden": 1, "filter": {}}),
 ]
@@ -356,11 +371,11 @@ def _utf8_speicherbar(wert) -> bool:
 
 def _soll_laufen(nachricht) -> bool:
     """Unabhaengige Aussage der Annahmeregeln (Befehle: genau die Felder des Vertrags, die Nutzlast ein Objekt mit allen
-    Pflichtfeldern der Art und sonst nur deren optionalen Feldern). Schreibt das HEUTIGE Verhalten fest, kein Sollwert:
-    der Wert von `schema` prueft die Annahme nicht (Dokumente pruefen ihn gegen wire.SCHEMATA), Restpunkt
-    TO-client-kern-T8; kommt die Pruefung, wird das Orakel angepasst."""
+    Pflichtfeldern der Art und sonst nur deren optionalen Feldern, `schema` einer der Vertragswerte)."""
     command_id, kind, payload = nachricht.get("command_id"), nachricht.get("kind"), nachricht.get("payload")
     if not (isinstance(command_id, str) and 0 < len(command_id) <= 64) or set(nachricht) != set(COMMAND_FELDER):
+        return False
+    if nachricht["schema"] not in wire.SCHEMATA:
         return False
     if not _utf8_speicherbar(nachricht):
         return False
@@ -412,6 +427,17 @@ def test_befehl_mit_fremdem_feld_fuehrt_keinen_handler_aus(befehl, fremd, im_pay
         _ergebnisse_sind_wohlgeformt(sent)
 
 
+@given(st.sampled_from(BEFEHLE), JSON_WERT)
+def test_befehl_mit_beliebigem_schema_laeuft_nur_mit_einem_vertragswert(befehl, schema):
+    kind, payload = befehl
+    nachricht = {**_command(kind, payload=payload), "schema": schema}
+    with tempfile.TemporaryDirectory() as verzeichnis:
+        sent, aufrufe = Sent(), []
+        _register(verzeichnis, sent, aufrufe).empfangen(nachricht)
+        assert len(aufrufe) == int(schema in wire.SCHEMATA and not isinstance(schema, bool))
+        _ergebnisse_sind_wohlgeformt(sent)
+
+
 @pytest.mark.parametrize(("kind", "payload"), BEFEHLE, ids=[f"{kind}-{i}" for i, (kind, _) in enumerate(BEFEHLE)])
 def test_gueltiger_befehl_ueberlebt_den_json_rundweg(tmp_path, kind, payload):
     ergebnisse = []
@@ -435,65 +461,30 @@ def test_command_id_beliebigen_textes_wird_abgelehnt_oder_ausgefuehrt_ohne_ausna
         _ergebnisse_sind_wohlgeformt(sent)
 
 
-@given(JSON_WERT, JSON_WERT, JSON_WERT | st.just(WEG), st.sampled_from(["key", "stufe", "text"]))
-def test_hinweis_mit_beliebigen_werten_speichert_nur_gueltige_hinweise(schluessel, stufe, text, feld):
+@given(JSON_WERT, JSON_WERT, JSON_WERT | st.just(WEG), JSON_WERT, st.sampled_from(["key", "code", "params", "stufe"]))
+def test_hinweis_mit_beliebigen_werten_speichert_nur_gueltige_hinweise(schluessel, code, params, stufe, feld):
     """Der eingebaute Befehl hinweis (jedes Geraet): was ankommt, ist ein Hinweis aus dem Vertrag oder abgelehnt."""
     with tempfile.TemporaryDirectory() as verzeichnis:
         sent = Sent()
         register = cmd.CommandRegister(Path(verzeichnis), sent)
         hinweise = cmd.Hinweise(Path(verzeichnis))
         register.register("hinweis", hinweise.handler)
-        payload = {"key": schluessel, "stufe": stufe, **({} if text is WEG else {"text": text})}
-        payload[feld] = {"key": schluessel, "stufe": stufe, "text": None if text is WEG else text}[feld]
+        gueltig = {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}
+        wert = {"key": schluessel, "code": code, "params": None if params is WEG else params, "stufe": stufe}
+        payload = {**gueltig, feld: wert[feld]}
         register.empfangen(_command("hinweis", payload=payload))
         _ergebnisse_sind_wohlgeformt(sent)
         for eintrag in hinweise.alle():
-            assert isinstance(eintrag["key"], str) and 0 < len(eintrag["key"]) <= 64
-            assert eintrag["stufe"] in wire.HINWEIS_STUFEN
-            assert isinstance(eintrag["text"], str) and 0 < len(eintrag["text"]) <= 1000
+            assert eintrag["key"] in wire.MELDUNGEN
+            assert eintrag["code"] == "meldung." + eintrag["key"]
+            assert eintrag["stufe"] == meldungen.TABELLE[eintrag["code"]].stufe
+            assert isinstance(eintrag["params"], dict)
         assert cmd.Hinweise(Path(verzeichnis)).alle() == hinweise.alle()  # was angenommen ist, ist auch gespeichert
 
 
 # --- Serverantwort down/setpoints (V1b, ticks.handle_setpoints) ---
 
-#: Entity -> Hebel (Bereich in LocalSafety.ranges) je Hebelsatz der Laufzeit-Tests; Werte der Auswahl- und Textentities
-#: sind keine Zahlen und stehen nicht in der Tabelle
-SAETZE = {
-    "vaillant_vrc720": (
-        {}, {}, {"number.curve_current": "curve", "number.shift_current": "room_setpoint",
-                 "number.heat_limit": "heat_limit", "number.min_flow": "min_flow"}),
-    "viessmann_vicare": (
-        VIESSMANN_OPTIONEN, VIESSMANN_ZUSTAND, {"number.slope": "curve", "number.shift": "level",
-                                                "number.normal_temperature": "room_setpoint"}),
-    "weishaupt_wwp": (
-        WEISHAUPT, WEISHAUPT_STATES, {"number.hk": "curve", "number.normal": "room_setpoint",
-                                      "number.komfort": "room_setpoint", "number.absenk": "room_setpoint",
-                                      "number.swu": "heat_limit"}),
-}
-#: Ziele ohne Zahl (Auswahl- und Betriebsart-Entities): jedes andere Ziel muss in der Zuordnung stehen
-NICHT_NUMERISCH = {"select.betriebsart", "climate.heizkreis::preset_mode"}
 ALLE_HEBEL = ["curve", "room_setpoint", "level", "heat_limit", "min_flow"]
-
-
-def _frische_umgebung(verzeichnis: Path, mp):
-    """Wie die Fixture `env` in test_runtime.py, aber ohne Fixture (hypothesis: ein Beispiel = eine Umgebung)."""
-    paths = {}
-    for name in ("BACKUP_PATH", "FAILSAFE_PATH", "ENTITLEMENT_PATH", "DERIVED_SENSORS_PATH", "AUFRAEUMEN_PATH",
-                 "RASTUNG_PATH"):
-        paths[name] = verzeichnis / f"{name.lower()}.json"
-        mp.setattr(f"heizungsbruecke.config.{name}", paths[name])
-    laufzeit = verzeichnis / "runtime"
-    for name, wert in (("RUNTIME_DIR", laufzeit), ("ROOM_TARGET_PATH", laufzeit / "room_target.json"),
-                       ("ABGEMELDET_PATH", laufzeit / "abgemeldet.json")):
-        paths[name] = wert
-        mp.setattr(f"heizungsbruecke.config.{name}", wert)
-    mp.setattr("heizungsbruecke.derived_sensors.ensure_all",
-               lambda **kwargs: DerivedSensors({"room_actual": "sensor.room_actual"}, (), "fp1"))
-    trigger = []
-    mp.setattr("heizungsbruecke.geraet_trigger.HaTriggerClient", trigger_klasse(trigger))
-    from types import SimpleNamespace
-    return SimpleNamespace(clock=FakeClock(), paths=paths, abo={"status": entitlement.ACTIVE, "queries": 0},
-                           ha=FakeHa(), trigger_clients=trigger, derived={"replaced": ()}, geraet=None)
 
 
 _ZAHL = st.floats(allow_nan=False, allow_infinity=False) | st.integers(-10**30, 10**30)
@@ -513,11 +504,12 @@ def _hebel(erwartet):
 
 def _antwort(erwartet):
     return st.builds(
-        lambda extra, schema, status, reason, levers, learned: {
-            **extra, "schema": schema, "ts": "x", "status": status, "reason": reason, "levers": levers,
+        lambda extra, schema, kreis, status, code, levers, learned: {
+            **extra, "schema": schema, "kreis": kreis, "ts": "x", "status": status, "code": code, "params": None, "levers": levers,
             "learned": learned},
         st.dictionaries(st.text(max_size=8), JSON_WERT, max_size=3),
-        st.sampled_from([4, 4, 4, 4]) | JSON_WERT,
+        st.sampled_from([5, 5, 5, 5]) | JSON_WERT,
+        st.sampled_from([1, 1, 1, 1]) | JSON_WERT,
         st.sampled_from(["ok", "ok", "ok", "skipped", "rejected", "maybe"]) | JSON_WERT,
         st.none() | st.text(max_size=20) | SURROGATTEXT | JSON_WERT,
         _hebel(erwartet),
@@ -525,37 +517,17 @@ def _antwort(erwartet):
     )
 
 
-def _endlich(wert) -> bool:
-    if isinstance(wert, bool) or not isinstance(wert, int | float):
-        return False
-    try:
-        return math.isfinite(float(wert))
-    except OverflowError:
-        return False  # riesige Ganzzahl
-
-
-class _Fehlerlog(logging.Handler):
-    """Fehler des Regel-Workers (der Worker faengt Ausnahmen ab und loggt sie; ein Fehler dort ist ein Fund)."""
-
-    def __init__(self):
-        super().__init__(logging.ERROR)
-        self.eintraege = []
-
-    def emit(self, record):
-        self.eintraege.append(record.getMessage())
-
-
 @pytest.mark.parametrize("hebelsatz", sorted(SAETZE))
 def test_beliebige_serverantwort_schreibt_nichts_ausserhalb_der_lokalen_grenzen_und_laesst_den_worker_laufen(hebelsatz):
     optionen, zustand, entities = SAETZE[hebelsatz]
-    erwartet = tuple(sorted(set(entities.values()) - {"min_flow"}))
+    erwartet = tuple(sorted(set(entities.values())))
     bereiche = LOCAL_SAFETY[(hebelsatz, OPTIONS["verteilsystem"])].ranges
     zaehler = {"geschrieben": 0, "angenommen": 0}
 
     @given(_antwort(erwartet))
     def pruefen(antwort):
         with tempfile.TemporaryDirectory() as verzeichnis, pytest.MonkeyPatch.context() as mp:
-            env = _frische_umgebung(Path(verzeichnis), mp)
+            env = _frische_umgebung(Path(verzeichnis), mp, FakeClock())
             env.ha.states.update(zustand)
             bridge = _start(env, **optionen)
             _ha_verbunden(env, bridge)
@@ -573,7 +545,8 @@ def test_beliebige_serverantwort_schreibt_nichts_ausserhalb_der_lokalen_grenzen_
             assert log.eintraege == []  # kein Fehler im Worker
             neu = env.ha.writes[len(vorher):]
             levers = antwort["levers"]
-            gueltig = (antwort["schema"] == 4 and type(antwort["schema"]) is int and antwort["status"] in ("ok", "skipped")
+            gueltig = (antwort["schema"] == 5 and type(antwort["schema"]) is int and antwort["kreis"] == 1
+                       and type(antwort["kreis"]) is int and antwort["status"] in ("ok", "skipped")
                        and isinstance(levers, dict) and sorted(levers) == list(erwartete_hebel)
                        and all(_endlich(wert) for wert in levers.values()))
             if not gueltig:

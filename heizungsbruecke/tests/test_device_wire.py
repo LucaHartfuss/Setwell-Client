@@ -1,5 +1,5 @@
-"""Plan 5b D1 Task 1: Vertragskopie smartheat_device/wire.py (Spec 5b 2). Die Gleichheit mit dem Server prueft
-zusaetzlich der Contract-Check im Dev-Root (Plan 5b-W Teil A)."""
+"""Vertragskopie smartheat_device/wire.py. Die Gleichheit mit dem Server prueft
+zusaetzlich der Contract-Check im Dev-Root."""
 import ast
 import hashlib
 import os
@@ -20,7 +20,7 @@ MARKER = "# --- Server-Regeln (nicht im Vertrag) ---"
 
 def vertragsteil(text: str) -> str:
     """Quelltext ab der ersten Anweisung nach Modul-Docstring und Importen bis vor MARKER bzw. bis zum Ende, ohne
-    Leerzeilen am Rand. Dieselbe Regel nutzt tools/contract_check.py (Plan 5b-W Teil A)."""
+    Leerzeilen am Rand. Dieselbe Regel nutzt tools/contract_check.py."""
     body = ast.parse(text).body
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         body = body[1:]
@@ -44,6 +44,17 @@ def test_the_copy_ends_with_the_command_errors():
         "return COMMANDS[kind].errors + COMMON_ERRORS")
 
 
+def test_the_update_fields_are_part_of_the_contract():
+    assert {"update_noetig", "updates"} <= set(wire.KONFIGURATION_FIELDS)
+    assert wire.UPDATES_FIELDS == ("funktion", "sicherheit")
+    assert wire.UPDATES_FUNKTIONEN == ("automatisch", "aufschub", "aus")
+    assert wire.UPDATES_SICHERHEIT == ("automatisch", "aus")
+    assert wire.SOFTWARE_FIELDS[-1] == "einmalig"
+    assert wire.HELLO_OPTIONAL == ("device_state", "auto_update", "integration_version")
+    assert {"manifest_abgelaufen", "einstellung_aus"} <= set(wire.SOFTWARE_ERRORS)
+    assert wire.FELD_MINDESTVERSION == {}
+
+
 @pytest.mark.parametrize("name", [*wire.UP_TOPICS, *wire.DOWN_TOPICS])
 def test_topic_roundtrip(name):
     assert wire.parse_topic(wire.topic(DEVICE, name)) == (DEVICE, name)
@@ -64,7 +75,8 @@ def test_every_command_error_list_ends_with_the_common_errors():
 
 
 def test_documents_have_their_down_topics():
-    assert wire.DOKUMENT_TOPICS == {"konfiguration": "down/config", "bedienung": "down/operation"}
+    assert wire.DOKUMENT_TOPICS == {"konfiguration": "down/config", "bedienung": "down/operation",
+                                     "anzeige": "down/display"}
     assert set(wire.DOKUMENT_TOPICS.values()) <= set(wire.DOWN_TOPICS)
 
 
@@ -82,10 +94,12 @@ _PIN_PRAEFIX = "_VERTRAG_GEPINNT"
 # V1-Konstanten, die nur der Server braucht; jede Zeile mit Grund. Kein Eintrag ohne Grund.
 NUR_SERVER: set[str] = {
     "MAX_CLOCK_SKEW_SECONDS",  # nur der Server prueft das Zeitfenster der Signatur
-    "UNAUTHENTICATED_ERROR",  # Text der 401-Antwort; das Geraet wertet nur den Status 401 (Spec 1: immer gleich)
+    "UNAUTHENTICATED_ERROR",  # Text der 401-Antwort; das Geraet wertet nur den Status 401 (immer gleich)
+    "WEG_ERGEBNISSE",  # Ergebnisse von weg_pruefen; der Server prueft sie, das Geraet lehnt den Befehl noch ab
 }
 NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts importieren), nur gepinnt (P4)
     "ABO",  # config_check.ABO_WERTE
+    "KREIS_ZUSTAENDE",  # config_check.KREIS_ZUSTAENDE
     "BINDUNGSPARAMETER_FIELDS",  # bindungsparameter.FELDER
     "BINDUNG_GATEWAY_FIELDS",  # config_check.GATEWAY_BINDUNG_FELDER
     "BINDUNG_HA_FIELDS",  # config_check.HA_BINDUNG_FELDER
@@ -93,10 +107,24 @@ NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts i
     "ENERGIE_EINHEITEN",  # bindungsparameter.EINHEITEN
     "HA_HINWEISE",  # config_check.HA_HINWEISE
     "HA_ROLLEN",  # config_check.HA_ROLLEN
+    "KONFIGURATION_KREIS_FIELDS",  # config_check.KONFIG_KREIS_FELDER
+    "KONFIGURATION_KREIS_OPTIONAL",  # config_check.KONFIG_KREIS_OPTIONAL
+    "KONFIGURATION_RAUM_FIELDS",  # config_check.RAUM_FELDER
+    "KREISE_MAX",  # config_check.KREISE_MAX
     "KREIS_FIELDS",  # config_check.KREIS_FELDER
     "KREIS_OPTIONAL",  # config_check.KREIS_OPTIONAL
+    "PUSH_REGELN_FIELDS",  # config_check.PUSH_REGELN_FELDER
+    "PUSH_STUNDEN",  # config_check.PUSH_STUNDEN
+    "PUSH_TAGESLIMIT",  # config_check.PUSH_TAGESLIMIT
+    "RAEUME_MAX",  # config_check.RAEUME_MAX
+    "RAUM_FUEHLER_MAX",  # config_check.RAUM_FUEHLER_MAX
+    "RAUM_ROLLEN",  # config_check.RAUM_ROLLEN
+    "RAUM_VERSATZ_MAX",  # config_check.RAUM_VERSATZ_MAX
     "SCHREIBSCHUTZ_FIELDS",  # bindungsparameter.SCHREIBSCHUTZ_FELDER
     "TREIBER_FIELDS",  # config_check.TREIBER_FELDER
+    "WEGE",  # config_check.WEGE
+    "WEG_DER_PLATTFORM",  # config_check.WEG_DER_PLATTFORM
+    "WEG_DES_TREIBERS",  # config_check.WEG_DES_TREIBERS
     "ZAEHLER",  # bindungsparameter.ZAEHLER
 }
 

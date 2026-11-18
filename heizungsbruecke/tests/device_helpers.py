@@ -1,13 +1,24 @@
-"""Hilfen fuer die Tests des Geraetekerns (Plan 5b D1): Test-CA, die CSRs des Geraets signiert (wie die lokale Test-CA
-des Servers, S1 Task 6). Plain-Import (`from device_helpers import ...`), tests/ hat kein __init__.py."""
+"""Hilfen fuer die Tests des Geraetekerns: Test-CA, die CSRs des Geraets signiert (wie die lokale Test-CA
+des Servers), dazu die Attrappen und Eingaben, die mehrere Testdateien teilen (von test_device_device.py,
+test_device_bootstrap.py, test_device_commands.py und test_device_documents.py gemeinsam genutzt): die Welt des
+Geraets (World), Bootstrap-Antworten, Befehle, Dokumente. Plain-Import (`from device_helpers import ...`), tests/ hat
+kein __init__.py."""
+import base64
 import datetime
+import hashlib
+import itertools
+import json
+from urllib.parse import urlparse
 
+import konfig_form
+from bindung_beispiele import parameter
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from smartheat_device import identity
+from smartheat_device import bootstrap, device, identity, wire
+from smartheat_device import documents as docs
 
 
 def _now() -> datetime.datetime:
@@ -60,3 +71,324 @@ def csr_passt(csr_pem: str, ident: identity.Identity) -> bool:
     cn = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
     return (cn == ident.device_id and csr.is_signature_valid
             and csr.public_key().public_numbers() == ident.tls_key.public_key().public_numbers())
+
+
+WALL = 1_800_000_000.0
+SENSOR = "zigbee:0x00124b0000000001:temperature"
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeHost:
+    host = "gateway"
+
+    def __init__(self, version="0.6.0") -> None:
+        self.version = version
+        self.synchron: bool | None = True
+        self.konfigurationen, self.bedienungen, self.software, self.anzeigen_liste = [], [], [], []
+        self.updates: list = []
+        self.kritisch_geaendert: list = []
+        self.status: dict | None = {"status": "regelt"}
+        self.raum_werte: dict[int, dict | None] = {}  # Raum je weiterem Kreis
+        self.raum_wert: dict | None = {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t0"}
+        self.treiber_details: dict | None = None
+        self.handlers: dict = {}
+        self.ursprung: dict = {}
+        self.entfernen: str | None = None  # Wahl des Nutzers beim Entfernen ("freigeben" oder keine)
+        self.entfernen_zugestellt = 0
+        self.hello_werte: dict = {"auto_update": True, "integration_version": "1.2.0"}
+        self.hello_felder_aufrufe = 0
+
+    def hello_felder(self):
+        self.hello_felder_aufrufe += 1
+        if isinstance(self.hello_werte, Exception):
+            raise self.hello_werte
+        return dict(self.hello_werte)
+
+    def ursprungswerte(self):
+        return dict(self.ursprung)
+
+    def entfernen_wahl(self):
+        return self.entfernen
+
+    def entfernen_erledigt(self):
+        self.entfernen = None
+        self.entfernen_zugestellt += 1
+
+    def faehigkeiten(self):
+        return {"drivers": ["simulation"], "zigbee": True, "updater": True}
+
+    def wege(self):
+        return ["simulation"]
+
+    def uhr_synchron(self):
+        return self.synchron
+
+    def treiber_pruefen(self, bindung):
+        return self.treiber_details
+
+    def befehle_eintragen(self, register):
+        for kind, handler in self.handlers.items():
+            register.register(kind, handler)
+
+    def konfiguration_vorbereiten(self, alt, neu):
+        pass
+
+    def konfiguration_uebernommen(self, alt, neu):
+        self.konfigurationen.append((alt, neu))
+
+    def bedienung_uebernommen(self, inhalt):
+        self.bedienungen.append(inhalt)
+
+    def software_soll(self, software):
+        self.software.append(software)
+
+    def updates_soll(self, updates):
+        self.updates.append(updates)
+
+    def update_noetig_geaendert(self, kritisch):
+        self.kritisch_geaendert.append(kritisch)
+
+    def runtime_status(self):
+        return self.status
+
+    def raum(self, kreis=1):
+        return self.raum_wert if kreis == 1 else self.raum_werte.get(kreis)
+
+    def anzeigen(self, anzeige):
+        self.anzeigen_liste.append(anzeige)
+
+
+_CLIENT_NUMMERN = itertools.count(1)
+
+
+class FakeLink:
+    def __init__(self, device_id, zugang, key_pem, ereignis) -> None:
+        self.device_id, self.zugang, self.key_pem, self.ereignis = device_id, zugang, key_pem, ereignis
+        self.connected = self.started = self.stopped = False
+        self.sent: list[tuple[str, dict]] = []
+        self.connect_failures = 0
+        self.client_nr = 0
+        self._mid_basis = 0  # paho zaehlt mids je Client ab 1
+
+    def start(self):
+        self.started = True
+        self.client_nr = next(_CLIENT_NUMMERN)
+
+    def stop(self):
+        self.stopped, self.connected = True, False
+
+    def publish(self, name, payload):
+        if not self.connected:
+            return None
+        # wie der echte Link: nie NaN/Inf hinaus, json wirft dann ValueError
+        self.sent.append((name, json.loads(json.dumps(payload, allow_nan=False))))
+        return len(self.sent) - self._mid_basis
+
+    def port_wechseln_falls_noetig(self):
+        pass
+
+    # --- Teststeuerung ---
+
+    def neuer_client(self):
+        """Wie port_wechseln_falls_noetig: alter Client weg (mit seinen unbestaetigten Nachrichten), neuer Client,
+        dessen mids wieder bei 1 beginnen."""
+        self.client_nr = next(_CLIENT_NUMMERN)
+        self._mid_basis = len(self.sent)
+        self.connected = False
+        self.ereignis("getrennt")
+
+    def verbinden(self):
+        self.connected = True
+        self.ereignis("verbunden")
+
+    def trennen(self):
+        self.connected = False
+        self.ereignis("getrennt")
+
+    def gesendet(self, mid, client_nr=None, ok=True):
+        """PUBACK des Brokers; wie der Link traegt das Ereignis die Nummer des Clients, der gesendet hat, und ob der
+        Reason Code ein Erfolg war."""
+        self.ereignis("gesendet", mid, self.client_nr if client_nr is None else client_nr, ok)
+
+    def empfangen(self, name, body):
+        self.ereignis("nachricht", name, json.dumps(body).encode())
+
+    def topics(self):
+        return [name for name, _ in self.sent]
+
+    def of(self, name):
+        return [payload for topic, payload in self.sent if topic == name]
+
+
+class ScriptedBootstrap:
+    def __init__(self) -> None:
+        self.script: dict[str, list] = {"register": [], "certificate": []}
+        self.calls, self.idents = [], []
+
+    def register(self, **kwargs):
+        self.calls.append(("register", kwargs))
+        return self._next("register")
+
+    def certificate(self):
+        self.calls.append(("certificate", None))
+        return self._next("certificate")
+
+    def _next(self, route):
+        answer = self.script[route].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+class World:
+    def __init__(self, tmp_path, host=None, *, access=True) -> None:
+        self.dir = tmp_path / device.DEVICE_DIR
+        self.host = host or FakeHost()
+        self.ca = GeraeteCa()
+        self.clock = Clock()
+        self.links: list[FakeLink] = []
+        self.client = ScriptedBootstrap()
+        ident = identity.load_or_create(self.dir)
+        self.zugang = self.neuer_zugang(ident)
+        if access:
+            bootstrap.speichern(self.dir, bootstrap.Antwort("uebernommen", self.zugang))
+
+        def client_for(ident):
+            self.client.idents.append(ident)
+            return self.client
+
+        self.device = device.Device(self.host, tmp_path, "https://accounts.example.test", clock=self.clock,
+                                    wall=lambda: WALL, bootstrap_client=client_for, link_factory=self._link)
+
+    def neuer_zugang(self, ident=None):
+        ident = ident or self.device.identity
+        return bootstrap.Zugang(zertifikat_fuer(ident, self.ca), bootstrap.Endpoint("mqtt.e2e.test", 8883, self.ca.pem))
+
+    def _link(self, *args):
+        self.links.append(FakeLink(*args))
+        return self.links[-1]
+
+    @property
+    def link(self) -> FakeLink:
+        return self.links[-1]
+
+    def verbinden(self):
+        self.device.schritt()
+        self.link.verbinden()
+        self.device.schritt()
+
+    def empfangen(self, name, body):
+        self.link.empfangen(name, body)
+        self.device.schritt()
+
+
+#: Die Testkette des Vertrauensankers: aktiver Schluessel und Reserve, nur im Speicher erzeugt (nie eine Datei mit
+#: privatem Teil im Repo). Die Fixture `_anker_kette` (conftest.py) schreibt deren oeffentliche Teile in eine Datei.
+ANKER_AKTIV = ec.generate_private_key(ec.SECP256R1())
+ANKER_RESERVE = ec.generate_private_key(ec.SECP256R1())
+
+
+def anker_oeffentlich_pem(*keys) -> str:
+    """Die oeffentlichen Teile (Standard: aktiv und Reserve) als Inhalt einer anker.pem."""
+    return "".join(key.public_key().public_bytes(serialization.Encoding.PEM,
+                                                  serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+                   for key in (keys or (ANKER_AKTIV, ANKER_RESERVE)))
+
+
+def anker_signatur(antwort: dict, *, route: str, device_id: str, ts: int, key=None) -> dict:
+    """`anker_id` und `anker_signatur` so, wie der Server sie bildet (die Form steht hier bewusst noch einmal)."""
+    key = key or ANKER_AKTIV
+    inhalt = {k: v for k, v in antwort.items() if k not in ("anker_id", "anker_signatur")}
+    nachricht = json.dumps({"antwort": inhalt, "route": route, "device_id": device_id, "ts": ts}, sort_keys=True,
+                           separators=(",", ":")).encode()
+    signatur = key.sign(nachricht, ec.ECDSA(hashes.SHA256()))
+    der = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return {"anker_id": hashlib.sha256(der).hexdigest()[:16],
+            "anker_signatur": base64.b64encode(signatur).decode("ascii")}
+
+
+class FakeResponse:
+    """`signieren=True`: die Session signiert eine Objekt-Antwort ohne `anker_signatur` mit dem aktiven Testschluessel
+    fuer die gerade gestellte Anfrage; `False` liefert den Koerper unveraendert (fehlerhafte Signaturen)."""
+
+    def __init__(self, status: int, body=None, *, signieren: bool = True) -> None:
+        self.status_code = status
+        self._body = body
+        self.signieren = signieren
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("kein JSON")
+        return self._body
+
+
+class FakeSession:
+    def __init__(self, *answers) -> None:
+        self.answers, self.calls = list(answers), []
+
+    def request(self, method, url, data=None, headers=None, timeout=None):
+        self.calls.append((method, url, data, headers, timeout))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        body = answer._body
+        if answer.signieren and answer.status_code == 200 and isinstance(body, dict) and "anker_signatur" not in body:
+            signatur = anker_signatur(body, route=f"{method} {urlparse(url).path}",
+                                      device_id=headers[wire.HEADER_DEVICE], ts=int(headers[wire.HEADER_TIMESTAMP]))
+            return FakeResponse(200, {**body, **signatur}, signieren=False)
+        return answer
+
+
+class Sent:
+    def __init__(self, ok: bool = True) -> None:
+        self.results: list[dict] = []
+        self.ok = ok
+
+    def __call__(self, body: dict) -> bool:
+        self.results.append(body)
+        return self.ok
+
+
+def _command(kind="diagnostics", command_id="c1", payload=None):
+    return {"schema": 2, "command_id": command_id, "kind": kind, "payload": {} if payload is None else payload,
+            "expires_at": "2027-01-15T09:00:00+00:00"}
+
+
+def _konfiguration(version=1, **changes):
+    inhalt = {
+        "anlage": "kunde3", "hebelsatz": "viessmann_vicare",
+        "verteilsystem": "Heizkoerper",
+        "bindung": {"treiber": {"id": "simulation", "parameter": {"heizkreis": 0}}, "thermostat": None},
+        "raumfuehler": [SENSOR], "tagestick": "12:12", "abo": "aktiv", "mindest_software": "0.6.0", "software": None,
+        "bindungsparameter": parameter("viessmann_vicare"),
+    }
+    inhalt.update(changes)
+    return konfig_form.nach_form({"schema": 2, "version": version, **inhalt})
+
+
+def _leer(version=1, mindest="0.6.0"):
+    return konfig_form.nach_form({"schema": 2, "version": version, "anlage": None, "mindest_software": mindest})
+
+
+def _bedienung(version=1, raum_soll=21.0, *, kreis=1, modus="manuell", **changes):
+    """Bedienung mit einem Kreis; `kreise=[...]` ersetzt die Liste ganz."""
+    return {"schema": 2, "version": version, "kreise": [{"kreis": kreis, "modus": modus, "raum_soll": raum_soll}],
+            "quelle": "portal", "ts": "2027-01-15T08:00:00+00:00", **changes}
+
+
+def _anzeige(version=1, kreise=(1,), **changes):
+    """Anzeige: je Kreis der volle Feldsatz mit leeren Werten; `kreise=[...]` ersetzt die Liste ganz."""
+    leer = {"einlernphase_tag": None, "testphase_bis": None, "befunde": [], "aufgaben": [], "kennzahlen": {},
+            "raumziele": []}
+    return {"schema": 2, "version": version, "kreise": [{"kreis": nummer, **leer} for nummer in kreise], **changes}
+
+
+def _store(tmp_path, version="0.6.0"):
+    return docs.DocumentStore(tmp_path, host="gateway", software_version=version)

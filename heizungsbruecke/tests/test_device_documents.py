@@ -1,51 +1,24 @@
-"""Spec 5b 3 und 5.1: Dokumentspeicher des Geraets und atomares Schreiben (Plan D1 Task 3)."""
+"""Dokumentspeicher des Geraets und atomares Schreiben."""
 import json
 import logging
 import math
 import os
 import stat
 
+import konfig_form
 import pytest
 from bindung_beispiele import parameter
+from device_helpers import SENSOR, _anzeige, _bedienung, _konfiguration, _leer, _store
 
-from smartheat_core import config_check, dateien, rastung
+from smartheat_core import config_check, dateien, kreisansicht, rastung
 from smartheat_device import documents as docs
 from smartheat_device import wire
-
-SENSOR = "zigbee:0x00124b0000000001:temperature"
-
-
-def _konfiguration(version=1, **changes):
-    inhalt = {
-        "anlage": "kunde3", "profil": "viessmann_gastherme_heizkoerper", "hebelsatz": "viessmann_vicare",
-        "verteilsystem": "Heizkoerper",
-        "bindung": {"treiber": {"id": "simulation", "parameter": {"heizkreis": 0}}, "thermostat": None},
-        "raumfuehler": [SENSOR], "tagestick": "12:12", "abo": "aktiv", "mindest_software": "0.6.0", "software": None,
-        "bindungsparameter": parameter("viessmann_vicare"),
-    }
-    inhalt.update(changes)
-    return {"schema": 1, "version": version, **inhalt}
-
-
-def _leer(version=1, mindest="0.6.0"):
-    return {"schema": 1, "version": version, "anlage": None, "profil": None, "hebelsatz": None, "verteilsystem": None,
-            "bindung": None, "raumfuehler": [], "tagestick": None, "abo": None, "mindest_software": mindest,
-            "software": None, "bindungsparameter": None}
-
-
-def _bedienung(version=1, raum_soll=21.0, **changes):
-    return {"schema": 1, "version": version, "modus": "manuell", "raum_soll": raum_soll, "quelle": "portal",
-            "ts": "2027-01-15T08:00:00+00:00", **changes}
-
-
-def _store(tmp_path, version="0.6.0"):
-    return docs.DocumentStore(tmp_path, host="gateway", software_version=version)
-
+from smartheat_runtime import soll_speicher
 
 # --- Konfiguration ---
 
 def test_a_empty_configuration_does_not_release_the_lock(tmp_path):
-    """A5-06 (SI-1): leer und danach ein anderes Verteilsystem loeste das Einrasten. Jetzt bleibt die Rastung."""
+    """Leer und danach ein anderes Verteilsystem loeste das Einrasten. Jetzt bleibt die Rastung."""
     store = _store(tmp_path)
     store.empfangen("konfiguration", _konfiguration(version=1, verteilsystem="Fussbodenheizung"))
     assert store.empfangen("konfiguration", _leer(version=2)).uebernommen
@@ -56,11 +29,79 @@ def test_a_empty_configuration_does_not_release_the_lock(tmp_path):
     assert _store(tmp_path).empfangen("konfiguration", _konfiguration(version=5, verteilsystem="Fussbodenheizung")).ok
 
 
+def _rastung_zu(**changes):
+    """Die Rastung, die der Speicher aus dieser Konfiguration schreibt."""
+    return rastung.aus_konfiguration(_konfiguration(**changes))
+
+
 def test_the_first_set_up_configuration_creates_the_lock(tmp_path):
     assert not (tmp_path / "sicherheitssatz.json").exists()
     _store(tmp_path).empfangen("konfiguration", _konfiguration())
     gespeichert = json.loads((tmp_path / "sicherheitssatz.json").read_text())
-    assert (gespeichert["hebelsatz"], gespeichert["verteilsystem"]) == ("viessmann_vicare", "Heizkoerper")
+    [eintrag] = gespeichert["kreise"]
+    assert (eintrag["kreis"], eintrag["hebelsatz"], eintrag["verteilsystem"], eintrag["soll_entity"]) \
+        == (1, "viessmann_vicare", "Heizkoerper", None)
+    assert "treiber=simulation" in eintrag["ziele"] and "hebelsatz" not in gespeichert
+    assert rastung.lesen(tmp_path / "sicherheitssatz.json") == _rastung_zu()
+
+
+def test_the_same_pair_with_other_write_targets_is_rejected_after_the_lock(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).ok
+    bindung = {"treiber": {"id": "simulation", "parameter": {"heizkreis": 1}}, "thermostat": None}
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, bindung=bindung))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "hebelsatz_eingerastet")
+    assert store.version("konfiguration") == 1
+    assert store.empfangen("konfiguration", _leer(version=3)).uebernommen   # leer lockert nichts
+    assert store.empfangen("konfiguration", _konfiguration(version=4, bindung=bindung)).grund == "hebelsatz_eingerastet"
+    assert store.empfangen("konfiguration", _konfiguration(version=5)).ok
+
+
+def test_a_lock_in_the_old_format_rejects_every_set_up_configuration_and_stays_untouched(tmp_path):
+    alt = '{"hebelsatz": "viessmann_vicare", "seit": "2026-10-01T00:00:00", "verteilsystem": "Heizkoerper"}'
+    (tmp_path / "sicherheitssatz.json").write_text(alt)
+    store = _store(tmp_path)
+    assert store.rastung == rastung.UNBEKANNT and store.rastung.sperre == "altes_format"
+    assert store.empfangen("konfiguration", _konfiguration()).grund == "hebelsatz_eingerastet"
+    assert store.empfangen("konfiguration", _leer(version=2)).ok
+    assert (tmp_path / "sicherheitssatz.json").read_text() == alt
+
+
+def _kreis_gateway(nummer):
+    bindung = {"treiber": {"id": "simulation", "parameter": {"heizkreis": nummer}}, "thermostat": None}
+    return konfig_form.kreis({"bindung": bindung, "raumfuehler": [f"zigbee:0x{nummer:016x}:temperature"],
+                              "hebelsatz": "viessmann_vicare", "verteilsystem": "Heizkoerper", "abo": "aktiv"},
+                             nummer=nummer)
+
+
+def _kreise(version, *nummern, **changes):
+    return _konfiguration(version=version, kreise=[_kreis_gateway(n) for n in nummern], **changes)
+
+
+def test_a_configuration_without_an_existing_circuit_is_rejected_and_the_stored_one_stays(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _kreise(1, 1, 2)).uebernommen
+
+    ergebnis = store.empfangen("konfiguration", _kreise(2, 1))
+
+    assert (ergebnis.ok, ergebnis.grund, ergebnis.details) == (False, "ungueltig", {"feld": "kreise", "regel": "nicht_erlaubt"})
+    assert store.version("konfiguration") == 1
+    assert [k["kreis"] for k in store.inhalt("konfiguration")["kreise"]] == [1, 2]
+    assert _store(tmp_path).empfangen("konfiguration", _kreise(3, 1, 2, tagestick="13:00")).uebernommen  # derselbe Satz geht
+
+
+def test_a_second_circuit_missing_in_the_middle_of_the_set_is_rejected_too(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _kreise(1, 1, 2, 3)).uebernommen
+    assert store.empfangen("konfiguration", _kreise(2, 1, 3)).grund == "ungueltig"
+    assert store.empfangen("konfiguration", _kreise(3, 2, 3)).grund == "ungueltig"
+
+
+def test_an_empty_configuration_and_a_new_plant_are_not_a_removal_of_circuits(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _kreise(1, 1, 2)).uebernommen
+    assert store.empfangen("konfiguration", _leer(version=2)).uebernommen  # leer ist das Abmelden, kein Entfernen
+    assert store.empfangen("konfiguration", _kreise(3, 1, 2)).uebernommen  # danach eine Einrichtung wie jede
 
 
 def _scheitert_fuer(monkeypatch, name: str) -> None:
@@ -76,18 +117,45 @@ def _scheitert_fuer(monkeypatch, name: str) -> None:
 
 
 def test_an_abort_after_the_lock_leaves_the_lock_without_the_document(tmp_path, monkeypatch):
-    """Spec 3.2: die Rastung steht vor dem Dokument; ein Abbruch dazwischen hinterlaesst die Rastung ohne Dokument
-    (der Server stellt neu zu, die Rastung passt dazu)."""
+    """Die Rastung steht vor dem Dokument; ein Abbruch dazwischen hinterlaesst die Rastung ohne Dokument
+    (das Geraet haelt die Konfiguration zurueck und wiederholt, device.py; die Rastung passt dazu). Der Speicher gibt
+    den OSError weiter."""
     _scheitert_fuer(monkeypatch, "konfiguration.json")
     with pytest.raises(OSError):
         _store(tmp_path).empfangen("konfiguration", _konfiguration())
     monkeypatch.undo()
-    assert rastung.lesen(tmp_path / "sicherheitssatz.json") == rastung.Rastung("viessmann_vicare", "Heizkoerper")
+    assert rastung.lesen(tmp_path / "sicherheitssatz.json") == _rastung_zu()
     assert not (tmp_path / "konfiguration.json").exists() and _store(tmp_path).version("konfiguration") == 0
 
 
+def test_a_failed_state_file_after_the_document_is_retried_with_the_same_result(tmp_path, monkeypatch):
+    """Scheitert dokumente.json erst nach dem Dokument, gilt das Dokument im Speicher nicht als uebernommen: die
+    Wiederholung gibt dasselbe Ergebnis wie ein erster Versuch (uebernommen, Host erfaehrt es) und schreibt den Zustand."""
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    _scheitert_fuer(monkeypatch, "dokumente.json")
+    with pytest.raises(OSError):
+        store.empfangen("konfiguration", _konfiguration(version=2, tagestick="12:30"))
+    assert store.version("konfiguration") == 1 and store.inhalt("konfiguration")["tagestick"] == "12:12"
+    monkeypatch.undo()
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, tagestick="12:30"))
+    assert (ergebnis.ok, ergebnis.uebernommen, ergebnis.version) == (True, True, 2)
+    assert json.loads((tmp_path / docs.ZUSTAND_DATEI).read_text())["abgelehnt"] == {}
+    assert _store(tmp_path).version("konfiguration") == 2
+
+
+def test_a_failed_state_file_restores_a_refusal_entry(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1, abo="falsch")).ok is False
+    vorher = store.ablehnung("konfiguration")
+    _scheitert_fuer(monkeypatch, "dokumente.json")
+    with pytest.raises(OSError):
+        store.empfangen("konfiguration", _konfiguration(version=2))
+    assert store.ablehnung("konfiguration") == vorher and store.version("konfiguration") == 0
+
+
 def test_a_failed_folder_sync_after_the_lock_replace_still_locks_the_pair_in_this_process(tmp_path, monkeypatch):
-    """S3S3-Reste: os.replace gelang, der fsync des Ordners warf. Die Rastung steht auf dem Datentraeger, also muss
+    """os.replace gelang, der fsync des Ordners warf. Die Rastung steht auf dem Datentraeger, also muss
     derselbe Prozess sie kennen: ein anderes Paar wird abgelehnt, das gleiche angenommen."""
     store = _store(tmp_path)
     echt = dateien.os.fsync
@@ -101,19 +169,19 @@ def test_a_failed_folder_sync_after_the_lock_replace_still_locks_the_pair_in_thi
     with pytest.raises(OSError, match="Datentraeger"):
         store.empfangen("konfiguration", _konfiguration(version=1, verteilsystem="Fussbodenheizung"))
     monkeypatch.undo()
-    assert store.rastung == rastung.Rastung("viessmann_vicare", "Fussbodenheizung")
+    assert store.rastung == _rastung_zu(verteilsystem="Fussbodenheizung")
     assert store.empfangen("konfiguration", _konfiguration(version=2, verteilsystem="Heizkoerper")).grund \
         == "hebelsatz_eingerastet"
     assert store.empfangen("konfiguration", _konfiguration(version=3, verteilsystem="Fussbodenheizung")).ok
 
 
 def test_a_read_only_store_neither_writes_nor_creates_the_lock(tmp_path):
-    """S3S3-Reste: die Nur-Lese-Verwendungen (Aufraeumen beim Start) rasten nicht nach, auch nicht bei gespeicherter
+    """Die Nur-Lese-Verwendungen (Aufraeumen beim Start) rasten nicht nach, auch nicht bei gespeicherter
     Konfiguration ohne Rastung; sie lesen nur."""
     _store(tmp_path).empfangen("konfiguration", _konfiguration())
     (tmp_path / "sicherheitssatz.json").unlink()
     nur_lesen = docs.DocumentStore(tmp_path, host="gateway", software_version="0.6.0", rasten=False)
-    assert nur_lesen.rastung is None and nur_lesen.inhalt("konfiguration")["anlage"] == "kunde3"
+    assert nur_lesen.rastung.sperre == "fehlt" and nur_lesen.inhalt("konfiguration")["anlage"] == "kunde3"
     assert not (tmp_path / "sicherheitssatz.json").exists()
 
 
@@ -127,7 +195,9 @@ def test_a_read_only_store_refuses_a_configuration_that_would_lock(tmp_path):
     assert nur_lesen.version("konfiguration") == 0 and nur_lesen.rastung is None
 
 
-def test_a_read_only_store_survives_a_folder_that_refuses_the_lock(tmp_path, monkeypatch):
+def test_no_store_writes_the_lock_on_start_not_even_a_normal_one(tmp_path, monkeypatch):
+    """Die Rastung wird nie beim Start nachgeholt (das tut die Migration im Wartungsfenster): auch ein Ordner, der
+    das Schreiben verweigert, stoert weder den Nur-Lese-Store noch den normalen."""
     _store(tmp_path).empfangen("konfiguration", _konfiguration())
     (tmp_path / "sicherheitssatz.json").unlink()
 
@@ -136,8 +206,8 @@ def test_a_read_only_store_survives_a_folder_that_refuses_the_lock(tmp_path, mon
 
     monkeypatch.setattr(rastung.dateien, "schreiben_json", verweigert)
     assert docs.DocumentStore(tmp_path, host="gateway", software_version="0.6.0", rasten=False).eingerichtet()
-    with pytest.raises(OSError, match="schreibgeschuetzt"):  # Gegenprobe: der Normalfall rastet und scheitert hier
-        _store(tmp_path)
+    assert _store(tmp_path).eingerichtet()
+    assert not (tmp_path / "sicherheitssatz.json").exists()
 
 
 def test_an_empty_configuration_never_creates_a_lock(tmp_path):
@@ -145,26 +215,64 @@ def test_an_empty_configuration_never_creates_a_lock(tmp_path):
     assert not (tmp_path / "sicherheitssatz.json").exists()
 
 
-def test_a_stored_configuration_without_lock_locks_on_start(tmp_path):
-    _store(tmp_path).empfangen("konfiguration", _konfiguration())
-    (tmp_path / "sicherheitssatz.json").unlink()  # Stand vor dieser Version (client1)
-    store = _store(tmp_path)
-    assert store.rastung == rastung.Rastung("viessmann_vicare", "Heizkoerper")
-    assert (tmp_path / "sicherheitssatz.json").exists()
-
-
-@pytest.mark.parametrize("feld", ["hebelsatz", "verteilsystem"])
-def test_a_stored_configuration_without_a_text_pair_does_not_lock_on_start(tmp_path, feld):
-    """Rastung aus einer gespeicherten Konfiguration nur mit Hebelsatz UND Verteilsystem als Text (z. B. eine von Hand
-    veraenderte Datei); sonst keine Rastung und keine Datei."""
+def test_a_stored_configuration_without_lock_is_locked_not_locked_in_again(tmp_path):
+    """Stand vor der Rastung je Kreis (client1): der Start rastet nicht nach und ein neues Dokument rastet nicht ein
+    (sonst bestimmte das erste fremde Dokument die Ziele); die Rastung gilt als gesperrt (`fehlt`) bis zur Migration."""
     _store(tmp_path).empfangen("konfiguration", _konfiguration())
     (tmp_path / "sicherheitssatz.json").unlink()
-    datei = tmp_path / docs.DATEIEN["konfiguration"]
-    gespeichert = json.loads(datei.read_text())
-    gespeichert["inhalt"][feld] = None
-    datei.write_text(json.dumps(gespeichert))
     store = _store(tmp_path)
-    assert store.rastung is None and not (tmp_path / "sicherheitssatz.json").exists()
+    assert store.rastung == rastung.UNBEKANNT and store.rastung.sperre == "fehlt"
+    assert not (tmp_path / "sicherheitssatz.json").exists()
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, verteilsystem="Fussbodenheizung"))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "hebelsatz_eingerastet")
+    assert store.empfangen("konfiguration", _konfiguration(version=3)).grund == "hebelsatz_eingerastet"
+    assert not (tmp_path / "sicherheitssatz.json").exists() and store.version("konfiguration") == 1
+    assert store.empfangen("konfiguration", _leer(version=4)).ok       # leer bleibt moeglich und lockert nichts
+
+
+def test_a_migration_while_the_store_runs_is_neither_overwritten_nor_bypassed(tmp_path):
+    """Die Migration schreibt die Datei, waehrend der Store laeuft (docker exec): der Store liest vor jeder Annahme
+    neu, nimmt nur zur Rastung Passendes an und ueberschreibt die Datei nie."""
+    _store(tmp_path).empfangen("konfiguration", _konfiguration())
+    (tmp_path / "sicherheitssatz.json").unlink()
+    store = _store(tmp_path)
+    rastung.schreiben(tmp_path / "sicherheitssatz.json", _rastung_zu(), "2026-11-01T00:00:00")  # wie die Migration
+    inhalt = (tmp_path / "sicherheitssatz.json").read_bytes()
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, verteilsystem="Fussbodenheizung"))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "hebelsatz_eingerastet")
+    assert (tmp_path / "sicherheitssatz.json").read_bytes() == inhalt
+    assert store.empfangen("konfiguration", _konfiguration(version=3)).uebernommen
+    assert (tmp_path / "sicherheitssatz.json").read_bytes() == inhalt and store.rastung == _rastung_zu()
+
+
+def test_a_file_that_appears_between_check_and_locking_is_not_overwritten(tmp_path, monkeypatch):
+    """Erstinbetriebnahme, die Migration legt die Datei zwischen Pruefung und Einrasten an: nichts wird ueberschrieben,
+    das Dokument wird gegen die Datei neu geprueft."""
+    store = _store(tmp_path)
+    echt = docs.config_check.pruefen
+    aufrufe = []
+
+    def pruefen(inhalt, lock, **kwargs):
+        aufrufe.append(lock)
+        if len(aufrufe) == 1:
+            rastung.schreiben(tmp_path / "sicherheitssatz.json", _rastung_zu(), "2026-11-01T00:00:00")
+        return echt(inhalt, lock, **kwargs)
+
+    monkeypatch.setattr(docs.config_check, "pruefen", pruefen)
+    ergebnis = store.empfangen("konfiguration", _konfiguration(verteilsystem="Fussbodenheizung"))
+    assert aufrufe[0] is None and aufrufe[1] == _rastung_zu()
+    assert (ergebnis.ok, ergebnis.grund) == (False, "hebelsatz_eingerastet")
+    assert rastung.lesen(tmp_path / "sicherheitssatz.json") == _rastung_zu()
+    assert store.version("konfiguration") == 0
+
+
+def test_a_configuration_without_a_derivable_lock_is_rejected_not_stored(tmp_path, monkeypatch):
+    monkeypatch.setattr(docs.rastung, "aus_konfiguration", lambda inhalt: None)
+    store = _store(tmp_path)
+    ergebnis = store.empfangen("konfiguration", _konfiguration())
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert store.version("konfiguration") == 0 and not store.eingerichtet()
+    assert not (tmp_path / "sicherheitssatz.json").exists() and not (tmp_path / "konfiguration.json").exists()
 
 
 def test_a_broken_lock_file_rejects_every_set_up_configuration(tmp_path):
@@ -200,7 +308,7 @@ def test_a_new_configuration_is_taken_and_survives_a_restart(tmp_path):
     store = _store(tmp_path)
     ergebnis = store.empfangen("konfiguration", _konfiguration())
     assert ergebnis == docs.Ergebnis("konfiguration", 1, True, uebernommen=True)
-    assert ergebnis.payload() == {"schema": 1, "dokument": "konfiguration", "version": 1, "ok": True}
+    assert ergebnis.payload() == {"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}
     again = _store(tmp_path)
     assert again.version("konfiguration") == 1 and again.inhalt("konfiguration")["anlage"] == "kunde3"
     assert "schema" not in again.inhalt("konfiguration") and "version" not in again.inhalt("konfiguration")
@@ -225,7 +333,7 @@ def test_the_same_version_again_only_repeats_the_result(tmp_path):
     store.empfangen("konfiguration", _konfiguration())
     again = store.empfangen("konfiguration", _konfiguration(raumfuehler=["treiber:room_temperature"]))
     assert again == docs.Ergebnis("konfiguration", 1, True)
-    assert store.inhalt("konfiguration")["raumfuehler"] == [SENSOR]
+    assert kreisansicht.erste(store.inhalt("konfiguration"))["raumfuehler"] == [SENSOR]
 
 
 def test_a_repeated_version_writes_nothing_and_works_on_a_disk_that_refuses_writes(tmp_path, monkeypatch):
@@ -271,7 +379,7 @@ def test_invalid_binding_parameters_are_rejected_as_invalid_and_keep_the_previou
 
 def test_an_unknown_schema_is_refused_and_means_update_needed(tmp_path):
     store = _store(tmp_path)
-    ergebnis = store.empfangen("konfiguration", {**_konfiguration(), "schema": 2})
+    ergebnis = store.empfangen("konfiguration", {**_konfiguration(), "schema": 3})
     assert (ergebnis.ok, ergebnis.grund) == (False, "schema_unbekannt") and store.update_noetig
 
 
@@ -324,7 +432,7 @@ def test_ungueltige_details_des_hosts_gehen_nicht_hoch(tmp_path, caplog):
 
 
 SOFTWARE = {"version": "0.7.0", "manifest_url": "https://example.invalid/m.json", "manifest_sha256": "a" * 64,
-            "signature": "c2ln"}
+            "signature": "c2ln", "einmalig": False}
 
 
 @pytest.mark.parametrize(("fremd", "details"), [
@@ -360,7 +468,7 @@ def test_the_target_software_must_have_exactly_the_contract_fields(tmp_path, sof
     assert ergebnis.details["feld"] == "software" and ergebnis.details["regel"] == regel
 
 
-# --- Gemerktes Software-Angebot (5b-D2-3, Review Focus 5) ---
+# --- Gemerktes Software-Angebot ---
 
 SOFTWARE_NEU = {**SOFTWARE, "version": "0.7.1"}
 ANGEBOT, ANGEBOT_NEU, ZURUECKGEZOGEN = docs.Angebot(SOFTWARE), docs.Angebot(SOFTWARE_NEU), docs.Angebot(None)
@@ -460,7 +568,7 @@ def test_a_held_back_configuration_remembers_no_offer(tmp_path):
     ({"software_angebot": "0.7.0"}, None),
 ])
 def test_only_a_stored_key_in_the_contract_form_is_a_remembered_offer(tmp_path, gespeichert, erwartet):
-    """Kein Kompatibilitaetspfad: ein dokumente.json ohne den Schluessel (Stand vor 5b-D2-3) oder mit einem Wert
+    """Kein Kompatibilitaetspfad: ein dokumente.json ohne den Schluessel oder mit einem Wert
     ausserhalb des Vertrags heisst nichts gemerkt; null heisst zurueckgezogen gemerkt."""
     (tmp_path / docs.ZUSTAND_DATEI).write_text(json.dumps(gespeichert))
     assert _store(tmp_path).software_angebot() == erwartet
@@ -486,19 +594,208 @@ def test_the_returned_offer_is_a_copy(tmp_path):
     assert store.software_angebot() == ANGEBOT
 
 
-def test_a_rejected_foreign_field_changes_neither_the_accepted_document_nor_the_update_trigger(tmp_path):
+def test_a_rejected_foreign_field_changes_not_the_accepted_document(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    vorher = store.aktuell("konfiguration")
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, kuenftig=1))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert store.aktuell("konfiguration") == vorher and not store.update_noetig
+    # ein gesetzter Ausloeser bleibt: die fremde Konfiguration mit niedriger Mindestversion loest ihn nicht
+    assert store.empfangen("konfiguration", _konfiguration(version=3, mindest_software="9.9.9")).grund == "update_noetig"
+    assert store.update_noetig
+    store.empfangen("konfiguration", _konfiguration(version=4, mindest_software="0.1.0", kuenftig=1))
+    assert store.update_noetig and store.aktuell("konfiguration") == vorher
+
+
+def test_a_foreign_field_with_a_too_high_minimum_reports_update_needed_instead_of_invalid(tmp_path):
+    """Ein Geraet unter der Mindestversion kennt die neuen Felder noch nicht; es meldet update_noetig, nicht ungueltig."""
     store = _store(tmp_path)
     assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
     vorher = store.aktuell("konfiguration")
     ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, mindest_software="9.9.9", kuenftig=1))
-    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
-    assert store.aktuell("konfiguration") == vorher and not store.update_noetig
-    # ein gesetzter Ausloeser bleibt ebenfalls: die fremde Konfiguration mit niedriger Mindestversion loest ihn nicht
-    abgelehnt = store.empfangen("konfiguration", _konfiguration(version=3, mindest_software="9.9.9"))
-    assert abgelehnt.grund == "update_noetig"
-    assert store.update_noetig
-    store.empfangen("konfiguration", _konfiguration(version=4, mindest_software="0.1.0", kuenftig=1))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "update_noetig")
     assert store.update_noetig and store.aktuell("konfiguration") == vorher
+    assert _store(tmp_path).update_noetig  # uebersteht den Neustart
+
+
+def test_a_missing_field_with_a_too_high_minimum_reports_update_needed(tmp_path):
+    store = _store(tmp_path)
+    inhalt = _konfiguration(mindest_software="9.9.9")
+    del inhalt["tagestick"]
+    assert store.empfangen("konfiguration", inhalt).grund == "update_noetig"
+    assert store.update_noetig
+
+
+@pytest.mark.parametrize("mindest", [None, 5, True, ["9.9.9"], {"v": "9.9.9"}, "neu", "9.9", "9.9.9-rc1", ""])
+def test_a_minimum_that_is_not_a_readable_version_text_never_blocks(tmp_path, mindest):
+    """Gegenprobe zum Lesen vor der Formpruefung: Nicht-Text und Unlesbares ist keine Mindestversion."""
+    store = _store(tmp_path)
+    ergebnis = store.empfangen("konfiguration", _konfiguration(mindest_software=mindest, kuenftig=1))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert not store.update_noetig and not _store(tmp_path).update_noetig
+
+
+def test_a_readable_minimum_not_above_the_own_version_is_no_reason(tmp_path):
+    store = _store(tmp_path, version="0.6.0")
+    assert store.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", kuenftig=1)).grund == "ungueltig"
+    assert not store.update_noetig
+
+
+def test_the_empty_configuration_is_still_taken_with_a_too_high_minimum(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _leer(mindest="9.9.9")).uebernommen
+
+
+# --- Felder update_noetig und updates ---
+
+UPDATES = {"funktion": "aufschub", "sicherheit": "automatisch"}
+UPDATES_AUS = {"funktion": "aus", "sicherheit": "aus"}
+
+
+@pytest.mark.parametrize("feld", ["update_noetig", "updates"])
+def test_a_configuration_needs_the_update_fields(tmp_path, feld):
+    inhalt = _konfiguration()
+    inhalt.pop(feld, None)
+    ergebnis = _store(tmp_path).empfangen("konfiguration", inhalt)
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert ergebnis.details["feld"] == feld and ergebnis.details["regel"] == "fehlt"
+
+
+@pytest.mark.parametrize("feld, wert", [
+    ("update_noetig", "bald"), ("update_noetig", True), ("update_noetig", float("nan")),
+    ("update_noetig", float("inf")), ("update_noetig", [1]),
+    ("updates", "aus"), ("updates", {"funktion": "aus"}), ("updates", {**UPDATES, "funktion": "morgen"}),
+    ("updates", {**UPDATES, "extra": 1})])
+def test_a_malformed_update_field_is_accepted_but_the_stored_document_holds_the_effective_value(tmp_path, feld, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000000, updates=UPDATES)).ok
+    neu = {"update_noetig": 1900000000, "updates": UPDATES, feld: wert}
+    assert store.empfangen("konfiguration", _konfiguration(version=2, **neu)).uebernommen
+    for stand in (store, _store(tmp_path)):
+        inhalt = stand.inhalt("konfiguration")
+        assert (inhalt["update_noetig"], inhalt["updates"]) == (1900000000, UPDATES)
+
+
+def test_the_update_fields_are_remembered_and_survive_a_restart(tmp_path):
+    store = _store(tmp_path)
+    assert store.update_noetig_ab is None and store.updates is None
+    assert store.empfangen("konfiguration", _konfiguration(update_noetig=1900000000, updates=UPDATES)).uebernommen
+    assert (store.update_noetig_ab, store.updates) == (1900000000, UPDATES)
+    neu = _store(tmp_path)
+    assert (neu.update_noetig_ab, neu.updates) == (1900000000, UPDATES)
+
+
+def test_the_returned_updates_are_a_copy(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(updates=UPDATES))
+    store.updates["funktion"] = "aus"
+    assert store.updates == UPDATES
+
+
+def test_null_is_remembered_as_nothing_needed_and_no_updater(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000000, updates=UPDATES))
+    assert store.empfangen("konfiguration", _konfiguration(version=2, update_noetig=None, updates=None)).uebernommen
+    assert (store.update_noetig_ab, store.updates) == (None, None)
+    assert (_store(tmp_path).update_noetig_ab, _store(tmp_path).updates) == (None, None)
+
+
+def test_the_update_fields_come_also_from_a_rejected_configuration(tmp_path):
+    """Sonst bliebe ein Geraet, das jede neue Konfiguration ablehnt, bei der alten Einstellung stehen."""
+    assert _store(tmp_path).empfangen("konfiguration", _konfiguration(version=1, updates=UPDATES)).uebernommen
+    faelle = (("update_noetig", {"mindest_software": "9.9.9"}), ("ungueltig", {"kuenftig": 1}), ("treiber_parameter", {}))
+    for nummer, (ablehnung, aenderung) in enumerate(faelle):
+        store = docs.DocumentStore(
+            tmp_path, host="gateway", software_version="0.6.0",
+            treiber_pruefen=(lambda bindung: {"feld": "p", "regel": "fehlt"}) if ablehnung == "treiber_parameter"
+            else None)
+        ergebnis = store.empfangen("konfiguration", _konfiguration(
+            version=10 + 2 * nummer, update_noetig=1900000001, updates=UPDATES_AUS, **aenderung))
+        assert (ergebnis.ok, ergebnis.grund) == (False, ablehnung), ablehnung
+        assert (store.update_noetig_ab, store.updates) == (1900000001, UPDATES_AUS), ablehnung
+        neu = _store(tmp_path)
+        assert (neu.update_noetig_ab, neu.updates) == (1900000001, UPDATES_AUS), ablehnung
+        # zuruecksetzen mit einer eigenen Version, damit die naechste Runde etwas Neues sieht
+        assert _store(tmp_path).empfangen(
+            "konfiguration", _konfiguration(version=11 + 2 * nummer, update_noetig=None, updates=UPDATES)).uebernommen
+        assert (_store(tmp_path).update_noetig_ab, _store(tmp_path).updates) == (None, UPDATES)
+
+
+def test_the_update_fields_of_an_unknown_schema_are_not_read(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", {**_konfiguration(update_noetig=1900000000, updates=UPDATES), "schema": 99})
+    assert (store.update_noetig_ab, store.updates) == (None, None)
+
+
+def test_a_redelivered_version_updates_the_remembered_fields(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, updates=UPDATES))
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000005, updates=UPDATES_AUS))
+    assert ergebnis.ok and not ergebnis.uebernommen
+    assert (store.update_noetig_ab, store.updates) == (1900000005, UPDATES_AUS)
+    assert (_store(tmp_path).update_noetig_ab, _store(tmp_path).updates) == (1900000005, UPDATES_AUS)
+
+
+def test_an_operation_does_not_change_the_update_fields(tmp_path):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(update_noetig=1900000000, updates=UPDATES))
+    store.empfangen("bedienung", _bedienung(updates=UPDATES_AUS, update_noetig=5))
+    assert (store.update_noetig_ab, store.updates) == (1900000000, UPDATES)
+
+
+@pytest.mark.parametrize("update_noetig", [True, False, "1900000000", [5], {"a": 1}, math.nan, math.inf])
+def test_an_unreadable_update_noetig_never_blocks_and_keeps_the_remembered_value(tmp_path, update_noetig):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, update_noetig=1900000000))
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, update_noetig=update_noetig))
+    assert ergebnis.ok  # kein Typzwang: das Geraet lehnt die Konfiguration nicht deswegen ab
+    assert store.update_noetig_ab == 1900000000 and _store(tmp_path).update_noetig_ab == 1900000000
+
+
+@pytest.mark.parametrize("updates", [
+    "aus", 5, True, [], {}, {"funktion": "aus"}, {"funktion": "aus", "sicherheit": "aufschub"},
+    {"funktion": "immer", "sicherheit": "aus"}, {"funktion": "aus", "sicherheit": "aus", "extra": 1},
+    {"funktion": ["aus"], "sicherheit": "aus"}])
+def test_unreadable_updates_never_block_and_keep_the_remembered_value(tmp_path, updates):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(version=1, updates=UPDATES))
+    ergebnis = store.empfangen("konfiguration", _konfiguration(version=2, updates=updates))
+    assert ergebnis.ok
+    assert store.updates == UPDATES and _store(tmp_path).updates == UPDATES
+
+
+@pytest.mark.parametrize("wert", [0, 0.5, 1900000000, 1900000000.5])
+def test_update_noetig_is_remembered_as_given(tmp_path, wert):
+    store = _store(tmp_path)
+    store.empfangen("konfiguration", _konfiguration(update_noetig=wert))
+    assert store.update_noetig_ab == wert
+
+
+def test_a_stored_state_without_the_update_fields_starts_and_takes_the_new_form(tmp_path):
+    """Dateien aus der Zeit vor den Feldern: Konfiguration ohne update_noetig und updates, dokumente.json ohne ihre
+    Schluessel. Das Geraet startet, merkt nichts und nimmt die naechste Konfiguration in der neuen Form."""
+    assert _store(tmp_path).empfangen("konfiguration", _konfiguration(version=7)).uebernommen  # schreibt auch die Rastung
+    alt = {feld: wert for feld, wert in _konfiguration(version=7).items()
+           if feld not in ("schema", "version", "update_noetig", "updates")}
+    (tmp_path / "konfiguration.json").write_text(json.dumps({"version": 7, "inhalt": alt, "dirty": False}))
+    (tmp_path / docs.ZUSTAND_DATEI).write_text(json.dumps({"update_anlass": None, "abgelehnt": {}}))
+    store = _store(tmp_path)
+    assert store.version("konfiguration") == 7 and store.inhalt("konfiguration") == alt
+    assert (store.update_noetig_ab, store.updates, store.update_noetig) == (None, None, False)
+    assert store.empfangen("konfiguration", _konfiguration(version=8, updates=UPDATES)).uebernommen
+    assert store.updates == UPDATES
+
+
+def test_the_software_offer_carries_einmalig(tmp_path):
+    store = _store(tmp_path)
+    einmalig = {**SOFTWARE, "einmalig": True}
+    assert store.empfangen("konfiguration", _konfiguration(software=einmalig)).ok
+    assert store.software_angebot() == docs.Angebot(einmalig)
+    assert docs.angebot_aus("konfiguration", {"schema": 2, "software": einmalig}) == docs.Angebot(einmalig)
+    ohne = {k: v for k, v in SOFTWARE.items() if k != "einmalig"}
+    assert docs.software_pruefen(ohne).details == {"feld": "software", "regel": "fehlt"}
+    assert docs.angebot_aus("konfiguration", {"schema": 2, "software": ohne}) is None
 
 
 def test_a_foreign_operation_field_is_rejected(tmp_path):
@@ -524,7 +821,75 @@ def test_a_reason_outside_the_contract_is_a_programming_error(tmp_path):
 def test_a_configuration_with_origin_values_is_taken(tmp_path):
     store = _store(tmp_path)
     assert store.empfangen("konfiguration", _konfiguration(ursprungswerte={"heat_limit": 18.0})).ok
-    assert store.inhalt("konfiguration")["ursprungswerte"] == {"heat_limit": 18.0}
+    assert store.inhalt("konfiguration")["kreise"][0]["ursprungswerte"] == {"heat_limit": 18.0}
+
+
+def _abgelehnt(store, art, dokument, feld):
+    """Das Dokument wird mit Grund ungueltig und dem Feld in details abgelehnt; der Stand bleibt wie er war."""
+    vorher = (store.version(art), store.inhalt(art), store.update_noetig)
+    ergebnis = store.empfangen(art, dokument)
+    assert (ergebnis.ok, ergebnis.grund, ergebnis.details.get("feld")) == (False, "ungueltig", feld), ergebnis
+    assert (store.version(art), store.inhalt(art), store.update_noetig) == vorher
+
+
+@pytest.mark.parametrize("wert", [None, 5, True, "", "neu", "1.0", "1.0.0-rc1", ["1.0.0"], {"v": "1.0.0"}])
+def test_eine_mindestversion_ohne_versionstext_wird_abgelehnt(tmp_path, wert):
+    """Ein Nicht-Text oder Unlesbares blockierte nie und ging als gueltig durch; jetzt lehnt das Geraet ab, auch bei
+    der leeren Konfiguration."""
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    _abgelehnt(store, "konfiguration", _konfiguration(version=2, mindest_software=wert), "mindest_software")
+    _abgelehnt(store, "konfiguration", {**_leer(version=3), "mindest_software": wert}, "mindest_software")
+
+
+def test_eine_ungueltige_mindestversion_setzt_keinen_update_anlass(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    assert store.empfangen("konfiguration", _konfiguration(version=2, mindest_software=5)).grund == "ungueltig"
+    assert not store.update_noetig
+
+
+@pytest.mark.parametrize("wert", [None, 5, True, "", ["2027-01-15T08:00:00+00:00"], {"ts": "x"}])
+def test_eine_bedienung_ohne_zeitstempeltext_wird_abgelehnt(tmp_path, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("bedienung", _bedienung(version=1)).uebernommen
+    _abgelehnt(store, "bedienung", _bedienung(version=2, ts=wert), "ts")
+
+
+@pytest.mark.parametrize("wert", [None, [], "x", 5, {1: 2}, {"": 1.0}, {"heat_limit": None}, {"heat_limit": [1.0]},
+                                  {"heat_limit": {"a": 1}}, {"heat_limit": float("nan")}, {"heat_limit": float("inf")},
+                                  {"heat_limit": 10**400}])
+def test_ursprungswerte_haben_namen_und_einfache_werte(tmp_path, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    _abgelehnt(store, "konfiguration", _konfiguration(version=2, ursprungswerte=wert), "ursprungswerte")
+
+
+def test_ursprungswerte_nehmen_zahl_wahrheitswert_und_text_an(tmp_path):
+    """Der Server schreibt diese drei Arten (Zahl, Wahrheitswert, kurzer Text)."""
+    werte = {"heat_limit": 18.0, "stufe": 2, "an": True, "modus": "heizen"}
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(ursprungswerte=werte)).uebernommen
+    assert store.inhalt("konfiguration")["kreise"][0]["ursprungswerte"] == werte
+
+
+@pytest.mark.parametrize("feld, wert", [
+    ("anlage_name", 5), ("anlage_name", ""), ("weg", ["x"]), ("weg", 7), ("kreise", "x"), ("kreise", None),
+    ("tagestick", 5), ("tagestick", "25:00"), ("mindest_integration", 5), ("mindest_integration", ""),
+    ("bindungsparameter", []), ("bindungsparameter", "x"),
+])
+def test_eine_leere_konfiguration_hat_typrichtige_felder(tmp_path, feld, wert):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(version=1)).uebernommen
+    _abgelehnt(store, "konfiguration", {**_leer(version=2), feld: wert}, feld)
+
+
+def test_die_leere_konfiguration_des_servers_wird_angenommen(tmp_path):
+    """Die Felder, die der Server in der leeren Konfiguration schreibt: null bzw. leere Liste."""
+    leer = _leer(version=1)
+    assert {leer[feld] for feld in ("anlage_name", "weg", "tagestick", "bindungsparameter", "mindest_integration")} == {None}
+    assert leer["kreise"] == []
+    assert _store(tmp_path).empfangen("konfiguration", leer).uebernommen
 
 
 @pytest.mark.parametrize("version", [0, -1, "1", True, None, 1.5])
@@ -553,6 +918,44 @@ def test_a_configuration_within_reach_clears_update_needed(tmp_path):
     assert store.empfangen("konfiguration", _konfiguration(version=2)).uebernommen and not store.update_noetig
 
 
+def test_the_critical_date_ends_once_the_device_reaches_the_required_minimum_without_a_new_server_state(tmp_path):
+    alt = _store(tmp_path, version="0.5.9")
+    assert alt.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", update_noetig=1900000000)).grund \
+        == "update_noetig"
+    assert alt.update_noetig_ab == 1900000000  # unter der Mindestversion: das Datum gilt
+    assert _store(tmp_path, version="0.5.9").update_noetig_ab == 1900000000  # auch nach einem Neustart (Gegenprobe)
+    assert _store(tmp_path, version="0.5.99").update_noetig_ab == 1900000000  # knapp darunter: weiter kritisch
+    assert _store(tmp_path, version="0.6.0").update_noetig_ab is None  # Mindestversion erreicht: kein Notbetrieb
+    assert _store(tmp_path, version="0.7.1").update_noetig_ab is None
+
+
+def test_a_critical_date_without_a_remembered_reason_is_kept(tmp_path):
+    """Ohne gemerkte Mindestversion (Anlass fehlt) bleibt das Datum, bis ein neuer Stand des Servers kommt."""
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(update_noetig=1900000000)).uebernommen
+    assert store.update_noetig_ab == 1900000000 and _store(tmp_path, version="0.9.0").update_noetig_ab == 1900000000
+
+
+def test_the_reached_minimum_does_not_change_the_stored_date_only_what_the_device_reports(tmp_path):
+    store = _store(tmp_path, version="0.5.9")
+    store.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", update_noetig=1900000000))
+    neu = _store(tmp_path, version="0.6.0")
+    assert neu.update_noetig_ab is None
+    # ein neuer Stand des Servers mit Datum (er sieht die Version noch unter der Mindestversion) gilt wieder
+    assert neu.empfangen("konfiguration", _konfiguration(version=2, mindest_software="0.7.0", update_noetig=1900000001)).grund \
+        == "update_noetig"
+    assert neu.update_noetig_ab == 1900000001
+
+
+def test_an_unknown_schema_does_not_end_a_critical_date(tmp_path):
+    """Ein unbekanntes Schema ist kein erreichbares Update: das gemerkte Datum gilt weiter."""
+    store = _store(tmp_path, version="0.5.9")
+    store.empfangen("konfiguration", _konfiguration(mindest_software="0.6.0", update_noetig=1900000000))
+    assert store.empfangen("konfiguration", {**_konfiguration(version=2), "schema": 99}).grund == "schema_unbekannt"
+    assert store.update_noetig and store.update_noetig_ab == 1900000000
+    assert _store(tmp_path, version="0.5.9").update_noetig_ab == 1900000000
+
+
 def test_update_needed_ends_once_the_device_reaches_the_rejected_minimum(tmp_path):
     store = _store(tmp_path, version="0.5.9")
     assert store.empfangen("konfiguration", _konfiguration()).grund == "update_noetig"
@@ -562,7 +965,7 @@ def test_update_needed_ends_once_the_device_reaches_the_rejected_minimum(tmp_pat
 
 def test_update_needed_after_an_unknown_schema_ends_with_a_new_software(tmp_path):
     store = _store(tmp_path, version="0.6.0")
-    store.empfangen("konfiguration", {**_konfiguration(), "schema": 2})
+    store.empfangen("konfiguration", {**_konfiguration(), "schema": 3})
     assert _store(tmp_path, version="0.6.0").update_noetig
     assert not _store(tmp_path, version="0.6.1").update_noetig
 
@@ -594,10 +997,17 @@ def test_minimum_software_compares_numerically(eigene, mindest, unter):
 
 @pytest.mark.parametrize("value, ok", [
     (15, True), (25, True), (20.5, True), (14.5, False), (25.5, False), (20.25, False), (True, False), (None, False),
-    ("20", False), (math.nan, False), (math.inf, False), (10**400, False),
+    ("20", False), (math.nan, False), (math.inf, False), (10**400, False), (14.99, False), (25.01, False),
+    (21.3, False), (0, False), (-1, False), (1e308, False), (-math.inf, False), (False, False),
 ])
 def test_operating_range(value, ok):
-    assert docs.im_bedienbereich(value) is ok
+    assert soll_speicher.im_bedienbereich(value) is ok  # die eine Funktion, die documents.py benutzt
+
+
+def test_the_steps_inside_the_operating_range_are_exactly_the_half_kelvin_ones():
+    for step in range(0, 101):
+        value = 15 + step * 0.1
+        assert soll_speicher.im_bedienbereich(value) is (step % 5 == 0)
 
 
 def test_an_operation_is_checked_against_the_operating_range(tmp_path):
@@ -616,7 +1026,7 @@ def test_dirty_operation_takes_the_same_version_again(tmp_path):
     assert store.aktuell("bedienung").dirty and _store(tmp_path).aktuell("bedienung").dirty
     ergebnis = store.empfangen("bedienung", _bedienung(version=3, raum_soll=20.0))
     assert ergebnis.uebernommen and not store.aktuell("bedienung").dirty
-    assert store.inhalt("bedienung")["raum_soll"] == 20.0
+    assert store.inhalt("bedienung")["kreise"][0]["raum_soll"] == 20.0
 
 
 def test_dirty_without_an_operation_does_nothing(tmp_path):
@@ -633,15 +1043,14 @@ def test_configuration_and_operation_do_not_influence_each_other(tmp_path):
 
 
 def test_documents_are_the_contract_documents():
-    assert (docs.KONFIGURATION, docs.BEDIENUNG) == wire.DOKUMENTE
+    assert (docs.KONFIGURATION, docs.BEDIENUNG, docs.ANZEIGE) == wire.DOKUMENTE
 
 
 @pytest.mark.parametrize("art, inhalt", [("konfiguration", _konfiguration(anlage="a\ud800b")),
                                           ("bedienung", _bedienung(ts="\udfff"))])
 def test_a_document_with_a_lone_surrogate_is_rejected_and_nothing_is_stored(tmp_path, art, inhalt):
     """json.loads liefert aus "\\ud800" ein einzelnes Surrogat; schreiben_json koennte es nicht kodieren. Statt einer
-    Ausnahme aus empfangen() (ohne Antwort an den Server) gibt es eine Ablehnung `ungueltig` (Testoffensive T2,
-    Task 13)."""
+    Ausnahme aus empfangen() (ohne Antwort an den Server) gibt es eine Ablehnung `ungueltig`."""
     store = _store(tmp_path)
     ergebnis = store.empfangen(art, inhalt)
     assert (ergebnis.ok, ergebnis.grund, ergebnis.details) == (False, "ungueltig", None)
@@ -649,7 +1058,7 @@ def test_a_document_with_a_lone_surrogate_is_rejected_and_nothing_is_stored(tmp_
     assert store.empfangen(art, _konfiguration() if art == "konfiguration" else _bedienung()).uebernommen  # Gegenprobe
 
 
-# --- Vorbereitung vor dem Speichern (Spec Testoffensive 12.6, Nr. 38: Aufraeum-Markierung) ---
+# --- Vorbereitung vor dem Speichern (Nr. 38: Aufraeum-Markierung) ---
 
 def _ohne_huelle(body: dict) -> dict:
     return {key: value for key, value in body.items() if key not in ("schema", "version")}
@@ -676,7 +1085,7 @@ def test_the_preparation_gets_old_and_new_before_the_configuration_is_written(tm
 
 @pytest.mark.parametrize("fehler", [OSError("/data/aufraeumen.json"), RuntimeError("unerwartet")])
 def test_a_failing_preparation_holds_the_configuration_back_and_stores_nothing(tmp_path, fehler):
-    """Nr. 38: scheitert die Vorbereitung (OSError beim Schreiben der Markierung, aber auch jede andere Ausnahme), ist
+    """Scheitert die Vorbereitung (OSError beim Schreiben der Markierung, aber auch jede andere Ausnahme), ist
     die Konfiguration nicht pruefbar: nichts gespeichert, nichts abgelehnt, das Geraet haelt sie zurueck (device.py)."""
     def vorbereiten(alt, neu):
         if not neu.get("anlage"):
@@ -743,7 +1152,7 @@ def test_operations_rejections_and_duplicates_skip_the_preparation(tmp_path):
 
 @pytest.mark.parametrize("dazwischen", ["abgelehnt", "angenommen", "duplikat"])
 def test_after_a_result_for_another_configuration_a_new_failure_is_logged_again(tmp_path, caplog, dazwischen):
-    """Nr. 38: ein Ergebnis fuer eine Konfiguration (Ablehnung, Annahme einer anderen, Duplikat der gespeicherten)
+    """Ein Ergebnis fuer eine Konfiguration (Ablehnung, Annahme einer anderen, Duplikat der gespeicherten)
     beendet das Zurueckhalten; scheitert danach eine neue Zustellung, ist das ein neues Zurueckhalten mit eigener
     ERROR-Zeile."""
     def vorbereiten(alt, neu):
@@ -774,10 +1183,10 @@ def test_a_host_that_changes_its_arguments_does_not_change_the_documents(tmp_pat
     def vorbereiten(alt, neu):
         leer = neu.get("anlage") is None
         neu["anlage"] = "fremd"
-        neu["raumfuehler"].append("zigbee:0xdead:temperature")
+        neu["kreise"][0]["raeume"][0]["fuehler"].append("zigbee:0xdead:temperature")
         if alt is not None:
             alt["anlage"] = "fremd"
-            alt["raumfuehler"].clear()
+            alt["kreise"][0]["raeume"][0]["fuehler"].clear()
         if leer:
             raise OSError("Datentraeger")  # zurueckgehalten: das gespeicherte Dokument bleibt im Speicher stehen
 
@@ -790,3 +1199,96 @@ def test_a_host_that_changes_its_arguments_does_not_change_the_documents(tmp_pat
     assert store.inhalt("konfiguration") == _ohne_huelle(_konfiguration(tagestick="13:00"))
     assert json.loads((tmp_path / "konfiguration.json").read_text())["inhalt"] == store.inhalt("konfiguration")
     assert _store(tmp_path).inhalt("konfiguration") == _ohne_huelle(_konfiguration(tagestick="13:00"))
+
+
+# --- Bedienung und Anzeige je Kreis ---
+
+def test_eine_bedienung_je_kreis_prueft_jeden_eintrag(tmp_path):
+    store = _store(tmp_path)
+    zwei = [{"kreis": 1, "modus": "manuell", "raum_soll": 21.0}, {"kreis": 2, "modus": "manuell", "raum_soll": 19.5}]
+    assert store.empfangen("bedienung", _bedienung(kreise=zwei)).uebernommen
+    zwei[1]["raum_soll"] = 25.5  # Randwert: ausserhalb des Bedienbereichs im zweiten Kreis
+    ergebnis = store.empfangen("bedienung", _bedienung(version=2, kreise=zwei))
+    assert (ergebnis.grund, ergebnis.details) == (
+        "ausserhalb_bereich", {"feld": "raum_soll", "regel": "bereich", "min": 15.0, "max": 25.0})
+    assert store.version("bedienung") == 1  # die vorige Version bleibt
+
+
+@pytest.mark.parametrize("kreise", [
+    [],  # kein Kreis
+    [{"kreis": 0, "modus": "manuell", "raum_soll": 21.0}],  # unter KREIS_MIN
+    [{"kreis": True, "modus": "manuell", "raum_soll": 21.0}],  # bool ist keine Nummer
+    [{"kreis": 1.0, "modus": "manuell", "raum_soll": 21.0}],
+    [{"kreis": wire.KREIS_MAX + 1, "modus": "manuell", "raum_soll": 21.0}],  # ueber KREIS_MAX
+    [{"kreis": 10**400, "modus": "manuell", "raum_soll": 21.0}],  # Riesenzahl
+    [{"kreis": 1, "modus": "manuell", "raum_soll": 21.0}, {"kreis": 1, "modus": "manuell", "raum_soll": 21.0}],
+    [{"kreis": 2, "modus": "manuell", "raum_soll": 21.0}, {"kreis": 1, "modus": "manuell", "raum_soll": 21.0}],
+    [{"kreis": 1, "modus": "manuell"}],  # Feld fehlt
+    [{"kreis": 1, "modus": "manuell", "raum_soll": 21.0, "name": "Bad"}],  # fremdes Feld
+    [{"kreis": 1, "modus": "programm", "raum_soll": 21.0}],
+    "kreis1",
+])
+def test_eine_bedienung_mit_falschen_kreisen_wird_abgelehnt(tmp_path, kreise):
+    store = _store(tmp_path)
+    assert store.empfangen("bedienung", _bedienung(kreise=kreise)).grund == "ungueltig"
+    assert store.inhalt("bedienung") is None
+
+
+def test_die_groesste_kreisnummer_wird_angenommen(tmp_path):
+    store = _store(tmp_path)
+    kreise = [{"kreis": wire.KREIS_MAX, "modus": "manuell", "raum_soll": 21.0}]
+    assert store.empfangen("bedienung", _bedienung(kreise=kreise)).uebernommen
+
+
+def test_eine_bedienung_im_alten_aufbau_scheitert_laut(tmp_path):
+    alt = {"schema": 2, "version": 1, "modus": "manuell", "raum_soll": 21.0, "quelle": "portal", "ts": "t"}
+    ergebnis = _store(tmp_path).empfangen("bedienung", alt)
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+
+
+def test_ein_geraet_mit_dem_alten_schema_lehnt_ab(tmp_path):
+    assert _store(tmp_path).empfangen("bedienung", _bedienung(schema=1)).grund == "schema_unbekannt"
+
+
+def test_die_anzeige_wird_mit_eigener_version_gespeichert_und_ueberlebt_den_neustart(tmp_path):
+    store = _store(tmp_path)
+    assert store.version("anzeige") == 0
+    assert store.empfangen("anzeige", _anzeige(version=4, kreise=(1, 2))).uebernommen
+    assert store.version("anzeige") == 4 and store.version("bedienung") == 0
+    assert [eintrag["kreis"] for eintrag in _store(tmp_path).inhalt("anzeige")["kreise"]] == [1, 2]
+    assert store.empfangen("anzeige", _anzeige(version=4, kreise=(1, 2))).uebernommen is False  # Duplikat
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"kreise": []},
+    {"kreise": [{"kreis": 1}]},  # Feldsatz unvollstaendig
+    {"extra": 1},  # fremdes Feld im Dokument
+    {"kreise": "alle"},
+])
+def test_eine_anzeige_ohne_den_vollen_feldsatz_wird_abgelehnt(tmp_path, aenderung):
+    store = _store(tmp_path)
+    assert store.empfangen("anzeige", _anzeige(**aenderung)).grund == "ungueltig"
+    assert store.inhalt("anzeige") is None
+
+
+@pytest.mark.parametrize("feld, wert", [
+    ("kreis", 0), ("kreis", "1"), ("einlernphase_tag", "3"), ("einlernphase_tag", True), ("testphase_bis", 5),
+    ("befunde", None), ("aufgaben", {}), ("kennzahlen", []), ("raumziele", None), ("fremd", 1),
+])
+def test_eine_anzeige_mit_falschem_typ_im_kreis_wird_abgelehnt(tmp_path, feld, wert):
+    anzeige = _anzeige()
+    anzeige["kreise"][0][feld] = wert
+    assert _store(tmp_path).empfangen("anzeige", anzeige).grund == "ungueltig"
+
+
+def test_eine_anzeige_mit_doppelter_oder_absteigender_kreisnummer_wird_abgelehnt(tmp_path):
+    assert _store(tmp_path).empfangen("anzeige", _anzeige(kreise=(1, 1))).grund == "ungueltig"
+    assert _store(tmp_path).empfangen("anzeige", _anzeige(kreise=(2, 1))).grund == "ungueltig"
+
+
+def test_a_document_of_another_plant_with_fewer_circuits_is_no_removal_of_circuits(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _kreise(1, 1, 2)).uebernommen
+    anderes = {**_kreise(2, 1), "anlage": "andere-anlage"}
+    assert store._kreis_entfernt(anderes) is None  # eine neue Einrichtung entfernt keinen Kreis der alten
+    assert store._kreis_entfernt(_kreise(2, 1)).grund == "ungueltig"  # dieselbe Anlage: Kreis 2 fehlt

@@ -1,13 +1,14 @@
-"""HTTPS-Bootstrap (Spec 5b 1): register mit CSR liefert Zertifikat, Broker-Endpunkt und Broker-CA, certificate ist
+"""HTTPS-Bootstrap: register mit CSR liefert Zertifikat, Broker-Endpunkt und Broker-CA, certificate ist
 Rettungsweg und Erneuerung. Signiert wie der Vertrag G3 (SHG1, 300-s-Fenster). Der Server antwortet bei jedem
 Anmeldefehler gleich (401), auch fuer ein gesperrtes Geraet: das Geraet wertet "401 auf certificate und register" als
-gesperrt (Plan S1) und versucht es nach GESPERRT_SECONDS erneut, aber nur bei synchroner Uhr. Ohne synchrone Uhr (Pi
+gesperrt und versucht es nach GESPERRT_SECONDS erneut, aber nur bei synchroner Uhr. Ohne synchrone Uhr (Pi
 ohne Echtzeituhr nach einem Stromausfall) liegt der Zeitstempel womoeglich ausserhalb des Fensters: dann kein Urteil,
-sondern ein Versuch nach Backoff (Plan-Praezisierung). Zertifikat, Endpunkt und Uebernahmestatus liegen unter
-<daten>/device/; der Broker-CA wird vertraut, weil sie ueber die HTTPS-Verbindung kam (Plan S1). Ein Zertifikat, das
+sondern ein Versuch nach Backoff. Zertifikat, Endpunkt und Uebernahmestatus liegen unter
+<daten>/device/; der Broker-CA wird vertraut, weil sie ueber die HTTPS-Verbindung kam. Ein Zertifikat, das
 nicht zum eigenen TLS-Schluessel passt, wird nie gespeichert. Logs nennen Route und Status, nie Inhalte (Regel 6)."""
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,7 +17,8 @@ from pathlib import Path
 import requests
 
 from smartheat_core import dateien
-from smartheat_device import commands, fehler, nachrichten, wire
+from smartheat_core.zeitquelle import echte_epoche
+from smartheat_device import anker, commands, fehler, nachrichten, wire
 from smartheat_device import identity as identity_module
 from smartheat_device.tls import ALPN_443, IOT_PORTS
 
@@ -31,6 +33,9 @@ RETRY_MAX_SECONDS = 900
 TIMEOUT_SECONDS = 10.0
 _TRANSIENT_4XX = (408, 429)
 _PEM_CERT = "-----BEGIN CERTIFICATE-----"
+#: Maske der Adresse des uebernehmenden Kontos, wie der Server sie bildet (`a***@e***.com`, Endung nur mit Punkt in der
+#: Domain); alles andere (Steuerzeichen, Leerraum, volle Adressen) ist kein Hinweis und wird weder gespeichert noch gezeigt.
+_KONTO_HINWEIS = re.compile(wire.KONTO_HINWEIS_MUSTER)
 (_ALPN,) = wire.BOOTSTRAP_OPTIONAL  # fehlt = kein Rueckfall auf Port 443; bei einer Drift scheitert der Import
 
 
@@ -39,11 +44,16 @@ class BootstrapError(Exception):
 
 
 class NotAuthenticated(BootstrapError):
-    """401: Anmeldefehler, Zeitstempel ausserhalb des Fensters oder gesperrt (fuer alle gleich, Spec 1)."""
+    """401: Anmeldefehler, Zeitstempel ausserhalb des Fensters oder gesperrt (fuer alle gleich)."""
 
 
 class Unavailable(BootstrapError):
     """Netz, Zeitueberschreitung, 5xx, 408/429 oder eine unbrauchbare Antwort: spaeter erneut."""
+
+
+class AnkerUngueltig(Unavailable):
+    """Die Antwort trägt keine gueltige Signatur des Vertrauensankers (smartheat_device/anker.py): Backoff wie bei einer
+    unbrauchbaren Antwort, nie "gesperrt" (ein Angreifer auf dem Weg soll das Geraet nicht stilllegen)."""
 
 
 class Rejected(BootstrapError):
@@ -71,7 +81,9 @@ class Antwort:
 
 
 def _antwort(body) -> Antwort:
-    if not isinstance(body, dict) or any(key not in body for key in wire.BOOTSTRAP_RESPONSE):
+    # die Ankerfelder prueft _request vor dem Lesen (anker.pruefen); hier zaehlen nur die Felder, die gelesen werden
+    if not isinstance(body, dict) or any(key not in body for key in wire.BOOTSTRAP_RESPONSE
+                                         if key not in anker.ANKER_FELDER):
         raise Unavailable("Bootstrap-Antwort unvollstaendig")
     host, port, ca, cert = body["mqtt_endpoint"], body["mqtt_port"], body["mqtt_ca"], body["certificate"]
     alpn = body.get(_ALPN)
@@ -85,10 +97,10 @@ def _antwort(body) -> Antwort:
 
 
 class BootstrapClient:
-    """Signierte Anfragen an register und certificate (Signatur wie die Polling-API, G3 2.1)."""
+    """Signierte Anfragen an register und certificate (Signatur wie die Polling-API)."""
 
     def __init__(self, base_url: str, ident: identity_module.Identity, *, session=None,
-                 now: Callable[[], float] = time.time, timeout: float = TIMEOUT_SECONDS) -> None:
+                 now: Callable[[], float] = echte_epoche, timeout: float = TIMEOUT_SECONDS) -> None:
         self._base = base_url.rstrip("/")
         self._ident, self._now, self._timeout = ident, now, timeout
         self._session = session or requests.Session()
@@ -103,7 +115,7 @@ class BootstrapClient:
     def _request(self, route: str, body: dict):
         method, template = wire.ROUTES[route]
         path = template.format(device_id=self._ident.device_id)
-        # allow_nan=False (Testoffensive T2, Nr. 17) und MAX_BODY_BYTES (V1): ein ValueError faengt Bootstrap.holen
+        # allow_nan=False und MAX_BODY_BYTES (V1): ein ValueError faengt Bootstrap.holen
         # (Backoff) bzw. der Befehls-Handler (_new_claim_code, commands._guarded); gesendet wird dann nichts
         data = json.dumps(body, separators=(",", ":"), sort_keys=True, allow_nan=False).encode()
         if len(data) > wire.MAX_BODY_BYTES:
@@ -127,9 +139,13 @@ class BootstrapClient:
         if response.status_code >= 300:
             raise Unavailable(f"{route}: HTTP {response.status_code}")
         try:
-            return response.json()
+            antwort = response.json()
         except ValueError:
             raise Unavailable(f"{route}: keine gueltige Antwort") from None
+        # Vor jeder Auswertung: nur eine Antwort des Servers fuer genau diese Anfrage darf Zustand und Broker setzen
+        if not anker.pruefen(antwort, route=f"{method} {path}", device_id=self._ident.device_id, ts=timestamp):
+            raise AnkerUngueltig("anker_ungueltig")
+        return antwort
 
 
 def device_state(device_dir: Path) -> str | None:
@@ -139,8 +155,36 @@ def device_state(device_dir: Path) -> str | None:
 
 
 def device_state_speichern(device_dir: Path, state: str | None) -> None:
+    """Ein neuer Stand ersetzt die Datei ganz: der Hinweis auf das Konto gilt nur fuer den Stand, in dem er kam (jede
+    Freigabe loescht ihn). Derselbe Stand laesst die Datei und damit den Hinweis unberuehrt."""
     if state in wire.DEVICE_STATES and state != device_state(device_dir):
         dateien.schreiben_json(device_dir / STATE_FILE, {"device_state": state}, modus=dateien.PRIVAT)
+
+
+def konto_hinweis_gueltig(hinweis: object) -> str | None:
+    """Der Hinweis, wenn er die Laenge und Form der Maske hat (wire.KONTO_HINWEIS_MAX_ZEICHEN); sonst None."""
+    if (isinstance(hinweis, str) and len(hinweis) <= wire.KONTO_HINWEIS_MAX_ZEICHEN
+            and _KONTO_HINWEIS.fullmatch(hinweis)):
+        return hinweis
+    return None
+
+
+def konto_hinweis(device_dir: Path) -> str | None:
+    """Maske der Adresse des uebernehmenden Kontos; nur im Stand uebernommen, ohne Feld (alter Stand) oder bei
+    unbrauchbarem Inhalt None."""
+    raw = dateien.lesen_json(device_dir / STATE_FILE)
+    if not isinstance(raw, dict) or raw.get("device_state") != "uebernommen":
+        return None
+    return konto_hinweis_gueltig(raw.get("konto_hinweis"))
+
+
+def konto_hinweis_speichern(device_dir: Path, hinweis: str | None) -> None:
+    """Hinweis neben den Stand uebernommen schreiben, None loescht ihn; ohne diesen Stand oder bei gleichem Inhalt
+    bleibt die Datei, wie sie ist."""
+    if device_state(device_dir) != "uebernommen" or hinweis == konto_hinweis(device_dir):
+        return
+    inhalt = {"device_state": "uebernommen", **({"konto_hinweis": hinweis} if hinweis is not None else {})}
+    dateien.schreiben_json(device_dir / STATE_FILE, inhalt, modus=dateien.PRIVAT)
 
 
 def speichern(device_dir: Path, antwort: Antwort) -> None:

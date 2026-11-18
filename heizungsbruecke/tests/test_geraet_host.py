@@ -1,106 +1,32 @@
-"""Spec 5c 1.3: das HA-Add-on als DeviceHost (Faehigkeiten, Uhr, Pruefung, Befehle, Dokumente, Wunsch, Raum)."""
+"""Das HA-Add-on als DeviceHost (Faehigkeiten, Uhr, Pruefung, Befehle, Dokumente, Wunsch, Raum)."""
+import dataclasses
 import io
 import json
 import logging
 import stat
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
-from conftest import FakeClock
+from befehle_sicht import registrierte_befehle
 from fakes import FakeHa, HttpAntwort, nachricht_bytes
-from geraet_helpers import konfiguration_aus_optionen
-from test_runtime import OPTIONS, env  # noqa: F401 - env ist eine Fixture
+from geraet_helpers import Device, Supervisor, _host, _register, bedienung_inhalt, konfiguration_aus_optionen
+from runtime_helpers import OPTIONS
 
-from heizungsbruecke import config, discovery, geraet_host, stdin_befehl
+from heizungsbruecke import config, discovery, geraet_host, geraet_status, stdin_befehl
 from heizungsbruecke.host import EV_RAUM, RAUM_SECONDS, HaHost
 from heizungsbruecke.supervisor import SupervisorApi
+from smartheat_core import meldungen
 from smartheat_core.config_check import NichtPruefbar
 from smartheat_device import inventory, nachrichten, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Waiting
 from smartheat_device.geraet_host_basis import EV_RELOAD
 from smartheat_device.host import Anzeige
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, entitlement
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
 from smartheat_runtime.status import STATUS_ABGEMELDET
 from smartheat_runtime.worker import RegulationWorker
-
-
-class Supervisor:
-    """Grenze Supervisor-HTTP: host_info (Uhr) und die Discovery-Meldungen (gemeldet, in Reihenfolge)."""
-
-    def __init__(self, info=None, error=None):
-        self.info, self.error, self.calls = info or {"dt_synchronized": True}, error, 0
-        self.gemeldet: list[dict] = []
-
-    def host_info(self):
-        self.calls += 1
-        if self.error:
-            raise self.error
-        return self.info
-
-    def discovery_anmelden(self, config_):
-        self.gemeldet.append(dict(config_))
-        return f"uuid-{len(self.gemeldet)}"
-
-    def discovery_entfernen(self, uuid):
-        pass
-
-
-class Doc:
-    def __init__(self, dirty):
-        self.dirty = dirty
-
-
-class Device:
-    def __init__(self, konf=None, bed=None, dirty=False):
-        self.wuensche, self.aus, self.konf, self.bed, self.dirty = [], [], konf, bed, dirty
-        self.meldungen = []
-        self.documents = self
-
-    def wunsch(self, wert, *, herkunft, durch=None):
-        self.wuensche.append((wert, herkunft, durch))
-        return min(max(float(wert), 15.0), 25.0)
-
-    def soll_quelle_aus(self, aus, wirksam=None):
-        self.aus.append((aus, wirksam))
-
-    def konfiguration(self):
-        return self.konf
-
-    def bedienung(self):
-        return self.bed
-
-    def aktuell(self, art):
-        return Doc(self.dirty) if art == "bedienung" and self.bed is not None else None
-
-    def abo_status(self):
-        return "aktiv"
-
-    def meldung(self, key, text, *, offen, kritisch=True):
-        self.meldungen.append((key, text, offen, kritisch))
-
-
-def _paths(tmp_path, monkeypatch):
-    for name in ("RUNTIME_DIR", "ABGEMELDET_PATH", "AUFRAEUMEN_PATH", "ROOM_TARGET_PATH", "BACKUP_PATH",
-                 "RASTUNG_PATH"):
-        monkeypatch.setattr(config, name, tmp_path / getattr(config, name).name)
-
-
-def _host(tmp_path, monkeypatch, supervisor=None, device=None, ha=None):
-    _paths(tmp_path, monkeypatch)
-    clock = FakeClock()
-    host = geraet_host.HaDeviceHost(ha or FakeHa(), supervisor or Supervisor(), clock=clock,
-                                    wall=lambda: 1_800_000_000)
-    device = device or Device()
-    host.verbinden(device)
-    return host, device, clock
-
-
-def _register(host, tmp_path):
-    register = CommandRegister(tmp_path, lambda body: True)
-    host.befehle_eintragen(register)
-    return register
 
 
 def _warten(pruefen, schritte=200):
@@ -125,7 +51,8 @@ def test_host_identity():
 
 def test_capabilities_and_clock(tmp_path, monkeypatch):
     host, _, clock = _host(tmp_path, monkeypatch)
-    assert host.faehigkeiten() == {"drivers": [], "zigbee": False}  # kein updater: Updates macht der Supervisor
+    assert host.faehigkeiten() == {"drivers": [], "zigbee": False, "testphase": True,
+                                  "kaelteschutz": True}  # kein updater: Updates macht der Supervisor
     assert host.uhr_synchron() is True
     host, _, _ = _host(tmp_path, monkeypatch, Supervisor(error=OSError("weg")))
     assert host.uhr_synchron() is None
@@ -133,6 +60,18 @@ def test_capabilities_and_clock(tmp_path, monkeypatch):
     assert host.uhr_synchron() is None  # kein bool: unbekannt
     host, _, _ = _host(tmp_path, monkeypatch, Supervisor(info={"dt_synchronized": False}))
     assert host.uhr_synchron() is False
+
+
+def test_the_ha_host_reports_the_ways_of_its_write_platforms(tmp_path, monkeypatch):
+    """Jede Schreib-Plattform hat einen Weg; die Liste ist sortiert und ohne Doppelte (zwei Hebelsaetze teilen sich eine
+    Plattform)."""
+    from heizungsbruecke import dokument
+    host, _, _ = _host(tmp_path, monkeypatch)
+    assert set(dokument.SCHREIB_PLATTFORM.values()) <= set(geraet_host.WEG_JE_PLATTFORM)
+    assert host.wege() == ["vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
+    assert nachrichten.hello(konfiguration_version=1, bedienung_version=1, anzeige_version=0, software_version="1.0.0",
+                             host="ha", faehigkeiten=host.faehigkeiten(), wege=host.wege(), boot_id="b" * 16,
+                             uhr_synchron=True)["wege"] == host.wege()
 
 
 def test_capabilities_are_built_against_the_contract(tmp_path, monkeypatch):
@@ -150,6 +89,47 @@ def test_clock_is_cached_for_a_minute(tmp_path, monkeypatch):
     clock.advance(61)
     host.uhr_synchron()
     assert supervisor.calls == 2
+
+
+def test_hello_felder_come_from_the_supervisor_switch_and_the_integration(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    assert host.hello_felder() == {"auto_update": True, "integration_version": None}
+    host.integration_stand.ereignis({"schema": 1, "version": "0.4.2", "v5_schemas": [geraet_status.EVENT_SCHEMA]},
+                                    clock())
+    assert host.hello_felder() == {"auto_update": True, "integration_version": "0.4.2"}
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS + 1)
+    supervisor.auto_update = False
+    assert host.hello_felder()["auto_update"] is False
+    clock.advance(900)  # die Integration hat sich 900 s nicht gemeldet
+    assert host.hello_felder()["integration_version"] is None
+
+
+def test_the_auto_update_switch_is_cached_and_unknown_when_unreadable(tmp_path, monkeypatch, caplog):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    for _ in range(5):
+        host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 1
+    supervisor.auto_update = None
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS)
+    assert host.hello_felder()["auto_update"] is None
+    supervisor.auto_update, supervisor.auto_update_fehler = True, OSError("Bearer geheim")
+    clock.advance(geraet_host.AUTO_UPDATE_CACHE_SECONDS)
+    assert host.hello_felder()["auto_update"] is None
+    assert "OSError" in caplog.text and "geheim" not in caplog.text
+
+
+def test_the_auto_update_switch_is_read_at_most_once_a_minute(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, _, clock = _host(tmp_path, monkeypatch, supervisor)
+    host.hello_felder()
+    clock.advance(59)
+    host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 1
+    clock.advance(1)
+    host.hello_felder()
+    assert supervisor.auto_update_aufrufe == 2
 
 
 def test_clock_error_logs_only_the_kind(tmp_path, monkeypatch, caplog):
@@ -191,10 +171,16 @@ def test_software_is_ignored(tmp_path, monkeypatch):
     assert not any(tmp_path.iterdir())
 
 
+def test_the_updates_setting_is_ignored(tmp_path, monkeypatch):
+    host, _, _ = _host(tmp_path, monkeypatch)
+    host.updates_soll({"funktion": "aus", "sicherheit": "aus"})  # Updates kommen ueber Supervisor und Add-on-Store
+    assert not any(tmp_path.iterdir())
+
+
 def test_foreign_commands_are_not_supported(tmp_path, monkeypatch):
     host, _, _ = _host(tmp_path, monkeypatch)
     register = _register(host, tmp_path)
-    assert {"inventory", "sign_off", "diagnostics", "zigbee_permit_join", "zigbee_devices", "driver_login"} <= register.kinds
+    assert {"inventory", "sign_off", "diagnostics", "zigbee_permit_join", "zigbee_devices", "driver_login"} <= registrierte_befehle(register)
     for kind in ("zigbee_permit_join", "zigbee_devices", "driver_login"):
         outcome = register._handlers[kind]({"driver_id": "x"})
         assert outcome == Failed("nicht_unterstuetzt")
@@ -218,7 +204,7 @@ def test_inventory_runs_in_the_background(tmp_path, monkeypatch):
 
 
 def test_inventory_is_repeatable_after_a_restart(tmp_path, monkeypatch):
-    """L4-02 (a): Marker "gestartet" im Journal (Neustart fiel in die Erkennung): die erneute Zustellung fuehrt sie
+    """Marker "gestartet" im Journal (Neustart fiel in die Erkennung): die erneute Zustellung fuehrt sie
     noch einmal aus (kein "intern"), das Ergebnis geht erst nach dem PUBACK der Inventur; ein Duplikat danach laeuft
     nicht noch einmal."""
     ha = FakeHa()
@@ -230,7 +216,7 @@ def test_inventory_is_repeatable_after_a_restart(tmp_path, monkeypatch):
     register = CommandRegister(tmp_path, lambda body: sent.append(body) or True, clock=clock,
                                send_inventory=lambda command_id, daten: teile.append(daten) or [1])
     host.befehle_eintragen(register)
-    befehl = {"schema": 1, "command_id": "c1", "kind": "inventory",
+    befehl = {"schema": 2, "command_id": "c1", "kind": "inventory",
               "payload": {"stunden": 0, "filter": {"plattformen": ["mypyllant"]}},
               "expires_at": "2027-01-01T00:00:00+00:00"}
     register.empfangen(befehl)
@@ -312,7 +298,7 @@ def test_an_inventory_that_breaks_the_contract_ends_with_intern_and_no_values_in
     register = CommandRegister(tmp_path, lambda body: ergebnisse.append(body) or True, clock=clock)
     host.befehle_eintragen(register)
     try:
-        register.empfangen({"schema": 1, "command_id": "c1", "kind": "inventory",
+        register.empfangen({"schema": 2, "command_id": "c1", "kind": "inventory",
                             "expires_at": "2027-01-01T00:00:00+00:00",
                             "payload": {"stunden": 0, "filter": {"domaenen": ["climate"]}}})
 
@@ -365,16 +351,32 @@ def test_remembered_originals_are_handed_to_the_device_as_a_copy(tmp_path, monke
     assert host.ursprungswerte() == {"heat_limit": 16.0}
 
 
+def test_the_critical_minimum_version_goes_to_the_device_as_a_red_message_with_the_date(tmp_path, monkeypatch):
+    """Unter update_noetig geht die rote Meldung mit dem Datum der Ursprungswerte ueber den Geraetekern an den Server
+    (Portal, Push, Mail); beim Verlassen des Zustands wird sie zurueckgenommen."""
+    host, device, _ = _host(tmp_path, monkeypatch, device=Device(kritisch=True))
+    pfad = config.entitlement_path(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    entitlement.mark_inactive(pfad, datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=1))), kritisch=True)
+    anzeige = Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
+                      hinweise=(), meldungen=(), konfiguration_abgelehnt=None)
+    host.anzeigen(anzeige)
+    host.anzeigen(anzeige)
+    assert device.meldungen == [("update_noetig", meldungen.neu("meldung.update_noetig", ende="2026-01-31"), True)]
+    host.anzeigen(dataclasses.replace(anzeige, zustand="regelt"))
+    assert device.meldungen[1:] == [("update_noetig", None, False)]
+
+
 def test_portal_operation_reaches_the_worker(tmp_path, monkeypatch):
     host, _, clock = _host(tmp_path, monkeypatch)
     worker = RegulationWorker(clock)
     seen = []
     worker.register(EV_TARGET_INPUT, lambda event: seen.append(event.data))
-    host.bedienung_uebernommen({"raum_soll": 22.0})  # vor dem Binden: nachgestellt
+    host.bedienung_uebernommen(bedienung_inhalt(22.0))  # vor dem Binden: nachgestellt
     host.worker_binden(worker)
     worker.run_pending()
-    host.bedienung_uebernommen({"raum_soll": 22.5})
-    host.bedienung_uebernommen({"raum_soll": True})  # kein Wert
+    host.bedienung_uebernommen(bedienung_inhalt(22.5))
+    host.bedienung_uebernommen(bedienung_inhalt(True))  # kein Wert
     worker.run_pending()
     assert seen == [{"value": 22.0, "source": "portal"}, {"value": 22.5, "source": "portal"}]
 
@@ -382,15 +384,15 @@ def test_portal_operation_reaches_the_worker(tmp_path, monkeypatch):
 def test_in_the_idle_state_operations_do_not_reach_the_worker(tmp_path, monkeypatch, caplog):
     host, _, clock = _host(tmp_path, monkeypatch)
     worker = RegulationWorker(clock)
-    host.bedienung_uebernommen({"raum_soll": 22.0})
+    host.bedienung_uebernommen(bedienung_inhalt(22.0))
     host.worker_binden(worker, soll_eingang=False)
-    host.bedienung_uebernommen({"raum_soll": 22.5})
+    host.bedienung_uebernommen(bedienung_inhalt(22.5))
     worker.run_pending()
     assert "Kein Handler" not in caplog.text
 
 
 def test_configuration_change_requests_a_restart_and_empty_marks_cleanup(tmp_path, monkeypatch):
-    """Die Markierung schreibt konfiguration_vorbereiten (vor dem Speichern, Nr. 38), den Neustart fordert
+    """Die Markierung schreibt konfiguration_vorbereiten (vor dem Speichern), den Neustart fordert
     konfiguration_uebernommen an."""
     host, _, clock = _host(tmp_path, monkeypatch)
     alt = konfiguration_aus_optionen(OPTIONS)
@@ -409,7 +411,7 @@ def test_configuration_change_requests_a_restart_and_empty_marks_cleanup(tmp_pat
 
 
 def test_new_binding_parameters_restart_the_runtime(tmp_path, monkeypatch):
-    """Spec Stufe 3 S4b 4.3: Konfiguration ohne Parameter -> mit Parametern startet die Laufzeit neu; gleiche nicht."""
+    """Konfiguration ohne Parameter -> mit Parametern startet die Laufzeit neu; gleiche nicht."""
     host, _, _ = _host(tmp_path, monkeypatch)
     alt = {**konfiguration_aus_optionen(OPTIONS), "bindungsparameter": None}
     neu = konfiguration_aus_optionen(OPTIONS)
@@ -429,16 +431,16 @@ def test_an_irrelevant_configuration_change_keeps_running(tmp_path, monkeypatch)
 def test_wish_goes_to_the_device_with_origin(tmp_path, monkeypatch):
     host, device, _ = _host(tmp_path, monkeypatch)
     assert host.wunsch(30.0, "soll_entity", "nutzer") == 25.0
-    host.wunsch(22.5, herkunft="smartheat_entity")
+    host.wunsch(22.5, herkunft="ha")
     host.soll_quelle_aus(True, 21.0)
-    assert device.wuensche == [(30.0, "soll_entity", "nutzer"), (22.5, "smartheat_entity", None)]
+    assert device.wuensche == [(30.0, "soll_entity", "nutzer"), (22.5, "ha", None)]
     assert device.aus == [(True, 21.0)]
 
 
 def test_document_view_for_the_runtime(tmp_path, monkeypatch):
     konf = konfiguration_aus_optionen(OPTIONS)
-    host, _, _ = _host(tmp_path, monkeypatch, device=Device(konf, {"raum_soll": 21.0}, dirty=True))
-    assert host.konfiguration() == konf and host.bedienung() == ({"raum_soll": 21.0}, True)
+    host, _, _ = _host(tmp_path, monkeypatch, device=Device(konf, bedienung_inhalt(21.0), dirty=True))
+    assert host.konfiguration() == konf and host.bedienung() == (bedienung_inhalt(21.0), True)
     assert host.abo_status() == "aktiv"
     unverbunden = geraet_host.HaDeviceHost(FakeHa(), Supervisor())
     assert unverbunden.konfiguration() is None and unverbunden.bedienung() == (None, False)
@@ -452,9 +454,9 @@ def test_the_ha_check_is_skipped_against_the_accepted_configuration(tmp_path, mo
     ha.offline = True
     akzeptiert = konfiguration_aus_optionen(OPTIONS)
     host, _, _ = _host(tmp_path, monkeypatch, ha=ha, device=Device(akzeptiert))
-    assert host.treiber_pruefen({**akzeptiert, "abo": "inaktiv"}) is None
+    assert host.treiber_pruefen(konfiguration_aus_optionen({**OPTIONS, "abo": "inaktiv"})) is None
     with pytest.raises(NichtPruefbar):  # neue Bindung: HA-Teil noetig, HA aus -> spaeter erneut
-        host.treiber_pruefen({**akzeptiert, "raumfuehler": ["sensor.anderer"]})
+        host.treiber_pruefen(konfiguration_aus_optionen({**OPTIONS, "room_sensors": ["sensor.anderer"]}))
 
 
 def test_the_ha_check_gets_the_accepted_configuration(tmp_path, monkeypatch):
@@ -463,8 +465,8 @@ def test_the_ha_check_gets_the_accepted_configuration(tmp_path, monkeypatch):
     ha = FakeHa()
     akzeptiert = konfiguration_aus_optionen(OPTIONS)
     host, _, _ = _host(tmp_path, monkeypatch, ha=ha, device=Device(akzeptiert))
-    assert host.treiber_pruefen({**akzeptiert, "hebelsatz": "gibt_es_nicht"}) == {"feld": "hebelsatz",
-                                                                                   "regel": "unbekannt"}
+    unbekannt = konfiguration_aus_optionen({**OPTIONS, "lever_set": "gibt_es_nicht"})
+    assert host.treiber_pruefen(unbekannt) == {"feld": "hebelsatz", "regel": "unbekannt"}
     ha.offline = True
     assert host.treiber_pruefen(akzeptiert) is None  # unveraendert gegen die uebernommene: HA nicht noetig
     host.verbinden(Device(None))
@@ -475,7 +477,8 @@ def test_the_ha_check_gets_the_accepted_configuration(tmp_path, monkeypatch):
 def test_sign_off_marks_restarts_and_reports_the_restore_point(tmp_path, monkeypatch):
     konf = konfiguration_aus_optionen(OPTIONS)
     host, _, clock = _host(tmp_path, monkeypatch, device=Device(konf))
-    config.BACKUP_PATH.write_text(json.dumps({"restore_point": {"curve": 1.1}}))
+    config.kreis_dir(1).mkdir(parents=True)
+    config.backup_path(1).write_text(json.dumps({"restore_point": {"curve": 1.1}}))
     register = _register(host, tmp_path)
     outcome = register._handlers["sign_off"]({})
     assert isinstance(outcome, Waiting) and host._neustart
@@ -496,7 +499,7 @@ def test_sign_off_ends_after_its_deadline_of_a_day(tmp_path, monkeypatch):
     ergebnisse = []
     register = CommandRegister(tmp_path, lambda body: ergebnisse.append(body) or True, clock=clock)
     host.befehle_eintragen(register)
-    register.empfangen({"schema": 1, "command_id": "c-abmelden", "kind": "sign_off", "payload": {},
+    register.empfangen({"schema": 2, "command_id": "c-abmelden", "kind": "sign_off", "payload": {},
                         "expires_at": "2027-01-15T09:00:00+00:00"})
     clock.advance(86_400)
     register.pruefen()
@@ -516,7 +519,7 @@ def test_sign_off_without_setup_fails(tmp_path, monkeypatch):
     assert outcome == Failed("nicht_eingerichtet")
 
 
-# --- Lokales Abmelden ueber den stdin-Befehl (L4-06 Variante C) ---
+# --- Lokales Abmelden ueber den stdin-Befehl ---
 
 EIGEN = "shg-aaaaaaaaaaaaaaaa"
 
@@ -531,11 +534,45 @@ def test_die_stdin_zeile_meldet_ab_und_startet_einmal_neu(tmp_path, monkeypatch)
     worker.register(EV_RELOAD, lambda event: reloads.append(event.kind))
     host.worker_binden(worker)
     zeile = f"entfernen {EIGEN}\n".encode()
-    stdin_befehl.lesen(io.BytesIO(zeile + zeile), EIGEN, host.lokal_abmelden)
+    stdin_befehl.lesen(io.BytesIO(zeile + zeile), EIGEN, host.lokal_abmelden, lambda: None, lambda: None)
     assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"]}
     assert stat.S_IMODE(config.ABGEMELDET_PATH.stat().st_mode) == 0o600
     worker.run_pending()
     assert reloads == [EV_RELOAD]
+
+
+def test_die_stdin_zeile_mit_freigeben_traegt_die_wahl_in_die_markierung(tmp_path, monkeypatch):
+    konf = konfiguration_aus_optionen(OPTIONS)
+    host, _, clock = _host(tmp_path, monkeypatch, device=Device(konf))
+    worker = RegulationWorker(clock)
+    reloads = []
+    worker.register(EV_RELOAD, lambda event: reloads.append(event.kind))
+    host.worker_binden(worker)
+    zeile = f"entfernen {EIGEN} freigeben\n".encode()
+    stdin_befehl.lesen(io.BytesIO(zeile), EIGEN, host.lokal_abmelden, lambda: None, host.lokal_freigeben)
+    assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"], "freigeben": True}
+    assert stat.S_IMODE(config.ABGEMELDET_PATH.stat().st_mode) == 0o600
+    worker.run_pending()
+    assert reloads == [EV_RELOAD]
+    assert host.entfernen_wahl() == "freigeben"
+
+
+def test_freigeben_nach_einfachem_abmelden_ergaenzt_die_wahl_ohne_neustart(tmp_path, monkeypatch, caplog):
+    konf = konfiguration_aus_optionen(OPTIONS)
+    host, _, _ = _host(tmp_path, monkeypatch, device=Device(konf))
+    host.lokal_abmelden()
+    host._neustart = False
+    with caplog.at_level(logging.INFO, logger=geraet_host.logger.name):
+        host.lokal_freigeben()
+    assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"], "freigeben": True}
+    assert not host._neustart
+    assert "schon abgemeldet" in caplog.text
+
+
+def test_freigeben_ohne_einrichtung_tut_nichts(tmp_path, monkeypatch):
+    host, _, _ = _host(tmp_path, monkeypatch, device=Device(None))
+    host.lokal_freigeben()
+    assert not config.ABGEMELDET_PATH.exists() and not host._neustart
 
 
 def test_lokal_abmelden_ohne_einrichtung_tut_nichts(tmp_path, monkeypatch, caplog):
@@ -640,7 +677,7 @@ class _KaputteDiscovery:
 
 
 def test_display_reports_to_the_discovery_with_the_code_only_while_it_may_be_shown(tmp_path, monkeypatch):
-    """Spec 5c 1.1/F1: Code nur, solange das Geraet nicht uebernommen ist (Anzeige.code_zeigen); die echte Discovery
+    """Code nur, solange das Geraet nicht uebernommen ist (Anzeige.code_zeigen); die echte Discovery
     meldet an den Supervisor (Grenze)."""
     supervisor = Supervisor()
     host, device, clock = _host(tmp_path, monkeypatch, supervisor)
@@ -648,7 +685,7 @@ def test_display_reports_to_the_discovery_with_the_code_only_while_it_may_be_sho
     host.anzeigen(Anzeige("startet", False, "nicht_uebernommen", False, (), (), None))  # ohne Discovery: nichts
     assert supervisor.gemeldet == []
     host.discovery = discovery.Discovery(supervisor, tmp_path / "discovery.json", clock=clock)
-    host.claim_code = lambda: "ABCDEFGHIJKL"
+    host.claim_code = lambda: "ABCDEFGHIJKLMNOP"
     host.anzeigen(Anzeige("startet", True, "nicht_uebernommen", False, (), (), None))  # startet: noch kein Code
     host.anzeigen(Anzeige("nicht_uebernommen", True, "nicht_uebernommen", False, (), (), None))
     host.anzeigen(Anzeige("wartet_auf_einrichtung", True, "uebernommen", False, (), (), None))
@@ -657,7 +694,7 @@ def test_display_reports_to_the_discovery_with_the_code_only_while_it_may_be_sho
     host.anzeigen(Anzeige("gesperrt", False, "nicht_uebernommen", False, (), (), None))
     assert supervisor.gemeldet == [
         {"geraet_id": "shg-a", "zustand": "nicht_uebernommen"},
-        {"geraet_id": "shg-a", "zustand": "nicht_uebernommen", "claim_code": "ABCDEFGHIJKL"},
+        {"geraet_id": "shg-a", "zustand": "nicht_uebernommen", "claim_code": "ABCDEFGHIJKLMNOP"},
         {"geraet_id": "shg-a", "zustand": "uebernommen"},
         {"geraet_id": "shg-a", "zustand": "startet"},
         {"geraet_id": "shg-a", "zustand": "gesperrt"},
@@ -678,32 +715,45 @@ def test_runtime_status_and_room(tmp_path, monkeypatch):
     host, _, _ = _host(tmp_path, monkeypatch)
     assert host.runtime_status() is None and host.raum() is None
     host.runtime_status_event = {"status": "regelt"}
-    host.raum_merken({"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t"})
+    host.raum_merken(1, {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t"})
     assert host.runtime_status() == {"status": "regelt"} and host.raum()["ist"] == 20.0
+
+
+def test_der_raum_wird_je_kreis_gemerkt(tmp_path, monkeypatch):
+    host, _, _ = _host(tmp_path, monkeypatch)
+    host.raum_merken(1, {"ist": 20.0})
+    host.raum_merken(2, {"ist": 17.5})
+    assert host.raum(1)["ist"] == 20.0 and host.raum(2)["ist"] == 17.5 and host.raum(3) is None
+    host.raum_merken(2, None)
+    assert host.raum(2) is None and host.raum(1)["ist"] == 20.0
 
 
 def test_notify_sink_sends_to_the_given_services(tmp_path, monkeypatch):
     ha = FakeHa()
     host, _, _ = _host(tmp_path, monkeypatch, ha=ha)
-    host.notify_sink_fuer(["notify.mobile_app_handy"]).push("k", "Hallo")
-    assert ha.pushes == ["Hallo"]
+    meldung = meldungen.neu("meldung.notbetrieb_ok")
+    host.notify_sink_fuer(["notify.mobile_app_handy"]).push("k", meldung)
+    assert ha.pushes == [meldungen.text(meldung)]
 
 
 def test_runtime_messages_go_to_ha_and_to_the_device_core(tmp_path, monkeypatch):
-    """Spec 5c 3 (Portal zeigt HA-Geraete wie Gateways, mit Hinweisen): Meldungen der Laufzeit gehen wie beim Gateway
+    """Portal zeigt HA-Geraete wie Gateways, mit Hinweisen: Meldungen der Laufzeit gehen wie beim Gateway
     (MeldungSink) als up/notifications an den Geraetekern und weiter an HA (Push, persistent_notification)."""
     ha = FakeHa()
     host, device, _ = _host(tmp_path, monkeypatch, ha=ha)
     sink = host.notify_sink_fuer(["notify.mobile_app_handy"])
-    sink.show("notbetrieb", "Notbetrieb aktiv")
-    sink.push("notbetrieb", "Notbetrieb aktiv")
-    sink.push("batterie:sensor.x", "Batterie schwach")
+    notbetrieb = meldungen.neu("meldung.notbetrieb")
+    batterie = meldungen.neu("meldung.batterie_schwach", bezeichnung="Bad")
+    text_notbetrieb, text_batterie = meldungen.text(notbetrieb), meldungen.text(batterie)
+    sink.show("notbetrieb", notbetrieb)
+    sink.push("notbetrieb", notbetrieb)
+    sink.push("batterie:sensor.x", batterie)
     sink.withdraw("notbetrieb")
     assert device.meldungen == [
-        ("notbetrieb", "Notbetrieb aktiv", True, True), ("notbetrieb", "Notbetrieb aktiv", True, True),
-        ("batterie:sensor.x", "Batterie schwach", False, False), ("notbetrieb", "Notbetrieb aktiv", False, True)]
-    assert ha.pushes == ["Notbetrieb aktiv", "Batterie schwach"]
-    assert ha.persistent == [("smartheat_notbetrieb", "Notbetrieb aktiv")]
+        ("notbetrieb", notbetrieb, True), ("notbetrieb", notbetrieb, True),
+        ("batterie:sensor.x", batterie, False), ("notbetrieb", notbetrieb, False)]
+    assert ha.pushes == [text_notbetrieb, text_batterie]
+    assert ha.persistent == [("smartheat_notbetrieb", text_notbetrieb)]
     assert ha.dismissed == ["smartheat_notbetrieb"]
 
 
@@ -717,12 +767,12 @@ def test_a_failing_ha_notification_still_reaches_the_device_core(tmp_path, monke
 
     host, device, _ = _host(tmp_path, monkeypatch, ha=_HaDown())
     sink = host.notify_sink_fuer([])
+    budget = meldungen.neu("meldung.schreibbudget", limit=50)
     with pytest.raises(ConnectionError):  # der Notifier faengt und loggt das (show/withdraw duerfen werfen)
-        sink.show("schreibbudget", "Budget erschoepft")
+        sink.show("schreibbudget", budget)
     with pytest.raises(ConnectionError):
         sink.withdraw("schreibbudget")
-    assert device.meldungen == [("schreibbudget", "Budget erschoepft", True, True),
-                                ("schreibbudget", "Budget erschoepft", False, True)]
+    assert device.meldungen == [("schreibbudget", budget, True), ("schreibbudget", budget, False)]
 
 
 def test_the_notifier_reports_a_critical_runtime_message_to_the_device_core(tmp_path, monkeypatch):
@@ -733,14 +783,15 @@ def test_the_notifier_reports_a_critical_runtime_message_to_the_device_core(tmp_
     host, device, _ = _host(tmp_path, monkeypatch, ha=ha)
     notifier = Notifier(StateStore(tmp_path / "backup.json", tmp_path / "failsafe.json"),
                         host.notify_sink_fuer(["notify.mobile_app_handy"]))
-    notifier.notify("notbetrieb", "aktiv", "Notbetrieb aktiv", critical=True)
-    notifier.notify("notbetrieb", "ok", "Notbetrieb beendet", critical=True)
+    an, aus = meldungen.neu("meldung.notbetrieb"), meldungen.neu("meldung.notbetrieb_ok")
+    notifier.notify("notbetrieb", "aktiv", an, critical=True)
+    notifier.notify("notbetrieb", "ok", aus, critical=True)
     # Regeln des Gateways (MeldungSink): der Geraetekern sendet je key nur den letzten Stand (Upsert), am Ende geschlossen
-    assert device.meldungen == [("notbetrieb", "Notbetrieb aktiv", False, False),  # Push vor der offenen Meldung
-                                ("notbetrieb", "Notbetrieb aktiv", True, True),
-                                ("notbetrieb", "Notbetrieb beendet", True, True),
-                                ("notbetrieb", "Notbetrieb aktiv", False, True)]
-    assert ha.persistent == [("smartheat_notbetrieb", "Notbetrieb aktiv")] and ha.dismissed == ["smartheat_notbetrieb"]
+    assert device.meldungen == [("notbetrieb", an, False),  # Push vor der offenen Meldung
+                                ("notbetrieb", an, True),
+                                ("notbetrieb", aus, True),
+                                ("notbetrieb", an, False)]
+    assert ha.persistent == [("smartheat_notbetrieb", meldungen.text(an))] and ha.dismissed == ["smartheat_notbetrieb"]
 
 
 # --- Raum fuer up/status (Controller-Entscheid 2) und Soll-Speicher mit dem echten Geraete-Host -------------------
@@ -758,7 +809,7 @@ def _laufzeit(env, *, bed=None, dirty=False, **overrides):
 
 
 def test_the_room_carries_actual_target_and_source(env):
-    geraet, host, worker, _ = _laufzeit(env, bed={"raum_soll": 21.0})
+    geraet, host, worker, _ = _laufzeit(env, bed=bedienung_inhalt(21.0))
     assert geraet.raum() is None  # erst der Worker veroeffentlicht
     worker.run_pending()
     raum = geraet.raum()
@@ -771,16 +822,16 @@ def test_the_room_carries_actual_target_and_source(env):
 
 
 def test_a_target_change_publishes_the_room_at_once(env):
-    geraet, host, worker, _ = _laufzeit(env, bed={"raum_soll": 21.0})
+    geraet, host, worker, _ = _laufzeit(env, bed=bedienung_inhalt(21.0))
     worker.run_pending()
-    geraet.bedienung_uebernommen({"raum_soll": 22.0})
+    geraet.bedienung_uebernommen(bedienung_inhalt(22.0))
     worker.run_pending()
     assert (geraet.raum()["soll"], geraet.raum()["soll_quelle"]) == (22.0, "portal")
     assert host.store.value == 22.0
 
 
 def test_an_unreadable_room_actual_is_none_and_the_tick_continues(env):
-    geraet, host, worker, _ = _laufzeit(env, bed={"raum_soll": 21.0})
+    geraet, host, worker, _ = _laufzeit(env, bed=bedienung_inhalt(21.0))
     env.ha.states["sensor.room_actual"] = ValueError("unavailable")
     worker.run_pending()
     assert geraet.raum()["ist"] is None and geraet.raum()["soll"] == 21.0
@@ -794,10 +845,10 @@ def test_an_unreadable_room_actual_is_none_and_the_tick_continues(env):
 def test_a_new_operation_during_operation_is_applied_and_written_to_the_entity(env):
     """Controller-Entscheid 3c: Bedienung -> Soll-Eingang (portal) -> Soll-Speicher und Soll-Entity, ohne Wunsch."""
     env.ha.states.update({"climate.wz": "heat", "climate.wz::temperature": 21.0})
-    geraet, host, worker, device = _laufzeit(env, bed={"raum_soll": 21.0}, entity_room_target="climate.wz::temperature")
+    geraet, host, worker, device = _laufzeit(env, bed=bedienung_inhalt(21.0), entity_room_target="climate.wz::temperature")
     worker.run_pending()
     assert env.ha.writes == []  # zeigt schon den Wert
-    geraet.bedienung_uebernommen({"raum_soll": 23.0})
+    geraet.bedienung_uebernommen(bedienung_inhalt(23.0))
     worker.run_pending()
     assert host.store.value == 23.0 and ("climate.wz::temperature", 23.0) in env.ha.writes
     assert host.store.echo_rest() > 0 and device.wuensche == []

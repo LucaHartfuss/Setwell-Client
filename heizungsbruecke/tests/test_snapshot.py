@@ -13,7 +13,7 @@ from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.snapshot import SnapshotRead, publish_snapshot, read_snapshot
 
 LEVERS = ("curve", "room_setpoint", "heat_limit")
-# Rollen der Manifest-Entities je Hebel (Add-on-Optionen unveraendert, P2-3).
+# Rollen der Manifest-Entities je Hebel (Add-on-Optionen unveraendert).
 LEVER_ENTITIES = {"curve": "sensor.curve_current", "room_setpoint": "sensor.shift_current",
                   "heat_limit": "sensor.heat_limit"}
 
@@ -107,7 +107,7 @@ def test_read_snapshot_skips_unmapped_levers_without_marking_them_invalid():
 
 
 def test_read_snapshot_never_sends_notifications():
-    # T2-13: Meldungen kommen nur noch aus der Zustellung (einmal pro Fehlerbeginn).
+    # Meldungen kommen nur noch aus der Zustellung (einmal pro Fehlerbeginn).
     ha_api = MagicMock(spec=HomeAssistantApi)
     ha_api.get_state.side_effect = ValueError("unavailable")
 
@@ -120,11 +120,11 @@ def test_read_snapshot_never_sends_notifications():
 def test_publish_snapshot_sends_one_schema_4_message():
     mqtt_client = MagicMock(spec=MqttChannel)
 
-    publish_snapshot(mqtt_client, seq="s1", trigger="daily", room_target=20.5, levers={"heat_limit": 4.0})
+    publish_snapshot(mqtt_client, seq="s1", trigger="daily", room_target=20.5, levers={"heat_limit": 4.0}, kreis=1)
 
     mqtt_client.publish_snapshot.assert_called_once()
     payload = mqtt_client.publish_snapshot.call_args.args[0]
-    assert payload["schema"] == 4
+    assert payload["schema"] == 5
     assert payload["seq"] == "s1"
     assert payload["trigger"] == "daily"
     assert payload["room_target"] == 20.5
@@ -136,9 +136,9 @@ def test_publish_snapshot_schema_4():
     fake_mqtt = MagicMock(spec=MqttChannel)
     publish_snapshot(fake_mqtt, seq="s", trigger="daily", room_target=20.5,
                      levers={"curve": 1.0, "room_setpoint": 17.5, "heat_limit": 16.0},
-                     manual_override={"levers": {"curve": 1.2}, "erkannt": "2026-10-03T09:00:00+02:00", "rollen": {}})
+                     manual_override={"levers": {"curve": 1.2}, "erkannt": "2026-10-03T09:00:00+02:00", "rollen": {}}, kreis=1)
     payload = fake_mqtt.publish_snapshot.call_args.args[0]
-    assert payload["schema"] == 4
+    assert payload["schema"] == 5
     assert (payload["room_target"], payload["readonly"]) == (20.5, [])
     assert payload["levers"] == {"curve": 1.0, "room_setpoint": 17.5, "heat_limit": 16.0}
     assert payload["manual_override"] == {"levers": {"curve": 1.2}, "erkannt": "2026-10-03T09:00:00+02:00"}
@@ -147,20 +147,20 @@ def test_publish_snapshot_schema_4():
 def test_snapshot_carries_a_manual_override_only_when_given():
     client = MagicMock(spec=MqttChannel)
 
-    publish_snapshot(client, seq="s", trigger="daily", room_target=20.0, levers={"heat_limit": 1.0})
+    publish_snapshot(client, seq="s", trigger="daily", room_target=20.0, levers={"heat_limit": 1.0}, kreis=1)
     assert "manual_override" not in client.publish_snapshot.call_args.args[0]
 
     publish_snapshot(
         client, seq="s", trigger="daily", room_target=20.0, levers={"heat_limit": 1.0},
         manual_override={"levers": {"curve": 1.3, "room_setpoint": 24.5}, "erkannt": "2026-10-01T08:00:00+02:00",
                          "fremd": 1},
-    )
+    kreis=1)
     assert client.publish_snapshot.call_args.args[0]["manual_override"] == {
         "levers": {"curve": 1.3, "room_setpoint": 24.5}, "erkannt": "2026-10-01T08:00:00+02:00",
     }
 
 
-# --- Hebel aus `known` (TP11: room_setpoint kommt von HaPlantBinding.read_or, nicht von einem Live-Read der
+# --- Hebel aus `known` (room_setpoint kommt von HaPlantBinding.read_or, nicht von einem Live-Read der
 # Zone) ---
 
 MANIFEST = ChannelManifest(refs={
@@ -193,7 +193,7 @@ def test_missing_known_lever_is_invalid():
     assert read.invalid == ("room_setpoint",)
 
 
-# --- Plan 3b: nur lesbare Hebel (Weishaupt-Basis) ---
+# --- Nur lesbare Hebel (Weishaupt-Basis) ---
 
 def _basis_manifest(**extra):
     return ChannelManifest(refs={
@@ -233,7 +233,7 @@ def test_an_unreadable_readonly_lever_is_left_out_without_a_data_fault(bad):
 
 def test_publish_snapshot_carries_readonly():
     mqtt = MagicMock(spec=MqttChannel)
-    publish_snapshot(mqtt, "s1", "daily", 21.0, {"room_setpoint": 20.0, "curve": 0.75}, readonly=("curve",))
+    publish_snapshot(mqtt, "s1", "daily", 21.0, {"room_setpoint": 20.0, "curve": 0.75}, readonly=("curve",), kreis=1)
     payload = mqtt.publish_snapshot.call_args.args[0]
     assert payload["readonly"] == ["curve"]
     assert payload["levers"] == {"room_setpoint": 20.0, "curve": 0.75}
@@ -247,7 +247,7 @@ def test_publish_snapshot_carries_readonly():
      "Nur lesbarer Hebel 'curve' (sensor.curve_current) nicht lesbar, wird weggelassen: "),
 ], ids=["rolle", "hebel", "nur_lesbar"])
 def test_a_read_error_text_from_ha_is_logged_only_escaped(caplog, entity, basis, zeile):
-    """T6-Rest, R-c: der Fehlertext beim Lesen aus HA (Rolle, Hebel, nur lesbarer Hebel) steht nur als Escape im Log."""
+    """Der Fehlertext beim Lesen aus HA (Rolle, Hebel, nur lesbarer Hebel) steht nur als Escape im Log."""
     ha_api = MagicMock(spec=HomeAssistantApi)
     ha_api.get_state.side_effect = _states_with({entity: RuntimeError(FREMDTEXT)})
     with caplog.at_level(logging.WARNING, logger="smartheat_runtime.snapshot"):
@@ -256,3 +256,11 @@ def test_a_read_error_text_from_ha_is_logged_only_escaped(caplog, entity, basis,
         else:
             _read(_all_roles_manifest(), ha_api)
     assert zeile + FREMDTEXT_IM_LOG in logzeilen(caplog)
+
+
+def test_der_snapshot_traegt_schema_5_und_den_kreis():
+    for kreis in (1, 2):
+        client = MagicMock(spec=MqttChannel)
+        publish_snapshot(client, seq="s", trigger="daily", room_target=20.0, levers={"heat_limit": 1.0}, kreis=kreis)
+        payload = client.publish_snapshot.call_args.args[0]
+        assert (payload["schema"], payload["kreis"]) == (5, kreis)

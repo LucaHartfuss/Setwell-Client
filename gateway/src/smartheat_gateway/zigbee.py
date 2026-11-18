@@ -1,18 +1,19 @@
-"""Zigbee-Spiegel (Spec SHG G2 5): letzte Werte der Geraete aus Zigbee2MQTT mit Zeitstempel der MONOTONEN Uhr (die
+"""Zigbee-Spiegel: letzte Werte der Geraete aus Zigbee2MQTT mit Zeitstempel der MONOTONEN Uhr (die
 Wanduhr des Pi springt beim Boot, Plan G2a Review Focus 1), Faehigkeiten aus bridge/devices (exposes), Schreiben ans
 Thermostat, Koppeln, erfolgreiche Interviews (bridge/event) fuer die Thermostat-Pflege. Friendly Name = IEEE-Adresse.
 Callbacks laufen im Bus-Thread; der Spiegel haelt nur Daten. Retained Geraetemeldungen (Broker-Replay nach einem
 Neustart der Laufzeit) gelten nur, wenn sie das `last_seen` von Zigbee2MQTT (ISO 8601 mit Zeitzone) tragen und dessen
-Alter auf der Wanduhr zwischen 0 und max_age liegt (L4-17); sonst, auch bei einem `last_seen` in der Zukunft (Uhr
+Alter auf der Wanduhr zwischen 0 und max_age liegt; sonst, auch bei einem `last_seen` in der Zukunft (Uhr
 nach dem Boot noch nicht gestellt), gelten sie bis zur ersten Live-Meldung als veraltet. Retained Meldungen loesen nie
 Geraete-Hooks aus."""
+import contextlib
 import logging
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
+from smartheat_core.zeitquelle import echte_epoche
 from smartheat_gateway import topics
 from smartheat_gateway.bus import Bus, decode
 from smartheat_gateway.thermostat_profil import ThermostatPflege
@@ -35,7 +36,7 @@ class ZigbeeDevice:
     vendor: str
     faehigkeiten: frozenset[str]
     art: str  # fuehler | thermostat | sonstig
-    #: Definition mit exposes und abgeschlossenes Interview; sonst ist die Art nur geraten (A6-02).
+    #: Definition mit exposes und abgeschlossenes Interview; sonst ist die Art nur geraten.
     definiert: bool = False
 
 
@@ -74,7 +75,7 @@ def _art(faehigkeiten: frozenset[str]) -> str:
 
 class ZigbeeMirror:
     def __init__(self, bus: Bus, clock: Callable[[], float], max_age: float = DEFAULT_MAX_AGE_SECONDS,
-                 wall: Callable[[], float] = time.time) -> None:
+                 wall: Callable[[], float] = echte_epoche) -> None:
         self._bus = bus
         self._clock = clock
         self._wall = wall
@@ -96,6 +97,11 @@ class ZigbeeMirror:
 
     def on_device_message(self, hook: Callable[[str, dict], None]) -> None:
         self._hooks.append(hook)
+
+    def off_device_message(self, hook: Callable[[str, dict], None]) -> None:
+        """Meldet einen Haken ab (stop einer Trigger-Quelle); ein unbekannter Haken ist kein Fehler."""
+        with contextlib.suppress(ValueError):
+            self._hooks.remove(hook)
 
     def on_interview(self, hook: Callable[[str, str], None]) -> None:
         """hook(ieee, model) nach jedem erfolgreichen Interview (Koppeln, Neukoppeln)."""
@@ -155,13 +161,13 @@ class ZigbeeMirror:
         elif parts[1:] == ["bridge", "event"] and not retain:
             self._on_bridge_event(body)
         elif len(parts) == 2 and parts[1] != "bridge" and isinstance(body, dict):
-            # Retained Meldungen (Broker-Replay beim Verbinden) sind beliebig alt: nur mit frischem last_seen stempeln
-            # (L4-17), sonst gespeichert, aber nicht frisch; keine Geraete-Hooks (Plan G2b-1 Praezisierung 13).
+            # Retained Meldungen (Broker-Replay beim Verbinden) sind beliebig alt: nur mit frischem last_seen stempeln,
+            # sonst gespeichert, aber nicht frisch; keine Geraete-Hooks.
             with self._lock:
                 self._payloads[parts[1]] = (body, self._retained_stamp(body) if retain else self._clock())
             if retain:
                 return
-            for hook in self._hooks:
+            for hook in tuple(self._hooks):  # ein Haken darf sich beim Aufruf abmelden
                 hook(parts[1], body)
 
     def _retained_stamp(self, body: dict) -> float | None:

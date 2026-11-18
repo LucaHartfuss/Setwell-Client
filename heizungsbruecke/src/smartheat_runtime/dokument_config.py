@@ -1,33 +1,36 @@
-"""Laufzeit aus dem Konfigurationsdokument (Spec 5b 5.2, Plan D1): sobald ein Host smartheat_device nutzt (Gateway ab
+"""Laufzeit aus dem Konfigurationsdokument: sobald ein Host smartheat_device nutzt (Gateway ab
 0.6.0, HA-Add-on ab 5c), liest die Laufzeit Anlage, Hebelsatz, Verteilsystem, Raumfuehler, Tagestick und Abo aus dem
-Konfigurationsdokument statt aus Optionen; kurze Intervalle gibt es nur fuer die E2E aus der Umgebung
-(SMARTHEAT_E2E_INTERVALLE, Stufe 3 S8a-1 P2). Transport und Zugang haelt der Geraetekern (eine
-MQTT-Verbindung), der Abo-Status steht im Dokument (Plan S1, Praezisierung abo; die 30-Tage-Frist bleibt lokal).
-Die Anlage bindet den lokalen Zustand (A4-08) ueber tenant_id: eine andere Anlage beginnt mit leerem Zustand, eine
+Konfigurationsdokument statt aus Optionen (je Kreis: die Funktionen nehmen die Nummer des Kreises, ohne Nummer gilt
+der erste Kreis; jeder Kreis des Dokuments hat seine eigene Laufzeit); kurze Intervalle gibt es nur fuer die E2E aus der Umgebung
+(SMARTHEAT_E2E_INTERVALLE). Transport und Zugang haelt der Geraetekern (eine
+MQTT-Verbindung), der Abo-Status steht im Dokument (die 30-Tage-Frist bleibt lokal).
+Die Anlage bindet den lokalen Zustand ueber tenant_id: eine andere Anlage beginnt mit leerem Zustand, eine
 neue Konfiguration derselben Anlage nicht. Feldnamen = smartheat_device.wire.KONFIGURATION_FIELDS (die Laufzeit
 importiert den Geraetekern nicht; ein Test haelt beide gleich). Die Bindung (Treiber, Thermostat) liest der Host.
-Dazu ConfigError, Bindungsbeschreibung und Sicherheitswerte (bis Stufe 3 S5 in options.py)."""
+Dazu ConfigError, Bindungsbeschreibung und Sicherheitswerte."""
 import json
 import logging
 import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from smartheat_core import config_check, dateien, rastung
+from smartheat_core import config_check, dateien, kreisansicht, rastung
 from smartheat_core.binding import BindingDescription
+from smartheat_core.bindungsparameter import FELDER as _PARAMETER_FELDER
+from smartheat_core.bindungsparameter import Fehler
 from smartheat_core.bindungsparameter import beschreibung as _beschreibung
 from smartheat_core.levers import LEVER_SETS
-from smartheat_core.safety import LocalSafety, resolve_local_safety
+from smartheat_core.safety import LOCAL_SAFETY, LocalSafety, resolve_local_safety
 from smartheat_runtime import entitlement
+from smartheat_runtime.plan_quelle import PlanEingabe
 from smartheat_runtime.runtime_config import BootInfo, RuntimeConfig
 from smartheat_runtime.windows import validate_daily_trigger_time
 
-FELDER = ("anlage", "profil", "hebelsatz", "verteilsystem", "bindung", "raumfuehler", "tagestick", "abo",
-          "bindungsparameter")
-#: Aendert sich eines davon, startet der Host die Laufzeit neu (software, mindest_software und profil nicht). Die
-#: Bindungsparameter (Spec Stufe 3 S4b) gehoeren dazu: Schritte, Toleranzen, Wartezeit und Schreibschutz kommen nur von dort.
-LAUFZEIT_FELDER = ("anlage", "hebelsatz", "verteilsystem", "bindung", "raumfuehler", "tagestick", "abo",
-                   "bindungsparameter")
+FELDER = ("anlage", "anlage_name", "weg", "kreise", "tagestick", "bindungsparameter")
+#: Aendert sich eines davon, startet der Host die Laufzeit neu (software, mindest_software und Anlagenname nicht).
+#: Die Kreise gehoeren dazu (Bindung, Raeume, Hebelsatz, Verteilsystem, Abo), aber ohne die gespiegelten
+#: Ursprungswerte; die Bindungsparameter auch: Schritte, Toleranzen, Wartezeit und Schreibschutz kommen nur von dort.
+LAUFZEIT_FELDER = ("anlage", "weg", "kreise", "tagestick", "bindungsparameter")
 ABO = {"aktiv": entitlement.ACTIVE, "inaktiv": entitlement.INACTIVE}
 # Lokale Checks laufen eventgetrieben; dieser Takt gilt nur noch fuer den Watchdog-Fallback
 # bei getrennter WS-Verbindung (und fuer grace_check/health).
@@ -45,29 +48,58 @@ class ConfigError(ValueError):
     app.CONFIG_RECHECK_SECONDS). Die Meldung nennt das fehlende oder ungueltige Feld."""
 
 
-def _hebelsatz(konfiguration) -> str:
-    hebelsatz = konfiguration.get("hebelsatz") if isinstance(konfiguration, Mapping) else None
+class ConfigFormError(ConfigError):
+    """Die Konfiguration nennt etwas, das diese Software nicht lesen kann (unbekannter Hebelsatz, Weg oder Zaehlerart,
+    unbekanntes Verteilsystem, fehlende oder andere Felder der Bindungsparameter, fehlende Pflichtzuordnungen): eine
+    neue Software kann sie lesen, nach einem Softwarewechsel wartet die Meldung darauf
+    (app.StartFailure.konfigurationsform). Ein Verstoss gegen eine lokale Grenze ist kein Formgrund und meldet sofort,
+    denn keine neue Software lockert sie: Rastung, lokale Sicherheitswerte, Werte der Bindungsparameter ausserhalb
+    ihrer Grenzen (Schreibschutz, Wartezeit, Schrittweite, Mindestliste der Rueckstellung, erlaubte Schreibgruppen),
+    Positivliste und Entity-Art der Schreibziele sowie ungueltige Werte."""
+
+#: Regeln eines Verstosses gegen die Bindungsparameter (Fehler.details["regel"]), die eine neue Software lesen kann.
+_FORMGRUND_REGELN = ("fehlt", "unbekannt")
+
+
+def bindungsfehler(error: ValueError, parameter) -> ConfigError:
+    """Der Fehler der Bindungsparameter als Konfigurationsfehler: ConfigFormError, wenn nur eine neue Software ihn
+    beheben kann (fehlende Parameter, unbekannter Weg, Hebelsatz ohne Verfahren oder unbekannte Zaehlerart, andere
+    Felder als diese Software kennt), sonst ConfigError (Grenzen, die lokal gelten, und alles Unbekannte: sofort)."""
+    details = error.details if isinstance(error, Fehler) else {}
+    andere_felder = details.get("feld") == "bindungsparameter" and details.get("regel") == "ungueltig" and (
+        isinstance(parameter, Mapping) and set(parameter) != set(_PARAMETER_FELDER))
+    form = details.get("regel") in _FORMGRUND_REGELN or andere_felder
+    return (ConfigFormError if form else ConfigError)(f"Konfiguration: {error}")
+
+
+def _hebelsatz(konfiguration, kreis: int | None = None) -> str:
+    hebelsatz = kreisansicht.sicht(konfiguration, kreis).get("hebelsatz")
     if not isinstance(hebelsatz, str) or hebelsatz not in LEVER_SETS:
-        raise ConfigError(f"Hebelsatz {hebelsatz!r} ist unbekannt – {RECONFIGURE_HINT}")
+        raise ConfigFormError(f"Hebelsatz {hebelsatz!r} ist unbekannt – {RECONFIGURE_HINT}")
     return hebelsatz
 
 
-def beschreibung(konfiguration) -> BindingDescription:
-    """Wirksame Binding-Beschreibung aus Hebelsatz und Bindungsparametern (Spec Stufe 3 S4b); keine Ersatztabelle."""
-    hebelsatz = _hebelsatz(konfiguration)
+def beschreibung(konfiguration, kreis: int | None = None) -> BindingDescription:
+    """Wirksame Binding-Beschreibung des Kreises aus Hebelsatz und Bindungsparametern; keine Ersatztabelle."""
+    hebelsatz = _hebelsatz(konfiguration, kreis)
+    sicht = kreisansicht.sicht(konfiguration, kreis)
     try:
-        return _beschreibung(hebelsatz, konfiguration.get("bindungsparameter"))
+        return _beschreibung(sicht.get("weg"), hebelsatz, sicht.get("bindungsparameter"))
     except ValueError as error:
-        raise ConfigError(f"Konfiguration: {error}") from None
+        raise bindungsfehler(error, sicht.get("bindungsparameter")) from None
 
 
-def sicherheit(konfiguration) -> LocalSafety:
-    """Lokale Sicherheitswerte fuer Hebelsatz und Verteilsystem (Regel 4)."""
-    hebelsatz = _hebelsatz(konfiguration)
+def sicherheit(konfiguration, kreis: int | None = None) -> LocalSafety:
+    """Lokale Sicherheitswerte des Kreises fuer Hebelsatz und Verteilsystem (Regel 4)."""
+    hebelsatz = _hebelsatz(konfiguration, kreis)
+    verteilsystem = kreisansicht.sicht(konfiguration, kreis).get("verteilsystem")
     try:
-        return resolve_local_safety(hebelsatz, konfiguration.get("verteilsystem"))
+        return resolve_local_safety(hebelsatz, verteilsystem)
     except ValueError as error:
-        raise ConfigError(f"Konfiguration: {error}") from None
+        # Ein Verteilsystem ohne Sicherheitswerte kann eine neue Software kennen; verletzen die Werte selbst die
+        # Invarianten, ist das ein Verstoss gegen Regel 4 und meldet sofort.
+        form = not isinstance(verteilsystem, str) or (hebelsatz, verteilsystem) not in LOCAL_SAFETY
+        raise (ConfigFormError if form else ConfigError)(f"Konfiguration: {error}") from None
 
 
 def eingerichtet(konfiguration) -> bool:
@@ -75,20 +107,24 @@ def eingerichtet(konfiguration) -> bool:
         konfiguration["anlage"])
 
 
-def ursprungswerte(konfiguration) -> dict:
-    """Feld ursprungswerte der Konfiguration (vom Server gespiegelt, Spec Stufe 3 S2 6.1); {} ohne gueltiges Feld."""
-    werte = konfiguration.get("ursprungswerte") if isinstance(konfiguration, Mapping) else None
+def ursprungswerte(konfiguration, kreis: int | None = None) -> dict:
+    """Feld ursprungswerte des Kreises (vom Server gespiegelt); {} ohne gueltiges Feld."""
+    werte = kreisansicht.sicht(konfiguration, kreis).get("ursprungswerte")
     return dict(werte) if isinstance(werte, Mapping) else {}
 
 
-def abo_status(konfiguration) -> str:
+def abo_status(konfiguration, kreis: int | None = None) -> str:
+    """Abo-Status des Kreises `kreis` (`kreise[n].abo`); ohne Nummer der des ersten Kreises. Ohne Einrichtung oder
+    ohne diesen Kreis unbekannt."""
     if not eingerichtet(konfiguration):
         return entitlement.UNKNOWN
-    return ABO.get(konfiguration.get("abo"), entitlement.UNKNOWN)
+    sicht = kreisansicht.erste(konfiguration) if kreis is None else kreisansicht.fuer(konfiguration, kreis)
+    abo = sicht.get("abo")
+    return ABO.get(abo, entitlement.UNKNOWN) if isinstance(abo, str) else entitlement.UNKNOWN
 
 
 def _e2e_intervalle() -> dict:
-    """Nur fuer die E2E (Plan S8a-1 P2; frueher das Dokumentfeld intervalle): JSON-Objekt mit pruefung_s/telemetrie_s
+    """Nur fuer die E2E (kein Dokumentfeld): JSON-Objekt mit pruefung_s/telemetrie_s
     in den Grenzen von config_check.INTERVALLE; sonst {} (Standardwerte), Log ohne Wert."""
     roh = os.environ.get(E2E_INTERVALLE_ENV)
     if not roh:
@@ -105,60 +141,133 @@ def _e2e_intervalle() -> dict:
     return werte
 
 
+def kreisnummer(konfiguration, kreis: int | None = None) -> int:
+    """Nummer des Heizkreises `kreis` (ohne Angabe des ersten) im Dokument; ohne brauchbaren Eintrag 1 (die BootInfo
+    wirft nie)."""
+    nummer = kreisansicht.sicht(konfiguration, kreis).get("kreis")
+    return nummer if isinstance(nummer, int) and not isinstance(nummer, bool) and nummer >= 1 else 1
+
+
 def boot_info(konfiguration, *, abgemeldet: bool, client_version: str, backup_path: Path,
-              failsafe_path: Path, aufraeumen_path: Path | None = None) -> BootInfo:
+              failsafe_path: Path, aufraeumen_path: Path | None = None,
+              alter_zustand: Path | None = None, anlage_budget_path: Path | None = None,
+              kreis: int | None = None, zustand_source: Callable[[], str] | None = None,
+              abgelehnt_source: Callable[[], bool] | None = None) -> BootInfo:
     """Wirft nie (wie die BootInfo der Hosts): ein unbekannter Hebelsatz faellt fuer das Statusereignis auf den
     Standard zurueck; runtime_config meldet ihn danach als Konfigurationsfehler."""
     intervalle = _e2e_intervalle()  # einmal je Aufruf lesen (und loggen)
     anlage = konfiguration["anlage"] if eingerichtet(konfiguration) else None
-    hebelsatz = konfiguration.get("hebelsatz") if isinstance(konfiguration, Mapping) else None
+    hebelsatz = kreisansicht.sicht(konfiguration, kreis).get("hebelsatz")
     lever_set = LEVER_SETS.get(hebelsatz) if isinstance(hebelsatz, str) else None
     lever_set = lever_set or LEVER_SETS[_STANDARD_HEBELSATZ]
     return BootInfo(
         configured=anlage is not None and not abgemeldet, signed_off=anlage is not None and abgemeldet,
         tenant_id=anlage, lever_set=lever_set, client_version=client_version, notify_hints_off=(),
         local_check_interval=intervalle.get("pruefung_s", DEFAULT_LOCAL_CHECK_INTERVAL_SECONDS),
-        backup_path=backup_path, failsafe_path=failsafe_path, aufraeumen_path=aufraeumen_path,
+        backup_path=backup_path, failsafe_path=failsafe_path, kreis=kreisnummer(konfiguration, kreis),
+        aufraeumen_path=aufraeumen_path, alter_zustand=alter_zustand, anlage_budget_path=anlage_budget_path,
+        kreise_der_anlage=max(1, len(kreisansicht.kreise(konfiguration))),
+        zustand_source=zustand_source or (lambda: kreisansicht.IN_BETRIEB),
+        konfiguration_abgelehnt=abgelehnt_source or (lambda: False),
     )
 
 
 def rastung_pruefen(konfiguration, rastung_pfad: Path) -> None:
-    """Zweite Linie (Spec Stufe 3 S3 3.3): die Laufzeit startet bzw. setzt nur zurueck, wenn die Konfiguration zur
+    """Zweite Linie: die Laufzeit startet bzw. setzt nur zurueck, wenn die Konfiguration zur
     Rastung passt; der Dokumentspeicher hat das schon geprueft, das hier deckt einen Fehler dort ab. Wirft ConfigError."""
-    if not rastung.passt(rastung.lesen(rastung_pfad), konfiguration if isinstance(konfiguration, Mapping) else {}):
-        raise ConfigError(f"Konfiguration: {rastung.TEXT}")
+    gelesen = rastung.lesen(rastung_pfad)
+    if not rastung.passt(gelesen, konfiguration):
+        raise ConfigError(f"Konfiguration: {rastung.text_zu(gelesen)}")
 
 
 def runtime_config(konfiguration, *, rastung_pfad: Path, entitlement_path: Path,
-                   abo_source: Callable[[], str]) -> RuntimeConfig:
-    """Wirft ConfigError (der Host macht daraus StartFailure); config_check hat das Dokument schon geprueft."""
+                   abo_source: Callable[[], str], kreis: int | None = None,
+                   zustand_source: Callable[[], str] | None = None,
+                   update_noetig_source: Callable[[], bool] | None = None,
+                   plan_source: Callable[[], PlanEingabe | None] | None = None) -> RuntimeConfig:
+    """Die Laufzeitkonfiguration des Kreises `kreis` (ohne Angabe des ersten). Wirft ConfigError (der Host macht daraus
+    StartFailure); config_check hat das Dokument schon geprueft."""
     if not eingerichtet(konfiguration):
         raise ConfigError("Das Gerät ist nicht eingerichtet")
+    nummern = [eintrag.get("kreis") for eintrag in kreisansicht.kreise(konfiguration)]
+    if not nummern:
+        raise ConfigError("Konfiguration: kein Heizkreis")
+    if kreis is not None and kreis not in nummern:
+        raise ConfigError(f"Konfiguration: Heizkreis {kreis} fehlt")
     rastung_pruefen(konfiguration, rastung_pfad)
-    hebelsatz = _hebelsatz(konfiguration)
-    safety = sicherheit(konfiguration)
+    hebelsatz = _hebelsatz(konfiguration, kreis)
+    safety = sicherheit(konfiguration, kreis)
     try:
         daily = validate_daily_trigger_time(konfiguration.get("tagestick"))
     except ValueError as error:
         raise ConfigError(f"Konfiguration: {error}") from None
-    sensors = konfiguration.get("raumfuehler")
-    if not isinstance(sensors, list) or not sensors or not all(isinstance(ref, str) for ref in sensors):
+    sensors = kreisansicht.sicht(konfiguration, kreis)["raumfuehler"]  # nur die Fuehler der Referenzraeume
+    if not sensors:
         raise ConfigError("Konfiguration: keine Raumfühler")
     intervalle = _e2e_intervalle()  # einmal je Aufruf lesen (und loggen)
     return RuntimeConfig(
-        tenant_id=konfiguration["anlage"], lever_set_id=hebelsatz,
+        tenant_id=konfiguration["anlage"], kreis=kreisnummer(konfiguration, kreis), lever_set_id=hebelsatz,
         local_safety=safety, daily_trigger_time=daily,
         local_check_interval=intervalle.get("pruefung_s", DEFAULT_LOCAL_CHECK_INTERVAL_SECONDS),
         telemetry_interval=intervalle.get("telemetrie_s", DEFAULT_TELEMETRY_INTERVAL_SECONDS),
         notify_hints_off=(), room_sensor_refs=tuple(sensors), battery_refs=(), entitlement_path=entitlement_path,
-        abo_source=abo_source,
+        abo_source=abo_source, referenzraeume=tuple(kreisansicht.referenz_versatz(konfiguration, kreis)),
+        zustand_source=zustand_source or (lambda: kreisansicht.IN_BETRIEB),
+        update_noetig_source=update_noetig_source or (lambda: False),
+        plan_source=plan_source or (lambda: None),
     )
 
 
 def laufzeit_relevant(alt, neu) -> bool:
     alt = alt if isinstance(alt, Mapping) else {}
     neu = neu if isinstance(neu, Mapping) else {}
-    return any(alt.get(key) != neu.get(key) for key in LAUFZEIT_FELDER)
+    return any(_laufzeit_wert(alt, key) != _laufzeit_wert(neu, key) for key in LAUFZEIT_FELDER)
+
+
+def laufzeit_relevant_anlage(alt, neu) -> bool:
+    """Aendert sich ein anlagenweites Laufzeitfeld (alles ausser `kreise`)? Das betrifft jeden Kreis zugleich."""
+    alt = alt if isinstance(alt, Mapping) else {}
+    neu = neu if isinstance(neu, Mapping) else {}
+    return any(alt.get(feld) != neu.get(feld) for feld in LAUFZEIT_FELDER if feld != "kreise")
+
+
+def laufzeit_relevant_kreis(alt, neu, kreis: int) -> bool:
+    """Wie `laufzeit_relevant`, aber nur fuer die Laufzeit des Kreises `kreis`: die anlagenweiten Felder und der Eintrag
+    dieses Kreises zaehlen, die Eintraege der anderen nicht. Ein Abo, das wieder `aktiv` ist, zaehlt nicht: der Kreis
+    nimmt es selbst auf (`abo_wiederaufnahme`), ohne dass der Host neu startet."""
+    alt = alt if isinstance(alt, Mapping) else {}
+    neu = neu if isinstance(neu, Mapping) else {}
+    if laufzeit_relevant_anlage(alt, neu):
+        return True
+    ohne_abo = abo_status(neu, kreis) == entitlement.ACTIVE
+    return _kreis_wert(alt, kreis, ohne_abo=ohne_abo) != _kreis_wert(neu, kreis, ohne_abo=ohne_abo)
+
+
+def _kreis_wert(konfiguration: Mapping, kreis: int, *, ohne_abo: bool):
+    """Eintrag des Kreises ohne Ursprungswerte und Zustand (und ohne Abo, wenn gewuenscht); None, wenn es ihn nicht
+    gibt."""
+    weg = ("ursprungswerte", "zustand", "abo") if ohne_abo else ("ursprungswerte", "zustand")
+    for eintrag in kreisansicht.kreise(konfiguration):
+        if eintrag.get("kreis") == kreis:
+            return {k: v for k, v in eintrag.items() if k not in weg}
+    return None
+
+
+def abo_wiederaufnahme(alt, neu, kreis: int) -> bool:
+    """Das Abo des Kreises war nicht aktiv und ist es jetzt: der Kreis verlaesst seinen Ruhezustand."""
+    return (eingerichtet(neu) and abo_status(neu, kreis) == entitlement.ACTIVE
+            and abo_status(alt, kreis) != entitlement.ACTIVE)
+
+
+def _laufzeit_wert(konfiguration: Mapping, feld: str):
+    """Wert eines Laufzeitfeldes; die Kreise ohne die gespiegelten Ursprungswerte (ihr Eintreffen startet nichts neu) und
+    ohne den Zustand (er wechselt ohne Neustart, die Laufzeit liest ihn bei jedem Check)."""
+    wert = konfiguration.get(feld)
+    if feld == "kreise" and isinstance(wert, list):
+        return [{k: v for k, v in kreis.items() if k not in ("ursprungswerte", "zustand")}
+                if isinstance(kreis, Mapping) else kreis
+                for kreis in wert]
+    return wert
 
 
 def abgemeldet(pfad: Path, konfiguration) -> bool:
@@ -168,18 +277,40 @@ def abgemeldet(pfad: Path, konfiguration) -> bool:
     return isinstance(marker, dict) and anlage is not None and marker.get("anlage") == anlage
 
 
-def abmelden(pfad: Path, anlage: str) -> bool:
-    """Markierung setzen (Modus 0600); True, wenn sie neu ist (dann startet die Laufzeit neu). Die Laufzeit
-    importiert den Geraetekern nicht, die atomaren Datei-Helfer stehen in smartheat_core.dateien."""
+def abmelden(pfad: Path, anlage: str, freigeben: bool = False) -> bool:
+    """Markierung setzen (Modus 0600); True, wenn sie neu ist (dann startet die Laufzeit neu). Mit freigeben traegt
+    sie zusaetzlich den Wunsch, das Geraet nach der Abmeldung aus dem Konto zu loesen; der Wunsch bleibt, bis er
+    zugestellt ist (entfernen_erledigt), und eine einfache Zeile nimmt ihn nicht zurueck. Die Laufzeit importiert den
+    Geraetekern nicht, die atomaren Datei-Helfer stehen in smartheat_core.dateien."""
     marker = dateien.lesen_json(pfad)
     if isinstance(marker, dict) and marker.get("anlage") == anlage:
+        if freigeben and marker.get("freigeben") is not True:
+            dateien.schreiben_json(pfad, {"anlage": anlage, "freigeben": True}, modus=dateien.PRIVAT)
+        return False
+    dateien.schreiben_json(pfad, {"anlage": anlage, "freigeben": True} if freigeben else {"anlage": anlage},
+                           modus=dateien.PRIVAT)
+    return True
+
+
+def entfernen_gewuenscht(pfad: Path, konfiguration) -> bool:
+    """Steht in der Abmelde-Markierung der aktuellen Anlage der Wunsch, das Geraet aus dem Konto zu loesen?"""
+    marker = dateien.lesen_json(pfad)
+    anlage = konfiguration.get("anlage") if isinstance(konfiguration, Mapping) else None
+    return (isinstance(marker, dict) and anlage is not None and marker.get("anlage") == anlage
+            and marker.get("freigeben") is True)
+
+
+def entfernen_erledigt(pfad: Path, anlage: str) -> bool:
+    """Wunsch nach der Zustellung loeschen, die Abmelde-Markierung bleibt. True, wenn ein Wunsch der Anlage stand."""
+    marker = dateien.lesen_json(pfad)
+    if not (isinstance(marker, dict) and marker.get("anlage") == anlage and marker.get("freigeben") is True):
         return False
     dateien.schreiben_json(pfad, {"anlage": anlage}, modus=dateien.PRIVAT)
     return True
 
 
 def abmeldung_aufheben(pfad: Path, anlage: str) -> bool:
-    """Neue, nicht leere Konfiguration derselben Anlage (Spec Testoffensive 12.7, 5b-D2-7): das Geraet folgt dem
+    """Neue, nicht leere Konfiguration derselben Anlage: das Geraet folgt dem
     Server, die Abmelde-Markierung verfaellt. True, wenn sie entfernt wurde; ein OSError laesst sie stehen (Warnung mit
     Fehlerart, ohne Pfad)."""
     marker = dateien.lesen_json(pfad)

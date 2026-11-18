@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import requests
 import websocket
@@ -6,8 +7,8 @@ import websocket
 from smartheat_runtime.ports import SignalUngueltig
 
 # Plattformen der Helfer, die derived_sensors per Config-Flow anlegt (und nur die darf
-# delete_helper loeschen).
-HELPER_PLATFORMS = ("statistics", "template")
+# delete_helper loeschen): nur Template-Sensoren.
+HELPER_PLATFORMS = ("template",)
 # `state` in GET /api/config, sobald HA fertig gestartet ist (homeassistant.core.CoreState).
 HA_STATE_RUNNING = "RUNNING"
 # (Verbindungs-, Lese-Timeout) fuer Anlagen-Schreibaufrufe: HA beantwortet einen REST-Service-
@@ -72,7 +73,7 @@ class HomeAssistantApi:
 
     def ws_command(self, command: dict):
         """Ein WebSocket-Kommando mit kurzlebiger Verbindung (wie _call_ws_command, oeffentlich fuer Inventur und
-        Pruefung, Spec 5c 1.3)."""
+        Pruefung)."""
         return self._call_ws_command(command)
 
     def entity_registry(self) -> list[dict]:
@@ -154,7 +155,7 @@ class HomeAssistantApi:
         response.raise_for_status()
 
     def set_climate_temperature(self, entity_id: str, value: float) -> None:
-        """Wunschtemperatur einer Climate-Entity (TP11: Parallelverschiebung = Zonen-Sollwert).
+        """Wunschtemperatur einer Climate-Entity (Parallelverschiebung = Zonen-Sollwert).
         Bei mypyllant im Modus "Manuell" dauerhaft (set_manual_mode_setpoint)."""
         response = requests.post(
             f"{self._base_url}{self._api_prefix}/services/climate/set_temperature",
@@ -174,7 +175,7 @@ class HomeAssistantApi:
         response.raise_for_status()
 
     def select_option(self, entity_id: str, option: str) -> None:
-        """Option einer select-Entity waehlen (Plan 3b, Weishaupt-Betriebsart)."""
+        """Option einer select-Entity waehlen (Weishaupt-Betriebsart)."""
         response = requests.post(
             f"{self._base_url}{self._api_prefix}/services/select/select_option",
             headers=self._headers,
@@ -184,7 +185,7 @@ class HomeAssistantApi:
         response.raise_for_status()
 
     def set_preset_mode(self, entity_id: str, preset: str) -> None:
-        """Preset einer Climate-Entity setzen (Plan 3b, Viessmann-Heizprogramm)."""
+        """Preset einer Climate-Entity setzen (Viessmann-Heizprogramm)."""
         response = requests.post(
             f"{self._base_url}{self._api_prefix}/services/climate/set_preset_mode",
             headers=self._headers,
@@ -194,7 +195,7 @@ class HomeAssistantApi:
         response.raise_for_status()
 
     def get_attribute(self, entity_id: str, attribute: str) -> str:
-        """Ein Attribut als Text (Plan 3b, z. B. preset_mode); ein fehlendes oder leeres Attribut wirft ValueError wie
+        """Ein Attribut als Text (z. B. preset_mode); ein fehlendes oder leeres Attribut wirft ValueError wie
         get_raw_state bei unavailable/unknown."""
         response = requests.get(
             f"{self._base_url}{self._api_prefix}/states/{entity_id}",
@@ -207,22 +208,20 @@ class HomeAssistantApi:
             raise ValueError(f"Entity {entity_id} hat kein Attribut {attribute!r}")
         return str(value)
 
-    def delete_input_number(self, entity_id: str) -> None:
-        """Loescht einen input_number-Helfer (TP11: Tag-/Nachtmittel entfallen). Nur input_number.*
-        mit dem Objekt-Teil-Praefix `smartheat_` (wie delete_helper() bei den Config-Entry-Helfern:
-        nie ein fremder Helfer), per WS-Kommando input_number/delete mit dem Objekt-Teil der Entity-ID."""
-        domain, _, object_id = entity_id.partition(".")
-        if domain != "input_number" or not object_id:
-            raise RuntimeError(f"'{entity_id}' ist kein input_number-Helfer, wird nicht geloescht")
-        if not object_id.startswith("smartheat_"):
-            raise RuntimeError(f"'{entity_id}' ist kein SmartHeat-Hilfssensor, wird nicht geloescht")
-        self._call_ws_command({"type": "input_number/delete", "input_number_id": object_id})
+    def get_attribute_roh(self, entity_id: str, attribute: str) -> Any:
+        """Ein Attribut unveraendert als JSON-Wert (Liste, Objekt, Text, Zahl); fehlt es, None."""
+        response = requests.get(
+            f"{self._base_url}{self._api_prefix}/states/{entity_id}",
+            headers=self._headers,
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json().get("attributes", {}).get(attribute)
 
     def create_template_sensor(self, name: str, template: str) -> str:
         """Legt einen Template-Sensor (Temperatur in °C) per Config-Entry-Flow `template` an:
         erst der Menue-Schritt `sensor`, dann das Formular mit Name, Template, Einheit,
-        Device- und State-Class. Die Entity-ID entsteht aus slugify(name), wie bei den
-        Statistik-Helfern. Gegen einen echten HA-Container verifiziert
+        Device- und State-Class. Die Entity-ID entsteht aus slugify(name). Gegen einen echten HA-Container verifiziert
         (tests/test_ha_api_real_ha_integration.py)."""
         fields = {
             "next_step_id": "sensor",
@@ -237,8 +236,7 @@ class HomeAssistantApi:
         return self._find_entity_by_config_entry(result["result"]["entry_id"])
 
     def delete_helper(self, entity_id: str, tenant_id: str | None = None) -> None:
-        """Loescht den Config-Entry eines per Config-Flow angelegten Helfers (Template- oder
-        Statistik-Sensor). input_number-Helfer loescht delete_input_number.
+        """Loescht den Config-Entry eines per Config-Flow angelegten Helfers (Template-Sensor).
 
         Nur Entities der Plattformen HELPER_PLATFORMS: die Entity-ID stammt aus
         derived_sensors.json. Ist die Datei kaputt, von einer anderen Installation oder die ID
@@ -246,7 +244,7 @@ class HomeAssistantApi:
         Integration (z.B. mypyllant) geloescht -- nicht rueckgaengig zu machen. Dann wirft es,
         ohne etwas zu loeschen. Zusaetzlich muss der Helfer als SmartHeat-eigen erkennbar sein:
         am Objekt-Teil-Praefix `smartheat_` oder -- bei einer von HA/dem Nutzer umbenannten
-        Entity-ID (B-TP11-1, TP12b) -- am Titel des Config-Entry `SmartHeat {tenant_id} ...`, den
+        Entity-ID -- am Titel des Config-Entry `SmartHeat {tenant_id} ...`, den
         das Add-on beim Anlegen vergibt und den HA beim Umbenennen der Entity nicht aendert."""
         object_id = entity_id.partition(".")[2]
         prefixed = object_id.startswith("smartheat_")
@@ -364,7 +362,7 @@ class HomeAssistantApi:
 
     def fire_event(self, event_type: str, data: dict) -> None:
         """Feuert ein Ereignis auf dem HA-Event-Bus (POST /api/events/<typ>): Status-Kanal zur
-        SmartHeat-Integration (Spec TP7 1.1). Wirft wie send_notification; abfangen ist Sache des
+        SmartHeat-Integration. Wirft wie send_notification; abfangen ist Sache des
         Aufrufers."""
         response = requests.post(
             f"{self._base_url}{self._api_prefix}/events/{event_type}",

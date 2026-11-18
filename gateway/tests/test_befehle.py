@@ -1,11 +1,16 @@
-"""Spec 5b 3.4 (Plan D2 Task 2): Befehle des Gateways im Befehlsregister des Geraetekerns. Einmal-Ausfuehrung und
+"""Befehle des Gateways im Befehlsregister des Geraetekerns. Einmal-Ausfuehrung und
 Gruende-Pruefung testet D1; hier die Handler und die Uebersetzung der Treiber-Fehler."""
+import errno
 import json
+import logging
 import math
+import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
+from befehle_sicht import registrierte_befehle
 from configs import SENSOR, THERMOSTAT, bedienung, dokumente_schreiben, konfiguration
 from fake_z2m import FakeZigbee2Mqtt
 from fakes import FakeBus, SofortHintergrund
@@ -14,6 +19,7 @@ from world import GatewayWorld
 from smartheat_core import dateien
 from smartheat_device import fehler, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Waiting
+from smartheat_device.hintergrund import HINTERGRUND_NAME
 from smartheat_gateway import befehle
 from smartheat_gateway.drivers.base import DriverError
 from smartheat_gateway.drivers.simulation import SimulationDriver
@@ -60,14 +66,14 @@ def register(ctx, tmp_path, clock):
 
 
 def _run(register, kind, payload, command_id="c1"):
-    register.empfangen({"schema": 1, "command_id": command_id, "kind": kind, "payload": payload,
+    register.empfangen({"schema": 2, "command_id": command_id, "kind": kind, "payload": payload,
                         "expires_at": "2027-01-01T00:00:00+00:00"})
     return register.sent[-1] if register.sent else None
 
 
 @pytest.mark.parametrize("kind", sorted(befehle.HANDLERS))
 def test_kein_handler_meldet_einen_text(ctx, register, kind):
-    """Spec Stufe 3 S5 8: jeder Fehler eines Gateway-Befehls traegt nur grund und details aus dem Vertrag."""
+    """Jeder Fehler eines Gateway-Befehls traegt nur grund und details aus dem Vertrag."""
     ctx.umgebung.konf = None  # nicht eingerichtet: inventory stunden >= 1 und sign_off scheitern
     nutzlasten = [{}, {"seconds": -1}, {"stunden": 0}, {"stunden": 1}, {"stunden": 0, "filter": {"treiber": "erfunden"}},
                   {"phase": "x"}, {"phase": "begin", "driver_id": "simulation"}]
@@ -99,7 +105,7 @@ def test_unbekannte_phase_und_fehlender_treiber_nennen_feld_und_regel(register):
 def test_the_gateway_registers_exactly_its_commands(register):
     assert set(befehle.HANDLERS) == {"zigbee_permit_join", "zigbee_devices", "driver_login",
                                      "inventory", "diagnostics", "sign_off"}
-    assert set(befehle.HANDLERS) <= set(wire.COMMANDS) and set(befehle.HANDLERS) <= register.kinds
+    assert set(befehle.HANDLERS) <= set(wire.COMMANDS) and set(befehle.HANDLERS) <= registrierte_befehle(register)
 
 
 def test_bad_payloads(register):
@@ -268,7 +274,7 @@ def test_erkennung_traegt_die_sicherheitswarnungen_je_anlage(ctx):
 def _login_nutzlast(phase="begin", **aenderung) -> dict:
     """Nutzlast des Befehls driver_login mit genau den Feldern der Phase (wire.DRIVER_LOGIN_PHASES)."""
     werte = {"driver_id": "simulation", "client_id": "c", "redirect_uri": "https://portal.test/cb", "scope": "s",
-             "code": "x", "ciphertext": "y"}
+             "code": "x"}
     return {"phase": phase, **{feld: werte[feld] for feld in wire.DRIVER_LOGIN_PHASES[phase] if feld != "phase"},
             **aenderung}
 
@@ -331,7 +337,7 @@ def test_inventur_stunden_0_ist_die_erkennung_des_treibers(ctx):
 
 
 def test_inventory_ist_wiederholbar(ctx, tmp_path, clock):
-    """L4-02 (a): fiel ein Neustart in die Erkennung (Marker "gestartet" im Journal), laeuft sie bei der erneuten
+    """Fiel ein Neustart in die Erkennung (Marker "gestartet" im Journal), laeuft sie bei der erneuten
     Zustellung noch einmal und endet mit ok statt mit "intern"; die Inventur geht vor dem Ergebnis hinaus."""
     dateien.schreiben_json(tmp_path / "befehle" / "befehle.json", [["c1", None, None, None]], modus=dateien.PRIVAT)
     sent: list[dict] = []
@@ -340,7 +346,7 @@ def test_inventory_ist_wiederholbar(ctx, tmp_path, clock):
                           send_inventory=lambda command_id, daten: teile.append(daten) or [1],
                           uebersetzen=befehle.fehler_uebersetzen)
     befehle.eintragen(reg, ctx)
-    befehl = {"schema": 1, "command_id": "c1", "kind": "inventory",
+    befehl = {"schema": 2, "command_id": "c1", "kind": "inventory",
               "payload": {"stunden": 0, "filter": {"treiber": "simulation"}}, "expires_at": "2027-01-01T00:00:00+00:00"}
     reg.empfangen(befehl)
     assert len(teile) == 1 and teile[0]["treiber"] == "simulation" and sent == []  # Ergebnis erst nach dem PUBACK
@@ -430,9 +436,16 @@ def test_sign_off_marks_restarts_and_finishes_when_the_runtime_is_signed_off(ctx
     assert outcome.check() is None
     ctx.umgebung.status = {"status": "abgemeldet", "tenant_id": "andere", "grund": None}
     assert outcome.check() is None
-    dateien.schreiben_json(ctx.paths.backup, {"restore_point": {"curve": 1.1, "room_setpoint": 21.0}}, modus=dateien.LESBAR)
+    dateien.schreiben_json(ctx.paths.backup(1), {"restore_point": {"curve": 1.1, "room_setpoint": 21.0}}, modus=dateien.LESBAR)
     ctx.umgebung.status = {"status": "abgemeldet", "tenant_id": "test-tenant", "grund": None}
     assert outcome.check() == Done({"zurueckgesetzt": True, "werte": {"curve": 1.1, "room_setpoint": 21.0}})
+
+
+def test_sign_off_takes_over_an_abmeldung_that_a_werksreset_request_made(ctx):
+    """Der Server meldet ab, nachdem ein Werksreset die Anlage abgemeldet hat: ein verworfener Reset hebt sie nie auf."""
+    dateien.schreiben_json(ctx.paths.werksreset_abmeldung, {"seq": 1, "ts": "x", "anlage": "test-tenant"}, modus=dateien.PRIVAT)
+    befehle.sign_off(ctx, {})
+    assert not ctx.paths.werksreset_abmeldung.exists() and ctx.paths.abgemeldet.exists()
 
 
 def test_sign_off_after_the_restart_does_not_restart_again(ctx):
@@ -444,7 +457,7 @@ def test_sign_off_after_the_restart_does_not_restart_again(ctx):
 def test_sign_off_through_the_register_survives_the_restart_it_causes(ctx, tmp_path, clock):
     """Der Neustart gehoert zum Befehl: das Register stellt ihn nach dem Neustart erneut zu (D1: wiederholbar), die
     Markierung steht schon, es gibt keinen zweiten Neustart, und das Ergebnis geht hoch, sobald der Status abgemeldet ist."""
-    befehl = {"schema": 1, "command_id": "c1", "kind": "sign_off", "payload": {},
+    befehl = {"schema": 2, "command_id": "c1", "kind": "sign_off", "payload": {},
               "expires_at": "2027-01-01T00:00:00+00:00"}
     sent: list[dict] = []
 
@@ -467,7 +480,7 @@ def test_sign_off_through_the_register_survives_the_restart_it_causes(ctx, tmp_p
     assert sent == []
     ctx.umgebung.status = {"status": "abgemeldet", "tenant_id": "test-tenant", "grund": None}
     neustart.pruefen()
-    assert sent == [{"schema": 1, "command_id": "c1", "ok": True,
+    assert sent == [{"schema": 2, "command_id": "c1", "ok": True,
                      "result": {"zurueckgesetzt": True, "werte": {}}, "error": None}]
     neustart.empfangen(befehl)  # fertig: das gespeicherte Ergebnis, kein weiterer Lauf
     assert len(sent) == 2 and sent[1] == sent[0] and ctx.umgebung.restarts == [1]
@@ -590,13 +603,35 @@ def test_two_live_commands_for_the_same_series_sample_each_boundary_once(vicare_
     assert done[0].inventur["proben"] == done[1].inventur["proben"] and len(done[0].inventur["proben"]) == 3
 
 
+def test_forgetting_the_inventory_reports_whether_it_is_gone(tmp_path, monkeypatch, caplog):
+    """forget_inventory meldet Erfolg als True, ein Teil-Scheitern als False mit genau einer Fehlerzeile je Datei."""
+    paths = Paths(tmp_path)
+    paths.inventur.parent.mkdir(parents=True, exist_ok=True)
+    paths.inventur.write_text("{}")
+    assert befehle.forget_inventory(paths) is True and not paths.inventur.exists()
+    assert befehle.forget_inventory(paths) is True  # nichts da: auch Erfolg
+    paths.inventur.write_text("{}")
+    echt = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self == paths.inventur:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        echt(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with caplog.at_level(logging.INFO):
+        assert befehle.forget_inventory(paths) is False
+    assert paths.inventur.exists()
+    assert [r.levelno for r in caplog.records if "inventur.json" in r.getMessage()] == [logging.ERROR]
+
+
 def test_a_pending_inventory_does_not_recreate_its_series_after_the_setup_was_removed(vicare_kontext):
     ctx, server, clock = vicare_kontext
     outcome = befehle.inventory(ctx, {"stunden": 2})
     clock.advance(900)
     ctx.wall = lambda: 1_000_000 + clock()
     assert outcome.check() is None and len(json.loads(ctx.paths.inventur.read_text())["samples"]) == 1
-    befehle.forget_inventory(ctx.paths)  # Abmelden oder Neueinrichtung
+    assert befehle.forget_inventory(ctx.paths) is True  # Abmelden oder Neueinrichtung
     used = server_calls(server)
     clock.advance(900)
     ctx.wall = lambda: 1_000_000 + clock()
@@ -734,8 +769,8 @@ def test_an_inventory_whose_samples_are_all_rate_limited_reports_the_quota_at_th
     assert result.grund in wire.command_errors("inventory")
 
 
-# --- Blockierende Treiber-Aufrufe (Cloud-HTTP) laufen neben dem Geraete-Thread (Review D2, Important 1) ---
-# Bis 0.5.0 liefen Anmeldung, Probe und Inventur im Agenten-Prozess. Im Geraete-Thread wuerde ein Aufruf mit Token-
+# --- Blockierende Treiber-Aufrufe (Cloud-HTTP) laufen neben dem Geraete-Thread ---
+# Im Geraete-Thread wuerde ein Aufruf mit Token-
 # Erneuerung und 401-Wiederholung (bis 80 s) down/setpoints, Dokumente und hello aufhalten; die Laufzeit liefe nach
 # zwei Ack-Timeouts (je 30 s) in den Notbetrieb.
 
@@ -785,7 +820,7 @@ def _blockieren(monkeypatch, ziel: str, danach) -> tuple[threading.Event, thread
 
 
 def _befehl(world, command_id: str, kind: str, payload: dict) -> None:
-    world.server("down/command", {"schema": 1, "command_id": command_id, "kind": kind, "payload": payload,
+    world.server("down/command", {"schema": 2, "command_id": command_id, "kind": kind, "payload": payload,
                                   "expires_at": "2026-01-17T08:00:00+01:00"})
 
 
@@ -895,7 +930,7 @@ def test_the_background_thread_is_a_daemon_and_stop_cancels_queued_calls():
 
     erster = hintergrund.submit(erster_aufruf)
     zweiter = hintergrund.submit(lambda: "nie")
-    threads = [t for t in threading.enumerate() if t.name.startswith(befehle.HINTERGRUND_NAME)]
+    threads = [t for t in threading.enumerate() if t.name.startswith(HINTERGRUND_NAME)]
     assert threads and all(t.daemon for t in threads)  # haelt das Prozessende nie auf
     # Erst stoppen, wenn der erste Aufruf laeuft: sonst bricht stop() auch ihn als wartend ab (CI-Runner langsamer)
     assert gestartet.wait(2.0)

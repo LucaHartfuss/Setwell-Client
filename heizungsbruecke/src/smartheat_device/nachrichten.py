@@ -1,11 +1,13 @@
-"""Bausteine der Geraetenachrichten (Audit 5 A5-34; Spec Stufe 3 S8 Abschnitt 6; Plan S8a-1 P1): jede Nachricht des
+"""Bausteine der Geraetenachrichten: jede Nachricht des
 Geraets entsteht hier und hat genau die Felder des Vertrags (wire.py). Eine Abweichung ist ein Programmierfehler:
 Vertragsfehler (ein ValueError) mit Nachricht und Feldnamen, nie mit Werten (Regel 6); die Aufrufer im
 Geraete-Thread loggen nur die Fehlerart. tools/contract_check.py ruft dieselben Bausteine fuer die Round-Trips mit
 dem Server.
 
 Ausser den Feldmengen setzen die Bausteine nur Vertragsregeln durch, die ohne Wert pruefbar sind: host aus HOSTS,
-zustand aus ZUSTAENDE, die Felder von raum und faehigkeiten, die Groesse des CSR."""
+zustand aus ZUSTAENDE, stufe aus STUFEN, die Felder von kreise, raum und faehigkeiten, die Groesse des CSR."""
+import hashlib
+import re
 from collections.abc import Iterable
 
 from smartheat_device import wire
@@ -29,11 +31,38 @@ def _host(name: str, body: dict, feld: str = "host") -> None:
         raise Vertragsfehler(f"{name}: {feld} steht nicht in HOSTS")
 
 
+#: Felder des hello, die nur der Host ha sendet (Vertrag: wire.HELLO_OPTIONAL).
+HELLO_NUR_HA = ("auto_update", "integration_version")
+_INTEGRATION_VERSION = re.compile(r"[0-9A-Za-z.+-]{1,32}")  # die Form, die der Server annimmt
+
+
+def integration_version_gueltig(wert) -> bool:
+    """Versionstext in der Form, die der Server annimmt."""
+    return isinstance(wert, str) and _INTEGRATION_VERSION.fullmatch(wert) is not None
+
+
 def _faehigkeiten(name: str, wert) -> dict:
     """hello.faehigkeiten und register.capabilities: genau drivers und zigbee, dazu optional updater und programm."""
     if not isinstance(wert, dict):
         raise Vertragsfehler(f"{name}: kein Objekt")
     return pruefen(name, wert, wire.CAPABILITY_FIELDS, wire.CAPABILITY_OPTIONAL)
+
+
+def _kreisnummern(name: str, eintraege, felder: tuple[str, ...]) -> list[dict]:
+    """Eine Liste von Eintraegen mit genau `felder`, deren `kreis` ganze Zahlen von KREIS_MIN bis KREIS_MAX sind,
+    aufsteigend und einmalig."""
+    if not isinstance(eintraege, list):
+        raise Vertragsfehler(f"{name}: keine Liste")
+    letzte = wire.KREIS_MIN - 1
+    for eintrag in eintraege:
+        if not isinstance(eintrag, dict):
+            raise Vertragsfehler(f"{name}: Eintrag ist kein Objekt")
+        pruefen(name, eintrag, felder)
+        nummer = eintrag["kreis"]
+        if isinstance(nummer, bool) or not isinstance(nummer, int) or not letzte < nummer <= wire.KREIS_MAX:
+            raise Vertragsfehler(f"{name}: kreis ist keine aufsteigende ganze Zahl von KREIS_MIN bis KREIS_MAX")
+        letzte = nummer
+    return eintraege
 
 
 def hello(*, device_state: str | None = None, **felder) -> dict:
@@ -42,27 +71,80 @@ def hello(*, device_state: str | None = None, **felder) -> dict:
         body["device_state"] = device_state
     pruefen("hello", body, wire.HELLO_FIELDS, wire.HELLO_OPTIONAL)
     _host("hello", body)
+    for feld in HELLO_NUR_HA:
+        if feld in body and body["host"] != "ha":
+            raise Vertragsfehler(f"hello.{feld}: nur der Host ha sendet das Feld")
+    if "auto_update" in body and body["auto_update"] is not None and not isinstance(body["auto_update"], bool):
+        raise Vertragsfehler("hello.auto_update: kein Wahrheitswert")
+    if body.get("integration_version") is not None and not integration_version_gueltig(body["integration_version"]):
+        raise Vertragsfehler("hello.integration_version: kein Versionstext")
     _faehigkeiten("hello.faehigkeiten", body["faehigkeiten"])
+    wege = body["wege"]
+    if not isinstance(wege, list) or not all(isinstance(weg, str) for weg in wege) or len(set(wege)) != len(wege):
+        raise Vertragsfehler("hello.wege: keine Liste verschiedener Texte")
     return body
 
 
-def status(*, zustand: str, runtime_status, raum, ts: str, ursprungswerte: dict | None = None) -> dict:
-    body = {"schema": wire.SCHEMA, "zustand": zustand, "runtime_status": runtime_status, "raum": raum, "ts": ts}
+def status(*, zustand: str, runtime_status, kreise: list[dict], ts: str, ursprungswerte: dict | None = None) -> dict:
+    body = {"schema": wire.SCHEMA, "zustand": zustand, "runtime_status": runtime_status, "kreise": kreise, "ts": ts}
     if ursprungswerte:
         body["ursprungswerte"] = ursprungswerte
     pruefen("status", body, wire.STATUS_FIELDS, wire.STATUS_OPTIONAL)
     if zustand not in wire.ZUSTAENDE:
         raise Vertragsfehler("status: zustand steht nicht in ZUSTAENDE")
-    if raum is not None:
-        if not isinstance(raum, dict):
-            raise Vertragsfehler("status.raum: kein Objekt")
-        pruefen("status.raum", raum, wire.RAUM_FIELDS)
+    for eintrag in _kreisnummern("status.kreise", kreise, wire.STATUS_KREIS_FIELDS):
+        raum = eintrag["raum"]
+        if raum is not None:
+            if not isinstance(raum, dict):
+                raise Vertragsfehler("status.kreise.raum: kein Objekt")
+            pruefen("status.kreise.raum", raum, wire.RAUM_FIELDS)
     return body
 
 
-def meldung(*, key: str, kategorie: str, kritisch: bool, text: str, offen: bool, ts: str) -> dict:
-    return pruefen("meldung", {"key": key, "kategorie": kategorie, "kritisch": kritisch, "text": text, "offen": offen,
-                               "ts": ts}, wire.NOTIFICATION_FIELDS)
+_KREISPRAEFIX = re.compile(r"kreis-([1-9][0-9]{0,3}):(.*)", re.DOTALL)
+_SCHLICHTER_KEY = re.compile(r"[a-z0-9_]{1,40}")
+_KATEGORIE = re.compile(r"[a-z0-9_]{1,29}")
+
+
+def draht_key(key: str) -> tuple[str, int | None]:
+    """Draht-Key und Kreis zu einem Schluessel des Geraets. Ein schlichter Schluessel bleibt, wie er ist; jeder andere
+    traegt Entity-, Raum- oder Anlagennamen oder einen Kreis und wird zu `<kategorie>:<Pruefsumme>` (Kategorie: der
+    Teil vor dem ersten Doppelpunkt, sofern er nur `[a-z0-9_]` enthaelt, sonst `meldung`). Die Pruefsumme laeuft
+    ueber den ganzen Schluessel samt Kreis, damit zwei Kreise zwei Draht-Keys ergeben; der Kreis geht als Feld."""
+    if _SCHLICHTER_KEY.fullmatch(key):
+        return key, None
+    treffer = _KREISPRAEFIX.fullmatch(key)
+    kreis, rest = (int(treffer.group(1)), treffer.group(2)) if treffer else (None, key)
+    kategorie = rest.split(":", 1)[0][:29]
+    if not _KATEGORIE.fullmatch(kategorie):
+        kategorie = "meldung"
+    pruefsumme = hashlib.sha256(key.encode("utf-8", errors="backslashreplace")).hexdigest()[:10]
+    return f"{kategorie}:{pruefsumme}", kreis
+
+
+def meldung(*, key: str, code: str | None, params: dict, stufe: str | None, offen: bool, ts: str,
+            kreis: int | None = None, quelle: str | None = None, roh: str | None = None) -> dict:
+    """Ein Eintrag von up/notifications: Code, Parameter und Stufe, nie ein Text. Schliesst das Geraet eine Meldung,
+    die es nicht mehr kennt, ist `code` None (nur mit offen False, params leer, stufe None)."""
+    body = {"key": key, "code": code, "params": params, "stufe": stufe, "offen": offen, "ts": ts}
+    for name, wert in (("kreis", kreis), ("quelle", quelle), ("roh", roh)):
+        if wert is not None:
+            body[name] = wert
+    pruefen("meldung", body, wire.NOTIFICATION_FIELDS, wire.NOTIFICATION_OPTIONAL)
+    if code is None:
+        if offen is not False or params != {} or stufe is not None:
+            raise Vertragsfehler("meldung: ohne code nur geschlossen, ohne params und ohne stufe")
+    elif stufe not in wire.STUFEN:
+        raise Vertragsfehler("meldung: stufe steht nicht in STUFEN")
+    return body
+
+
+def entfernt(*, wahl: str, ts: str) -> dict:
+    """up/entfernt: der Nutzer hat den Eintrag des Geraets entfernt und waehlt, ob es das Konto verlaesst."""
+    body = pruefen("entfernt", {"schema": wire.SCHEMA, "wahl": wahl, "ts": ts}, wire.ENTFERNT_FIELDS)
+    if wahl not in wire.ENTFERNT_WAHLEN:
+        raise Vertragsfehler("entfernt: wahl steht nicht in ENTFERNT_WAHLEN")
+    return body
 
 
 def notifications(items: list[dict]) -> dict:

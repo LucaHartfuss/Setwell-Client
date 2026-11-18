@@ -1,4 +1,4 @@
-"""Start der Laufzeit ohne eigene MQTT-Verbindung und ohne Abo-Abfrage (Phase 1 S1b, 5c-D-1): der Geraetekern haelt die
+"""Start der Laufzeit ohne eigene MQTT-Verbindung und ohne Abo-Abfrage: der Geraetekern haelt die
 Verbindung (mqtt_factory ist Pflicht), den Abo-Status liefert das Konfigurationsdokument (abo_source ist Pflicht)."""
 import dataclasses
 import inspect
@@ -23,8 +23,9 @@ def test_abo_status_kommt_nur_aus_dem_dokument():
 def test_runtime_config_hat_keine_altfelder():
     namen = {feld.name for feld in dataclasses.fields(RuntimeConfig)}
     assert namen == {
-        "tenant_id", "lever_set_id", "local_safety", "daily_trigger_time", "local_check_interval",
+        "tenant_id", "kreis", "lever_set_id", "local_safety", "daily_trigger_time", "local_check_interval",
         "telemetry_interval", "notify_hints_off", "room_sensor_refs", "battery_refs", "entitlement_path", "abo_source",
+        "referenzraeume", "zustand_source", "update_noetig_source", "plan_source",
     }
 
 

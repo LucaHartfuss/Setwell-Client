@@ -1,4 +1,4 @@
-"""Durchsetzung (TP11, Spec 5.3)."""
+"""Durchsetzung."""
 import dataclasses
 import logging
 from datetime import date, datetime
@@ -8,7 +8,7 @@ from bindung_beispiele import VAILLANT_MYPYLLANT
 from fakes import FREMDTEXT, FREMDTEXT_IM_LOG, FakeNotifySink, logzeilen, runtime_config
 
 from heizungsbruecke.ha_binding import HaPlantBinding
-from smartheat_core import enforce, wallclock, write_budget
+from smartheat_core import enforce, meldungen, wallclock, write_budget
 from smartheat_core.pipeline import LeverPipeline
 from smartheat_core.safety import LocalSafety
 from smartheat_core.zahlen import ist_endliche_zahl
@@ -31,7 +31,7 @@ ROWS = {"boost_active": (1.2, 24.0), "emergency_boost_active": (1.5, 25.0)}
 MANIFEST = ChannelManifest(refs={
     "curve_current": "number.curve", "shift_current": "climate.zone::temperature", "min_flow": "number.mf",
 })
-POINT = {"curve": 0.9, "room_setpoint": 21.0}
+POINT = {"curve": 0.9, "room_setpoint": 21.0, "min_flow": 20.5}
 TODAY = date(2026, 10, 3)
 _ECHTES_HEUTE = enforce._today  # vor der autouse-Fixture _fixed_day gemerkt
 
@@ -100,7 +100,7 @@ def _rt(make_store, clock, ha, uptime=SETTLE + 1, store=None, manifest=MANIFEST,
     vorhandenen StateStore (Neustart-Simulation: derselbe backup.json-Pfad, frisch eingelesen)
     statt den Wiederherstellungspunkt POINT (geaendert um `point`, None = fehlt) neu zu schreiben. `description`:
     Bindungsbeschreibung (Default Vaillant).
-    Echte Teile (A5-25): Notifier mit Fake-Sink (`rt.kunde`: was beim Kunden ankommt), Worker, Pipeline."""
+    Echte Teile: Notifier mit Fake-Sink (`rt.kunde`: was beim Kunden ankommt), Worker, Pipeline."""
     if store is None:
         restore_point = {lever: value for lever, value in {**POINT, **point}.items() if value is not None}
         store = make_store(backup={"restore_point": restore_point})
@@ -114,6 +114,7 @@ def _rt(make_store, clock, ha, uptime=SETTLE + 1, store=None, manifest=MANIFEST,
         override=override, notifier=Notifier(store, kunde), neustart=lambda: None, clock=clock,
     )
     rt.kunde = kunde  # type: ignore[attr-defined]  # nur Test: Sicht auf den Sink
+    rt.zone_prepared = True  # die Zone war schon vorbereitet; ohne das setzt die Durchsetzung die Betriebsart nicht durch
     return rt
 
 
@@ -135,7 +136,7 @@ def _curve_writes(rt):
     return [w for w in rt.signals.writes if w[0] == "number.curve"]
 
 
-# Kundentexte der Meldung `manueller_eingriff` (enforce.MESSAGE, LIMIT_MESSAGE) als Literal.
+# Kundentexte der Meldungen `manueller_eingriff` und `manueller_eingriff_limit` als Literal.
 def _meldung(was):
     return (f"SmartHeat: Die Heizungseinstellung wurde in der App verstellt ({was}) und zurückgesetzt. "
             "Einstellungen bitte nur über das Raumthermostat.")
@@ -187,6 +188,20 @@ def test_manual_curve_change_is_written_back_and_reported(make_store, clock):
     assert rt.kunde.pushes == [("manueller_eingriff", _meldung("Heizkurve"))]
 
 
+def test_the_reset_is_reported_as_a_code_with_the_lever_label(make_store, clock):
+    rt = _rt(make_store, clock, Ha(curve=1.3))
+    _rounds(rt)
+    assert rt.kunde.push_meldungen == [("manueller_eingriff", meldungen.neu("meldung.manueller_eingriff", was="Heizkurve"))]
+
+
+def test_the_limit_is_reported_as_a_code_with_the_lever_label(make_store, clock):
+    rt = _rt(make_store, clock, Ha(curve=1.3))
+    rt.store.update(write_budget={"enforce:curve": {"day": TODAY.isoformat(), "count": 6, "last": 0.0}})
+    _rounds(rt)
+    assert rt.kunde.push_meldungen == [
+        ("manueller_eingriff", meldungen.neu("meldung.manueller_eingriff_limit", was="Heizkurve"))]
+
+
 def test_heat_limit_changed_in_the_app_is_written_back_and_reported(make_store, clock):
     rt = _rt_g(make_store, clock, 16.0)
     _rounds(rt)
@@ -215,7 +230,7 @@ def test_zone_mode_is_restored_and_shift_rewritten(make_store, clock):
 
 
 def test_zone_mode_restore_switches_the_mode_exactly_once(make_store, clock):
-    # Ruling #3: write_levers schaltet die Zone selbst um, kein zweites set_hvac_mode davor.
+    # write_levers schaltet die Zone selbst um, kein zweites set_hvac_mode davor.
     # Zone und Wert verstellt, HA hinkt nach: Betriebsart und Parallelverschiebung sind EIN
     # Rueckschreiben (sonst schaltete der zweite Schreibvorgang auf dem veralteten "auto" erneut).
     rt = _rt(make_store, clock, Ha(mode="auto", shift=18.0, reflects_writes=False))
@@ -243,6 +258,55 @@ def test_min_flow_deviation_is_written_back(make_store, clock):
     rt = _rt(make_store, clock, Ha(min_flow=25.0))
     _rounds(rt)
     assert rt.signals.writes == [("number.mf", 20.5)]
+
+
+def test_a_zone_that_was_never_prepared_is_no_zone_mode_deviation(make_store, clock):
+    """Vor der ersten erfolgreichen Vorbereitung gehoert die Betriebsart dem Start und dem lokalen
+    Check (Kontingent `zone_prepare`); die Durchsetzung schaltet nicht um, zaehlt nicht und meldet nichts."""
+    rt = _rt(make_store, clock, Ha(mode="auto"))
+    rt.zone_prepared = False
+    _rounds(rt, 4)
+    assert rt.signals.writes == [] and rt.signals.attempts == []
+    assert rt.store.state.manual_override is None and _pushes(rt) == []
+    rt.zone_prepared = True  # Gegenprobe: nach der Vorbereitung wird dieselbe Abweichung durchgesetzt
+    _rounds(rt)
+    assert ("climate.zone", "heat_cool") in rt.signals.writes
+
+
+def test_a_zone_that_was_never_prepared_is_no_room_setpoint_deviation(make_store, clock):
+    """Auch der vorbereitete Hebel gehoert vor der ersten Vorbereitung dem Start. Die Zone im Zeitprogramm
+    liest ihr eigenes Soll (19,0), der Wiederherstellungspunkt hat 21,0: kein Eingriff, denn das Schreiben von
+    room_setpoint stellt die Zone selbst um (ensure_prepared), am Kontingent `zone_prepare` vorbei."""
+    rt = _rt(make_store, clock, Ha(mode="auto", shift=19.0))
+    rt.zone_prepared = False
+    _rounds(rt, 4)
+    assert rt.signals.writes == [] and rt.signals.attempts == []
+    assert rt.store.state.manual_override is None and _pushes(rt) == []
+    rt.zone_prepared = True  # Gegenprobe: nach der Vorbereitung wird die Umstellung ueber die Betriebsart durchgesetzt
+    _rounds(rt)
+    assert rt.signals.writes == [("climate.zone", "heat_cool"), ("climate.zone", 21.0)]
+
+
+def test_an_unprepared_zone_on_manual_still_enforces_room_setpoint(make_store, clock):
+    """Steht die Zone schon auf Manuell, ist room_setpoint auch ohne eigene Vorbereitung ein Eingriff wie jeder andere:
+    zurueckgeschrieben wird nur der Wert, die Betriebsart bleibt."""
+    rt = _rt(make_store, clock, Ha(mode="heat_cool", shift=19.0))
+    rt.zone_prepared = False
+    _rounds(rt)
+    assert rt.signals.writes == [("climate.zone", 21.0)]
+
+
+def test_an_intervention_ends_while_the_zone_is_unprepared_and_room_setpoint_holds(make_store, clock):
+    """Nur eine Abweichung an room_setpoint ist bei nie vorbereiteter Zone offen: weicht er nicht ab, endet ein
+    laufender Eingriff an einem anderen Hebel mit der Rueckkehr."""
+    rt = _rt(make_store, clock, Ha(curve=1.1, mode="auto"))
+    rt.zone_prepared = False
+    _rounds(rt)
+    assert ("number.curve", 0.9) in rt.signals.writes and rt.store.state.manual_override is not None
+    clock.advance(SETTLE + 1)
+    _rounds(rt)
+    assert rt.store.state.manual_override is None
+    assert ("climate.zone", "heat_cool") not in rt.signals.writes
 
 
 def test_zone_zero_is_no_deviation(make_store, clock):
@@ -303,7 +367,7 @@ def test_after_a_restart_enforcement_waits_for_the_settle_window(make_store, clo
 
 
 def test_enforcement_rate_limited_per_day(make_store, clock, monkeypatch):
-    # Review Focus 2: mypyllant uebernimmt das Rueckschreiben nicht -- hoechstens
+    # Mypyllant uebernimmt das Rueckschreiben nicht -- hoechstens
     # MAX_PER_DAY Schreibvorgaenge, genau eine Eingriffs- und eine Limit-Meldung.
     rt = _rt(make_store, clock, Ha(curve=1.3, reflects_writes=False))
     for _ in range(20):
@@ -351,7 +415,7 @@ def test_retry_interval_between_writes(make_store, clock):
 @pytest.mark.parametrize(("ago", "allowed"), [(enforce.RETRY_SECONDS - 1, False),
                                               (enforce.RETRY_SECONDS + 1, True)])
 def test_may_write_respects_the_retry_interval(make_store, clock, ago, allowed):
-    # Ruling #9: RETRY_SECONDS direkt pruefen (im Ablauf wird es von der Schonfrist verdeckt).
+    # RETRY_SECONDS direkt pruefen (im Ablauf wird es von der Schonfrist verdeckt).
     rt = _rt(make_store, clock, Ha())
     rt.store.update(write_budget={"enforce:curve": {"day": TODAY.isoformat(), "count": 1, "last": clock() - ago}})
     assert enforce._may_write(rt, "curve") is allowed
@@ -458,9 +522,9 @@ def test_partial_write_back_is_one_intervention(make_store, clock):
     assert ("climate.zone", 21.0) in ha.writes
     assert _message_pushes(rt) == [_meldung("Heizkurve")]
     pending = rt.store.state.manual_override_pending
-    assert pending["levers"] == {"curve": 1.3, "room_setpoint": 23.0}
+    assert pending["levers"] == {"curve": 1.3, "room_setpoint": 23.0, "min_flow": 20.5}
     assert pending is first  # derselbe Eingriff: KPI nicht neu geschrieben (kein erneutes Senden)
-    assert rt.store.state.manual_override["levers"] == {"curve": 1.3, "room_setpoint": 23.0}
+    assert rt.store.state.manual_override["levers"] == {"curve": 1.3, "room_setpoint": 23.0, "min_flow": 20.5}
 
 
 def test_pending_kpi_is_merged_not_replaced(make_store, clock):
@@ -474,7 +538,7 @@ def test_pending_kpi_is_merged_not_replaced(make_store, clock):
     clock.advance(SETTLE + 1)
     _rounds(rt)
     pending = rt.store.state.manual_override_pending
-    assert pending["levers"] == {"curve": 1.3, "room_setpoint": 23.0}
+    assert pending["levers"] == {"curve": 1.3, "room_setpoint": 23.0, "min_flow": 20.5}
 
 
 def test_detection_at_the_daily_limit_only_sends_the_limit_message(make_store, clock):
@@ -514,17 +578,18 @@ def test_curve_tolerance_is_half_a_plant_step(make_store, clock):
     assert rt.store.state.manual_override is None
 
 
-def test_without_room_target_the_min_flow_is_skipped_and_the_rest_enforced(make_store, clock):
-    """A5-24 (a): beim ersten Start ohne Raum-Soll liefert derived.expected None."""
+def test_the_min_flow_is_enforced_without_a_room_target_too(make_store, clock):
+    """Der Mindestvorlauf ist ein Serverwert: sein Soll steht im Wiederherstellungspunkt, das Raum-Soll des Geraets
+    spielt fuer die Durchsetzung keine Rolle."""
     ha = Ha(curve=1.3, min_flow=25.0)
     rt = _rt(make_store, clock, ha)
     rt.store.update(stable_target=None)
     _rounds(rt)
-    assert ("number.curve", 0.9) in ha.writes and not [w for w in ha.writes if w[0] == "number.mf"]
+    assert ("number.curve", 0.9) in ha.writes and ("number.mf", 20.5) in ha.writes
 
 
 def test_a_second_change_during_an_open_intervention_extends_it(make_store, clock):
-    """A5-24 (b): neuer Hebel waehrend eines noch nicht zurueckgekehrten Eingriffs -> neue Signatur, neue Meldung,
+    """Neuer Hebel waehrend eines noch nicht zurueckgekehrten Eingriffs -> neue Signatur, neue Meldung,
     KPI zusammengefuehrt."""
     ha = Ha(curve=1.2, reflects_writes=False)
     rt = _rt(make_store, clock, ha)
@@ -541,7 +606,7 @@ def test_a_second_change_during_an_open_intervention_extends_it(make_store, cloc
 
 
 def test_after_a_data_fault_detection_needs_two_rounds_again(make_store, clock):
-    """A5-24 (c)."""
+    """Nach einem Datenfehler braucht die Erkennung wieder zwei Runden."""
     ha = Ha(curve=1.3)
     rt = _rt(make_store, clock, ha)
     enforce.check_manual_override(rt)  # Runde 1 von 2
@@ -559,7 +624,7 @@ def test_after_a_data_fault_detection_needs_two_rounds_again(make_store, clock):
     ("auto", 21.0, "Betriebsart der Zone"),
 ])
 def test_message_names_mode_and_setpoint_correctly(make_store, clock, mode, shift, was):
-    """A5-24 (d), Mutanten 71-73."""
+    """Die Meldung nennt Betriebsart und Sollwert richtig."""
     ha = Ha(mode=mode, shift=shift)
     rt = _rt(make_store, clock, ha)
     _rounds(rt)
@@ -567,7 +632,7 @@ def test_message_names_mode_and_setpoint_correctly(make_store, clock, mode, shif
 
 
 def test_limit_message_is_not_critical(make_store, clock):
-    """A5-24 (d), Mutant 123."""
+    """Die Limit-Meldung ist nicht kritisch."""
     ha = Ha(curve=1.3)
     rt = _rt(make_store, clock, ha)
     rt.store.update(write_budget={"enforce:curve": {"day": TODAY.isoformat(), "count": 6, "last": 0.0}})
@@ -578,7 +643,7 @@ def test_limit_message_is_not_critical(make_store, clock):
 
 @pytest.mark.parametrize(("live", "durchgesetzt"), [(20.6, True), (20.4, True), (20.55, False), (20.5, False)])
 def test_min_flow_deviation_of_one_plant_step_is_enforced(make_store, clock, live, durchgesetzt):
-    """A5-64: Toleranz = halber Anlagenschritt (0,05) wie bei allen Hebeln; Soll = Raum-Soll 20,5."""
+    """Toleranz = halber Anlagenschritt (0,05) wie bei allen Hebeln; Soll = Raum-Soll 20,5."""
     ha = Ha(min_flow=live)
     rt = _rt(make_store, clock, ha)
     _rounds(rt)
@@ -591,7 +656,7 @@ def test_state_ok_matches_the_notifier():
     assert STATE_OK == NOTIFIER_OK
 
 
-# --- Mutationsprobe Stufe 3 S3 (Task 11) ------------------------------------------------------------------------
+# --- Mutationsprobe ------------------------------------------------------------------------
 
 def test_today_is_the_wallclock_day(monkeypatch):
     """Mutationsprobe (Mutant 2): _today() liefert den Tag der Wanduhr, nicht None."""
@@ -628,7 +693,7 @@ def test_return_to_learned_values_is_reported_quietly_and_not_critical(make_stor
     assert rt.kunde.pushes == [("manueller_eingriff", _meldung("Heizkurve"))]  # still: kein Push
     assert rt.kunde.shown == {} and rt.kunde.withdrawn == []  # nicht kritisch: keine offene Meldung angefasst
     assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "smartheat_runtime.notifier"] == [
-        (logging.INFO, "SmartHeat: Die Heizungseinstellung steht wieder auf den gelernten Werten.")]
+        (logging.INFO, "Meldung meldung.manueller_eingriff_ok")]  # das Log nennt nur den Code
 
 
 def test_reset_message_is_not_critical(make_store, clock):
@@ -667,7 +732,7 @@ def test_kpi_takes_the_live_value_of_a_lever_without_setpoint(make_store, clock)
     (lambda: Ha(mode=RuntimeError(FREMDTEXT)), f"Betriebsart der Zone nicht lesbar: {FREMDTEXT_IM_LOG}"),
 ], ids=["hebel", "betriebsart"])
 def test_a_read_error_from_ha_is_logged_only_escaped(make_store, clock, caplog, ha, zeile):
-    """T6-Rest, R-c: der Fehlertext beim Lesen aus HA (Hebel, Betriebsart der Zone) steht nur als Escape im Log."""
+    """Der Fehlertext beim Lesen aus HA (Hebel, Betriebsart der Zone) steht nur als Escape im Log."""
     rt = _rt(make_store, clock, ha())
     with caplog.at_level(logging.INFO, logger="smartheat_core.enforce"):
         _rounds(rt)
@@ -676,7 +741,7 @@ def test_a_read_error_from_ha_is_logged_only_escaped(make_store, clock, caplog, 
 
 @pytest.mark.parametrize(("live", "durchgesetzt"), [(0.925, False), (0.926, True)])
 def test_a_deviation_of_exactly_tolerance_plus_float_rest_is_no_deviation(make_store, clock, live, durchgesetzt):
-    """Testoffensive T8 (Mutationsprobe K2): die Grenze gehoert zur Toleranz. Die Toleranz der Steigung (knapp unter
+    """Die Grenze gehoert zur Toleranz. Die Toleranz der Steigung (knapp unter
     0,025; der Server darf jede Toleranz bis zum Schritt senden) ist so gewaehlt, dass 0,925 genau Toleranz plus
     Gleitkomma-Rest 1e-9 ueber dem Soll 0,9 liegt: keine Abweichung; 0,926 ist eine."""
     toleranz = (0.925 - 0.9) - 1e-9
@@ -692,7 +757,7 @@ def test_a_deviation_of_exactly_tolerance_plus_float_rest_is_no_deviation(make_s
 
 
 def test_a_failed_write_back_within_the_retry_interval_sends_no_limit_message(make_store, clock):
-    """Testoffensive T8 (Mutationsprobe K2): der erste Rueckschreibversuch scheitert; die Runden in den naechsten
+    """Der erste Rueckschreibversuch scheitert; die Runden in den naechsten
     30 Minuten (Abstand der Versuche) schreiben nicht und melden auch kein Tageslimit -- erst 6 Versuche am Tag sind
     das Limit."""
     ha = Ha(curve=1.3)

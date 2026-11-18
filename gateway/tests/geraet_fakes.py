@@ -1,4 +1,4 @@
-"""Fakes fuer den Geraetekern in den Gateway-Tests (Plan 5b D2): Zugang von der Test-CA (fake_ca), Link ohne Netz, ein
+"""Fakes fuer den Geraetekern in den Gateway-Tests: Zugang von der Test-CA (fake_ca), Link ohne Netz, ein
 Bootstrap, der nie laufen darf (der Zugang liegt schon vor), und eine Geraetesicht ohne Geraetekern fuer Host-Tests.
 Gegenstuecke der Hilfen in heizungsbruecke/tests (D1), die hier nicht importierbar sind."""
 import itertools
@@ -53,7 +53,7 @@ class FakeLink:
             return None
         # allow_nan=False wie link.Link.publish: NaN/Inf gehen nie hinaus, json wirft ValueError (Device._publish faengt es)
         self.sent.append((name, json.loads(json.dumps(payload, allow_nan=False))))
-        if name == "up/inventory":  # PUBACK des Brokers: das Ergebnis der Inventur wartet darauf (L4-02)
+        if name == "up/inventory":  # PUBACK des Brokers: das Ergebnis der Inventur wartet darauf
             self.ereignis("gesendet", len(self.sent), self.client_nr, True)
         return len(self.sent)
 
@@ -80,7 +80,7 @@ class FakeDeviceSicht:
 
     def __init__(self, konf: dict | None, bedienung: dict | None = None, dirty: bool = False) -> None:
         self.konf, self.bed, self.dirty = konf, bedienung, dirty
-        self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKL")
+        self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKLMNOP")
         self.documents = SimpleNamespace(
             aktuell=lambda art: SimpleNamespace(dirty=self.dirty) if self.bed is not None else None)
         self.wuensche: list = []
@@ -92,25 +92,30 @@ class FakeDeviceSicht:
     def bedienung(self):
         return self.bed
 
-    def abo_status(self):
+    def abo_status(self, kreis=None):
         return dokument_config.abo_status(self.konf)
 
-    def wunsch(self, wert, *, herkunft, durch=None):
+    def update_noetig_kritisch(self):
+        return False
+
+    def wunsch(self, wert, *, herkunft, durch=None, kreis=1):
         self.wuensche.append(wert)
         return wert
 
     def soll_quelle_aus(self, aus, wirksam=None):
         pass
 
-    def meldung(self, key, text, *, offen, kritisch=True):
+    def meldung(self, key, text, *, offen, stufe):
         pass
 
     def stop(self):
         self.stopped = True
 
 
-def geraet_fuer(paths, mirror, konf, bedienung=None, *, dirty=False, clock=None) -> GatewayDeviceHost:
+def geraet_fuer(paths, mirror, konf, bedienung=None, *, dirty=False, clock=None,
+                start_markierung=None) -> GatewayDeviceHost:
     geraet = GatewayDeviceHost(paths, mirror, host_dir=paths.data.parent / "host",
                                **({"clock": clock} if clock is not None else {}))
     geraet.verbinden(FakeDeviceSicht(konf, bedienung, dirty))
+    geraet.start_markierung = start_markierung  # die beim Start gelesene Aufraeum-Markierung (aufraeumen.entscheiden)
     return geraet

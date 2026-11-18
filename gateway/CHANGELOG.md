@@ -1,5 +1,241 @@
 # Changelog SmartHeat-Gateway
 
+## Unveroeffentlicht
+
+- Das Geraet nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
+  (`smartheat_device/anker.pem`, aktiver Schluessel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
+  loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Frostschutz laufen unveraendert
+  weiter. Ohne Schluessel in der Datei (Platzhalter) lehnt es jede Antwort ab; der Release-Weg verlangt dort die
+  oeffentlichen Schluessel.
+
+- Der Uebernahme-Code hat 16 Zeichen (80 Bit) statt 12 und gilt am Gateway 1 Stunde; eine vorhandene Datei mit dem alten
+  Code wird beim Start durch einen neuen ersetzt. Das Code-Fenster nach dem Knopfdruck bleibt bei 15 Minuten.
+
+- Die LAN-Seite zeigt bei uebernommenem Geraet die Zeile „uebernommen“ mit der maskierten Adresse des Kontos
+  (`a***@e***.com`), sobald der Server sie kennt. Der LED-Zustand `wartet_auf_einrichtung` blinkt jetzt gleichmaessig
+  1 s an, 1 s aus und ist damit vom Doppelblitz des Zustands `nicht_uebernommen` zu unterscheiden.
+
+- Die Meldung „Heizungssteuerung gestoppt“ wartet nach einem Softwarewechsel nur noch, wenn die Konfiguration selbst
+  die neue Software sie nicht lesen kann (unbekannter Hebelsatz oder unbekanntes Verteilsystem, fehlende
+  Bindungsparameter oder andere Felder der Bindungsparameter); ein Verstoß gegen eine lokale Grenze meldet sofort:
+  Rastung, lokale Sicherheitswerte, Schreibschutz, Wartezeit, Schrittweite, Mindestliste der Rückstellung und erlaubte
+  Schreibgruppen der Bindungsparameter, Positivliste, ungültige Werte sowie Treiber-, Kanal- und Anlagenfehler. Die Wartezeit beginnt je Softwarestand höchstens einmal, eine
+  Boot-Schleife hält die Meldung nicht dauerhaft zurück. Grenzen: Ein Neustart des Geräts in der laufenden Karenz meldet
+  sofort; eine Neustartschleife, deren Start nach dem gemerkten Beginn liegt, hält die Meldung bis zu 15 Minuten
+  zurück.
+
+- Liegt die Software nur unter einer gewoehnlich angehobenen Mindestversion und steht kein kritischer Eintrag in der
+  Konfiguration (kein Notbetrieb, kein Datum), meldet das Gateway die orange Meldung `update_noetig_mindest` („bei
+  Gelegenheit aktualisieren“) an den Server statt der roten; Rot bleibt dem kritischen Eintrag vorbehalten.
+
+- Die rote Meldung unter einer kritischen Mindestversion mit dem Datum der urspruenglichen Werte geht jetzt auch an den
+  Server und erreicht Eigentuemer und Bedienende im Portal, per Push und per Mail; beim Update wird sie zurueckgenommen.
+
+- Die Meldung `update_noetig` des Geraets (gemeinsame Tabelle) traegt unter einer kritischen Mindestversion das Datum
+  der urspruenglichen Werte, ohne bekannten Beginn gilt die Fassung `update_noetig_unbekannt`. Die Meldung zur
+  veralteten Integration gibt es nur im Add-on, nie am Gateway.
+
+- Liegt die Software unter einer kritischen Mindestversion (Feld `update_noetig` mit Datum), geht jeder Heizkreis in den
+  Notbetrieb mit unveraenderten Werten und Notfall-Boost, ohne Server und ohne Snapshots; der Frostschutz gilt weiter. Die
+  30 Tage zaehlen lokal ab dem ersten Empfang mit vertrauenswuerdiger Uhr und ueberstehen Neustarts (eine unklare Uhr zaehlt
+  nicht). Danach stellt die Laufzeit die urspruenglichen Werte wieder her wie beim Abo-Ende. Ein Update auf die
+  Mindestversion oder ein Konfigurationsstand ohne `update_noetig` hebt den Zustand ohne Neustart der Laufzeit auf, auch
+  nach den 30 Tagen. Der Beginn steht mit dem Zusatz `kritisch` in der Datei der Abo-Frist (`entitlement_state.json` je
+  Kreis; neues Feld, keine Migration). Die Abo-Meldungen erscheinen dabei nicht.
+
+- Der Updater des Gateways achtet auf die Einstellung `updates` des Kunden: ein signiertes Angebot, dessen Art
+  (`sicherheit`, `funktion`, `treiberfix`) die Einstellung nicht erlaubt, wird nicht installiert und einmal mit dem Grund
+  `einstellung_aus` gemeldet (kein Eintrag unter den abgelehnten Angeboten, es gilt wieder, sobald die Einstellung es
+  erlaubt); `einmalig` hebt das auf. Die Laufzeit legt die Einstellung in der neuen Datei `data/updates_soll.json` ab
+  (neue Datei, keine Migration; ohne sie gilt keine Einschraenkung, eine unlesbare Datei laesst den Updater abwarten).
+  Ausserdem warnt der Updater in `data/updates_veraltet.json` (neue Datei), wenn das Manifest der laufenden Version in
+  weniger als 60 Tagen ablaeuft oder seit 90 Tagen kein hoeheres Angebot kam (Meldung `meldung.updates_veraltet`; nie ohne
+  verlaessliche Uhr, nie bei ausgeschalteten Sicherheitsupdates). Neues Feld in `updater/state.json`: `aus_gemeldet`;
+  die Zaehlung der Frische steht in der neuen Datei `updater/frische.json` (ohne sie beginnt die Zaehlung neu).
+
+- Das Geraet liest die neuen Felder der Konfiguration `update_noetig` und `updates` und das Feld `einmalig` der
+  Soll-Software (Unlesbares blockiert nie) und merkt sie in `dokumente.json`; das `hello` des Gateways traegt
+  `auto_update` und `integration_version` nie.
+- Nach einem Softwarewechsel wartet die Meldung „Heizungssteuerung gestoppt“ bei einem Konfigurationsfehler bis zu 900 s
+  auf die neue Konfiguration des Servers; Zustand, Status und LED bleiben wahr. Eine abgelehnte Konfiguration, Boost-Werte
+  und eine abgelaufene Karenz melden sofort. Die Karenz steht in `software_stand.json` neben dem Zustand (neue Datei,
+  keine Migration; ohne sie meldet jeder Start sofort wie bisher).
+
+- Ohne vertrauenswuerdige Uhr rueckt der Tag der Tageszaehler nach der monotonen Uhr vor (je volle 24 Stunden einer); der
+  Start-Zaehler des Kaelteschutzes haengt nicht mehr bis zum Neustart fest. Eintraege eines spaeteren Tages zaehlen als
+  heute. Ein Fehler der Plan-Eingabe oder des Uhrurteils haelt den Kaelteschutz nicht an (es gilt der Wunsch).
+
+- Ein Sprung der Uhr ueber Mitternacht setzt die Tageszaehler nicht mehr zurueck: Tageslimit des Schreibbudgets und
+  „Durchsetzen hoechstens sechsmal am Tag“ wechseln den Tag nur bei vertrauenswuerdiger Uhr, sonst bleibt der alte Tag.
+  Die Grenzwerte sind unveraendert.
+
+- Der Pruefertakt rechnet je Heizkreis das geltende Soll aus dem Wunsch und der Bedienung des Kreises (Wochenplan,
+  Abwesenheit, Leerstand, Uebersteuerung); jeder Kreis liest seinen eigenen Eintrag der Dokumente. Ohne Plan gilt wie
+  bisher der Wunsch des Thermostats.
+
+- Die Meldung zum erschoepften Abfragekontingent der Quelle kommt als Code (`meldung.kontingent_erschoepft`, Entwarnung
+  `meldung.kontingent_frei`) ohne Parameter statt als Freitext; der Treiber meldet nur noch den Zustand
+  (`kontingent_erschoepft()`).
+
+- Die Telemetrie traegt je Kreis das neue Feld `erzeuger_stoerung` (Kennung der aeltesten offenen Stoerung des
+  Waermeerzeugers oder `null`). Kein Treiber des Gateways liefert Stoerungen: das Feld bleibt `null`, es entsteht keine
+  Meldung `erzeuger.stoerung`.
+- Das Geraet prueft die Typen seiner Dokumente strenger (`mindest_software` als Versionstext, `ts` der Bedienung,
+  `ursprungswerte`, die Felder einer leeren Konfiguration) und lehnt Befehle mit unbekanntem `schema` mit
+  `ungueltige_nutzlast` ab. Der Server schreibt alle diese Felder schon richtig.
+- Neues Feld `push_regeln` im Konfigurationsdokument (`null` = Standard; Ruhezeit 22 bis 7 Uhr, Tageslimit 1 bis 5,
+  Standard 5; ungültige Werte liest das Geraet als Standard) und neue optionale Leserolle `fault_codes` im Geraetekern.
+  Der Hinweis `raumfuehler` entfaellt aus `hinweise_aus`. Ein Dokument ohne `push_regeln` oder mit `raumfuehler` lehnt das
+  Geraet ab.
+- Hinweise des Geräts und der Grund der Laufzeitstörung kommen als Code mit Parametern; die Diagnoseseite setzt den Text
+  aus `lokale_texte.json` zusammen (je Hinweis ein Eintrag `hinweis.<name>`, Parameterwerte erscheinen dort nicht).
+- Meldungen entstehen im Geraetekern als Code mit Parametern und Stufe statt als fertiger Text; den Text setzt erst der
+  Host zusammen (Wortlaut unveraendert). Der Meldungszustand je Kreis heisst jetzt `notify_meldungen`; die alten Felder
+  `notify_states` und `notify_messages` entfernt einmalig `python -m smartheat_device.meldungszustand_migration
+  --device-dir <Ordner> --release <Version>` (Sicherung `backup.json.pre-<Version>` als Rueckweg). Danach beginnt der
+  Meldungszustand leer, ein noch bestehender Anlass wird einmal neu gemeldet.
+- Neuer Befehl `weg_pruefen` im Geraete-Vertrag (Geraetekern); das Gateway lehnt ihn vorerst mit `nicht_unterstuetzt` ab.
+  Die Anmeldephase `password` und das Feld `ciphertext` des Befehls `driver_login` entfallen, weil kein Treiber sie nutzt.
+- Lehnt der Server einen Snapshot ab, liest das Gateway (gemeinsamer Client-Kern) nur noch den kurzen Code der Antwort und
+  zeigt ihn als „Code ...“; Freitext und Werte der Serverantwort gelangen nicht mehr in Meldung, Speicher oder Log.
+- Das Manifest nennt die Art der Aenderung (`art`: `sicherheit`, `funktion` oder `treiberfix`) und ein Ablaufdatum
+  (`ablauf`, UTC). Der Updater installiert ein abgelaufenes Manifest nicht (Ergebnis `manifest_abgelaufen`, nicht in der
+  Liste der abgelehnten Manifeste, eine neu signierte Fassung derselben Version bleibt annehmbar), ebenso keines mit
+  unbekannter Art und keines ohne synchrone Uhr. Das Release-Werkzeug verlangt `--art`, setzt den Ablauf auf zwoelf
+  Monate (beim Signieren neu, nie ueber das Zertifikat hinaus) und prueft beides; bei `sicherheit` lehnt es ab, wenn der
+  Changelog der Version einen Eintrag unter `### Funktion` hat.
+- Die lokale Seite (Anmeldung und Diagnose) erscheint nach dem Kopf `Accept-Language` auf Deutsch oder Englisch
+  (ohne passenden Eintrag Englisch; `lang` der Seite folgt). Die festen Texte stehen in `lokale_texte.json`; der Kopf
+  wird nie ausgegeben. Die Seite zeigt keine neue Angabe.
+- Uhrbeurteilung genauer: Ein Sprung der Systemuhr kurz nach einer „synchron“-Meldung des Hosts nimmt jetzt das
+  Vertrauen in die Uhr (Beleg zum Zeitpunkt der Antwort); zur Zeitumstellung gilt die tatsaechlich vergangene Zeit.
+  Die kritische Mindestversion im Status-Ereignis nimmt nur ASCII-Ziffern und als Endung `-…`, `+…` oder `.devN` an.
+- Die erlaubte eigene Zone fuer Geraete-API- und Portal-Adresse im Image (`SHG_OWN_ZONES` in `own_url.sh`) ist jetzt
+  `setwell.de` (vorher `hartfussha.org`, die Domain bleibt privat). Es gilt nur diese eine Zone, keine Mischliste:
+  ein Image mit Adressen unter `hartfussha.org` wird beim Bau abgelehnt. Bereits gebaute Images behalten ihre Adressen.
+- Meldungen an den Server (`up/notifications`) tragen Code, Parameter und Stufe statt Kategorie und Text; das
+  Diagnose- und LED-Verhalten bleibt gleich. Namen und Freitext verlassen das Geraet nicht. Ein Gateway dieses Standes
+  braucht einen Server mit dem neuen Format.
+
+## 0.9.0
+
+- Uebernahme-Code nur nach einem Knopfdruck am Geraet (SG-02, GPC21): Der Container wertet `host/knopf.json` des
+  Knopf-Dienstes; ein Druck ist eine Aenderung des Paars (`seq`, `ts`), die erste lesbare Lesung nach dem Start ist nur Grundlinie
+  (ein Neustart oeffnet kein Fenster). Jeder Druck erzeugt einen neuen Code (`Device.neuer_uebernahme_code`, derselbe Weg
+  wie der Befehl `new_claim_code`), hoechstens einer je 60 s, ein Druck davor verlaengert nur das Fenster. Die Seite zeigt
+  Geraete-ID und Code 15 min lang (nur im Speicher), sonst nach einem Druck "Keine Verbindung zum Server – kein Code"
+  bzw. "uebernommen". `agent_state.json` meldet das offene Fenster als `code_fenster` (LED `code_sichtbar`).
+- Die Seite des Gateways (Port 80) liegt ganz hinter dem Etikett-Passwort (SG-05, S-13, GW 8): ohne Sitzung gibt es nur das
+  Anmeldeformular (`/anmelden`), auch `/healthz` an Port 80 antwortet nur mit Sitzung. **Sichtbare Aenderung fuer Pilot und
+  E2E:** Gesundheitsport fuer Updater, Compose-Healthcheck und E2E ist 8081 (nur Loopback des Hosts, ohne Sitzung, ohne
+  Version). Passwort nur als scrypt-Hash in `werk.json` auf der Partition `werk`; ohne gueltige `werk.json` ist keine
+  Anmeldung moeglich (503). Globale Drossel (ab dem 5. Fehlversuch 60 s Sperre, verdoppelnd bis 3600 s), hoechstens eine
+  scrypt-Pruefung zugleich, Sitzung im Speicher (Cookie `shg_sitzung`, 1 h, hoechstens 16), Origin-Pruefung (nur der eigene
+  Host) gegen fremde Webseiten im Browser eines Bewohners, Lesebudget von 16 KiB je Verbindung gegen Kopfzeilen-Fluten. Der
+  QR-Code und der Portal-Link mit dem Code auf der Seite entfallen (GW 7.1, R31), ebenso `segno`; `SHG_PORTAL_BASE_URL` wird nicht mehr gelesen.
+- LED-Muster des Knopfs unterscheidbar: `reset_bereit` ist ein Doppelblitz (0,1 s an, 0,1 s aus, 0,1 s an, 0,7 s aus),
+  `reset_laeuft` blinkt gleichmaessig 0,25 s an / 0,25 s aus; kein Muster gleicht einem Zustand des Geraetekerns.
+- Werksreset am Knopf mit Ursprungswerten (SG-01 Geraeteteil, GP8, GPC9, Regel 4): Nach der bestaetigten Folge fordert der
+  Knopf-Dienst den Reset in `host/werksreset.json` (Phase `angefordert`) an; der Container setzt die Ursprungswerte zurueck
+  wie beim Abmelden und antwortet in `data/werksreset_bereit.json` (hoechstens 120 s, ohne Antwort wird trotzdem geloescht).
+  Dann haelt der Host Compose an (unter der Compose-Sperre), loescht `data/`, `bus/credentials/`, `bus/mosquitto/`,
+  `bus/mosquitto-daten/`, `zigbee2mqtt/` und `host/knopf.json`, leert das Journal, schreibt `host/werksreset_protokoll.json`
+  (letzte 20) und startet neu; `werk`, Bundles, Images, `updater/` und der Slot bleiben. Stromausfall vor dem Loeschen
+  verwirft die Anfrage, im Loeschen fuehrt der Erststart den Reset zu Ende (Phase `loeschen`). Waehrend eines Systemwechsels
+  (installiere, installiert, probestart) wird der Reset abgewiesen (LED Stoerung 5 s). Die Knopf-Unit schreibt dafuer
+  `data`, `bus`, `zigbee2mqtt` und `updater`, nutzt den Docker-Socket und das Journal und stoppt mit `KillMode=mixed`.
+  Ein verworfener Reset (Strom weg oder Stopp beim Warten, Systemwechsel waehrend der Wartezeit, liegengebliebene Anfrage) hebt
+  die Abmeldung wieder auf, die der Container bei der Anfrage gesetzt hat (Vermerk `data/werksreset_abmeldung.json`, auch nach
+  einem Neustart des Containers); eine Abmeldung des Servers bleibt. Eine vorerst unlesbare Anfragedatei wird nie geloescht. Bestaetigt der Kunde einen neuen Reset, waehrend eine Anfrage in Phase `loeschen` liegt (oder die Datei unlesbar ist), fuehrt der Host die liegende Phase zu Ende bzw. loescht sofort, statt `angefordert` zu ueberschreiben.
+- Systemteil im Updater (AP-05a, GW 6.3): Traegt das signierte Manifest das Feld `system` (`system.raucb`, SHA-256, Groesse
+  bis 2 GiB, `compatible` `smartheat-gateway-pi5`), wechselt der Updater zuerst das System (A/B, RAUC, Neustart mit tryboot)
+  und danach die Container. Ablauf mit gespeicherten Phasen (`system.phase` in `updater/state.json`, **vor** jeder Wirkung):
+  installiere, installiert, probestart, bestaetigt, oder zurueck (mit Grund und `ablehnen`). Im Probestart gilt die lokale
+  Gesundheit fest 600 s ab dem Start des Updaters (Host-Dienste, Container, `runtime` healthy, `/healthz` ohne `startet`,
+  ohne `server_ok`), danach `mark-good` und eine Netzprobe von 600 s; `current`/`previous` wechseln erst danach. Rueckfaelle:
+  Fehlstart = `start_fehlgeschlagen` (abgelehnt), ungesund = `ungesund` (abgelehnt), Netzprobe und Strom weg =
+  `server_unerreichbar` ohne Ablehnung mit Abstand 1 h, 2 h (hoechstens 24 h, Wanduhr, erst ab der ersten synchronen Uhr),
+  der dritte in Folge lehnt ab. `rauc install` scheitert einmal vorlaeufig, zweimal in Folge `manifest_ungueltig`. Ohne
+  erreichbaren Broker beginnt kein Systemwechsel; ein falsches `compatible`, eine falsche Pruefsumme oder Groesse sind
+  `manifest_ungueltig`. Das System-Bundle liegt unter `updater/system/<Version>.raucb` (root, 0600) und wird nach
+  Bestaetigung, Ablehnung oder Rueckfall geloescht. Der Erststart startet nichts, solange ein Systemwechsel offen ist.
+- Downgrade-Schutz mit Untergrenze `max(current, Version des Host-Pakets)` (A7-22): auch ohne `state.json` (frisches oder
+  zurueckgesetztes Gateway) wird kein Bundle angenommen, das nicht streng neuer als der laufende Updater ist.
+  `State.save` erhaelt Felder, die der Updater nicht kennt (ein aelterer Updater nach einem Rueckfall verwirft nichts).
+- `min_updater_version` der Bundles: 0.8.0 ohne Systemteil (der Updater 0.8.0 nimmt Container-Bundles weiter an), 0.9.0 mit
+  `system`. `build_bundle.py --system DATEI` bindet das System-Bundle im Manifest, `verify_bundle.py` prueft Groesse und
+  SHA-256 der Systemdatei.
+- Image fuer den Pi 5 (AP-05a, GW 6.1): `rpi-image-gen` v2.9.0 mit Layout `image-rota` statt `image-rpios`, NVMe statt USB
+  (`usbboot.sh`, `initramfs_check.sh`, feste MBR-Signatur und der Pi-4-Pfad entfallen). GPT mit sieben Partitionen:
+  `bootconfig`, `boot_a`/`boot_b` (je 256M), `system_a`/`system_b` (je 6G, ext4 mit 16-K-Bloecken, nur lesend), `werk` (16M,
+  ext4, `/werk` mit `ro,nodev,nosuid,noexec`; `hooks/preimage50-werk` fuegt sie in `genimage.cfg` ein) und `persistent`
+  (= `daten`, 4G). Slot-uebergreifend sind `/var/lib/{smartheat,docker,containerd,rauc,systemd/timesync}`. Kernel mit
+  `panic=10`, Hardware-Watchdog (`RuntimeWatchdogSec=10s`, `RebootWatchdogSec=5min`), WLAN und Bluetooth per Overlay
+  (`disable-wifi-pi5`, `disable-bt-pi5`) aus. Pakete: `rauc`, `rauc-service` (`/etc/rauc/system.conf` aus
+  `host/rauc/system.conf.in`; `rauc-mark-good.service` maskiert, bestaetigt wird nur vom Updater) und Docker 29 aus dem Docker-Archiv
+  (`docker-apt/`: Schluessel mit Fingerabdruck, vier Pakete exakt gepinnt); kein `docker.io`, kein `unattended-upgrades`
+  (`host/apt/` entfaellt, der Paketstand aendert sich nur mit einem neuen System-Bundle). Die Pruefungen des Bauergebnisses
+  laufen als Hooks (`hooks/postbuild50-rootfs-checks`, `hooks/finalize10-bootfs-checks`; v2.9.0 ignoriert den alten
+  `post-build.sh` ohne Meldung). `make_image.sh` liefert zusaetzlich `system-<Version>.ext4`, `boot-<Version>.vfat` und die
+  SBOM (`smartheat-gateway-<Version>.sbom.zst`, syft, CycloneDX-JSON laut `image/sbom/syft.yaml`, S-10), je mit `.sha256`; `--pilot-ssh` bricht bis AP-05b ab.
+- Ablage im System, erster Start auf `daten`, Partition `werk` (AP-05a, GW 6.1, FR-26, GPC31): Das Image legt System-Teile nur
+  unter `/opt/smartheat/` ab (Host-Paket, `release-roots.pem`, `rauc-backend`, `probestart-frist`, `gateway.env` als einzige Quelle
+  fuer Units und Compose, `werkseinstellung/` mit erstem Bundle, `state.json`-Vorlage und den Container-Archiven als
+  `images/<SHA-256>.tar`); `host/gateway.env` unter `SHG_ROOT` entfaellt. Unter `SHG_ROOT` (= `daten`) legt der Bau nichts ab:
+  `smartheat-ablage.service` gleicht bei jedem Start Ordner, Besitzer und Modi an (`bus/mosquitto-daten` neu, Symlinks werden
+  nicht durchschritten) und legt beim ersten Start das erste Bundle und `updater/state.json` aus der Werkseinstellung an.
+  `smartheat-firstboot.service` laedt jedes Archiv einmal (Merker `host/geladen/<SHA-256>`, Archive bleiben liegen) und ruft bei
+  jedem Start `compose up` fuer das laufende Bundle; der Updater wartet nicht auf das Laden (nur auf Docker, Netz und Ablage:
+  die Probestart-Frist). `smartheat-werk.service` prueft vor dem Netz `/werk/werk.json` (streng: ein Feld mehr, falscher Typ,
+  Symlink oder ueber 4 KiB sind ungueltig), kopiert die Werte nach `SHG_ROOT/host/werk.json` (0644) und setzt den fluechtigen
+  Hostnamen; ungueltig oder fehlend loescht die Kopie. `smartheat-probestart-frist.timer` ist im Image aktiviert. `prepare.sh`
+  nimmt das eigene Image aus `gateway-image.oci.tar` des Bundles (Groesse, SHA-256 und Index-Digest gegen `manifest.json`) und holt
+  nur Mosquitto und Zigbee2MQTT per `skopeo`; die Pilotzweige der Bau-Skripte entfallen.
+  Updater und Erststart teilen eine Compose-Sperre (`updater/compose.lock`, flock): kein `docker compose up` zweier Bundles
+  zugleich. Die Ablage haelt Updater, Hoststatus und Erststart nicht auf (`Wants=`); ein untergeschobener Eintrag im
+  Container-Bereich wird gemeldet und nicht angefasst. Das Image hat keinen statischen Hostnamen (Rueckfall
+  `DEFAULT_HOSTNAME=smartheat-gateway` in os-release), damit der Name aus `werk.json` gilt.
+- Waechter fuer die Laufzeit (AP-05a, GA-09, FR-35): `smartheat-waechter.service` (Takt 30 s) startet `runtime` mit `docker
+  compose -p smartheat restart runtime` (Frist 120 s) neu, wenn der Compose-Healthcheck dreimal in Folge `unhealthy` meldet;
+  hoechstens drei Neustarts je Stunde, der vierte wird nicht ausgefuehrt (ein ERROR im Journal). Pausiert bei einem offenen
+  Container-Auftrag, in den Phasen installiere, installiert und probestart, bei `host/werksreset.json` und solange der Updater
+  oder der Erststart die Compose-Sperre haelt (der Waechter wartet dort nie).
+- Firewall und Docker-Pool (AP-05a, GW-Weiterleitung): `docker-daemon.json` pinnt `default-address-pools` auf `172.30.0.0/16`
+  (Groesse 24); die Kette `prerouting` (raw) in `table inet smartheat` verwirft Pakete an 127.0.0.0/8 von ausserhalb von `lo`
+  und an den Docker-Pool von allen Schnittstellen ausser `docker0` und `br-*` (kein Direktrouting aus dem LAN an `runtime:8081`).
+- Mosquitto behaelt seinen Zustand (L4-28): `persistence true` mit `bus/mosquitto-daten` als `/mosquitto/data`.
+- `cloudflared.pin` auf 2026.10.5 (SHA-256 beider `.deb` aus dem GitHub-Release berechnet und mit dem Release verglichen).
+
+## 0.8.0
+
+- Signierte Auslieferung (AP-04): Der Updater prueft das Manifest mit einer X.509-Kette (`release-roots.pem`,
+  Release-Zertifikat mit `codeSigning`, ECDSA P-256) statt mit minisign, versucht ein Update nur mit synchroner Uhr
+  (`wartet_auf_zeit`, sonst ohne Abruf und ohne Ablehnung) und lehnt Zertifikate ab, die aelter sind als das juengste
+  angenommene (Widerruf eines gestohlenen Schluessels). `rejected` fuehrt `<Version>@<SHA-256 ueber Fingerabdruck des
+  Release-Zertifikats + manifest_sha256>`: eine mit einem anderen Zertifikat neu signierte Fassung oder ein anderes
+  Manifest derselben Version wird wieder versucht, anderer Leerraum im Signaturtext oder die zweite ECDSA-Form
+  (s -> n - s) ergeben keine neue Kennung. `install.sh` setzt die Zertifikat-Untergrenze beim Anlegen von `state.json`
+  aus dem `notBefore` des Zertifikats im mitgelieferten Bundle (eine Signatur ohne lesbares Zertifikat bricht den
+  Installer ab). Die Signaturdatei heisst `manifest.json.sig`.
+- Das eigene Image kommt als OCI-Archiv im Bundle (Manifest-Feld `archiv`: `gateway-image.oci.tar`, SHA-256, Groesse bis
+  512 MiB, Name `smartheat-gateway`, Index-Digest) statt aus GHCR. Der Updater holt es nach der Kettenpruefung (Frist
+  60 s plus Groesse bei mindestens 2 Mbit/s, Fortsetzen nach einem Abbruch per HTTP-Range, Ablage unter
+  `archive/<Version>.oci.tar`), prueft Groesse und SHA-256, laedt es mit `docker load` (Frist 600 s) und verlangt, dass der
+  Docker `smartheat-gateway@<Index-Digest>` kennt (sonst `manifest_ungueltig`); danach wird das Archiv geloescht. Ist
+  das Image schon da, wird nichts geholt. Die Compose-Datei nennt es mit `pull_policy: never`; `check_compose` erlaubt
+  `never` nur fuer genau dieses Image. Der Rueckweg braucht kein Netz: `prune` behaelt das Image der vorigen Version.
+- Das Release wird am Betreiberrechner gebaut, signiert und per `scp` in die eigene Ablage geladen
+  (`gateway/release/release_lokal.sh`, Schluessel auf einem Hardware-Token). Das Skript prueft den Tag gegen
+  `.github/allowed_signers` aus `origin/main` (nicht aus dem Checkout), erzeugt das CycloneDX-SBOM des Archivs neben dem
+  Bundle (gepinnter syft-Container) und lehnt mit `--probe` einen `pkcs11:`-Schluessel und den Standard-Schluesselbund ab.
+  Die CI baut und signiert nichts mehr: der Workflow `release-gateway.yml` prueft nur (volle CI, Probelauf mit
+  Wegwerf-Kette, Gate in einem eigenen Job ohne Schreibrecht, Tag-Signatur) und rueckt `main` per Fast-Forward vor, ohne im
+  Job mit Schreibrecht Code aus dem Root-Repo auszufuehren; das Release auf GitHub ist eine Notiz ohne Dateien. Der Workflow `image-gateway.yml` und
+  `release.pub` entfallen (das Werks-Image baut kuenftig ebenfalls der Betreiber lokal). Das Gate prueft
+  `gateway/host/release-roots.pem` auf den Platzhalter.
+- `min_updater_version` der Bundles ist 0.8.0 (neues Manifest-Format, aeltere Updater lehnen es als `updater_zu_alt` ab).
+  Der Erststart laedt mit demselben `docker load` mit Frist (`bundles.docker_load`).
+
 ## 0.7.0
 
 - `certifi` 2026.10.19 statt 2026.7.22 (Sicherheitsmeldung GHSA-6q48-6c7w-9gw2: kompromittierte emSign-Root-CAs im
@@ -8,9 +244,10 @@
   `vcgencmd` kommt über `raspi-utils` im Image (Raspberry-Pi-Archiv, `rootfs_checks.sh` prüft alle drei; `install.sh` auf
   einem fremden Debian verlangt es nicht). Das Journal schreibt alle 30 s (`SyncIntervalSec=30s`, `Storage=persistent`
   in `journald.conf.d/smartheat.conf`), nach hartem Stromverlust fehlen höchstens die letzten 30 s. Die Container
-  loggen über den Treiber `journald` (`tag` = Dienstname) statt `json-file`: `docker logs` scheitert nicht mehr an einer
+  loggen über den Treiber `journald` (`tag` = Containername `smartheat-<Dienst>-1`) statt `json-file`: `docker logs` scheitert nicht mehr an einer
   beschädigten Logdatei, und Größe und Rotation gelten für Host und Container gemeinsam. Mit dem nächsten Bundle werden
-  die Container neu erzeugt (`compose up -d`). Lesen: `docker logs <Dienst>` oder `journalctl CONTAINER_NAME=<Dienst>`.
+  die Container neu erzeugt (`compose up -d`). Lesen: `docker compose -p smartheat logs <Dienst>` oder
+  `journalctl CONTAINER_NAME=smartheat-<Dienst>-1`.
 - Der Updater nennt sich beim Abruf von Manifest und Bundle-Dateien `SmartHeat-Gateway-Updater/<Version>`. Den
   Standard-User-Agent von Python sperrt die Browser-Integritätsprüfung von Cloudflare (HTTP 403, Fehler 1010), und das
   Update scheiterte als „nicht ladbar“ (Labor 2026-10-20, H2).
@@ -31,6 +268,22 @@
 - Der Tagestick (`seconds_until`) feuert bei der Rückstellung der Uhr (Winterzeit, doppelte Stunde) nur einmal zur ersten
   Ortszeit der Tageszeit; bisher rechnete er in der zweiten Stunde mit einer negativen Wartezeit und feuerte bis zu eine
   Stunde lang dauernd.
+- Die Laufzeit wartet beim Start bis zu 60 s (bisher 10 s) auf die Geräteliste von Zigbee2MQTT. Nach einem Stromausfall
+  veröffentlicht Zigbee2MQTT sie erst nach Node-Start und Stick; mit 10 s fehlte danach die Batterie-Überwachung bis zum
+  nächsten Neustart der Laufzeit, und ein W100 galt als Thermostat ohne Profil (BR-GW-1). Die Wartezeit endet mit der
+  ersten Liste; nur bei abgeschaltetem Zigbee2MQTT läuft sie voll ab.
+- Die Diagnoseseite schließt jede Verbindung nach spätestens 10 s (auch bei tröpfelnden Anfragen) und bedient höchstens
+  64 Verbindungen gleichzeitig; weitere werden sofort geschlossen. Bisher konnte ein Gerät im LAN mit stummen
+  Verbindungen Fäden und Speicher des Prozesses füllen (BR-GW-3).
+- Compose-Healthcheck und Updater fragen einen eigenen Gesundheitsserver (nur `/healthz`, Port 8081 im Container, nur auf
+  `127.0.0.1:8081` des Hosts veröffentlicht, eigene Plätze) statt der Diagnoseseite auf Port 80. Belegt ein Gerät im LAN
+  alle Plätze der Diagnoseseite, bleiben dem Gesundheitsserver seine. Mit Docker vor Version 28 kann ein Gast im selben
+  Netz veröffentlichte Ports trotzdem über direktes Routing auf das Container-Netz erreichen (die Firewall des Hosts
+  sieht weitergeleiteten Verkehr nicht); das bleibt offen bis zur Härtung der Host-Firewall und einer Probe am Gerät.
+  Der Updater fragt `http://127.0.0.1:8081/healthz`; `/healthz` auf Port 80 bleibt für die Diagnose.
+- Scheitert beim Abmelden das Zurücksetzen der Heizung, nennt die Meldung die Werte, die das Gateway selbst geschrieben
+  hätte (Ursprungswert des Servers, auf die lokalen Grenzen gebracht), nicht den lokalen Ursprungswert (BR-KK-2, Client-Kern
+  für beide Hosts).
 - Jede Nachricht des Geräts entsteht über eine Stelle, die sie gegen den Vertrag prüft (`smartheat_device/nachrichten.py`),
   und das Gerät liest jede Vertragskonstante an der Stelle, die sie braucht (Stufe 3 S8a-1, A5-34). V1 gilt jetzt auf
   beiden Seiten strikt: Konfiguration, Bedienung und Befehle mit fehlendem oder fremdem Feld lehnt das Gerät ab. Der

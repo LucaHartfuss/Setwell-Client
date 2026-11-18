@@ -1,6 +1,6 @@
-# Ausnahmen fuer vulture (scripts/check.sh, Schritt lint; Stufe 3 S8b, A5-87, K4), Whitelist-Format von vulture.
+# Ausnahmen fuer vulture (scripts/check.sh, Schritt lint), Whitelist-Format von vulture.
 # vulture zaehlt jeden Namen hier als benutzt. Jede Zeile nennt den Grund; keine Zeile ohne Grund. Vertragsnamen nur,
-# wenn der Leser auf der Gegenseite der woertlichen Kopie liegt (S3S8b-Vertragsleser, Testoffensive T2). Neue Ausnahme
+# wenn der Leser auf der Gegenseite der woertlichen Kopie liegt. Neue Ausnahme
 # nur mit Grund, sonst den toten Code loeschen.
 # Gilt fuer heizungsbruecke/src (HA-Host, Kern, Laufzeit, Geraetekern, Transport); der Lauf nimmt gateway/src mit, weil
 # das Gateway auf demselben Kern aufbaut.
@@ -21,10 +21,61 @@ _.userdata  # smartheat_device/link.py: Parameter der paho-Callback-Signatur
 # --- Testeinstiege mit Namen (Tests und Szenarien treiben den Code ohne Threads) ---
 _.schritt  # smartheat_device/device.py Device.schritt: ein Durchlauf ohne Warten (gateway/tests/world.py, Szenarien)
 _.run_pending  # smartheat_runtime/worker.py RegulationWorker.run_pending: Takt mit Fake-Uhr (Tests im Add-on und Gateway)
-_.kinds  # smartheat_device/commands.py CommandRegister.kinds: registrierte Befehlsarten (test_geraet_host, test_befehle)
 
 # --- Vertragskopie V1 (smartheat_device/wire.py, woertlich wie geraete/device_protocol.py des Servers): Leser im Server ---
 _.MAX_CLOCK_SKEW_SECONDS  # Server: geraete/device_auth.py (Zeitfenster der Signatur); Geraet wertet nur den Status 401
 _.UNAUTHENTICATED_ERROR  # Server: geraete/devices_api.py (Text der 401-Antwort); das Geraet wertet nur den Status 401
 _.ENERGIE_EINHEITEN  # Server: einrichtung/ha_pruefung.py, einrichtung/ha.py, geraete/device_config.py; im Geraet nur gepinnt (bindungsparameter.EINHEITEN)
+_.WEG_ERGEBNISSE  # Server: geraete/device_protocol.py (Ergebnisse von weg_pruefen); das Geraet lehnt den Befehl noch ab
 _.expires_rule  # Feld von wire.Command: Server geraete/device_protocol.py wertet die Regel aus (expires_seconds None)
+
+# --- Soll aus der Bedienung (smartheat_core/plan.py): der Prueftakt rechnet es je Kreis (smartheat_runtime/plan_quelle.py) ---
+_.naechster_wechsel  # smartheat_core/plan.py SollErgebnis: Feld wird mit dem Wochenplan vom Wecker gelesen
+_.wochenplan_fehler  # smartheat_core/plan.py: Formpruefung des Wochenplans, der Dokument-Pruefer des Hosts ruft sie mit der Verdrahtung
+_.anstieg_vom_kunden  # smartheat_core/plan.py: Eingang des Boosts (anstieg_vom_kunden), mit der Verdrahtung gerufen
+_.SOLL_ART_ABSENKUNG  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_AUFHEIZEN  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_ABWESEND  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_LEERSTAND  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+_.SOLL_ART_UEBERSTEUERT  # smartheat_core/plan.py: Soll-Art in der Telemetrie, gelesen ab der Verdrahtung
+
+# --- Einstieg fuer Hosts mit mehreren Heizkreisen (sie rufen ihn bei einem neuen Konfigurationsdokument; Tests treiben ihn) ---
+_.konfiguration_geaendert  # smartheat_runtime/kreise.py Laufzeit.konfiguration_geaendert: Wiederaufnahme nach Abo-Wechsel
+
+# --- Raum-Abweichung (smartheat_core/raum_delta.py): Zwilling der Rechnung des Servers, vom Vertragscheck gegen die gemeinsamen Vektoren geprueft ---
+_.delta  # Contract-Check 89 (tools/contracts/raum_delta.json) rechnet Server und Geraet an denselben Vektoren; im Laufzeitpfad nur wirksames_ist
+
+# --- Feldlisten des Status-Ereignisses (V5) und des flachen Kreis-Ereignisses (V1): Leser auf der Gegenseite ---
+_.EVENT_FIELDS  # geraet_status/status/geraet_nachweis: Contract-Check 14 und 88 vergleichen sie mit der Integration bzw. der Fixture
+_.KREIS_EVENT_FIELDS  # geraet_status: Contract-Check 14 und 88 vergleichen die Kreisfelder mit STATUS_KREIS_FIELDS der Integration
+_.MELDUNG_FIELDS  # ha_sinks: Contract-Check 14 vergleicht die Felder einer Meldung (Status `meldungen`, Ereignis) mit der Integration
+_.MELDUNG_EVENT_FIELDS  # ha_sinks: Contract-Check 14 vergleicht die Felder des Ereignisses `smartheat_meldung` mit der Integration
+
+# --- Hausmodell-Kern (smartheat_core/hausmodell.py): woertliche Kopie der Quelle im Server, Leser auf der Gegenseite der Kopie ---
+# Die Kopie bleibt unveraendert (der Vertragscheck des Dev-Roots vergleicht sie zeichengleich); der Server nutzt den ganzen Kern
+# (Abnahme: Haeuser, Wetter, Sonne, Bilanz, Zaehler), das Geraet braucht nur Haus, Anlagenschritt und Zaehler im Simulationstreiber.
+_.balance_temperature  # Server: tests/generic (Bilanztemperatur der Haeuser)
+_.required_flow  # Server: tests/generic (Bedarfsvorlauf der Haeuser)
+_.FBH_HOUSE  # Server: tests/generic (Fussbodenheizung der Abnahme)
+_.weather  # Server: tests/generic (Tagesmittel der Aussentemperatur)
+_.WEATHER  # Server: tests/generic (benannte Wetterlagen)
+_.outdoor_at  # Server: tests/generic (Tagesgang der Aussentemperatur)
+_.sun_at  # Server: tests/generic (Sonneneinstrahlung)
+_.burner_starts  # Server: tests/generic (Brennerzaehler im Anlagenzustand); der Simulationstreiber liest ihn nicht
+_.brenner  # Server: tests/generic (Feld des Anlagenschritts); der Simulationstreiber liest es nicht
+_.leistung  # Server: tests/generic (Feld des Anlagenschritts); der Simulationstreiber liest es nicht
+
+# --- Update-Felder des Dokumentspeichers (smartheat_device/documents.py): der Versionspruefer liest sie; bis dahin ruft nur der Test ---
+_.update_noetig_ab  # smartheat_device/documents.py: Zeitpunkt, ab dem die Mindestversion Pflicht ist (tests/test_device_documents.py), noch ohne Aufrufer in den Hosts
+_.updates  # smartheat_device/documents.py: Update-Zulassung je Art (tests/test_device_documents.py), noch ohne Aufrufer in den Hosts
+_.FELD_MINDESTVERSION  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py) und im Vertragscheck
+
+# --- Grenzen der Betriebsarten (smartheat_core/safety.py): Plan, Leerstand und Abwesenheit rufen die Pruefer mit der Verdrahtung in den Takt; bis dahin ruft nur der Test ---
+_.LEERSTAND_VORGABE_C  # smartheat_core/safety.py: Voreinstellung der Leerstandstemperatur (tests/test_core_safety.py, tests/test_regel4_werte.py)
+_.absenktemperatur  # smartheat_core/safety.py: kuehles Soll nie unter der Untergrenze, noch ohne Aufrufer im Takt
+_.leerstand_temperatur_gueltig  # smartheat_core/safety.py: Untergrenze des Leerstands, noch ohne Aufrufer im Takt
+_.leerstand_bis_gueltig  # smartheat_core/safety.py: Hoechstdauer des Leerstands, noch ohne Aufrufer im Takt
+_.phasendauer_gueltig  # smartheat_core/safety.py: Mindestdauer der Phase, noch ohne Aufrufer im Takt
+_.abwesenheit_vorschlag  # smartheat_core/safety.py: Vorschlag je Verteilsystem, noch ohne Aufrufer im Takt
+# --- Push-Regeln der Person (V1): die Kopie der Feldliste in wire.py ---
+_.PUSH_REGELN_FIELDS  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py push_regeln_gueltig) und im Vertragscheck

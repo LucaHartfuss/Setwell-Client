@@ -1,9 +1,9 @@
 #!/bin/bash
-# Gateway-Image bauen (amd64), Grundpruefung des Images und Compose-Lauf mit dem Dev-Overlay (Spec SHG G2 7.4, ab
-# 0.6.0 Spec 5b 5.3, Plan 5b D2 Task 10): ein Gateway-Container runtime (Geraetekern, Laufzeit, Diagnoseseite). Der
+# Gateway-Image bauen (amd64), Grundpruefung des Images und Compose-Lauf mit dem Dev-Overlay:
+# ein Gateway-Container runtime (Geraetekern, Laufzeit, Diagnoseseite). Der
 # Geraetekern bootstrappt beim Fake-Bootstrap (Test-CA signiert den CSR) und verbindet mit dem Fake-Broker (TLS,
 # Client-Zertifikat, ACL wie die Geraete-Policy), up/hello kommt dort an; Seite und /healthz antworten mit
-# Serverkontakt und Zustand "wartet_auf_einrichtung", ohne Uebernahme-Code (uebernommen, Spec 5c F1); die Laufzeit
+# Serverkontakt und Zustand "wartet_auf_einrichtung", ohne Uebernahme-Code (uebernommen); die Laufzeit
 # ruht "nicht eingerichtet".
 # Zigbee2MQTT (gleiche uid wie das Gateway) darf die vom Init-Schritt geschriebene configuration.yaml lesen und
 # ersetzen; der lokale Bus verlangt Anmeldung, die ACL laesst nur Zigbee2MQTT-Topics zu; runtime schreibt data/device
@@ -18,7 +18,7 @@ DATA="$(mktemp -d)"
 COMPOSE_IMAGE="docker:29-cli@sha256:b1805116a6a86cc591b5d5f60a910a0715cdcc9d18d866ad68b1457ead25c35c"
 # uid:gid des Gateway-Images und des Dienstes zigbee2mqtt (docker-compose.yml, user:).
 GATEWAY_UID="1000:1000"
-MOSQ_IMAGE="eclipse-mosquitto:2@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408"
+MOSQ_IMAGE="eclipse-mosquitto:2@sha256:75d6662dee52c947dc9dd9c29f1d8d7ffef78ddaf38001caa09755681e8bbc98"
 # Test-PKI (je Lauf neu) und Fake-Broker im Netz wan des Compose-Projekts (gateway_lib.sh: dienst_pub, dienst_wait).
 PKI="$DATA/pki"; BROKER="fake-broker"; NET="${PROJECT}_wan"
 # shellcheck source=tests/gateway_lib.sh
@@ -31,10 +31,8 @@ run_in_image() { docker run --rm --security-opt label=disable "$@"; }
 docker build --platform linux/amd64 -f "$REPO/gateway/Dockerfile" -t "$IMAGE" "$REPO" || { echo "FAIL: docker build"; exit 1; }
 echo "PASS: docker build"
 [ "$(docker run --rm "$IMAGE" id -u)" = "1000" ] || fail "Image laeuft nicht als uid 1000"
-docker run --rm "$IMAGE" sh -c "! command -v cloudflared" >/dev/null || fail "cloudflared noch im Image"
 docker run --rm "$IMAGE" python -c "import smartheat_gateway.runtime_main, smartheat_gateway.init, smartheat_gateway.diagnose, smartheat_device.device" \
   || fail "Module nicht importierbar"
-docker run --rm "$IMAGE" python -c "import smartheat_gateway.agent" 2>/dev/null && fail "Agent noch im Image"
 docker run --rm "$IMAGE" sh -c "test ! -e /app/src/heizungsbruecke" || fail "HA-Host im Gateway-Image"
 
 # Der Geraetekern bootstrappt beim Fake-Bootstrap des Dev-Overlays (Dienstname fake-bootstrap im Netz wan).
@@ -46,7 +44,7 @@ else COMPOSE=(docker run --rm --security-opt label=disable -v /var/run/docker.so
               "$COMPOSE_IMAGE" docker compose); fi
 COMPOSE+=(-p "$PROJECT" -f "$REPO/gateway/compose/docker-compose.yml" -f "$REPO/gateway/compose/docker-compose.dev.yml")
 mkdir -p "$DATA/data" "$DATA/zigbee2mqtt" "$DATA/host"
-mkdir -p "$DATA/bus/mosquitto" "$DATA/bus/credentials/runtime" "$DATA/bus/credentials/zigbee2mqtt"
+mkdir -p "$DATA/bus/mosquitto" "$DATA/bus/mosquitto-daten" "$DATA/bus/credentials/runtime" "$DATA/bus/credentials/zigbee2mqtt"
 chmod -R 777 "$DATA"
 # Die Container legen Ordner und Dateien als uid 1000 mit 0700/0600 an (device/, secrets/, configuration.yaml); ein
 # Skript unter anderer uid (CI-Runner 1001) kann sie nicht loeschen. Deshalb raeumt ein Wegwerf-Container als root.
@@ -72,23 +70,52 @@ device_id="$(curl -fsS http://127.0.0.1:18090/_e2e/state \
 [ -n "$device_id" ] || fail "Fake-Bootstrap kennt keine Geraete-ID"
 # Verbunden mit dem Fake-Broker: /healthz meldet Serverkontakt; uebernommen, aber ohne Konfiguration wartet das Gateway
 # auf die Einrichtung, die Laufzeit ruht (nicht eingerichtet) und die Seite zeigt keinen Uebernahme-Code mehr
-# (Anzeige.code_zeigen, Spec 5c F1).
+# (Anzeige.code_zeigen).
 ok=0
 for _ in $(seq 1 30); do
-  curl -fsS http://127.0.0.1:8080/healthz 2>/dev/null | grep -q '"server_ok": true' && { ok=1; break; }; sleep 2
+  curl -fsS http://127.0.0.1:8081/healthz 2>/dev/null | grep -q '"server_ok": true' && { ok=1; break; }; sleep 2
 done
 [ "$ok" = 1 ] || fail "/healthz meldet keinen Serverkontakt"
-healthz="$(curl -fsS http://127.0.0.1:8080/healthz 2>/dev/null)"
+healthz="$(curl -fsS http://127.0.0.1:8081/healthz 2>/dev/null)"
 printf '%s' "$healthz" | grep -q '"zustand": "wartet_auf_einrichtung"' \
   || fail "/healthz: Zustand nicht wartet_auf_einrichtung ($healthz)"
 # Ruhezustand ohne Konfiguration: kein Laufzeitstatus (runtime_main.attach), Hinweis im Log (host.NOT_CONFIGURED_HINT).
 printf '%s' "$healthz" | grep -q '"runtime_status": null' || fail "/healthz: Laufzeit ruht nicht ($healthz)"
 "${COMPOSE[@]}" logs runtime 2>/dev/null | grep -q "noch nicht eingerichtet" || fail "Laufzeit nicht im Ruhezustand"
-page="$(curl -fsS http://127.0.0.1:8080/ 2>/dev/null)"
+# Gesundheitsserver (Compose-Healthcheck und Updater): nur /healthz, eigener Port, auf dem Loopback des Hosts veroeffentlicht.
+[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/ 2>/dev/null)" = 404 ] || fail "Gesundheitsserver zeigt mehr als /healthz"
+# Die Seite auf Port 80 (Container 8080) verlangt die Anmeldung mit dem Passwort aus werk.json (GW 8, SG-05): ohne Sitzung
+# nur das Formular (Seite 303, /healthz 401), mit falschem Passwort 401, mit dem richtigen Cookie und Seite.
+[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz 2>/dev/null)" = 401 ] || fail "/healthz auf Port 80 ohne Sitzung nicht 401"
+[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' http://127.0.0.1:8080/ 2>/dev/null)" = "303 http://127.0.0.1:8080/anmelden" ] \
+  || fail "Seite ohne Sitzung leitet nicht auf /anmelden"
+python3 - "$DATA/host/werk.json" <<'PY'
+import base64, hashlib, json, sys
+salz = bytes(range(16))
+hash_ = hashlib.scrypt(b"Etikett-Passwort", salt=salz, n=131072, r=8, p=1, maxmem=268435456, dklen=32)
+b64 = lambda roh: base64.b64encode(roh).decode()
+werk = {"format": "smartheat-werk-1", "seriennummer": "SHG-0001", "hostname": "smartheat-0001",
+        "passwort": {"verfahren": "scrypt", "n": 131072, "r": 8, "p": 1, "salz": b64(salz), "hash": b64(hash_)},
+        "bespielt": "2026-10-27", "hardware": "Test"}
+open(sys.argv[1], "w").write(json.dumps(werk))
+PY
+chmod 0644 "$DATA/host/werk.json"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -d 'passwort=falsch' http://127.0.0.1:8080/anmelden 2>/dev/null)" = 401 ] \
+  || fail "falsches Passwort nicht 401"
+jar="$DATA/cookies.txt"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -c "$jar" -d 'passwort=Etikett-Passwort' http://127.0.0.1:8080/anmelden 2>/dev/null)" = 303 ] \
+  || fail "richtiges Passwort nicht 303"
+grep -q "shg_sitzung" "$jar" || fail "kein Sitzungs-Cookie nach der Anmeldung"
+page="$(curl -fsS -b "$jar" -H 'Accept-Language: de' http://127.0.0.1:8080/ 2>/dev/null)"
+page_en="$(curl -fsS -b "$jar" -H 'Accept-Language: en' http://127.0.0.1:8080/ 2>/dev/null)"
+printf '%s' "$page" | grep -q "SHG-0001" || fail "Diagnoseseite zeigt die Seriennummer nicht"
 printf '%s' "$page" | grep -q "SmartHeat-Gateway" || fail "Diagnoseseite antwortet nicht"
-! printf '%s' "$page" | grep -q "Übernahme-Code" || fail "Diagnoseseite zeigt nach der Uebernahme den Code"
-printf '%s' "$page" | grep -q "übernommen und wartet auf die Einrichtung" || fail "Diagnoseseite ohne Zustandstext"
-unset page
+# Gegenprobe: nach der Uebernahme erscheint der Code in keiner Sprache (Beschriftung de und en)
+! printf '%s' "$page" | grep -q "Übernahme-Code" || fail "Diagnoseseite zeigt nach der Uebernahme den Code (de)"
+! printf '%s' "$page_en" | grep -q "Claim code" || fail "Diagnoseseite zeigt nach der Uebernahme den Code (en)"
+printf '%s' "$page" | grep -q "übernommen und wartet auf die Einrichtung" || fail "Diagnoseseite ohne Zustandstext (de)"
+printf '%s' "$page_en" | grep -q "has been claimed and is waiting for setup" || fail "Diagnoseseite ohne Zustandstext (en)"
+unset page page_en
 # up/hello am Fake-Broker (Rolle Dienst): hello ging beim ersten Verbinden vor jedem Abo raus; das Abo laeuft deshalb
 # vor einem Neustart der Laufzeit, deren neuer Prozess sich mit derselben Identitaet meldet.
 dienst_wait "$NET" "$PKI" "smartheat/$device_id/up/hello" 90 >"$DATA/hello" & waiter=$!
@@ -101,7 +128,7 @@ printf '%s' "$hello" | grep -q '"host": *"gateway"' || fail "hello ohne host gat
 python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("konfiguration_version") == 0 else 1)' "$hello" \
   2>/dev/null || fail "hello: Konfigurationsversion nicht 0 ($hello)"
 # Fremder Host-Name (DNS-Rebinding): 403, die Seite antwortet nur unter IP, localhost und SHG_DIAG_HOSTNAMES.
-[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: rebind.example.test' http://127.0.0.1:8080/)" = "403" ] \
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" -H 'Host: rebind.example.test' http://127.0.0.1:8080/)" = "403" ] \
   || fail "Diagnoseseite antwortet unter fremdem Host-Namen"
 run_in_image --user "$GATEWAY_UID" -v "$DATA/zigbee2mqtt:/app/data" "$IMAGE" \
   sh -c 'test -r /app/data/configuration.yaml && test -w /app/data/configuration.yaml && test -w /app/data' \
@@ -112,9 +139,8 @@ pw() {
     python -c "import json,sys; print(json.load(open('/b/credentials/' + sys.argv[1] + '/bus.json'))['password'])" "$1"
 }
 for svc in runtime zigbee2mqtt; do [ -n "$(pw "$svc")" ] || fail "Bus-Zugangsdaten von $svc nicht lesbar"; done
-[ -e "$DATA/bus/credentials/agent" ] && fail "init legt noch einen Ordner fuer den Agenten an"
 mosq() { docker run --rm --security-opt label=disable --network "${PROJECT}_bus" "$MOSQ_IMAGE" "$@"; }
-# Anonym abgewiesen, Dienste angemeldet, ACL greift: der Bus traegt nur noch Zigbee2MQTT (Spec 5b 5.3). Die Abos
+# Anonym abgewiesen, Dienste angemeldet, ACL greift: der Bus traegt nur noch Zigbee2MQTT. Die Abos
 # ignorieren retained Nachrichten (-R): Fake-Zigbee2MQTT haelt bridge/* retained, das kaeme sonst vor der Probe an.
 mosq mosquitto_pub -h mosquitto -t zigbee2mqtt/x/set -m x 2>/dev/null && fail "anonymer Zugriff auf den Bus moeglich"
 # runtime darf Thermostate setzen und die Bruecke anfragen, zigbee2mqtt liest beides (Gegenprobe der ACL).
@@ -147,7 +173,7 @@ puback() {
 for topic in zigbee2mqtt/bridge/state zigbee2mqtt/bridge/devices smartheat/x; do
   [ "$(puback "$topic")" = "135" ] || fail "runtime darf auf $topic veroeffentlichen (PUBACK nicht 135)"
 done
-# Der Geraetekern im Container runtime schreibt data/device (ab 0.6.0 keine tmpfs-Masken mehr).
+# Der Geraetekern im Container runtime schreibt data/device (keine tmpfs-Masken).
 "${COMPOSE[@]}" exec -T runtime sh -c 'test -d /data/device && test -w /data/device' \
   || fail "runtime kann /data/device nicht schreiben"
 cid=$("${COMPOSE[@]}" ps -q runtime)
@@ -155,7 +181,7 @@ docker inspect -f '{{range .Mounts}}{{if eq .Type "tmpfs"}}{{.Destination}}{{"\n
   && fail "runtime: tmpfs-Maske unter /data"
 # Stopp-Frist ueber runtime_main.JOIN_SECONDS (10 s): sauberes Trennen vor SIGKILL.
 [ "$(docker inspect -f '{{.Config.StopTimeout}}' "$cid")" = "20" ] || fail "runtime: stop_grace_period nicht 20 s"
-# Review Focus 1: docker stop -> SIGTERM -> sauberes MQTT-DISCONNECT. Mosquitto 2.1 schreibt dann "Client <id>
+# Docker stop -> SIGTERM -> sauberes MQTT-DISCONNECT. Mosquitto 2.1 schreibt dann "Client <id>
 # [<adresse>] disconnected."; bei einem Abbruch "... closed its connection." bzw. "... has exceeded timeout". Gezaehlt
 # wird ab hier (der Neustart oben hat schon eine Trennung protokolliert).
 broker_log() { "${COMPOSE[@]}" logs --no-color fake-broker 2>/dev/null; }

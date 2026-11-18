@@ -1,11 +1,13 @@
-"""Spec 5b 1: Identitaet des Geraets (aus gateway agent/identity.py) mit TLS-Schluessel und CSR."""
+"""Identitaet des Geraets (aus gateway agent/identity.py) mit TLS-Schluessel und CSR."""
 import base64
 import hashlib
 import inspect
 import secrets
 import stat
 
+import pytest
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
@@ -22,9 +24,9 @@ def test_keys_and_code_are_created_once_and_private(tmp_path):
         assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600, name
 
 
-def test_kein_verschluesselungsschluessel_mehr(tmp_path):
-    """Plan S8a-1 P3: das Geraet erzeugt enc_key.pem nicht mehr; eine vorhandene Datei bleibt liegen und wird nicht
-    gelesen (Loeschen beim Live-Abbau)."""
+def test_load_or_create_legt_genau_diese_dateien_an_und_laesst_eine_alte_enc_key_datei_liegen(tmp_path):
+    """Das Geraet erzeugt enc_key.pem nicht mehr; eine vorhandene Datei bleibt liegen und wird nicht
+    gelesen (Geraete der Version 1.0.0 haben sie noch)."""
     identity.load_or_create(tmp_path / "neu")
     assert sorted(p.name for p in (tmp_path / "neu").iterdir()) == sorted(
         (identity.KEY_FILE, identity.TLS_KEY_FILE, identity.CLAIM_CODE_FILE))
@@ -33,7 +35,6 @@ def test_kein_verschluesselungsschluessel_mehr(tmp_path):
     (alt / "enc_key.pem").write_text("kein PEM")  # gelesen wuerde das scheitern
     identity.load_or_create(alt)
     assert (alt / "enc_key.pem").read_text() == "kein PEM"
-    assert not hasattr(identity, "ENC_KEY_FILE")
 
 
 def test_device_id_is_derived_from_the_signing_key(tmp_path):
@@ -51,9 +52,45 @@ def test_an_existing_agent_key_keeps_its_device_id(tmp_path):
     assert identity.load_or_create(tmp_path).device_id == identity.device_id_for(key.public_key())
 
 
-def test_claim_code_is_12_base32_characters():
+def test_claim_code_is_16_base32_characters():
     code = identity.new_claim_code(lambda n: bytes(range(n)))
-    assert len(code) == 12 and set(code) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")  # Literal aus V1
+    assert len(code) == 16 and set(code) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")  # Literal aus V1
+    assert wire.CLAIM_CODE_CHARS == 16
+
+
+def test_claim_code_uses_80_bits_of_randomness():
+    angefragt = []
+
+    def quelle(n):
+        angefragt.append(n)
+        return bytes(range(n))
+
+    identity.new_claim_code(quelle)
+    assert angefragt == [10]
+
+
+@pytest.mark.parametrize("alt", ["ABCDEFGHIJKL", "ABCDEFGHIJKLMNOP1", "abcdefghijklmnop", "ABCD-EFGH-IJKL-MNOP", ""])
+def test_a_stored_code_of_the_wrong_shape_is_replaced_and_logged_without_the_code(tmp_path, caplog, alt):
+    identity.load_or_create(tmp_path)
+    pfad = tmp_path / identity.CLAIM_CODE_FILE
+    pfad.write_text(alt)
+    pfad.chmod(0o644)
+
+    with caplog.at_level("WARNING"):
+        ident = identity.load_or_create(tmp_path, lambda n: bytes(range(n)))
+
+    assert ident.claim_code == "AAAQEAYEAUDAOCAJ" == pfad.read_text()
+    assert stat.S_IMODE(pfad.stat().st_mode) == 0o600
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+    assert not alt or alt not in caplog.text
+    assert "AAAQEAYEAUDAOCAJ" not in caplog.text
+
+
+def test_a_stored_code_of_the_right_shape_stays(tmp_path):
+    identity.load_or_create(tmp_path)
+    (tmp_path / identity.CLAIM_CODE_FILE).write_text("ABCDEFGHIJKLMNOP\n")
+
+    assert identity.load_or_create(tmp_path).claim_code == "ABCDEFGHIJKLMNOP"
 
 
 def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_path):
@@ -61,10 +98,10 @@ def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_pa
     folgt genau der Quelle und haengt von nichts anderem ab als von ihr."""
     for funktion in (identity.new_claim_code, identity.load_or_create):
         assert inspect.signature(funktion).parameters["randbytes"].default is secrets.token_bytes, funktion.__name__
-    assert identity.new_claim_code(lambda n: bytes(n)) == "AAAAAAAAAAAA"
-    assert identity.new_claim_code(lambda n: bytes([255]) * n) == "777777777777"
-    assert identity.new_claim_code(lambda n: bytes(range(n))) == "AAAQEAYEAUDA"
-    assert identity.load_or_create(tmp_path / "c", lambda n: bytes(n)).claim_code == "AAAAAAAAAAAA"
+    assert identity.new_claim_code(lambda n: bytes(n)) == "AAAAAAAAAAAAAAAA"
+    assert identity.new_claim_code(lambda n: bytes([255]) * n) == "7777777777777777"
+    assert identity.new_claim_code(lambda n: bytes(range(n))) == "AAAQEAYEAUDAOCAJ"
+    assert identity.load_or_create(tmp_path / "c", lambda n: bytes(n)).claim_code == "AAAAAAAAAAAAAAAA"
     codes = {identity.new_claim_code() for _ in range(2)}
     assert len(codes) == 2
     assert identity.load_or_create(tmp_path / "a").claim_code != identity.load_or_create(tmp_path / "b").claim_code
@@ -72,8 +109,8 @@ def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_pa
 
 def test_a_new_claim_code_is_saved_only_on_request(tmp_path):
     ident = identity.load_or_create(tmp_path)
-    neu = identity.save_claim_code(tmp_path, ident, "ABCDEFGHIJKL")
-    assert neu.claim_code == "ABCDEFGHIJKL" == identity.load_or_create(tmp_path).claim_code
+    neu = identity.save_claim_code(tmp_path, ident, "ABCDEFGHIJKLMNOP")
+    assert neu.claim_code == "ABCDEFGHIJKLMNOP" == identity.load_or_create(tmp_path).claim_code
     assert neu.device_id == ident.device_id
 
 
@@ -126,3 +163,69 @@ def test_boot_ids_differ_and_fit():
 
 def test_the_encodings_of_the_contract_are_implemented():
     assert {wire.SIGNATURE_ENCODING, wire.PUBLIC_KEY_ENCODING} <= set(identity._KODIERUNGEN)
+
+
+# --- Nachweis fuer den Geraetecode der Einrichtung ---
+
+NACHWEIS_PFAD = "/einrichtung/v1/geraetecode"
+
+
+def _signatur_prueft(ident, signatur: str, methode: str, pfad: str, zeit: int, koerper: bytes) -> bool:
+    """Die Pruefung des Servers (device_auth.verify): Signatur gegen den oeffentlichen Schluessel und die kanonische
+    Zeichenkette des V1-Schemas."""
+    der = base64.urlsafe_b64decode(signatur + "=" * (-len(signatur) % 4))
+    try:
+        ident.signing_key.public_key().verify(der, wire.canonical_string(methode, pfad, zeit, koerper),
+                                              ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature:
+        return False
+    return True
+
+
+def test_der_nachweis_besteht_die_pruefung_des_servers_ueber_die_festen_werte(tmp_path):
+    ident = identity.load_or_create(tmp_path)
+    nachweis = identity.nachweis(ident, 1_700_000_000)
+    assert set(nachweis) == {"geraet_id", "zeitstempel", "signatur"}
+    assert nachweis["geraet_id"] == ident.device_id and nachweis["zeitstempel"] == 1_700_000_000
+    assert _signatur_prueft(ident, nachweis["signatur"], "POST", NACHWEIS_PFAD, 1_700_000_000, b"{}")
+
+
+def test_die_festen_werte_des_nachweises_stehen_im_vertragsmodul():
+    assert (wire.NACHWEIS_METHOD, wire.NACHWEIS_PATH, wire.NACHWEIS_BODY) == ("POST", NACHWEIS_PFAD, b"{}")
+    assert len(wire.NACHWEIS_BODY) == 2
+
+
+def test_der_nachweis_gilt_nur_fuer_diese_werte(tmp_path):
+    """Methode, Pfad, Koerper und Zeit sind Teil der Signatur: jede andere Kombination faellt durch (Gegenprobe zur
+    Pruefung oben, sonst bewiese sie nichts)."""
+    ident = identity.load_or_create(tmp_path)
+    signatur = identity.nachweis(ident, 100)["signatur"]
+    assert _signatur_prueft(ident, signatur, "POST", NACHWEIS_PFAD, 100, b"{}")
+    assert not _signatur_prueft(ident, signatur, "GET", NACHWEIS_PFAD, 100, b"{}")
+    assert not _signatur_prueft(ident, signatur, "POST", "/devices/register", 100, b"{}")
+    assert not _signatur_prueft(ident, signatur, "POST", NACHWEIS_PFAD, 101, b"{}")
+    assert not _signatur_prueft(ident, signatur, "POST", NACHWEIS_PFAD, 100, b"{ }")
+
+
+def test_der_nachweis_nimmt_weder_pfad_noch_koerper_entgegen(tmp_path):
+    """Ein anderer Pfad oder Koerper laesst sich gar nicht anfordern, und signiert wird immer ueber die Konstanten."""
+    assert list(inspect.signature(identity.nachweis).parameters) == ["ident", "jetzt"]
+    ident = identity.load_or_create(tmp_path)
+    gesehen = []
+    echte = identity.sign
+
+    def spion(key, method, path, timestamp, body):
+        gesehen.append((method, path, timestamp, body))
+        return echte(key, method, path, timestamp, body)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(identity, "sign", spion)
+        identity.nachweis(ident, 42)
+    assert gesehen == [("POST", NACHWEIS_PFAD, 42, b"{}")]
+
+
+def test_der_nachweis_traegt_keinen_schluessel(tmp_path):
+    ident = identity.load_or_create(tmp_path)
+    text = repr(identity.nachweis(ident, 7))
+    for geheim in (ident.claim_code, (tmp_path / identity.KEY_FILE).read_text(), "PRIVATE"):
+        assert geheim not in text

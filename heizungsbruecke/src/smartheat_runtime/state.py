@@ -4,73 +4,107 @@ Der Zustand wird nur im Worker-Thread gelesen und geaendert, deshalb ohne Lock. 
 Dateien werden beim Start genau einmal gelesen und danach nur geschrieben, wenn sich ihr
 Inhalt aendert: jeder Schreibvorgang geht auf den Datentraeger des Pi."""
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from smartheat_core import meldungen, write_budget
+from smartheat_core.emergency_boost import KaelteschutzZustand
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime import backup_store
 from smartheat_runtime.delivery import DeliveryState, from_persisted, to_persisted
+
+if TYPE_CHECKING:
+    from smartheat_runtime.budget_store import ZustandsSpeicher
 
 logger = logging.getLogger(__name__)
 
 
 class StorageError(OSError):
     """backup.json oder failsafe_state.json liess sich nicht schreiben (Datentraeger voll oder
-    schreibgeschuetzt, TP12b/AU-005). Unterklasse von OSError: Aufrufer, die OSError erwarten,
+    schreibgeschuetzt). Unterklasse von OSError: Aufrufer, die OSError erwarten,
     bleiben gueltig."""
 
 _NUMBER_FIELDS = ("last_room_target", "last_published_target_rt")
-_FLAG_FIELDS = ("boost_active", "emergency_boost_active")
-_TEXT_FIELDS = ("last_daily_trigger_date", "last_ack_at", "boost_since", "tenant_id", "plant_id")
-_TEXT_MAP_FIELDS = ("notify_states", "notify_messages")
+_FLAG_FIELDS = ("boost_active", "emergency_boost_active", "testphase_rueckgestellt", "ausser_betrieb_rueckgestellt",
+                "soll_ende_offen")
+#: Merker, die nur gesetzt in backup.json stehen (ein Bestandsstand bleibt gleich und gilt als "nicht zurueckgestellt").
+_OMITTED_FLAGS = ("testphase_rueckgestellt", "ausser_betrieb_rueckgestellt", "soll_ende_offen")
+_TEXT_FIELDS = (
+    "last_daily_trigger_date", "last_ack_at", "boost_since", "tenant_id", "plant_id", "kaelteschutz_art",
+    "kaelteschutz_seit",
+)
+#: Die Arten eines Kaelteschutz-Laufs (emergency_boost.KaelteschutzEntscheidung.art ohne "aus").
+_KAELTESCHUTZ_ARTEN = ("soll", "frost")
+_TEXT_MAP_FIELDS = ("notify_states",)
+#: Offene kritische Meldungen je Schluessel als {code, params, stufe} (meldungen.zu_dict).
+_MELDUNG_MAP_FIELDS = ("notify_meldungen",)
 _LEVER_MAP_FIELDS = ("restore_point", "originals", "learned")
 _OVERRIDE_FIELDS = ("manual_override", "manual_override_pending")
-# Plan 3b: Lebensdauerzaehler, zurueckgestellte Serverwerte, Hilfs-Ursprungswerte, Energie-Normalisierung. Fehlen sie in
-# backup.json (bis 0.30.0), gilt der Standardwert; leer bzw. 0 werden sie nicht geschrieben (eine bestehende backup.json
+# Lebensdauerzaehler, zurueckgestellte Serverwerte, Hilfs-Ursprungswerte, Energie-Normalisierung. Fehlen sie in
+# backup.json, gilt der Standardwert; leer bzw. 0 werden sie nicht geschrieben (eine bestehende backup.json
 # bleibt gleich).
 _PLAN3B_FIELDS = ("lifetime_writes", "deferred_levers", "aux_originals", "energy_state")
 BACKUP_FIELDS = (
-    _NUMBER_FIELDS + _FLAG_FIELDS + _TEXT_FIELDS + _TEXT_MAP_FIELDS + _LEVER_MAP_FIELDS + _OVERRIDE_FIELDS
-    + ("write_budget",) + _PLAN3B_FIELDS
+    _NUMBER_FIELDS + _FLAG_FIELDS + _TEXT_FIELDS + _TEXT_MAP_FIELDS + _MELDUNG_MAP_FIELDS + _LEVER_MAP_FIELDS
+    + _OVERRIDE_FIELDS + ("write_budget",) + _PLAN3B_FIELDS + ("kaelteschutz_zaehlung",)
 )
-_OMITTED_WHEN_EMPTY = _TEXT_MAP_FIELDS + _LEVER_MAP_FIELDS + ("write_budget",) + _PLAN3B_FIELDS
-# Audit 4 P-B: Schluessel, die Add-on 0.35.0 noch schrieb und die seit 0.36.0 ohne Bedeutung sind; sie werden beim Laden
-# verworfen statt als unbekannte Schluessel weitergeschrieben.
-# Stufe 3 S7 (A5-63): setup_id (immer = tenant_id) heisst jetzt tenant_id; _parse_backup uebernimmt den alten Wert, der
-# Schluessel verschwindet beim naechsten Schreiben.
-_DROPPED_KEYS = ("waerme_fehlt_seit", "setup_id")
+_OMITTED_WHEN_EMPTY = (_TEXT_MAP_FIELDS + _MELDUNG_MAP_FIELDS + _LEVER_MAP_FIELDS + ("write_budget",) + _PLAN3B_FIELDS
+                       + _OMITTED_FLAGS)
+#: Raster, auf das der Zeitpunkt der letzten Kaelteschutz-Pruefung beim Schreiben abgerundet wird: die Datei aendert
+#: sich hoechstens alle fuenf Minuten, nicht bei jeder Pruefung. Die Abrundung verkuerzt die Luecke nach einem Neustart
+#: um hoechstens diese Spanne, die Zaehlung beginnt dann eher von vorn (nie zu spaet einen Lauf).
+_ZULETZT_RASTER_SEKUNDEN = 300
 
 
 @dataclass(frozen=True)
 class BridgeState:
-    # Wiederherstellungspunkt je Hebel (Plan 2 P2-4): zuletzt vom Server bestaetigt oder vor dem ersten Boost von der
+    # Wiederherstellungspunkt je Hebel: zuletzt vom Server bestaetigt oder vor dem ersten Boost von der
     # Anlage gesichert. Darauf setzt jedes Boost-Ende zurueck.
     restore_point: dict = field(default_factory=dict)
-    # Ursprungswerte je Hebel vor dem ersten eigenen Schreiben (P2-5; Vaillant: nur die Heizgrenze): Abo-Ende und
+    # Ursprungswerte je Hebel vor dem ersten eigenen Schreiben (Vaillant: nur die Heizgrenze): Abo-Ende und
     # Abmelden stellen sie wieder her.
     originals: dict = field(default_factory=dict)
-    # Plan 3c: Lernwerte der letzten gueltigen Serverantwort (learned: {"curve": c, "heat_limit": G}), nur Anzeige im
+    # Lernwerte der letzten gueltigen Serverantwort (learned: {"curve": c, "heat_limit": G}), nur Anzeige im
     # Statusereignis.
     learned: dict = field(default_factory=dict)
     boost_active: bool = False
     emergency_boost_active: bool = False
-    # Audit 4, A4-09: Beginn des laufenden Comfort-Boosts (ISO), fuer die Hoechstdauer; None ohne Boost.
+    # Die Rueckstellung beim Eintritt in `testphase_ohne` bzw. `ausser_betrieb` ist erledigt (testphase.py,
+    # kreiszustand.py). Ein Neustart mitten im Zustand wiederholt sie nicht; ein Wechsel des Zustands, auch die Rueckkehr
+    # nach `in_betrieb`, setzt den Merker zurueck. Fehlt er (Bestandsstand), gilt: nicht zurueckgestellt.
+    testphase_rueckgestellt: bool = False
+    ausser_betrieb_rueckgestellt: bool = False
+    # Das Soll-Ende ist offen: nach dem Ende der Regelung bzw. der Rueckstellung ausser Betrieb steht der gemerkte Wunsch
+    # noch nicht an der Soll-Quelle. Der Merker wird im selben Schritt wie das Ende gesetzt und erst nach dem erfolgreichen
+    # Schreiben (oder wenn nichts zu schreiben ist) geloescht (soll_ende.py), auch ueber einen Neustart hinweg.
+    soll_ende_offen: bool = False
+    # Beginn des laufenden Comfort-Boosts (ISO), fuer die Hoechstdauer; None ohne Boost.
     boost_since: str | None = None
-    # Aufeinanderfolgende lokale Checks ohne lesbaren Raumwert (nur Laufzeit, A4-09).
+    # Laufender Kaelteschutz (regulation.py): Art ("soll" oder "frost") und Beginn (ISO mit Zeitzone); beide None ohne
+    # Lauf. Lauf und Zaehlung ueberleben einen Neustart (kaelteschutz_zaehlung).
+    kaelteschutz_art: str | None = None
+    kaelteschutz_seit: str | None = None
+    # Zaehlzustand der Kaelteschutz-Ausloeser ohne Lauf (soll_seit, frost_seit, zuletzt; der Lauf steht in den zwei Feldern
+    # davor). In backup.json steht er nur, solange eine Zaehlung laeuft, mit `zuletzt` im Fuenf-Minuten-Raster; die
+    # Luecken-Regel (KAELTESCHUTZ_LUECKE_MAX) entscheidet nach einem Neustart, ob die Zaehlung weiterlaeuft.
+    kaelteschutz_zaehlung: KaelteschutzZustand = field(default_factory=KaelteschutzZustand)
+    # Aufeinanderfolgende lokale Checks ohne lesbaren Raumwert (nur Laufzeit).
     room_actual_misses: int = 0
     last_room_target: float | None = None
     last_published_target_rt: float | None = None
     last_daily_trigger_date: str | None = None
-    # Audit 4, A4-08: Einrichtung (tenant_id) und Anlage, zu denen der Zustand gehoert (bind_to_tenant).
+    # Einrichtung (tenant_id) und Anlage, zu denen der Zustand gehoert (bind_to_tenant).
     tenant_id: str | None = None
     plant_id: str | None = None
     delivery: DeliveryState = field(default_factory=DeliveryState)
     # Zuletzt gemeldeter Zustand je Meldeschluessel (notifier.py); fehlender Schluessel = "ok".
     notify_states: dict = field(default_factory=dict)
-    # Letzter Meldetext je nicht-"ok" kritischem Schluessel: damit legt der notifier die
+    # Letzte Meldung (Code, Parameter, Stufe) je nicht-"ok" kritischem Schluessel: damit legt der notifier die
     # HA-Benachrichtigung nach einem HA-Neustart neu an (HA haelt sie nur im Speicher).
-    notify_messages: dict = field(default_factory=dict)
+    notify_meldungen: dict = field(default_factory=dict)
     # Zeitpunkt (ISO) der letzten Serverantwort auf einen offenen Tick (Status letzte_serverantwort).
     last_ack_at: str | None = None
     # Durchsetzung (enforce.py): aktiver Eingriff {levers, erkannt, rollen, signatur, gemeldet} bis
@@ -81,28 +115,27 @@ class BridgeState:
     manual_override_pending: dict | None = None
     # Nur Laufzeit (die Abo-Frist selbst liegt in entitlement_state.json).
     stable_target: float | None = None
-    # Mindestvorlauf, wie er zuletzt auf der Anlage stand (derived.py, fuer den Status). Nur
-    # Laufzeit: wird nicht persistiert (Praezisierung 12), beim Start neu ermittelt.
-    min_flow_current: float | None = None
     # Aufeinanderfolgende EV_HEALTH-Runden ohne gueltigen Wert je Raumfuehler (room_sensors.py).
     room_sensor_misses: dict = field(default_factory=dict)
+    # Aufeinanderfolgende EV_HEALTH-Runden ohne gueltige Aussentemperatur (aussentemperatur.py).
+    outdoor_misses: int = 0
     # Aufeinanderfolgende EV_HEALTH-Runden mit Abweichung von Kurve/Parallelverschiebung
     # (enforce.py).
     manual_override_misses: int = 0
     abo_inactive_since: datetime | None = None
     abo_finished: bool = False
-    # Schreibbudget je Schluessel (write_budget.py, TP12b): Durchsetzung, Zonenvorbereitung,
+    # Schreibbudget je Schluessel (write_budget.py): Durchsetzung, Zonenvorbereitung,
     # Boost-Start/-Ende, Wiederherstellung. In backup.json; "last" nur zur Laufzeit gueltig.
     write_budget: dict = field(default_factory=dict)
-    # Plan 3b: erfolgreiche physische Schreibvorgaenge seit der Einrichtung (nur Bindings mit lifetime_hint_at, EEPROM).
+    # Erfolgreiche physische Schreibvorgaenge seit der Einrichtung (nur Bindings mit lifetime_hint_at, EEPROM).
     lifetime_writes: int = 0
-    # Plan 3b: Hebel, deren Serverwert wegen des Tagesbudgets noch nicht geschrieben ist (LeverPipeline.write_deferred);
+    # Hebel, deren Serverwert wegen des Tagesbudgets noch nicht geschrieben ist (LeverPipeline.write_deferred);
     # Durchsetzen wertet sie nicht als Eingriff.
     deferred_levers: tuple[str, ...] = ()
-    # Plan 3b: Hilfs-Ursprungswerte (BindingDescription.aux_originals) vor dem ersten eigenen Schreiben, z. B.
+    # Hilfs-Ursprungswerte (BindingDescription.aux_originals) vor dem ersten eigenen Schreiben, z. B.
     # {"mode_select": "Automatik", "setpoint_comfort": 22.0}; Abo-Ende und Abmelden stellen sie zurueck.
     aux_originals: dict = field(default_factory=dict)
-    # Plan 3b: Energie-Normalisierung je Kanal {"raw": letzter Rohwert, "sum": monotone Summe} (nur Tageszaehler).
+    # Energie-Normalisierung je Kanal {"raw": letzter Rohwert, "sum": monotone Summe} (nur Tageszaehler).
     energy_state: dict = field(default_factory=dict)
 
 
@@ -135,7 +168,8 @@ def _is_aux(value) -> bool:
 def _is_energy_entry(value) -> bool:
     """Zustand je Energiekanal; ein Eintrag ohne Einheit (aus 1.0.0) bleibt lesbar und beginnt in normalize neu."""
     return (isinstance(value, dict) and set(value) in ({"raw", "sum"}, {"raw", "sum", "einheit"})
-            and ist_endliche_zahl(value["raw"]) and ist_endliche_zahl(value["sum"]) and isinstance(value.get("einheit", ""), str))
+            and ist_endliche_zahl(value["raw"]) and ist_endliche_zahl(value["sum"])
+            and isinstance(value.get("einheit", ""), str))
 
 
 def _parse_budget(raw) -> dict | None:
@@ -159,9 +193,7 @@ def _parse_budget(raw) -> dict | None:
 def _parse_backup(raw: dict, path: Path) -> tuple[dict, dict]:
     """Liest die bekannten Felder tolerant: ein Feld mit falschem Typ faellt auf seinen
     Standardwert zurueck, die anderen bleiben. Unbekannte Schluessel werden unveraendert
-    mitgefuehrt (spaetere Versionen; Felder bis 0.29.0 seit Audit 4 P-E ebenso)."""
-    if "setup_id" in raw and "tenant_id" not in raw:  # bis Stufe 3 S7 hiess das Feld setup_id (immer = tenant_id)
-        raw = {**raw, "tenant_id": raw["setup_id"]}
+    mitgefuehrt (spaetere Versionen ebenso)."""
     values = {}
 
     def _invalid(key):
@@ -184,13 +216,21 @@ def _parse_backup(raw: dict, path: Path) -> tuple[dict, dict]:
     for key in _TEXT_FIELDS:
         if raw.get(key) is None:
             continue
-        # boost_since: nur ein ISO-Zeitpunkt mit Zeitzone ist gueltig, alles andere "kein Flag" (Audit 4 P-C2, sonst
+        # boost_since: nur ein ISO-Zeitpunkt mit Zeitzone ist gueltig, alles andere "kein Flag" (sonst
         # bricht der lokale Check bei jedem Lauf ab).
-        valid = isinstance(raw[key], str) and (key != "boost_since" or parse_since(raw[key]) is not None)
+        valid = isinstance(raw[key], str) and (
+            (key not in ("boost_since", "kaelteschutz_seit") or parse_since(raw[key]) is not None)
+            and (key != "kaelteschutz_art" or raw[key] in _KAELTESCHUTZ_ARTEN)
+        )
         if valid:
             values[key] = raw[key]
         else:
             _invalid(key)
+    # Ein Kaelteschutz-Lauf braucht Art und Beginn; eines allein gilt als kein Lauf.
+    if ("kaelteschutz_art" in values) != ("kaelteschutz_seit" in values):
+        logger.warning("%s: Kaelteschutz-Lauf unvollstaendig, er gilt als beendet", path)
+        values.pop("kaelteschutz_art", None)
+        values.pop("kaelteschutz_seit", None)
     for key in _TEXT_MAP_FIELDS:
         if key not in raw:
             continue
@@ -199,6 +239,17 @@ def _parse_backup(raw: dict, path: Path) -> tuple[dict, dict]:
             values[key] = dict(mapping)
         else:
             _invalid(key)
+    for key in _MELDUNG_MAP_FIELDS:
+        if key not in raw:
+            continue
+        mapping = raw[key]
+        if isinstance(mapping, dict) and all(isinstance(k, str) for k in mapping):
+            pruefung = {k: meldungen.aus_dict(v) for k, v in mapping.items()}
+            gueltig = {k: meldung for k, meldung in pruefung.items() if meldung is not None}
+            if len(gueltig) == len(pruefung):
+                values[key] = {k: meldungen.zu_dict(meldung) for k, meldung in gueltig.items()}
+                continue
+        _invalid(key)
     for key in _LEVER_MAP_FIELDS:
         if key not in raw:
             continue
@@ -221,12 +272,63 @@ def _parse_backup(raw: dict, path: Path) -> tuple[dict, dict]:
         else:
             values["write_budget"] = budget
     _parse_plan3b(raw, values, _invalid)
-    extra = {key: value for key, value in raw.items() if key not in BACKUP_FIELDS and key not in _DROPPED_KEYS}
+    if "kaelteschutz_zaehlung" in raw:
+        zaehlung = _parse_zaehlung(raw["kaelteschutz_zaehlung"])
+        if zaehlung is None:
+            _invalid("kaelteschutz_zaehlung")
+        else:
+            values["kaelteschutz_zaehlung"] = zaehlung
+    extra = {key: value for key, value in raw.items() if key not in BACKUP_FIELDS}
     return values, extra
 
 
+def _parse_zaehlung(raw) -> KaelteschutzZustand | None:
+    """Zaehlzustand der Kaelteschutz-Ausloeser aus backup.json (Zeiten ISO mit Zeitzone, intern UTC). None bei jedem
+    Formfehler: dann gilt keine Zaehlung."""
+    if not isinstance(raw, dict):
+        return None
+    zeiten = {}
+    for key in ("soll_seit", "zuletzt"):
+        if raw.get(key) is None:
+            zeiten[key] = None
+            continue
+        zeit = parse_since(raw[key])
+        if zeit is None:
+            return None
+        zeiten[key] = zeit.astimezone(UTC)
+    frost = raw.get("frost_seit", [])
+    if not isinstance(frost, list):
+        return None
+    paare = []
+    for paar in frost:
+        if not (isinstance(paar, list) and len(paar) == 2):
+            return None
+        raum, seit = paar
+        zeit = parse_since(seit)
+        if not isinstance(raum, int) or isinstance(raum, bool) or zeit is None:
+            return None
+        paare.append((raum, zeit.astimezone(UTC)))
+    return KaelteschutzZustand(soll_seit=zeiten["soll_seit"], frost_seit=tuple(paare), zuletzt=zeiten["zuletzt"])
+
+
+def _zaehlung_content(zustand: KaelteschutzZustand) -> dict | None:
+    """Die Zaehlung fuer backup.json; None, solange keine Zaehlung laeuft (Normalbetrieb schreibt nichts). `zuletzt`
+    steht abgerundet im Raster (`_ZULETZT_RASTER_SEKUNDEN`), die Beginne auf die Sekunde genau."""
+    if zustand.soll_seit is None and not zustand.frost_seit:
+        return None
+    content = {}
+    if zustand.soll_seit is not None:
+        content["soll_seit"] = zustand.soll_seit.isoformat()
+    if zustand.frost_seit:
+        content["frost_seit"] = [[raum, seit.isoformat()] for raum, seit in zustand.frost_seit]
+    if zustand.zuletzt is not None:
+        raster = int(zustand.zuletzt.timestamp()) // _ZULETZT_RASTER_SEKUNDEN * _ZULETZT_RASTER_SEKUNDEN
+        content["zuletzt"] = datetime.fromtimestamp(raster, UTC).isoformat()
+    return content
+
+
 def _parse_plan3b(raw: dict, values: dict, invalid) -> None:
-    """Felder aus Plan 3b, tolerant wie die uebrigen: falscher Typ -> Standardwert (Warnung)."""
+    """Felder der Hersteller-Bindings, tolerant wie die uebrigen: falscher Typ -> Standardwert (Warnung)."""
     checks = {
         "lifetime_writes": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0,
         "deferred_levers": lambda v: isinstance(v, list) and all(isinstance(item, str) for item in v),
@@ -253,6 +355,8 @@ def _backup_content(state: BridgeState, extra: dict) -> dict:
     content = dict(extra)
     for key in BACKUP_FIELDS:
         value = getattr(state, key)
+        if key == "kaelteschutz_zaehlung":
+            value = _zaehlung_content(value)
         if value is None or (key in _OMITTED_WHEN_EMPTY and not value):
             continue
         content[key] = list(value) if isinstance(value, tuple) else value
@@ -273,6 +377,11 @@ class StateStore:
     @property
     def state(self) -> BridgeState:
         return self._state
+
+    def transaktion(self):
+        """Der Zustand eines Kreises hat einen Schreiber (seinen Worker): nichts zu sperren. Gegenstueck zum Lock der
+        Anlage im `BudgetStore`."""
+        return nullcontext()
 
     def update(self, **changes) -> None:
         """Aendert Felder und schreibt backup.json, wenn sich deren Inhalt aendert oder ein
@@ -296,7 +405,7 @@ class StateStore:
     @property
     def storage_failed(self) -> bool:
         """True, solange backup.json oder failsafe_state.json nicht geschrieben werden konnte
-        (TP12b, AU-005). Lebt nur im Speicher: ein kaputter Datentraeger kann sich nicht merken,
+        (AU-005). Lebt nur im Speicher: ein kaputter Datentraeger kann sich nicht merken,
         dass er kaputt ist."""
         return self._backup_dirty or self._failsafe_dirty
 
@@ -391,34 +500,70 @@ class StateStore:
         return from_persisted(raw)
 
 
-# Audit 4, A4-08 (Nutzer-Entscheidung E3): was zur Anlage gehoert (bei einer anderen Anlage verworfen) und was zur
+# Nutzer-Entscheidung: was zur Anlage gehoert (bei einer anderen Anlage verworfen) und was zur
 # Einrichtung (bei jeder neuen Einrichtung zurueckgesetzt: Erstkontakt-Tick, frische Zustellung).
 _PLANT_BOUND = (
     "restore_point", "originals", "aux_originals", "learned", "boost_active", "emergency_boost_active", "boost_since",
-    "manual_override", "manual_override_pending", "write_budget", "deferred_levers", "energy_state",
+    "testphase_rueckgestellt", "ausser_betrieb_rueckgestellt", "soll_ende_offen", "kaelteschutz_art", "kaelteschutz_seit",
+    "kaelteschutz_zaehlung", "manual_override", "manual_override_pending", "write_budget", "deferred_levers", "energy_state",
     "lifetime_writes", "last_room_target",
 )
 _SETUP_BOUND = ("last_published_target_rt", "last_daily_trigger_date")
+#: Die festen Schluessel des Schreibbudgets, die der ganzen Anlage gehoeren (alle Kreise teilen sie).
+ANLAGE_SCHLUESSEL = frozenset({
+    write_budget.TOTAL, write_budget.ZONE_PREPARE, write_budget.BOOST_START, write_budget.EMERGENCY_START,
+})
 
 
-def bind_to_tenant(store: "StateStore", tenant_id: str | None, plant_id: str) -> str:
-    """Bindet den Zustand an Einrichtung und Anlage. Ein Bestand ohne Bindung (bis Add-on 0.34.0) gilt als gebunden
-    (nichts verwerfen, Review Focus 1). Andere Anlage: anlagenbezogene Felder auf den Standardwert. Neue Einrichtung
-    derselben Anlage: Ursprungswerte bleiben, nur Tick-Buchung und Zustellung beginnen neu."""
+def gehoert_der_anlage(schluessel: str) -> bool:
+    """True fuer einen Schluessel des Schreibbudgets, den alle Kreise der Anlage teilen: die festen Schluessel
+    (`ANLAGE_SCHLUESSEL`) und die Durchsetzung je Hebel (`enforce:<hebel>`), deren Tageslimit das Kontingent der Cloud
+    der Anlage abbildet. Jeder andere Schluessel gehoert dem Kreis."""
+    return schluessel in ANLAGE_SCHLUESSEL or schluessel.startswith(write_budget.ENFORCE_PREFIX)
+
+
+#: INFO der einmaligen Uebernahme, woertlich im Ablaufbuch FB-Kennung-Live.
+UEBERNAHME_TEXT = "Anlagen-Kennung aus dem Heizkreis übernommen"
+
+
+def bind_to_tenant(store: "ZustandsSpeicher", tenant_id: str | None, plant_id: str, *, frueher: str | None = None,
+                   zaehler_der_anlage_behalten: bool = False) -> str:
+    """Bindet den Zustand an Einrichtung und Anlage. Ein Bestand ohne Bindung gilt als gebunden
+    (nichts verwerfen). Andere Anlage: anlagenbezogene Felder auf den Standardwert. Neue Einrichtung
+    derselben Anlage: Ursprungswerte bleiben, nur Tick-Buchung und Zustellung beginnen neu.
+    zaehler_der_anlage_behalten (mehrere Kreise teilen die Zaehler der Anlage): bei einer anderen Anlage bleiben das
+    Tageslimit und die Lebensdauer der Anlage stehen, nur der Zustand dieses Kreises wird zurueckgesetzt; ein
+    Zuruecksetzen wuerde den Verschleissschutz der anderen Kreise aufheben.
+    frueher (einmalige Uebernahme, Rueckbau: offene-punkte.md A6-36-Uebernahme): die Kennung, die ein frueherer Stand fuer dieselbe
+    Anlage schrieb (HA bis 1.1.0: roles.lever_refs_identity). Steht genau sie in backup.json, ist es dieselbe Anlage:
+    die Kennung wird umgeschrieben, nichts verworfen, danach der Vergleich der Einrichtung ("uebernommen"
+    bzw. "neue_einrichtung"; die INFO erst nach dem gelungenen Schreiben); ein Schreibfehler laesst backup.json auf der
+    frueheren Kennung (naechster Start erneut, ohne INFO in diesem)."""
     state, defaults = store.state, BridgeState()
     if state.tenant_id is None and state.plant_id is None:
         store.update(tenant_id=tenant_id, plant_id=plant_id)
         return "bestand"
-    if state.plant_id != plant_id:
+    if state.plant_id != plant_id and (frueher is None or state.plant_id != frueher):
         logger.warning("Andere Anlage als in backup.json: anlagenbezogener Zustand wird verworfen")
         # Zustellung zuerst: set_delivery wirft nicht, update bei einem Schreibfehler (StorageError) schon
         store.set_delivery(DeliveryState())
-        store.update(**{key: getattr(defaults, key) for key in _PLANT_BOUND + _SETUP_BOUND},
-                     tenant_id=tenant_id, plant_id=plant_id)
+        zurueck = {key: getattr(defaults, key) for key in _PLANT_BOUND + _SETUP_BOUND}
+        if zaehler_der_anlage_behalten:
+            zurueck["write_budget"] = {key: entry for key, entry in state.write_budget.items()
+                                       if gehoert_der_anlage(key)}
+            del zurueck["lifetime_writes"]
+        store.update(**zurueck, tenant_id=tenant_id, plant_id=plant_id)
         return "andere_anlage"
+    uebernommen = state.plant_id != plant_id  # die Zeile erst nach dem gelungenen Schreiben: sie steht genau einmal
     if state.tenant_id != tenant_id:
         logger.info("Neue Einrichtung derselben Anlage: Ursprungswerte bleiben, Erstkontakt-Tick folgt")
         store.set_delivery(DeliveryState())
-        store.update(**{key: getattr(defaults, key) for key in _SETUP_BOUND}, tenant_id=tenant_id)
+        store.update(**{key: getattr(defaults, key) for key in _SETUP_BOUND}, tenant_id=tenant_id, plant_id=plant_id)
+        if uebernommen:
+            logger.info(UEBERNAHME_TEXT)
         return "neue_einrichtung"
+    if uebernommen:
+        store.update(plant_id=plant_id)
+        logger.info(UEBERNAHME_TEXT)
+        return "uebernommen"
     return "unveraendert"

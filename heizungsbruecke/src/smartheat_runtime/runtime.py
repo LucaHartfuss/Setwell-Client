@@ -13,17 +13,18 @@ from smartheat_runtime.texts import HA_TEXTS, HostTexts
 
 if TYPE_CHECKING:
     from smartheat_core.pipeline import LeverPipeline
+    from smartheat_core.plan import SollErgebnis
+    from smartheat_runtime.budget_store import ZustandsSpeicher
+    from smartheat_runtime.erzeugerstoerung import Stand
     from smartheat_runtime.notifier import Notifier
     from smartheat_runtime.ports import MqttChannel, SignalSource, TriggerSource
     from smartheat_runtime.roles import ChannelManifest
     from smartheat_runtime.runtime_config import RuntimeConfig
-    from smartheat_runtime.state import StateStore
     from smartheat_runtime.status import StatusReporter
     from smartheat_runtime.worker import RegulationWorker
 
 EV_LOCAL_CHECK = "local_check"
 EV_SETPOINTS = "setpoints"
-EV_AUTH_REJECTED = "auth_rejected"
 EV_ACK_TIMEOUT = "ack_timeout"
 EV_RETRY_DUE = "retry_due"
 EV_WATCHDOG = "watchdog"
@@ -35,22 +36,22 @@ EV_MQTT_CONNECTED = "mqtt_connected"
 EV_SOURCE_CONNECTED = "source_connected"
 EV_HEARTBEAT = "heartbeat"
 EV_RECHECK = "recheck"
-# Spec Stufe 3 S3 Abschnitt 4: nach dem Zuruecksetzen einer leeren Konfiguration neu starten (app._nach_zuruecksetzen).
+# Nach dem Zuruecksetzen einer leeren Konfiguration neu starten (app._nach_zuruecksetzen).
 EV_AUFRAEUMEN = "aufraeumen"
 
 
 @dataclass
 class Runtime:
     """Wird nur im Worker-Thread benutzt. Zustand liegt ausschliesslich in `store`, Schreiben
-    auf die Anlage ausschliesslich ueber `override` (die Hebel-Pipeline; der Name stammt aus der Zeit vor Plan 2)."""
+    auf die Anlage ausschliesslich ueber `override` (die Hebel-Pipeline)."""
     manifest: ChannelManifest
     signals: SignalSource
     config: RuntimeConfig
     worker: RegulationWorker
-    store: StateStore
+    store: ZustandsSpeicher
     override: LeverPipeline
     notifier: Notifier
-    # Neustart des Hosts (Spec Stufe 3 S6 4.2), Rueckruf aus app.start; ruft nur der Worker-Thread
+    # Neustart des Hosts, Rueckruf aus app.start; ruft nur der Worker-Thread
     # (abo.check_grace_end).
     neustart: Callable[[], None]
     mqtt_client: MqttChannel | None = None
@@ -67,26 +68,47 @@ class Runtime:
     # geaenderten Eintrag sonst stillschweigend verwerfen (KPI-Verlust). Ein zwischenzeitlich neu
     # erkannter Eingriff reist deshalb erst mit der naechsten seq.
     manual_override_seq: str | None = None
-    # Monotone Uhr des Workers (Tests: FakeClock). Fuer die Drosselung in abo.handle_auth_rejected.
+    # Monotone Uhr des Workers (Tests: FakeClock). Fuer die Drosselung in abo.handle_connection_failing.
     clock: Callable[[], float] = time.monotonic
-    # T2-12: Zeitpunkt und Ergebnis der letzten Abo-Abfrage nach einer abgelehnten MQTT-Anmeldung;
-    # ein erfolgreicher Connect setzt beides zurueck. Nicht persistiert.
-    auth_rejected_queried_at: float | None = None
-    auth_rejected_last_status: str | None = None
-    # Transportneutrale Abo-Erkennung (Spec AWS-IoT 5.1): letzte /status-Abfrage nach langem,
+    # Transportneutrale Abo-Erkennung: letzte /status-Abfrage nach langem,
     # wiederholtem Verbindungsfehler; ein erfolgreicher Connect setzt sie zurueck. Nicht persistiert.
     connection_failing_queried_at: float | None = None
-    # Start (Plan-Praezisierung 11): Zone auf Manuell mit brauchbarer Parallelverschiebung. Bis es
+    # Start: Zone auf Manuell mit brauchbarer Parallelverschiebung. Bis es
     # einmal geklappt hat, versucht es jeder lokale Check erneut. Nicht persistiert.
     zone_prepared: bool = False
-    # Verbindungswaechter (TP12b, AU-033): seit wann (clock) die MQTT-Verbindung ununterbrochen
+    # Soll-Quelle aus (Thermostat aus oder Frostschutz-Stellung, soll_eingang.SollEingang.aus): der Speicher haelt dann
+    # den alten Wunsch, der Kaelteschutz rechnet ohne Soll. Gesetzt vom Ereignis EV_SOLL_QUELLE (app). Nicht persistiert.
+    soll_quelle_aus: bool = False
+    # Ob die Wanduhr als Grundlage einer Frist gilt (uhr.UhrVertrauen, vom Start verdrahtet). Der Vorgabewert vertraut
+    # nie: ohne verlaessliche Uhr beginnt keine Abo-Frist und keine endet.
+    uhr_vertrauen: Callable[[], bool] = lambda: False
+    # Das geltende Soll des letzten lokalen Checks (plan.SollErgebnis): Quelle der Soll-Art davor (ein Anstieg durch den
+    # Plan ist nicht der des Kunden) und des Merkers `uhr_unklar` (ruhende Betriebsarten bei unklarer Uhr). None bis
+    # zum ersten Check nach dem Start. Nicht persistiert.
+    geltendes_soll: SollErgebnis | None = None
+    # Die Abo-Frist sollte beginnen, die Uhr war aber nicht vertrauenswuerdig (abo.enter_inactive); abo.frist_nachholen
+    # holt den Beginn nach. Nicht persistiert.
+    frist_offen: bool = False
+    # Comfort-Boost: Stand der monotonen Uhr (clock) beim Start des Boosts in diesem Prozess, None bei einem
+    # Boost aus einem frueheren Lauf. Gilt nur bei aktivem Boost: ein Boost-Ende ueber die Pipeline laesst den Wert
+    # stehen, jeder neue Start ueberschreibt ihn. Die 4-h-Grenze zaehlt auch hier, falls die Wanduhr zurueckspringt.
+    # Nicht persistiert.
+    boost_mono_start: float | None = None
+    # Kaelteschutz: Stand der monotonen Uhr (clock) beim Start des Laufs in diesem Prozess, None bei einem Lauf aus
+    # einem frueheren Prozess (der gilt nach der Wanduhr). Die 4-h-Grenze zaehlt nach dieser Marke, ein Sprung der
+    # Wanduhr aendert sie nicht. Gilt nur bei laufendem Lauf, jeder neue Start ueberschreibt sie. Nicht persistiert.
+    kaelteschutz_mono_start: float | None = None
+    # Verbindungswaechter: seit wann (clock) die MQTT-Verbindung ununterbrochen
     # fehlt, None bei Verbindung. Nicht persistiert.
     mqtt_down_since: float | None = None
     # Gescheiterte Wiederherstellung am Fristende (abo.log_restore_failure): in diesem Prozess schon geloggt. Nicht
-    # persistiert: nach einem Neustart erscheint die Zeile einmal als WARNING (TP12b).
+    # persistiert: nach einem Neustart erscheint die Zeile einmal als WARNING.
     restore_failure_logged: bool = False
     # Datenfehler (SignalUngueltig, ein Fuehler ohne gueltigen Wert) des lokalen Checks in diesem Prozess schon als WARNING
-    # geloggt, bis zum naechsten erfolgreichen Check (app._run_local_check, L4-17). Nicht persistiert.
+    # geloggt, bis zum naechsten erfolgreichen Check (app._run_local_check). Nicht persistiert.
     local_check_data_fault_logged: bool = False
-    # Kundentexte des Hosts (Spec SHG G2 2.1); Standard = HA-Texte.
+    # Stoerungen des Waermeerzeugers (erzeugerstoerung.Stand): Zaehlung und offene Meldungen; None bis zur ersten Pruefung.
+    # Nicht persistiert: die offenen Meldungen stellt die Pruefung aus dem Meldezustand wieder her.
+    erzeuger: Stand | None = None
+    # Kundentexte des Hosts; Standard = HA-Texte.
     texts: HostTexts = HA_TEXTS

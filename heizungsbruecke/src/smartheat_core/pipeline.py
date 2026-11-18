@@ -1,4 +1,4 @@
-"""Hebel-Pipeline (Hersteller-Abstraktion, Spec 5.2, Plan 2 P2-1/P2-2/P2-5; Nachfolger von heizungsbruecke/override.py):
+"""Hebel-Pipeline (Hersteller-Abstraktion):
 welche Hebelwerte auf der Anlage stehen sollen, und das Schreiben dorthin ueber das Binding. Rein: Anlage (Binding),
 Speicher (store) und Uhr kommen von aussen.
 
@@ -7,36 +7,37 @@ Sollwert-Zeile (Vorrang von oben nach unten):
     Comfort-Boost aktiv -> LocalSafety.comfort_boost (*)
     sonst               -> Wiederherstellungspunkt restore_point (nur vorhandene Hebel)
     (*) ein Hebel aus BindingDescription.optional_restore nur, wenn der Wiederherstellungspunkt einen Wert fuer ihn
-        hat; sonst bleibt er waehrend des Boosts unangetastet (Vaillant: Heizgrenze, TP12h -- ohne Punkt koennte das
+        hat; sonst bleibt er waehrend des Boosts unangetastet (Vaillant: Heizgrenze -- ohne Punkt koennte das
         Boost-Ende sie nicht zuruecknehmen).
 
-Ursprungswerte (P2-5): die Hebel aus BindingDescription.restore_originals merkt capture_originals vor dem ersten eigenen
-Schreiben; restore_and_clear (Abo-Ende, Abmelden) stellt sie wieder her. Plan 3b: zusaetzlich die Hilfswerte aus
+Ursprungswerte: die Hebel aus BindingDescription.restore_originals merkt capture_originals vor dem ersten eigenen
+Schreiben; restore_and_clear (Abo-Ende, Abmelden) stellt sie wieder her. Zusaetzlich die Hilfswerte aus
 BindingDescription.aux_originals (Betriebsart, Komfort-/Absenk-Soll), gemerkt vor der ersten Vorbereitung bzw. dem
 ersten Schreiben des prepared_lever und nach den Hebeln zurueckgestellt.
 
 Geschrieben wird nur bei tatsaechlicher Aenderung (Quota-Check, jeder Schreibvorgang kann ein Cloud-Aufruf sein), jeder
-Wert auf die lokalen Grenzen begrenzt und auf die Schrittweite der Anlage gerundet. Client-abgeleitete Hebel
-(Mindestvorlauf) gehoeren zu keiner Zeile, werden aber auch hier geschrieben (write_lever).
+Wert auf die lokalen Grenzen begrenzt und auf die Schrittweite der Anlage gerundet. Der Mindestvorlauf ist ein
+Serverhebel wie die anderen: er steht im Wiederherstellungspunkt, gehoert aber zu keiner Boost-Zeile.
 
-Plan 3b: Jeder physische Schreibvorgang (binding.physical_writes; eine Schreibgruppe zaehlt je physischem Aufruf,
-A6-09) zaehlt in das Tagesbudget TOTAL (nur mit BindingDescription.daily_write_limit) und in den Lebensdauerzaehler
-(nur mit lifetime_hint_at). Das Tagesbudget begrenzt Serverwerte, Durchsetzen, Vorbereitung und Mindestvorlauf; ein
-Boost startet am Tageslimit nicht (A6-01), Boost-Ende und Wiederherstellung sind ausgenommen, zaehlen aber mit (der
-Rueckweg hat Vorrang vor der Schonung). Jeder Boost-Start zaehlt (Comfort: boost_start, Notfall: emergency_start; je
-hoechstens 6 am Tag, 30 min Abstand, A6-01/A6-34). Ein wegen des Budgets nicht geschriebener Serverwert bleibt im
+Jeder physische Schreibvorgang (binding.physical_writes; eine Schreibgruppe zaehlt je physischem Aufruf)
+zaehlt in das Tagesbudget TOTAL (nur mit BindingDescription.daily_write_limit) und in den Lebensdauerzaehler
+(nur mit lifetime_hint_at). Das Tagesbudget begrenzt Serverwerte (auch den Mindestvorlauf), Durchsetzen und
+Vorbereitung; ein Boost startet am Tageslimit nicht, Boost-Ende und Wiederherstellung sind ausgenommen, zaehlen aber
+mit (der Rueckweg hat Vorrang vor der Schonung). Jeder Boost-Start zaehlt (Comfort: boost_start, Notfall: emergency_start; je
+hoechstens 6 am Tag, 30 min Abstand). Ein wegen des Budgets nicht geschriebener Serverwert bleibt im
 Wiederherstellungspunkt und in deferred_levers und wird mit write_deferred nachgeholt."""
 import logging
-import math
 import time
 from collections.abc import Callable, Mapping
-from typing import TypeGuard
+from contextlib import nullcontext
 
-from smartheat_core import write_budget
+from smartheat_core import meldungen, write_budget
 from smartheat_core.binding import PlantBinding
 from smartheat_core.clamping import clamp, target_value
 from smartheat_core.logtext import lesbar
+from smartheat_core.meldungen import Meldung
 from smartheat_core.safety import LocalSafety
+from smartheat_core.zahlen import ist_endliche_zahl
 
 logger = logging.getLogger(__name__)
 
@@ -64,21 +65,10 @@ _POINT_CURRENT = "current"
 _POINT_SAVED = "saved"
 
 
-# Plan 3b: Meldeschluessel der nicht kritischen Hinweise (abschaltbar, Plan 3c).
+# Meldeschluessel der nicht kritischen Hinweise (abschaltbar).
 BUDGET_KEY = "schreibbudget"
 LIFETIME_KEY = "schreibzaehler"
 LIFETIME_STEP = 10000
-BUDGET_MESSAGE = (
-    "SmartHeat: Das Tageslimit von {limit} Schreibvorgängen an der Heizung ist erreicht. Neue Werte werden "
-    "gespeichert und morgen geschrieben (Schonung des Gerätespeichers)."
-)
-# Ablehnung eines Boost-Starts am Tageslimit: gleicher Schluessel und Tag wie BUDGET_MESSAGE (nur ein Hinweis je Tag),
-# deshalb nennt dieser Text beide Folgen, egal welche Meldung zuerst kommt.
-START_LIMIT_MESSAGE = BUDGET_MESSAGE + " Ein Boost startet erst morgen wieder."
-LIFETIME_MESSAGE = (
-    "SmartHeat: Bisher wurden {count} Werte in die Heizung geschrieben. Der Hersteller nennt eine Grenze von "
-    "100.000 Schreibvorgängen auf Lebensdauer des Reglers; bitte den Fachbetrieb informieren."
-)
 
 
 class WriteBudgetExhausted(Exception):
@@ -106,19 +96,10 @@ def _row(comfort: bool, emergency: bool) -> str:
     return _ROW_RESTORE
 
 
-def _is_finite_number(value) -> TypeGuard[float]:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return False
-    try:
-        return math.isfinite(value)
-    except OverflowError:  # riesige int (z. B. 10**400) passen in keinen float
-        return False
-
-
 class LeverPipeline:
     def __init__(
         self, store, binding: PlantBinding, safety: LocalSafety, *, clock: Callable[[], float] = time.monotonic,
-        notify: Callable[[str, str, str], None] | None = None,
+        notify: Callable[[str, str, Meldung], None] | None = None,
         server_originals: Callable[[], Mapping[str, object]] | None = None,
     ) -> None:
         self._store = store
@@ -131,9 +112,9 @@ class LeverPipeline:
         self._limits_unreadable: set[str] = set()
         self._overlap_warned: dict[str, tuple[float, float]] = {}
         self._narrowing_logged: dict[str, tuple[float, float]] = {}
-        # Nicht kritischer Hinweis (Schluessel, Zustand, Text); im Add-on Notifier.notify(..., critical=False).
+        # Nicht kritischer Hinweis (Schluessel, Zustand, Meldung); im Add-on Notifier.notify(..., critical=False).
         self._notify = notify
-        # Ursprungswerte der Anlage auf dem Server (Spec Stufe 3 S3 5.2, 5b-W-4); frisch bei jedem Zuruecksetzen
+        # Ursprungswerte der Anlage auf dem Server; frisch bei jedem Zuruecksetzen
         # gelesen.
         self._server_originals = server_originals
         # Zeitpunkt (clock) und Wert des letzten erfolgreichen eigenen Schreibens je Hebel, nur Laufzeit: Durchsetzen
@@ -170,7 +151,7 @@ class LeverPipeline:
         """Letzter eigener Schreibwert dieses Hebels seit dem Start (nur Laufzeit), sonst None."""
         return self._last_written.get(lever)
 
-    def set_boosts(self, comfort: bool, emergency: bool) -> tuple[bool, bool]:
+    def set_boosts(self, comfort: bool, emergency: bool, kaelteschutz: bool = False) -> tuple[bool, bool]:
         """Setzt die Boost-Flags und schreibt die Werte der neuen Sollwert-Zeile, falls sie sich aendert. Ein neu
         startender Boost braucht vorher einen gespeicherten Wiederherstellungspunkt, sonst wird er abgelehnt; ein
         laufender Boost wird nie abgelehnt. Ein neu startender Boost braucht ausserdem Platz im Tageslimit der
@@ -180,7 +161,15 @@ class LeverPipeline:
         comfort_start_heute_gesperrt auf True (die Erhoehung des Solls ist verbraucht). Ein neuer Notfall-Boost darf
         zusaetzlich auf dem zuletzt gespeicherten, aelteren Punkt starten, wenn der aktuelle nicht speicherbar ist
         (N6). Wirft das Schreiben, bleiben die Flags unveraendert. Nach einem Fehlschlag bremst das Schreibbudget:
-        dann bleiben die Flags ohne Schreiben stehen, zurueckgegeben werden die bisherigen."""
+        dann bleiben die Flags ohne Schreiben stehen, zurueckgegeben werden die bisherigen.
+        `kaelteschutz`: der Notfall-Boost ist ein Kaelteschutz-Lauf; sein Start wird vom Tageslimit der Schreibvorgaenge
+        nicht abgelehnt (er zaehlt mit), der Start-Zaehler gilt.
+        Pruefen der Start-Zaehler der Anlage und Zaehlen des Starts sind eine Einheit (`transaktion`): zwei Kreise
+        starten nie gleichzeitig gegen denselben Abstand."""
+        with self._store.transaktion():
+            return self._set_boosts(comfort, emergency, kaelteschutz)
+
+    def _set_boosts(self, comfort: bool, emergency: bool, kaelteschutz: bool) -> tuple[bool, bool]:
         self.comfort_start_heute_gesperrt = False
         self.capture_originals()
         state = self._store.state
@@ -199,7 +188,12 @@ class LeverPipeline:
         # Jeder wirklich startende Boost braucht das Tageslimit (soweit es eines gibt) und seinen Start-Zaehler;
         # scheitert eine Pruefung, wird nur dieses Flag False (der Rueckweg des anderen bleibt frei), nichts wird
         # gezaehlt.
-        if starting_emergency and emergency and self._start_refused(write_budget.EMERGENCY_START, "Notfall-Boost"):
+        # Ein Kaelteschutz-Start geht am Tageslimit vorbei (wie der Rueckweg: Schutz vor Kaelte vor Verschleissschutz);
+        # sein Schreiben zaehlt mit, und der Start-Zaehler des Notfall-Boosts gilt auch fuer ihn.
+        if starting_emergency and emergency and self._start_refused(
+            write_budget.EMERGENCY_START, "Kaelteschutz" if kaelteschutz else "Notfall-Boost",
+            tageslimit_gilt=not kaelteschutz,
+        ):
             emergency = False
         if starting_comfort and comfort:
             reason = self._start_refused(write_budget.BOOST_START, "Comfort-Boost")
@@ -224,11 +218,12 @@ class LeverPipeline:
         self._store.update(boost_active=comfort, emergency_boost_active=emergency)
         return comfort, emergency
 
-    def _start_refused(self, key: str, name: str) -> str | None:
+    def _start_refused(self, key: str, name: str, tageslimit_gilt: bool = True) -> str | None:
         """Grund (_REASON_*), warum ein jetzt startender Boost abgelehnt wird, sonst None: zuerst das Tageslimit der
-        Schreibvorgaenge (nur mit daily_write_limit), dann der Start-Zaehler des Boosts. Zaehlt nichts."""
+        Schreibvorgaenge (nur mit daily_write_limit und `tageslimit_gilt`), dann der Start-Zaehler des Boosts. Zaehlt
+        nichts."""
         day = write_budget.today()
-        if self.daily_budget_reached():
+        if tageslimit_gilt and self.daily_budget_reached():
             reason = _REASON_DAILY_LIMIT
             self._notify_start_limit(day)
         elif write_budget.may_attempt(self._store, key, write_budget.START_QUOTA, self._clock()):
@@ -250,10 +245,13 @@ class LeverPipeline:
         return reason
 
     def _notify_start_limit(self, day: str) -> None:
-        if self._notify is None:
+        limit = self._description.daily_write_limit
+        if self._notify is None or limit is None:  # ohne Tageslimit gibt es keinen Anlass zur Meldung
             return
         try:
-            self._notify(BUDGET_KEY, day, START_LIMIT_MESSAGE.format(limit=self._description.daily_write_limit))
+            # Gleicher Schluessel und Tag wie die Meldung `schreibbudget` (nur ein Hinweis je Tag): dieser Code nennt
+            # beide Folgen, egal welche Meldung zuerst kommt.
+            self._notify(BUDGET_KEY, day, meldungen.neu("meldung.schreibbudget_boost", limit=limit))
         except Exception:
             logger.exception("Hinweis zum Tageslimit fehlgeschlagen")
 
@@ -305,7 +303,7 @@ class LeverPipeline:
                 "Serverwerte waehrend aktivem (Notfall-)Boost nur gespeichert, die Anlage bleibt auf den Boost-Werten.")
             return
         try:
-            self._write(clamped)
+            self._write(clamped, prepare_quota=True)
         except WriteBudgetExhausted:
             self._defer(clamped)
 
@@ -315,8 +313,13 @@ class LeverPipeline:
         Hebel nicht als Eingriff."""
         pending = [lever for lever in self._description.lever_set.levers
                    if lever in values and self._binding.has(lever)]
-        deferred = tuple(dict.fromkeys((*self._store.state.deferred_levers, *pending)))
         logger.warning("Tageslimit erreicht: %s erst nach dem Tageswechsel", ", ".join(pending))
+        self._add_deferred(pending)
+
+    def _add_deferred(self, levers) -> None:
+        deferred = tuple(dict.fromkeys((*self._store.state.deferred_levers, *levers)))
+        if deferred == self._store.state.deferred_levers:
+            return
         try:
             self._store.update(deferred_levers=deferred)
         except Exception as error:
@@ -330,22 +333,35 @@ class LeverPipeline:
             return
         values = self._row_values(_ROW_RESTORE)
         try:
-            self._write({lever: values[lever] for lever in deferred if lever in values})
+            held = self._write({lever: values[lever] for lever in deferred if lever in values}, prepare_quota=True)
         except WriteBudgetExhausted:
             return
         except Exception:
             logger.exception("Zurueckgestellte Serverwerte nicht geschrieben, naechster Versuch im naechsten Takt")
             return
-        self._clear_deferred(deferred)
+        self._clear_deferred(tuple(lever for lever in deferred if lever not in held))
 
     def restore_and_clear(self, always_restore: bool) -> bool:
         """Abo-Fristende/Abmelden: beide Boosts beenden und den Wiederherstellungspunkt schreiben (bei always_restore
         auch ohne laufenden Boost). Die Hebel aus restore_originals gehen auf ihren Ursprungswert, auch ohne laufenden
         Boost, wenn der Wiederherstellungspunkt davon abweicht; ist der Ursprungswert unbekannt, bleibt der Hebel auf
         dem Wiederherstellungspunkt (Log). False, wenn das Schreiben scheitert: die Flags bleiben, der Aufrufer
-        versucht es erneut. Scheitert danach nur das Speichern, gilt die Wiederherstellung als erfolgt. Plan 3b: danach
-        die Hilfs-Ursprungswerte (aux_originals), die anschliessend geleert werden. Hilfswerte des Servers (Spec Stufe 3
-        S3 5.2) gelten nur, wenn ohnehin zurueckgesetzt wird; ausloesen koennen sie es nicht."""
+        versucht es erneut. Scheitert danach nur das Speichern, gilt die Wiederherstellung als erfolgt. Danach
+        die Hilfs-Ursprungswerte (aux_originals), die anschliessend geleert werden. Hilfswerte des Servers
+        gelten nur, wenn ohnehin zurueckgesetzt wird; ausloesen koennen sie es nicht."""
+        return self._restore(always_restore, leeren=True)
+
+    def restore_for_pause(self) -> bool:
+        """Eintritt in eine Pause ohne Setwell-Schreiben (Testphase): beide Boosts beenden und die Hebel samt
+        Hilfswerten einmal auf die gemerkten Ursprungswerte stellen, wie bei restore_and_clear, aber ohne etwas zu
+        leeren: Ursprungs- und Hilfs-Ursprungswerte bleiben fuer die Rueckkehr und eine weitere Pause stehen. Ein
+        laufender Kaelteschutz-Notfall-Boost bleibt, dann ist das Ergebnis False und der Aufrufer versucht es spaeter
+        erneut. False auch, wenn das Schreiben scheitert."""
+        if self._store.state.emergency_boost_active:
+            return False
+        return self._restore(True, leeren=False)
+
+    def _restore(self, always_restore: bool, leeren: bool) -> bool:
         state = self._store.state
         server = self._server_snapshot()
         originals: dict[str, float] = {}
@@ -353,14 +369,12 @@ class LeverPipeline:
         for lever in self._description.restore_originals:
             if not self._binding.has(lever):
                 continue
-            vom_server = server.get(lever)
-            original = vom_server if _is_finite_number(vom_server) else state.originals.get(lever)
+            original = self._ursprungswert(lever, server)
             current = state.restore_point.get(lever)
             if original is None:
                 if current is not None:
                     logger.warning("Ursprungswert von %s unbekannt: bleibt auf dem gelernten Wert", lever)
                 continue
-            original = self._target(lever, original)
             originals[lever] = original
             if current is not None and abs(current - original) > self._description.steps[lever] / 2:
                 differs = True
@@ -394,19 +408,35 @@ class LeverPipeline:
                 "bleiben gesetzt, es wird erneut versucht"
             )
             return False
+        # Hilfswerte sind zurueckgestellt: ein weiterer Aufruf (naechster Start, Fristende) schreibt nur noch
+        # abweichende Hebel (Quota-Check) und stellt ein Binding mit Hilfswerten nicht mehr um (_write); ein
+        # neues Abo merkt sie neu. Eine Pause leert nichts: die Hilfswerte gelten fuer die naechste Pause weiter.
+        geleert = {"aux_originals": {}} if leeren else {}
         try:
             self._store.update(
-                boost_active=False, emergency_boost_active=False,
+                boost_active=False, emergency_boost_active=False, kaelteschutz_art=None, kaelteschutz_seit=None,
                 restore_point={**self._store.state.restore_point, **originals},
-                # Hilfswerte sind zurueckgestellt: ein weiterer Aufruf (naechster Start, Fristende) schreibt nur noch
-                # abweichende Hebel (Quota-Check) und stellt ein Binding mit Hilfswerten nicht mehr um (_write); ein
-                # neues Abo merkt sie neu.
-                aux_originals={},
+                **geleert,
             )
         except Exception:
             logger.exception(
                 "Zuletzt gelernte Werte wiederhergestellt, Boost-Flags konnten aber nicht gespeichert werden")
         return True
+
+    def _ursprungswert(self, lever: str, server: Mapping[str, object]) -> float | None:
+        """Der Wert, auf den `restore_and_clear` den Hebel zuruecksetzt: Ursprungswert des Servers, sonst der lokale,
+        auf Schritt und lokale Grenzen gebracht; None, wenn keiner bekannt ist."""
+        vom_server = server.get(lever)
+        original = vom_server if ist_endliche_zahl(vom_server) else self._store.state.originals.get(lever)
+        return None if original is None else self._target(lever, original)
+
+    def sign_off_values(self) -> dict[str, float]:
+        """Die Werte, auf die `restore_and_clear` die Hebel aus restore_originals zuruecksetzt (nur die mit bekanntem
+        Ursprungswert); die Meldung beim gescheiterten Abmelden nennt sie dem Kunden zum Von-Hand-Einstellen."""
+        server = self._server_snapshot()
+        werte = {lever: self._ursprungswert(lever, server) for lever in self._description.restore_originals
+                 if self._binding.has(lever)}
+        return {lever: wert for lever, wert in werte.items() if wert is not None}
 
     def _server_snapshot(self) -> Mapping[str, object]:
         if self._server_originals is None:
@@ -419,12 +449,12 @@ class LeverPipeline:
         return werte if isinstance(werte, Mapping) else {}
 
     def _aux_vom_server(self, name: str, wert) -> bool:
-        """Spec 5.2: Zahl nur fuer die Sollwert-Rollen (Komfort-/Absenk-Soll) und nur im lokalen Bereich von
+        """Zahl nur fuer die Sollwert-Rollen (Komfort-/Absenk-Soll) und nur im lokalen Bereich von
         room_setpoint, Text nur fuer die uebrigen Rollen und nur, wenn das Binding ihn kennt (ein fehlerhafter Server
         darf keine unbekannte Betriebsart setzen)."""
         if name in AUX_SETPOINT_ROLES:
             bereich = self._safety.ranges.get("room_setpoint")
-            return bereich is not None and _is_finite_number(wert) and bereich[0] <= wert <= bereich[1]
+            return bereich is not None and ist_endliche_zahl(wert) and bereich[0] <= wert <= bereich[1]
         return isinstance(wert, str) and self._binding.aux_zulaessig(name, wert)
 
     def _row_values(self, row: str) -> dict:
@@ -440,7 +470,7 @@ class LeverPipeline:
         if row == _ROW_COMFORT:
             return {lever: value for lever, value in self._safety.comfort_boost.items() if included(lever)}
         # Reihenfolge des Hebelsatzes, nicht die Einfuegereihenfolge des Punkts: Durchsetzen geht expected_values
-        # der Reihe nach durch (wie bis 0.29.0: Steigung, Wunschtemperatur, Heizgrenze).
+        # der Reihe nach durch (Steigung, Wunschtemperatur, Heizgrenze).
         return {
             lever: point[lever] for lever in self._description.lever_set.levers if point.get(lever) is not None
         }
@@ -450,7 +480,7 @@ class LeverPipeline:
         Ziel liegen; haben WIR den Hebel innerhalb von settle_seconds selbst geschrieben, muss zusaetzlich unser
         letzter Schreibwert schon dem Ziel entsprechen (A -> B -> A, waehrend die Anlage noch B zeigt). Ein Lesefehler
         oder ein nicht auswertbarer Read heisst "schreiben". Meldet die Anlage keinen Sollwert (None, ruhende Zone),
-        zaehlt nur der eigene letzte Schreibwert seit dem Start (B-TP11-2)."""
+        zaehlt nur der eigene letzte Schreibwert seit dem Start."""
         try:
             current = self._binding.read(lever)
         except Exception:
@@ -459,7 +489,7 @@ class LeverPipeline:
         if current is None:
             last_written = self._last_written.get(lever)
             return last_written is not None and abs(last_written - target) <= step / 2
-        if not _is_finite_number(current) or abs(current - target) > step / 2:
+        if not ist_endliche_zahl(current) or abs(current - target) > step / 2:
             return False
         if self.settled(lever):
             return True
@@ -473,7 +503,7 @@ class LeverPipeline:
     def range_of(self, lever: str) -> tuple[float, float]:
         """Lokale Grenzen, verengt auf den Wertebereich der Anlage (binding.limits). Erweitert nie; ohne Schnittmenge
         gelten die lokalen Grenzen (das Schreiben scheitert dann sichtbar an der Anlage, nie ein Wert ausserhalb der
-        lokalen Grenzen). Einzige Quelle des Schreibbereichs: auch Mindestvorlauf (derived) und Durchsetzen lesen ihn
+        lokalen Grenzen). Einzige Quelle des Schreibbereichs: auch Durchsetzen liest ihn
         hier."""
         low, high = self._safety.ranges[lever]
         device = self._device_limits(lever)
@@ -521,6 +551,13 @@ class LeverPipeline:
         self._limits_cache[lever] = (now, device)
         return device
 
+    def _tagesbudget(self):
+        """Pruefen des Tageslimits, Schreiben und Zaehlen sind eine Einheit: zwei Kreise einer Anlage mit Tageslimit
+        gehen gemeinsam nie darueber. Ohne Tageslimit gibt es nichts zu pruefen und nichts zu sperren."""
+        if self._description.daily_write_limit is None:
+            return nullcontext()
+        return self._store.transaktion()
+
     def _write_lever(self, lever: str, value: float, *, force: bool = False, exempt: bool = False) -> float:
         """Schreibt EINEN Hebel, aber nur bei tatsaechlicher Aenderung, es sei denn `force=True` (direkt nach einer
         Vorbereitung zeigt der Read garantiert noch den alten Sollwert). Ein uebersprungener Schreibvorgang merkt sich
@@ -528,75 +565,97 @@ class LeverPipeline:
         target = self._target(lever, value)
         if not force and self._matches_the_device(lever, target):
             return target
-        if not exempt:
-            self._check_daily_budget(lever)
-        before = self._binding.physical_writes
-        try:
-            self._binding.write(lever, target)
-        except Exception as error:
-            raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
-        finally:
-            self._count_physical(self._binding.physical_writes - before)
+        with self._tagesbudget():
+            if not exempt:
+                self._check_daily_budget(lever)
+            before = self._binding.physical_writes
+            try:
+                self._binding.write(lever, target)
+            except Exception as error:
+                raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
+            finally:
+                self._count_physical(self._binding.physical_writes - before)
         self._last_write_at[lever] = self._clock()
         self._last_written[lever] = target
         return target
 
     def _write_group(self, members: list[str], values: Mapping[str, float], *, exempt: bool) -> None:
         """Schreibgruppe (Viessmann setCurve): weicht ein Mitglied ab, werden alle geschrieben (Reihenfolge des
-        Hebelsatzes) und zaehlen physisch (A6-09: ohne write_group je Mitglied ein Vorgang, mit write_group meldet der
+        Hebelsatzes) und zaehlen physisch (ohne write_group je Mitglied ein Vorgang, mit write_group meldet der
         Treiber einen Vorgang je Aufruf). Scheitert ein spaeteres Mitglied, schreibt der naechste
-        Versuch wieder alle. Hat das Binding write_group (Viessmann-Treiber, Audit 4 A4-31), geht die ganze Gruppe in
+        Versuch wieder alle. Hat das Binding write_group (Viessmann-Treiber), geht die ganze Gruppe in
         EINEM Aufruf hinaus: keine Zwischenstellung, ein Aufruf aus dem Kontingent; ein Fehler gilt dem ersten Mitglied.
         Die Buchfuehrung (letzter Schreibzeitpunkt und -wert) bleibt je Mitglied."""
         targets = {lever: self._target(lever, values[lever]) for lever in members}
         if all(self._matches_the_device(lever, target) for lever, target in targets.items()):
             return
-        if not exempt:
-            self._check_daily_budget(members[0])
-        before = self._binding.physical_writes
-        group_write = getattr(self._binding, "write_group", None)
-        try:
-            if group_write is not None:
-                try:
-                    group_write(targets)
-                except Exception as error:
-                    raise DeviceWriteError(members[0], self._binding.ref(members[0]), error) from error
-                for lever, target in targets.items():
-                    self._last_write_at[lever] = self._clock()
-                    self._last_written[lever] = target
-            else:
-                for lever, target in targets.items():
+        with self._tagesbudget():
+            if not exempt:
+                self._check_daily_budget(members[0])
+            before = self._binding.physical_writes
+            group_write = getattr(self._binding, "write_group", None)
+            try:
+                if group_write is not None:
                     try:
-                        self._binding.write(lever, target)
+                        group_write(targets)
                     except Exception as error:
-                        raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
-                    self._last_write_at[lever] = self._clock()
-                    self._last_written[lever] = target
-        finally:
-            self._count_physical(self._binding.physical_writes - before)
+                        raise DeviceWriteError(members[0], self._binding.ref(members[0]), error) from error
+                    for lever, target in targets.items():
+                        self._last_write_at[lever] = self._clock()
+                        self._last_written[lever] = target
+                else:
+                    for lever, target in targets.items():
+                        try:
+                            self._binding.write(lever, target)
+                        except Exception as error:
+                            raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
+                        self._last_write_at[lever] = self._clock()
+                        self._last_written[lever] = target
+            finally:
+                self._count_physical(self._binding.physical_writes - before)
 
     def _group(self, lever: str) -> tuple[str, ...]:
         return next((group for group in self._description.write_groups if lever in group), (lever,))
 
-    def _write(self, values: Mapping[str, float], *, exempt: bool = False, require_aux: bool = True) -> None:
+    def _write(
+        self, values: Mapping[str, float], *, exempt: bool = False, require_aux: bool = True,
+        prepare_quota: bool = False,
+    ) -> tuple[str, ...]:
         """Vorbereitung -> Hebel in der Reihenfolge des Hebelsatzes (Vaillant: Betriebsart -> Steigung ->
         Parallelverschiebung -> Heizgrenze), nur zugeordnete Hebel. Muss die Anlage fuer prepared_lever erst
         vorbereitet werden, geschieht das VOR dem ersten Hebel; macht die Vorbereitung den Sollwert unbrauchbar
         (preparation_resets_setpoint, Vaillant), wird prepared_lever danach ohne Quota-Check geschrieben (force), weil
         der Read garantiert noch den alten Sollwert zeigt. Schreibgruppen (write_groups) gehen zusammen. Vor dem
         prepared_lever muessen die Hilfs-Ursprungswerte gemerkt sein (require_aux; nur die Wiederherstellung schreibt
-        auch ohne und bereitet ein Binding mit Hilfswerten dabei nicht vor)."""
+        auch ohne und bereitet ein Binding mit Hilfswerten dabei nicht vor).
+        prepare_quota (Serverwerte, auch nachgeholte): die Vorbereitung teilt das Kontingent zone_prepare mit dem Start
+        und dem lokalen Check (_prepare_within_quota). Laesst es gerade keinen Versuch zu und steht die Anlage nicht
+        schon vorbereitet, bleibt prepared_lever samt Schreibgruppe im Wiederherstellungspunkt und in deferred_levers
+        (write_deferred holt ihn nach), die uebrigen Hebel werden geschrieben. Gibt die so zurueckgestellten Hebel
+        zurueck."""
         prepared_lever = self._description.prepared_lever
         switched = False
+        held: tuple[str, ...] = ()
         if prepared_lever is not None and prepared_lever in values and self._binding.has(prepared_lever):
             if require_aux:
                 self._require_aux(prepared_lever)
             # Ohne Pflicht zu Hilfswerten (nur die Wiederherstellung) nicht vorbereiten, wenn das Binding Hilfswerte
             # hat: die Betriebsart geht ueber restore_aux zurueck, ohne gemerkte Werte bliebe eine Umstellung fuer
-            # immer.
-            # Vaillant (keine Hilfswerte) bereitet wie bisher vor.
+            # immer. Ein Binding ohne Hilfswerte bereitet immer vor. Vaillant hat die Betriebsart der Zone als
+            # Hilfswert: vor der Vorbereitung muss sie gemerkt sein (require_aux), die Wiederherstellung bereitet nicht
+            # vor und schreibt den Sollwert nur, solange die Zone auf Manuell steht (_ready_for_setpoint).
             if self._binding.needs_preparation() and (require_aux or not self._description.aux_originals):
-                switched = self.ensure_prepared(exempt=exempt, require_aux=require_aux)
+                if not prepare_quota:
+                    switched = self.ensure_prepared(exempt=exempt, require_aux=require_aux)
+                elif (prepared := self._prepare_within_quota(exempt=exempt, require_aux=require_aux)) is None:
+                    held = self._group(prepared_lever)
+                    values = {lever: value for lever, value in values.items() if lever not in held}
+                    self._hold_back(held)
+                else:
+                    switched = prepared
+            elif not require_aux and not self._ready_for_setpoint(prepared_lever):
+                skipped = self._group(prepared_lever)
+                values = {lever: value for lever, value in values.items() if lever not in skipped}
         force_prepared = switched and self._description.preparation_resets_setpoint
         written: list[str] = []
         done: set[str] = set()
@@ -615,6 +674,73 @@ class LeverPipeline:
                 self._write_lever(lever, values[lever], force=force_prepared and lever == prepared_lever, exempt=exempt)
             written.extend(members)
         self._clear_deferred(written)
+        return held
+
+    def _ready_for_setpoint(self, lever: str) -> bool:
+        """False, wenn die Anlage ohne Vorbereitung (Wiederherstellung) den Sollwert des prepared_lever nicht annimmt:
+        steht die Zone nicht auf Manuell, wuerde ein Schreiben als Quick-Veto der Hersteller-Cloud verworfen
+        (preparation_resets_setpoint). Dann entfaellt der Hebel (Log), die uebrigen Hebel und die Hilfswerte laufen.
+        Hat diese Pipeline die Zone innerhalb von settle_seconds selbst umgestellt, gilt sie als umgestellt, auch wenn
+        die Anzeige noch das Zeitprogramm nennt; ein Neustart vergisst das (dann entscheidet die Anzeige).
+        Nicht lesbare Betriebsart: DeviceWriteError, die Wiederherstellung wird wiederholt."""
+        if not self._description.preparation_resets_setpoint or not self._binding.needs_preparation():
+            return True
+        if self._prepared_at is not None and self._clock() - self._prepared_at <= self._description.settle_seconds:
+            # Eigene Umstellung auf Manuell vor kurzem: HA zeigt sie womoeglich noch nicht (veraltete Anzeige der
+            # Cloud). Die Zone steht auf Manuell, der Sollwert wird angenommen.
+            return True
+        try:
+            prepared = self._binding.is_prepared()
+        except Exception as error:
+            raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
+        if not prepared:
+            logger.info("%s nicht zurueckgestellt: die Zone steht nicht auf Manuell, der Wert wuerde verworfen", lever)
+        return prepared
+
+    def _prepare_within_quota(self, *, exempt: bool, require_aux: bool) -> bool | None:
+        """ensure_prepared im Kontingent zone_prepare (write_budget.RETRY_QUOTA: nach einem Fehlschlag hoechstens ein
+        Versuch je 30 min, 6 Fehlschlaege am Tag), das der Schreibweg der Serverwerte mit dem Start und dem lokalen
+        Check teilt: sonst stellte jede Antwort auf einen Snapshot und jede Wiederholung
+        der Datenkette eine nicht vorbereitbare Zone erneut um. Ein Erfolg setzt das Kontingent zurueck, das
+        Tagesbudget (WriteBudgetExhausted) zaehlt nicht als Fehlschlag. Sperrt das Kontingent, entscheidet ein Lesen
+        der Betriebsart (is_prepared, kein Schreiben): steht die Anlage schon vorbereitet, gilt das wie eine
+        Vorbereitung ohne Umstellung (False, Kontingent unveraendert). None: eine Vorbereitung waere noetig (oder die
+        Betriebsart ist nicht lesbar), das Kontingent laesst aber gerade keinen Versuch zu.
+        Pruefen und Zaehlen des Kontingents sind eine Einheit (`transaktion`): zwei Kreise stellen die Zone nie
+        zugleich um."""
+        with self._store.transaktion():
+            return self._prepare_within_quota_gesperrt(exempt=exempt, require_aux=require_aux)
+
+    def _prepare_within_quota_gesperrt(self, *, exempt: bool, require_aux: bool) -> bool | None:
+        key, rule = write_budget.ZONE_PREPARE, write_budget.RETRY_QUOTA
+        if not write_budget.may_attempt(self._store, key, rule, self._clock()):
+            try:
+                prepared = self._binding.is_prepared()
+            except Exception as error:
+                logger.info(
+                    "Betriebsart nicht lesbar (%s), Vorbereitung bleibt im Kontingent gesperrt", lesbar(str(error)),
+                )
+                return None
+            return False if prepared else None
+        try:
+            switched = self.ensure_prepared(exempt=exempt, require_aux=require_aux)
+        except WriteBudgetExhausted:
+            raise
+        except Exception:
+            write_budget.after_failure(self._store, key, rule, self._clock())
+            raise
+        write_budget.after_success(self._store, key, rule)
+        return switched
+
+    def _hold_back(self, levers: tuple[str, ...]) -> None:
+        """prepared_lever (samt Schreibgruppe) zurueckstellen, bis das Kontingent zone_prepare wieder einen Versuch
+        zulaesst; gemeldet nur beim ersten Zurueckstellen."""
+        if not set(levers) <= set(self._store.state.deferred_levers):
+            logger.warning(
+                "Zone nicht vorbereitet, Kontingent der Vorbereitung erschoepft: %s erst beim naechsten erlaubten "
+                "Versuch", ", ".join(levers),
+            )
+        self._add_deferred(levers)
 
     def _clear_deferred(self, levers) -> None:
         deferred = self._store.state.deferred_levers
@@ -640,7 +766,7 @@ class LeverPipeline:
             return
         if self._notify is not None:
             try:
-                self._notify(BUDGET_KEY, write_budget.today(), BUDGET_MESSAGE.format(limit=limit))
+                self._notify(BUDGET_KEY, write_budget.today(), meldungen.neu("meldung.schreibbudget", limit=limit))
             except Exception:
                 logger.exception("Hinweis zum Tageslimit fehlgeschlagen")
         raise WriteBudgetExhausted(lever, limit)
@@ -650,6 +776,12 @@ class LeverPipeline:
         haelt den Stand im Speicher (StateStore.update aendert vor dem Schreiben)."""
         if count <= 0:
             return
+        with self._store.transaktion():
+            total = self._zaehlen(count)
+        self._hinweis_lebensdauer(total)
+
+    def _zaehlen(self, count: int) -> int:
+        """Lesen-Aendern-Schreiben der Zaehler der Anlage; liefert den Lebensdauerzaehler (0 ohne Hinweisgrenze)."""
         description = self._description
         if description.daily_write_limit is not None:
             entry = write_budget.get(self._store, write_budget.TOTAL)
@@ -657,18 +789,23 @@ class LeverPipeline:
                 self._store, write_budget.TOTAL, write_budget.added(entry, count, self._clock(), write_budget.today()),
             )
         if description.lifetime_hint_at is None:
-            return
+            return 0
         total = self._store.state.lifetime_writes + count
         try:
             self._store.update(lifetime_writes=total)
         except Exception as error:
             logger.warning("Lebensdauerzaehler nicht gespeichert (%s), gilt bis zum Neustart", error)
+        return total
+
+    def _hinweis_lebensdauer(self, total: int) -> None:
+        description = self._description
+        if description.lifetime_hint_at is None:
+            return
         if total >= description.lifetime_hint_at and self._notify is not None:
             reached = (description.lifetime_hint_at
                        + (total - description.lifetime_hint_at) // LIFETIME_STEP * LIFETIME_STEP)
             try:
-                self._notify(LIFETIME_KEY, str(reached),
-                             LIFETIME_MESSAGE.format(count=f"{reached:,}".replace(",", ".")))
+                self._notify(LIFETIME_KEY, str(reached), meldungen.neu("meldung.schreibzaehler", anzahl=reached))
             except Exception:
                 logger.exception("Hinweis zum Lebensdauerzaehler fehlgeschlagen")
 
@@ -688,11 +825,6 @@ class LeverPipeline:
         wanted = {name for lever in levers for name in self._group(lever)}
         self._write({lever: values[lever] for lever in wanted if lever in values})
 
-    def write_lever(self, lever: str, value: float) -> float:
-        """Einen einzelnen Hebel schreiben (Mindestvorlauf, client-abgeleitet). Wirft DeviceWriteError oder
-        WriteBudgetExhausted."""
-        return self._write_lever(lever, value)
-
     def ensure_prepared(self, *, exempt: bool = False, require_aux: bool = True) -> bool:
         """Anlage vorbereiten (Vaillant: Zone auf Manuell). Direkt nach einer eigenen Umstellung zeigt HA den alten
         Modus bis zum naechsten Poll der Hersteller-Cloud: dann nicht erneut umstellen (Kontingent). Nach einer
@@ -705,20 +837,21 @@ class LeverPipeline:
             return False
         if require_aux:
             self._require_aux(lever)
-        if not exempt and self.daily_budget_reached():
+        with self._tagesbudget():
+            if not exempt and self.daily_budget_reached():
+                try:
+                    prepared = self._binding.is_prepared()
+                except Exception as error:
+                    raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
+                if not prepared:
+                    self._check_daily_budget(lever)
+            before = self._binding.physical_writes
             try:
-                prepared = self._binding.is_prepared()
+                switched = self._binding.prepare()
             except Exception as error:
                 raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
-            if not prepared:
-                self._check_daily_budget(lever)
-        before = self._binding.physical_writes
-        try:
-            switched = self._binding.prepare()
-        except Exception as error:
-            raise DeviceWriteError(lever, self._binding.ref(lever), error) from error
-        finally:
-            self._count_physical(self._binding.physical_writes - before)
+            finally:
+                self._count_physical(self._binding.physical_writes - before)
         if switched:
             self._prepared_at = self._clock()
             self._last_write_at[lever] = self._clock()
@@ -726,7 +859,7 @@ class LeverPipeline:
         return switched
 
     def prepare_start(self, start_value: float | None) -> None:
-        """Start (Plan-Praezisierung 11, TP11): Anlage vorbereiten; meldet prepared_lever danach keinen brauchbaren
+        """Start: Anlage vorbereiten; meldet prepared_lever danach keinen brauchbaren
         Wert oder wurde gerade umgestellt, den Startwert schreiben und als Wiederherstellungspunkt speichern.
         Startwert: gespeicherter Punkt, sonst `start_value` (Raum-Soll). Wirft DeviceWriteError."""
         lever = self._description.prepared_lever
@@ -738,7 +871,7 @@ class LeverPipeline:
         except Exception:
             live = None
         low, high = self.range_of(lever)
-        # O-TP12e-1: nach der eigenen Umstellung ist der Sollwert unbekannt, bis ein Schreiben gelang. Scheiterte der
+        # Nach der eigenen Umstellung ist der Sollwert unbekannt, bis ein Schreiben gelang. Scheiterte der
         # Startwert, erzwingt ihn auch die Wiederholung (die Zone ist dann schon umgestellt, switched ist False).
         reset = switched or (self._prepared_at is not None and lever not in self._last_written)
         forced = reset and self._description.preparation_resets_setpoint
@@ -755,7 +888,7 @@ class LeverPipeline:
         logger.warning("Startwert fuer %s geschrieben: %s", lever, written)
 
     def reseed_from_plant(self, lever: str) -> None:
-        """Erster Start ohne gespeicherten prepared_lever (Neuinstallation, Update von vor TP11): ein vorhandener
+        """Erster Start ohne gespeicherten prepared_lever (Neuinstallation, Update von einer aelteren Version): ein vorhandener
         Wiederherstellungswert dieses Hebels stammt aus einer aelteren Regelung und wuerde sonst per Durchsetzen oder
         Boost-Ende geschrieben. Deshalb den Live-Wert (begrenzt, gerundet) uebernehmen; nicht lesbar: verwerfen.
         Waehrend eines Boosts steht die Anlage auf Boost-Werten: dann bleibt der Punkt. Wirft nur beim Speichern."""
@@ -771,7 +904,7 @@ class LeverPipeline:
             logger.warning("%s beim ersten Start nicht lesbar: %s", lever, lesbar(str(error)))
             live = None
         seeded = None
-        if live is not None and _is_finite_number(live):
+        if live is not None and ist_endliche_zahl(live):
             seeded = target_value(live, *self.range_of(lever), self._description.steps[lever])
         logger.warning(
             "Erster Start: Wiederherstellungswert von %s %s -> %s (Anlagenwert)",
@@ -786,6 +919,12 @@ class LeverPipeline:
         state = self._store.state
         return _row(state.boost_active, state.emergency_boost_active)
 
+    def _boost_levers(self) -> tuple[str, ...]:
+        """Die Hebel des Hebelsatzes, die ein Boost veraendert (Comfort- oder Notfall-Boost) und deren Wert vor dem
+        Boost gesichert sein muss. Der Mindestvorlauf gehoert nicht dazu: ein Boost schreibt ihn nicht."""
+        changed = set(self._safety.comfort_boost) | set(self._safety.emergency_boost_levers)
+        return tuple(lever for lever in self._description.lever_set.levers if lever in changed)
+
     def _ensure_restore_point(self, *, allow_saved_fallback: bool) -> str | None:
         """Fehlende Werte des Wiederherstellungspunkts (erster Boost vor der ersten Serverantwort) einmalig von der
         Anlage lesen und speichern. None, wenn das nicht geht oder der Punkt noch nicht gespeichert ist -- ausser
@@ -794,7 +933,7 @@ class LeverPipeline:
         state = self._store.state
         point = state.restore_point
         missing = [
-            lever for lever in self._description.lever_set.levers
+            lever for lever in self._boost_levers()
             if self._binding.has(lever) and point.get(lever) is None
         ]
         if state.boost_active or state.emergency_boost_active:
@@ -818,7 +957,7 @@ class LeverPipeline:
         except Exception as error:
             logger.warning("Wiederherstellungspunkt nicht lesbar (%s): %s", ", ".join(missing), lesbar(str(error)))
             return None
-        if not all(value is not None and _is_finite_number(value) for value in live.values()):
+        if not all(value is not None and ist_endliche_zahl(value) for value in live.values()):
             logger.warning("Wiederherstellungspunkt ungueltig: %r", live)
             return None
         self._store.update(restore_point={**point, **live})
@@ -826,9 +965,9 @@ class LeverPipeline:
         return _POINT_CURRENT
 
     def capture_originals(self) -> None:
-        """Die Hebel aus restore_originals vor dem ersten eigenen Schreiben als Ursprungswert merken (TP12h, P2-5). Nur
+        """Die Hebel aus restore_originals vor dem ersten eigenen Schreiben als Ursprungswert merken. Nur
         einmal und nur solange es fuer den Hebel noch keinen Wiederherstellungswert gibt (sonst waere der Live-Wert
-        schon ein gelernter). Ein Lesefehler ist kein Fehler: der naechste Aufruf versucht es erneut. Plan 3b: danach
+        schon ein gelernter). Ein Lesefehler ist kein Fehler: der naechste Aufruf versucht es erneut. Danach
         die Hilfs-Ursprungswerte (_capture_aux)."""
         self._capture_lever_originals()
         self._capture_aux()
@@ -864,13 +1003,16 @@ class LeverPipeline:
         before = self._binding.physical_writes
         try:
             self._binding.restore_aux(values, levers=levers)
+            # Die Zone steht (bei Vaillant) wieder auf dem Zeitprogramm: die eigene Umstellung gilt nicht mehr.
+            self._prepared_at = None
         finally:
             self._count_physical(self._binding.physical_writes - before)
 
     def _capture_lever_originals(self) -> None:
-        """Die Hebel aus restore_originals vor dem ersten eigenen Schreiben als Ursprungswert merken (TP12h, P2-5). Nur
+        """Die Hebel aus restore_originals vor dem ersten eigenen Schreiben als Ursprungswert merken. Nur
         einmal und nur solange es fuer den Hebel noch keinen Wiederherstellungswert gibt (sonst waere der Live-Wert
         schon ein gelernter). Ein Lesefehler ist kein Fehler: der naechste Aufruf versucht es erneut."""
+        boost_levers = self._boost_levers()
         for lever in self._description.restore_originals:
             state = self._store.state
             if (
@@ -878,12 +1020,17 @@ class LeverPipeline:
                 or state.restore_point.get(lever) is not None
             ):
                 continue
+            if (
+                (state.boost_active or state.emergency_boost_active)
+                and lever in boost_levers and lever not in self._description.optional_restore
+            ):
+                continue  # jeder Boost schreibt diesen Hebel: der Live-Wert ist ein Boost-Wert, kein Ursprungswert
             try:
                 live = self._binding.read(lever)
             except Exception as error:
                 logger.warning("%s beim Start nicht lesbar, Ursprungswert bleibt offen: %s", lever, lesbar(str(error)))
                 continue
-            if live is None or not _is_finite_number(live):
+            if live is None or not ist_endliche_zahl(live):
                 logger.warning("%s beim Start nicht numerisch (%r), Ursprungswert bleibt offen", lever, live)
                 continue
             self._store.update(originals={**state.originals, lever: live})
@@ -891,7 +1038,7 @@ class LeverPipeline:
 
     def _saved_fallback(self) -> str | None:
         required = tuple(
-            lever for lever in self._description.lever_set.levers if lever not in self._description.optional_restore
+            lever for lever in self._boost_levers() if lever not in self._description.optional_restore
         )
         saved = self._store.saved_restore_point(required)
         if saved is None:

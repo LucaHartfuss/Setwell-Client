@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host-Installer im Debian-13-Container pruefen (Spec G2b-1 6/10). Plattform: SHG_INSTALL_PLATFORM (Standard
+# Host-Installer im Debian-13-Container pruefen. Plattform: SHG_INSTALL_PLATFORM (Standard
 # linux/amd64; die CI faehrt zusaetzlich linux/arm64 per QEMU). Docker-Pakete laesst der Test aus (--no-docker).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -9,7 +9,7 @@ PLATFORM="${SHG_INSTALL_PLATFORM:-linux/amd64}"
 DEBIAN_IMAGE="debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5"
 docker run --rm --platform "$PLATFORM" --security-opt label=disable --cap-add NET_ADMIN -v "$REPO:/src:ro" "$DEBIAN_IMAGE" \
   bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-             systemd udev nftables shellcheck python3 openssh-server >/dev/null && bash /src/gateway/host/tests/install_checks.sh \
+             systemd udev nftables shellcheck python3 python3-cryptography openssh-server >/dev/null && bash /src/gateway/host/tests/install_checks.sh \
              && bash /src/gateway/host/tests/pilot_ssh_checks.sh' \
   || { echo "FAIL: install.sh ($PLATFORM)"; exit 1; }
 echo "PASS: install.sh ($PLATFORM)"

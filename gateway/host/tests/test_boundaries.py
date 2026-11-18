@@ -1,4 +1,4 @@
-"""Grenzen des Host-Pakets (Spec G2b-1 2.1): Standardbibliothek, cryptography und genau diese Gateway-Module."""
+"""Grenzen des Host-Pakets: Standardbibliothek, cryptography und genau diese Gateway-Module."""
 import ast
 import re
 import sys
@@ -7,9 +7,9 @@ from pathlib import Path
 HOST = Path(__file__).resolve().parents[1]
 SRC = HOST.parent / "src" / "smartheat_gateway"
 ALLOWED_GATEWAY = {"smartheat_gateway", "smartheat_gateway.paths", "smartheat_gateway.version"}
-# Dateien, die install.sh aus gateway/src mit ablegt (Plan G2b-1 Praezisierung 10; ab 0.6.0 ohne agent/, Plan 5b D2).
+# Dateien, die install.sh aus gateway/src mit ablegt.
 SHIPPED = ["__init__.py", "paths.py", "version.py"]
-#: Dateien aus heizungsbruecke/src/smartheat_core, die install.sh mit ablegt (Stufe 3 S6, S3S3-Host: ein Schreibweg)
+#: Dateien aus heizungsbruecke/src/smartheat_core, die install.sh mit ablegt (ein Schreibweg)
 SHIPPED_CORE = ["__init__.py", "dateien.py"]
 CORE = HOST.parent.parent / "heizungsbruecke" / "src" / "smartheat_core"
 ALLOWED_CORE = {"smartheat_core", "smartheat_core.dateien"}
@@ -102,8 +102,8 @@ def test_checker_rejects_forbidden_gateway_imports():
 
 
 def test_checker_rejects_host_package_in_shipped_gateway_modules():
-    assert forbidden_imports("import smartheat_host.minisign", "smartheat_gateway", allow_host=False) == [
-        "smartheat_host.minisign"
+    assert forbidden_imports("import smartheat_host.kette", "smartheat_gateway", allow_host=False) == [
+        "smartheat_host.kette"
     ]
 
 
@@ -117,9 +117,9 @@ def test_checker_accepts_the_allowed_forms():
         "from smartheat_core.dateien import schreiben_json",
         "from smartheat_gateway.paths import Paths",
         "from smartheat_gateway.version import GATEWAY_VERSION",
-        "from smartheat_host import minisign",
-        "from smartheat_host.minisign import verify",
-        "from . import minisign as sibling",
+        "from smartheat_host import kette",
+        "from smartheat_host.kette import verify",
+        "from . import kette as sibling",
     ])
     assert forbidden_imports(source, "smartheat_host", allow_host=True) == []
     relative = "from .paths import Paths"

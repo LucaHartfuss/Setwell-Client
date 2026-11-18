@@ -1,18 +1,17 @@
-"""Gleichlauf der Port-Fakes an der V2-Grenze (A5-25, Controller-Ruling Task 9): die Fakes des Geraetekerns, des
+"""Gleichlauf der Port-Fakes an der V2-Grenze: die Fakes des Geraetekerns, des
 Geraete-Hosts und des Links (RuntimeChannel) in den Host- und Laufzeit-Tests duerfen festhalten, was ihnen uebergeben
 wird, muessen aber dieselbe Signatur haben wie die echte Klasse (Name, Art und Vorgabe jedes Parameters). Aendert sich
 die echte Methode, wird dieser Test rot, statt dass die Fakes still eine alte Schnittstelle weiter bedienen. Dazu der
-Fake-Trigger-Client als Fake des Grenz-Adapters zum HA-WebSocket (Controller-Ruling Task 10)."""
+Fake-Trigger-Client als Fake des Grenz-Adapters zum HA-WebSocket."""
 import inspect
 
 import pytest
 from fakes import FakeTriggerClient, trigger_klasse
-from geraet_helpers import FakeGeraet
+from geraet_helpers import Device as HostTestDevice
+from geraet_helpers import FakeDevice, FakeGeraet
 from golden_scenario import RecordingTrigger
 from host_konformitaet import KonformDevice
-from test_geraet_host import Device as HostTestDevice
-from test_main_geraet import FakeDevice
-from test_runtime import loop_start_aufzeichnen, verbindung_aus
+from runtime_helpers import loop_start_aufzeichnen, verbindung_aus
 
 from heizungsbruecke.geraet_host import HaDeviceHost
 from heizungsbruecke.ha_trigger_client import HaTriggerClient
@@ -34,12 +33,12 @@ def _form(funktion) -> list[tuple[str, object, object]]:
 DEVICE_SICHT = ("wunsch", "soll_quelle_aus", "konfiguration", "bedienung", "abo_status", "meldung")
 PAARE = [
     # Geraetekern, wie ihn HaDeviceHost und die Konformitaetssuite sehen
-    *((f"test_geraet_host.Device.{name}", getattr(HostTestDevice, name), getattr(Device, name)) for name in DEVICE_SICHT),
-    ("test_geraet_host.Device.aktuell", HostTestDevice.aktuell, DocumentStore.aktuell),  # documents = self
+    *((f"geraet_helpers.Device.{name}", getattr(HostTestDevice, name), getattr(Device, name)) for name in DEVICE_SICHT),
+    ("geraet_helpers.Device.aktuell", HostTestDevice.aktuell, DocumentStore.aktuell),  # documents = self
     *((f"KonformDevice.{name}", getattr(KonformDevice, name), getattr(Device, name)) for name in DEVICE_SICHT),
     # Geraetekern, wie ihn main (laufen, verdrahten) sieht
     *((f"FakeDevice.{name}", getattr(FakeDevice, name), getattr(Device, name))
-      for name in ("konfiguration", "bedienung", "abo_status", "start", "stop", "laufzeit_kanal")),
+      for name in ("konfiguration", "bedienung", "abo_status", "meldung", "start", "stop", "laufzeit_kanal")),
     # Geraete-Host, wie ihn HaHost und app.start sehen
     *((f"FakeGeraet.{name}", getattr(FakeGeraet, name), getattr(HaDeviceHost, name))
       for name in ("konfiguration", "bedienung", "abo_status", "notify_sink_fuer", "wunsch", "soll_quelle_aus",
@@ -47,10 +46,10 @@ PAARE = [
     ("FakeGeraet.kanal", FakeGeraet.kanal, Device.laufzeit_kanal),  # mqtt_factory von app.start
     ("FakeGeraet.neustart", FakeGeraet.neustart, prozess.neustart_der_laufzeit),  # neustart von app.start
     ("FakeGeraet.publish", FakeGeraet.publish, StatusSink.publish),  # status_sink ohne HA
-    # Link der Laufzeit (Spione in test_runtime.py)
+    # Link der Laufzeit (Spione in runtime_helpers.py)
     ("loop_start_aufzeichnen", loop_start_aufzeichnen([], lambda: None), RuntimeChannel.loop_start),
     ("verbindung_aus", verbindung_aus({"up": True}), RuntimeChannel.is_connected),
-    # Grenz-Adapter zum HA-WebSocket (Controller-Ruling Task 10): Fake-Trigger-Client der Laufzeit-, Property- und
+    # Grenz-Adapter zum HA-WebSocket: Fake-Trigger-Client der Laufzeit-, Property- und
     # Szenario-Tests (geraet_trigger.HaTriggerClient per monkeypatch ersetzt)
     *((f"{fake.__name__}.{name}", getattr(fake, name), getattr(HaTriggerClient, name))
       for fake in (FakeTriggerClient, RecordingTrigger) for name in ("__init__", "start", "stop")),
@@ -77,7 +76,7 @@ def test_eine_abweichende_signatur_faellt_auf():
         def soll_quelle_aus(self, aus, wirksam):  # Vorgabe fehlt
             pass
 
-        def laufzeit_kanal(self, w):  # anderer Name
+        def laufzeit_kanal(self, w, kreis):  # anderer Name
             pass
 
     assert _form(Falsch.wunsch) != _form(Device.wunsch)

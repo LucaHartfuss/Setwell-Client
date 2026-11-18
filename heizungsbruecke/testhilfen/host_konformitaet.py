@@ -1,9 +1,11 @@
-"""Konformitaet der Geraete-Hosts (V2; Audit 5 A5-58; Spec Stufe 3 S6 4.1): dieselben Pruefungen fuer HaDeviceHost und
+"""Konformitaet der Geraete-Hosts (V2): dieselben Pruefungen fuer HaDeviceHost und
 GatewayDeviceHost. Jeder Host baut eine Welt (Fixture in seiner Testdatei); die Pruefungen kennen nur die gemeinsame
 Sicht: Binden des Workers, Nachstellen von Neustart und Bedienung, Ursprungswerte, Dokumentsicht, Aufraeum-Markierung,
-Abmelde-Markierung (verfaellt mit einer neuen Konfiguration derselben Anlage, 5b-D2-7), Bedienwunsch. Rueckrufe des
-Geraetekerns werfen nie, bis auf konfiguration_vorbereiten (vor dem Speichern, Spec Testoffensive 12.6, Nr. 38): laesst
+Abmelde-Markierung (verfaellt mit einer neuen Konfiguration derselben Anlage), Bedienwunsch. Rueckrufe des
+Geraetekerns werfen nie, bis auf konfiguration_vorbereiten (vor dem Speichern): laesst
 sich die Markierung nicht schreiben, geht der OSError an den Geraetekern, der das Dokument zurueckhaelt."""
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,18 +39,21 @@ class KonformDevice:
     def bedienung(self):
         return self.bed
 
-    def abo_status(self):
-        return dokument_config.abo_status(self.konf)
+    def abo_status(self, kreis=None):
+        return dokument_config.abo_status(self.konf, kreis)
 
-    def wunsch(self, wert, *, herkunft, durch=None):
+    def update_noetig_kritisch(self):
+        return False
+
+    def wunsch(self, wert, *, herkunft, durch=None, kreis=1):
         self.wuensche.append((wert, herkunft, durch))
         return min(max(float(wert), 15.0), 25.0)
 
     def soll_quelle_aus(self, aus, wirksam=None):
         self.aus.append((aus, wirksam))
 
-    def meldung(self, key, text, *, offen, kritisch=True):
-        self.meldungen.append((key, text, offen, kritisch))
+    def meldung(self, key, meldung, *, offen):
+        self.meldungen.append((key, meldung, offen))
 
 
 @dataclass
@@ -61,8 +66,13 @@ class Welt:
     konfiguration: dict  # eine eingerichtete Konfiguration des Hosts
     wunsch_herkunft: str  # herkunft, mit der host.wunsch(wert) den Geraetekern ruft
     # Liest einen Fuehlerwert ueber die echte SignalSource des Hosts: der Fuehler meldet `roh` (Zahl oder Text wie
-    # "unavailable"), die Antwort ist get_state(Fuehler-Referenz) (Spec Fixrunde A SignalUngueltig 4).
+    # "unavailable"), die Antwort ist get_state(Fuehler-Referenz).
     fuehler_lesen: Callable[[float | str], float]
+    # Baut den Host der Laufzeit (HaHost bzw. GatewayHost) ueber den Geraete-Host; der Geraete-Host ist dann verbunden.
+    laufzeit_host: Callable[[], object]
+    # Stellt den Zeitdienst, den der Geraete-Host befragt, auf synchron (True) bzw. nicht synchron (False); gilt fuer
+    # Laufzeit-Hosts, die danach gebaut werden.
+    zeitdienst_setzen: Callable[[bool], None]
 
     def verbunden(self) -> KonformDevice:
         device = KonformDevice(dict(self.konfiguration))
@@ -86,17 +96,22 @@ def ohne_geraet_gelten_feste_leerwerte(w: Welt) -> None:
     h.soll_quelle_aus(True, None)  # wirft nicht
 
 
+def _bed(raum_soll) -> dict:
+    """Inhalt einer Bedienung mit einem Kreis (Kreis 1)."""
+    return {"kreise": [{"kreis": 1, "modus": "manuell", "raum_soll": raum_soll}]}
+
+
 def dokumentsicht_fuer_die_laufzeit(w: Welt) -> None:
     device = w.verbunden()
-    device.bed, device.dirty = {"raum_soll": 21.5}, True
-    assert w.host.bedienung() == ({"raum_soll": 21.5}, True)
+    device.bed, device.dirty = _bed(21.5), True
+    assert w.host.bedienung() == (_bed(21.5), True)
     assert w.host.konfiguration() == w.konfiguration
     assert w.host.abo_status() == dokument_config.abo_status(w.konfiguration)
 
 
 def bedienung_vor_dem_binden_wird_nachgestellt(w: Welt) -> None:
     w.verbunden()
-    w.host.bedienung_uebernommen({"raum_soll": 22})  # aus JSON kommt eine ganze Zahl als int
+    w.host.bedienung_uebernommen(_bed(22))  # aus JSON kommt eine ganze Zahl als int
     worker, seen = w.worker()
     w.host.worker_binden(worker)
     worker.run_pending()
@@ -106,8 +121,8 @@ def bedienung_vor_dem_binden_wird_nachgestellt(w: Welt) -> None:
 
 def nur_die_letzte_bedienung_vor_dem_binden_zaehlt(w: Welt) -> None:
     w.verbunden()
-    w.host.bedienung_uebernommen({"raum_soll": 21.0})
-    w.host.bedienung_uebernommen({"raum_soll": 23.5})
+    w.host.bedienung_uebernommen(_bed(21.0))
+    w.host.bedienung_uebernommen(_bed(23.5))
     worker, seen = w.worker()
     w.host.worker_binden(worker)
     worker.run_pending()
@@ -118,18 +133,18 @@ def bedienung_nach_dem_binden_geht_sofort_an_den_worker(w: Welt) -> None:
     w.verbunden()
     worker, seen = w.worker()
     w.host.worker_binden(worker)
-    w.host.bedienung_uebernommen({"raum_soll": 22.5})
+    w.host.bedienung_uebernommen(_bed(22.5))
     worker.run_pending()
     assert seen == [(EV_TARGET_INPUT, {"value": 22.5, "source": SOURCE_PORTAL})]
 
 
 def ungueltige_bedienung_wird_still_ignoriert(w: Welt) -> None:
     w.verbunden()
-    for inhalt in ({}, {"raum_soll": None}, {"raum_soll": True}, {"raum_soll": "22"}, {"raum_soll": [22]}):
+    for inhalt in ({}, _bed(None), _bed(True), _bed("22"), _bed([22]), {"kreise": []}):
         w.host.bedienung_uebernommen(inhalt)  # vor dem Binden
     worker, seen = w.worker()
     w.host.worker_binden(worker)
-    for inhalt in ({}, {"raum_soll": False}, {"raum_soll": {"x": 1}}):
+    for inhalt in ({}, _bed(False), _bed({"x": 1}), {"kreise": [{"kreis": 2, "modus": "manuell", "raum_soll": 22.0}]}):
         w.host.bedienung_uebernommen(inhalt)  # nach dem Binden
     worker.run_pending()
     assert seen == []
@@ -137,10 +152,10 @@ def ungueltige_bedienung_wird_still_ignoriert(w: Welt) -> None:
 
 def im_ruhezustand_geht_keine_bedienung_an_den_worker(w: Welt) -> None:
     w.verbunden()
-    w.host.bedienung_uebernommen({"raum_soll": 22.0})
+    w.host.bedienung_uebernommen(_bed(22.0))
     worker, seen = w.worker()
     w.host.worker_binden(worker, soll_eingang=False)
-    w.host.bedienung_uebernommen({"raum_soll": 22.5})
+    w.host.bedienung_uebernommen(_bed(22.5))
     worker.run_pending()
     assert seen == []
 
@@ -155,7 +170,7 @@ def neustart_vor_dem_binden_kommt_beim_binden(w: Welt) -> None:
 
 
 def im_ruhezustand_kommt_ein_neustart_vor_dem_binden_beim_binden(w: Welt) -> None:
-    """Die Ersteinrichtung im Ruhezustand haengt daran (S3S6-Reste 1): soll_eingang=False haelt nur die Bedienung
+    """Die Ersteinrichtung im Ruhezustand haengt daran: soll_eingang=False haelt nur die Bedienung
     zurueck, nie die Neustart-Anforderung."""
     w.verbunden()
     w.host.neustart_anfordern()
@@ -238,7 +253,7 @@ def die_erste_leere_konfiguration_markiert_nichts(w: Welt) -> None:
 
 
 def die_erste_leere_konfiguration_startet_nicht_neu(w: Welt) -> None:
-    """L4-02 (c): leer nach keiner (Erstkontakt) und leer nach leer fordern keinen Neustart an; die erste eingerichtete
+    """Leer nach keiner (Erstkontakt) und leer nach leer fordern keinen Neustart an; die erste eingerichtete
     Konfiguration schon (Gegenprobe)."""
     w.verbunden()
     leer = {"anlage": None, "raumfuehler": []}  # wie vom Server: raumfuehler [] ist ungleich fehlend
@@ -269,7 +284,7 @@ def _abmelden(w: Welt, anlage: str) -> None:
 
 
 def eine_neue_konfiguration_derselben_anlage_hebt_die_abmeldung_auf(w: Welt) -> None:
-    """5b-D2-7 (Spec Testoffensive 12.7): das Geraet folgt dem Server. Auch ohne laufzeitrelevante Aenderung (gleicher
+    """Das Geraet folgt dem Server. Auch ohne laufzeitrelevante Aenderung (gleicher
     Inhalt in neuer Version, nur das Profil anders) faellt die Markierung, und der Neustart verlaesst "abgemeldet"."""
     w.verbunden()
     alt = dict(w.konfiguration)
@@ -302,7 +317,7 @@ def ein_sign_off_nach_der_neuen_konfiguration_meldet_wieder_ab(w: Welt) -> None:
     register = CommandRegister(w.abgemeldet_pfad.parent / "befehle", lambda body: gesendet.append(body) or True,
                                clock=w.clock)
     w.host.befehle_eintragen(register)
-    register.empfangen({"schema": 1, "command_id": "c1", "kind": "sign_off", "payload": {},
+    register.empfangen({"schema": 2, "command_id": "c1", "kind": "sign_off", "payload": {},
                         "expires_at": "2027-01-01T00:00:00+00:00"})  # down/command wie vom Server
     assert gesendet == []  # wartet auf den Status "abgemeldet" (Waiting), kein Fehlerergebnis
     assert dateien.lesen_json(w.abgemeldet_pfad) == {"anlage": alt["anlage"]}
@@ -344,7 +359,7 @@ def wunsch_und_soll_quelle_gehen_an_das_geraet(w: Welt) -> None:
 
 def ein_ungueltiger_fuehlerwert_wirft_signal_ungueltig(w: Welt) -> None:
     """V2 (Port SignalSource): ein Fuehler ohne gueltigen Wert (nicht verfuegbar, unbekannt, Text) ist der erwartete
-    Lesefall SignalUngueltig, kein einfacher ValueError; die Laufzeit loggt ihn als WARNING statt ERROR (L4-17)."""
+    Lesefall SignalUngueltig, kein einfacher ValueError; die Laufzeit loggt ihn als WARNING statt ERROR."""
     assert w.fuehler_lesen(21.5) == 21.5  # Gegenprobe: ein gueltiger Wert wird gelesen
     for roh in ("unavailable", "unknown", "kein Wert"):
         try:
@@ -358,6 +373,67 @@ def ein_ungueltiger_fuehlerwert_wirft_signal_ungueltig(w: Welt) -> None:
 
 def host_und_version(w: Welt) -> None:
     assert w.host.host in ("ha", "gateway") and isinstance(w.host.version, str) and w.host.version
+
+
+def _laufzeit_host(w: Welt):
+    w.verbunden()
+    return w.laufzeit_host()
+
+
+def die_uhr_der_laufzeit_ist_synchron_wenn_der_zeitdienst_es_meldet(w: Welt) -> None:
+    w.zeitdienst_setzen(True)
+    assert _laufzeit_host(w).uhr_synchron() is True
+
+
+def die_uhr_der_laufzeit_traegt_die_zeiten_der_synchronen_antwort(w: Welt) -> None:
+    w.zeitdienst_setzen(True)
+    antwort = _laufzeit_host(w).uhr_antwort()
+    assert antwort.synchron is True and antwort.wand is not None and antwort.wand.tzinfo is not None
+    assert isinstance(antwort.mono, float)
+
+
+def die_uhr_der_laufzeit_ist_nicht_synchron_wenn_der_zeitdienst_es_verneint(w: Welt) -> None:
+    w.zeitdienst_setzen(False)
+    assert _laufzeit_host(w).uhr_synchron() is False
+
+
+def nur_ein_echtes_true_des_geraete_hosts_macht_die_uhr_der_laufzeit_synchron(w: Welt) -> None:
+    for antwort, erwartet in ((True, True), (False, False), (None, False), ("ja", False), (1, False)):
+        w.host.uhr_synchron = lambda antwort=antwort: antwort
+        assert _laufzeit_host(w).uhr_synchron() is erwartet, antwort
+
+
+def wirft_der_geraete_host_gilt_die_uhr_der_laufzeit_als_nicht_synchron(w: Welt) -> None:
+    def werfen():
+        raise OSError("Zeitdienst weg")
+
+    w.host.uhr_synchron = werfen
+    assert _laufzeit_host(w).uhr_synchron() is False
+
+
+def die_uhr_der_laufzeit_haelt_den_takt_nicht_laenger_als_die_zwischenspeicherzeit_an(w: Welt) -> None:
+    """Haengt der Zeitdienst (HA: Supervisor ohne Antwort), kommt die Laufzeit nach hoechstens der Zwischenspeicherzeit
+    mit "nicht synchron" zurueck; der haengende Aufruf blockiert keinen weiteren."""
+    from smartheat_runtime import uhr
+
+    assert uhr.UHR_WARTEZEIT_S == 0.5  # absolute Schranke unten gilt nur fuer diese Wartezeit
+    frei, aufrufe = threading.Event(), []
+
+    def haengen():
+        aufrufe.append(1)
+        frei.wait(10)
+        return True
+
+    w.host.uhr_synchron = haengen
+    host = _laufzeit_host(w)
+    try:
+        for _ in range(2):
+            start = time.monotonic()
+            assert host.uhr_synchron() is False
+            assert time.monotonic() - start < 2.0  # absolut: ein Takt wartet nie auf den haengenden Zeitdienst (10 s)
+        assert len(aufrufe) == 1
+    finally:
+        frei.set()
 
 
 PRUEFUNGEN = (
@@ -375,6 +451,12 @@ PRUEFUNGEN = (
     eine_leere_oder_fremde_konfiguration_laesst_die_abmeldung_stehen,
     ohne_eigene_abmeldung_startet_dieselbe_konfiguration_nicht_neu, wunsch_und_soll_quelle_gehen_an_das_geraet,
     ein_ungueltiger_fuehlerwert_wirft_signal_ungueltig, host_und_version,
+    die_uhr_der_laufzeit_ist_synchron_wenn_der_zeitdienst_es_meldet,
+    die_uhr_der_laufzeit_traegt_die_zeiten_der_synchronen_antwort,
+    die_uhr_der_laufzeit_ist_nicht_synchron_wenn_der_zeitdienst_es_verneint,
+    nur_ein_echtes_true_des_geraete_hosts_macht_die_uhr_der_laufzeit_synchron,
+    wirft_der_geraete_host_gilt_die_uhr_der_laufzeit_als_nicht_synchron,
+    die_uhr_der_laufzeit_haelt_den_takt_nicht_laenger_als_die_zwischenspeicherzeit_an,
 )
 
 

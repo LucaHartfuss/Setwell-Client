@@ -1,16 +1,16 @@
-"""Befehle des Gateways (Spec 5b 3.4; Handler aus dem Agenten bis 0.5.0) fuer das Befehlsregister des Geraetekerns
+"""Befehle des Gateways fuer das Befehlsregister des Geraetekerns
 (smartheat_device.commands): ein Handler bekommt Kontext und Nutzlast und liefert Done, Failed oder Waiting; Einmal-
 Ausfuehrung, Gruende-Pruefung und Versand macht das Register. Gateway-Befehle: zigbee_permit_join, zigbee_devices,
 driver_login, inventory (stunden 0: Erkennung des Treibers, sonst Messreihe des Treibers aus der Konfiguration;
 Ergebnis jeweils als up/inventory), diagnostics und sign_off (Markierung, dann startet die Laufzeit als "abgemeldet"
 neu und setzt die Anlage zurueck). hinweis und new_claim_code kann jedes Geraet (Geraetekern). Fehler als Grund und
-details, nie Texte oder Geheimnisse (Spec Stufe 3 S5 6.2); DriverError und QuotaExhausted uebersetzt
+details, nie Texte oder Geheimnisse; DriverError und QuotaExhausted uebersetzt
 fehler_uebersetzen in Vertragsgruende.
 
 Blockierende Treiber-Aufrufe (Cloud-HTTP: Anmeldung, Erkennung, Inventur-Probe; mit Token-Erneuerung und 401-Wiederholung
 bis 80 s) laufen im Hintergrund (ein eigener Daemon-Thread je Kontext), nicht im Geraete-Thread: der Handler liefert
 Waiting, dessen check im Geraete-Thread nur das Future liest. Sonst stuenden down/setpoints, Dokumente und hello still,
-und die Laufzeit liefe nach zwei Ack-Timeouts in den Notbetrieb (bis 0.5.0 lief das im Agenten-Prozess)."""
+und die Laufzeit liefe nach zwei Ack-Timeouts in den Notbetrieb."""
 import functools
 import json
 import logging
@@ -22,12 +22,11 @@ from datetime import UTC, datetime
 
 from smartheat_core import dateien
 from smartheat_core.zahlen import ist_endliche_zahl
+from smartheat_core.zeitquelle import fachliche_epoche
 from smartheat_device import fehler, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, InvalidPayload, Outcome, Waiting
-from smartheat_device.hintergrund import (  # noqa: F401  (HINTERGRUND_NAME: Rueck-Import fuer tests/test_befehle.py)
-    HINTERGRUND_NAME,
-    Hintergrund,
-)
+from smartheat_device.geraet_host_basis import SIGN_OFF_WAIT_SECONDS, abmeldung_abwarten
+from smartheat_device.hintergrund import Hintergrund
 from smartheat_device.nachrichten import Vertragsfehler, pruefen
 from smartheat_gateway import config as gateway_config
 from smartheat_gateway.drivers import registry
@@ -37,15 +36,13 @@ from smartheat_gateway.quota import QuotaExhausted
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime import dokument_config
 from smartheat_runtime.dokument_config import ConfigError
-from smartheat_runtime.status import STATUS_ABGEMELDET
 
 logger = logging.getLogger(__name__)
 
 INVENTORY_EVERY_SECONDS = 900
 ERKENNUNG_SECONDS = 120
-SIGN_OFF_WAIT_SECONDS = 24 * 3600
 ZIGBEE_VALUE_FIELDS = ("temperature", "local_temperature", "occupied_heating_setpoint", "humidity")
-MAX_WERT_EBENEN = 32  # tiefer verschachtelte Werte der Zigbee-Geraeteliste fallen weg (Testoffensive T5', Task 4)
+MAX_WERT_EBENEN = 32  # tiefer verschachtelte Werte der Zigbee-Geraeteliste fallen weg
 
 
 @dataclass
@@ -57,7 +54,7 @@ class Kontext:
     neustart: Callable[[], None]
     diagnostics: Callable[[], dict] = dict
     clock: Callable[[], float] = time.monotonic
-    wall: Callable[[], float] = time.time
+    wall: Callable[[], float] = fachliche_epoche
     hintergrund: Hintergrund = field(default_factory=Hintergrund)
 
 
@@ -82,7 +79,7 @@ def eintragen(register: CommandRegister, ctx: Kontext) -> None:
         # sign_off ist idempotent (die Markierung setzt den Neustart nur einmal): nach dem Neustart laeuft es erneut,
         # damit das Ergebnis kommt, sobald der Status "abgemeldet" zeigt (D1: wiederholbar). inventory liest nur und
         # setzt die Messreihe aus der Datei fort: fiel ein Neustart in die Erkennung, laeuft sie bei der erneuten
-        # Zustellung noch einmal, statt mit "intern" zu enden (L4-02). Grenze: hoechstens eine Cloud-Abfrage je
+        # Zustellung noch einmal, statt mit "intern" zu enden. Grenze: hoechstens eine Cloud-Abfrage je
         # Neustart, solange der Server den Befehl zustellt (bis expires_at); eine Neustart-Schleife wiederholte sie.
         register.register(kind, functools.partial(function, ctx), wiederholbar=kind in WIEDERHOLBAR)
 
@@ -112,7 +109,7 @@ def _driver(ctx: Kontext, driver_id, parameter: dict | None = None) -> Driver:
 def _im_hintergrund(ctx: Kontext, kind: str, call: Callable[[], Done | Failed],
                     frist_s: float | None = None) -> Outcome:
     """Blockierender Aufruf im Hintergrund; check() im Geraete-Thread liest nur das Future. Eine Ausnahme des Aufrufs
-    wirft check() erneut, das Register uebersetzt sie wie bisher (fehler_uebersetzen). Antwortet der Treiber bis zur
+    wirft check() erneut, das Register uebersetzt sie (fehler_uebersetzen). Antwortet der Treiber bis zur
     Frist des Befehls (wire, expires; frist_s, wenn die Frist von der Nutzlast abhaengt) nicht, endet der Befehl mit
     anlage_nicht_erreichbar. Ist der Aufruf sofort fertig, kommt das Ergebnis direkt."""
     future = ctx.hintergrund.submit(call)
@@ -247,17 +244,22 @@ def driver_login(ctx: Kontext, payload: dict) -> Outcome:
     return _im_hintergrund(ctx, "driver_login", anmelden)
 
 
-def forget_inventory(paths: Paths) -> None:
-    """Proben gehoeren zur Anlage der Einrichtung; nach Abmelden oder Aufraeumen nie in einer neuen Inventur. Wirft nie."""
+def forget_inventory(paths: Paths) -> bool:
+    """Proben gehoeren zur Anlage der Einrichtung; nach Abmelden oder Aufraeumen nie in einer neuen Inventur. Wirft nie;
+    False, wenn eine Datei liegen blieb (eine Fehlerzeile je Datei, der Aufrufer loggt nicht noch einmal)."""
+    geloescht = True
     for path in (paths.inventur, paths.inventur.with_name(paths.inventur.name + ".tmp")):
         try:
             path.unlink(missing_ok=True)
         except OSError as error:
-            logger.error("Inventur-Proben nicht gelöscht (%s)", type(error).__name__)
+            geloescht = False
+            logger.error("%s nicht geloescht (%s), neuer Versuch beim naechsten Start", path.name,
+                         type(error).__name__)
+    return geloescht
 
 
 def _erkennung(ctx: Kontext, payload: dict) -> Outcome:
-    """Inventur stunden 0 (Spec Stufe 3 S5 5.1): Erkennung des Treibers aus dem Filter, vor und nach der Einrichtung;
+    """Inventur stunden 0: Erkennung des Treibers aus dem Filter, vor und nach der Einrichtung;
     die Daten gehen als up/inventory vor dem Ergebnis."""
     filter_ = payload.get("filter")
     if isinstance(filter_, dict) and (fremd := fehler.fremdes_feld(filter_, wire.INVENTUR_FILTER_GATEWAY_FIELDS)):
@@ -358,15 +360,9 @@ def diagnostics(ctx: Kontext, payload: dict) -> Outcome:
     return Done(ctx.diagnostics())
 
 
-def _restore_values(ctx: Kontext) -> dict:
-    backup = dateien.lesen_json(ctx.paths.backup)
-    point = backup.get("restore_point") if isinstance(backup, dict) else None
-    return dict(point) if isinstance(point, dict) else {}
-
-
 @_handler("sign_off")
 def sign_off(ctx: Kontext, payload: dict) -> Outcome:
-    """Abmelden (Spec TP7 3.3, 5b 4.5): Markierung fuer die Anlage, dann startet die Laufzeit als "abgemeldet" neu und
+    """Abmelden (5b 4.5): Markierung fuer die Anlage, dann startet die Laufzeit als "abgemeldet" neu und
     setzt die Anlage zurueck (LeverPipeline.restore_and_clear): die Hebel aus restore_originals auf ihre Ursprungswerte,
     die uebrigen auf die zuletzt gelernten Werte (Wiederherstellungspunkt). Erneut zugestellt (nach dem Neustart):
     dieselbe Markierung, kein zweiter Neustart. Fertig, sobald der Status "abgemeldet" fuer diese Anlage zeigt; werte
@@ -376,13 +372,9 @@ def sign_off(ctx: Kontext, payload: dict) -> Outcome:
         return Failed("nicht_eingerichtet")
     assert konfiguration is not None
     anlage = konfiguration["anlage"]
+    gateway_config.abmeldung_vom_server(ctx.paths)
     if gateway_config.abmelden(ctx.paths, anlage):
         ctx.neustart()
 
-    def check() -> Done | Failed | None:
-        status = ctx.runtime_status()
-        if not status or status.get("status") != STATUS_ABGEMELDET or status.get("tenant_id") != anlage:
-            return None
-        return Done({"zurueckgesetzt": status.get("grund") is None, "werte": _restore_values(ctx)})
-
-    return Waiting(check, ctx.clock() + SIGN_OFF_WAIT_SECONDS)
+    return abmeldung_abwarten(anlage, ctx.runtime_status, ctx.paths.backup(dokument_config.kreisnummer(konfiguration)),
+                              ctx.clock() + SIGN_OFF_WAIT_SECONDS)

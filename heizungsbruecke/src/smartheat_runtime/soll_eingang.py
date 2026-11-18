@@ -1,4 +1,4 @@
-"""Soll-Eingang (Spec 5b 3.2/3.3, Spec 5c 1.3), hostneutral: Bedienung vom Server (portal), Eingabe an der Soll-Quelle
+"""Soll-Eingang, hostneutral: Bedienung vom Server (portal), Eingabe an der Soll-Quelle
 (thermostat; HA: Soll-Entity) und lokale Eingabe (lokal; HA: Ereignis smartheat_wunsch) gehen als EV_TARGET_INPUT in den
 Worker. Der Soll-Speicher schreibt, der Debouncer beendet die Eingabe (Gateway 10 s; HA 0 s, dort entprellt der
 HA-Trigger mit for: 10 s). Erst dann geht ein Wunsch einmal an den Geraetekern (begrenzt auf den Bedienbereich); der
@@ -23,8 +23,18 @@ logger = logging.getLogger(__name__)
 
 EV_TARGET_INPUT = "shg_target_input"
 EV_SOLL_MODUS = "shg_soll_modus"
+#: Meldet der Laufzeit jeden Wechsel von Soll-Quelle aus/an ({"aus": bool}); der Kaelteschutz rechnet dann ohne Soll.
+EV_SOLL_QUELLE = "shg_soll_quelle"
+#: Ende der Regelung (Abo-Ende, ausser Betrieb): die Soll-Quelle zeigt danach den gemerkten Wunsch, nie weniger.
+EV_SOLL_ENDE = "shg_soll_ende"
+#: Das Soll-Ende ist abgearbeitet (geschrieben, nicht noetig oder nicht Sache der Regelung): die Laufzeit loescht
+#: den Merker "Soll-Ende offen". Ohne diese Meldung bleibt er offen und der naechste Start holt es nach.
+EV_SOLL_ENDE_ERLEDIGT = "shg_soll_ende_erledigt"
+#: Wiederholung eines Soll-Endes, das noch nicht gelang (Anzeige unbekannt oder Schreiben gescheitert).
+EV_SOLL_ENDE_WIEDERHOLEN = "shg_soll_ende_wiederholen"
+SOLL_ENDE_WIEDERHOLUNG_S = 60.0
 DEBOUNCE_KIND = "shg_target_debounce"
-#: Spec 5b 3.2: ein Soll bis zu diesem Wert ist die Frostschutz-Stellung der Soll-Quelle, kein Bedienwunsch.
+#: Ein Soll bis zu diesem Wert ist die Frostschutz-Stellung der Soll-Quelle, kein Bedienwunsch.
 FROSTSCHUTZ_BIS = 7.0
 MODUS_AUS = "off"
 
@@ -37,6 +47,31 @@ class SollQuelle(Protocol):
     def angezeigt(self) -> float | None:
         """Was die Quelle gerade zeigt; None = unbekannt."""
         ...
+
+    def aus(self) -> bool:
+        """Die Quelle zeigt „aus“ (Modus off): sie gehoert dem Kunden."""
+        ...
+
+
+def ende_schreiben(wunsch: float, quelle: SollQuelle, *,
+                   geschrieben: Callable[[float], None] | None = None) -> bool:
+    """Soll-Ende an der Quelle: sie zeigt danach den gemerkten Wunsch, nie weniger. True = erledigt (nichts zu tun oder
+    geschrieben), False = spaeter erneut (Anzeige unbekannt oder Schreiben gescheitert). Bei unbekannter Anzeige wird
+    nicht geschrieben: ein hoeherer Wert des Kunden koennte dort stehen. Zeigt die Quelle gleich viel oder mehr, bleibt
+    sie; bei „aus“ oder einer Frostschutz-Stellung gehoert sie dem Kunden. `geschrieben` bekommt nach einem Schreiben
+    den vorher angezeigten Wert."""
+    if quelle.aus():
+        return True
+    angezeigt = quelle.angezeigt()
+    if angezeigt is None:
+        return False
+    if angezeigt >= wunsch or angezeigt <= FROSTSCHUTZ_BIS:
+        return True
+    if not quelle.schreiben(wunsch):
+        return False
+    if geschrieben is not None:
+        geschrieben(angezeigt)
+    return True
 
 
 class SollEingang:
@@ -53,9 +88,13 @@ class SollEingang:
         self._herkunft: tuple[str | None, str | None] = (None, None)
         self._vor_wunsch: tuple[float, str] | None = None  # Soll und Quelle vor dem ersten offenen Wunsch
         self._unbrauchbar_gemeldet: set[str] = set()  # Fehlerarten mit WARNING seit dem letzten brauchbaren Wert
+        self._ende_wartet = False  # ein Soll-Ende kam bei offenem Wunsch: nach dem Entprellen nachholen
+        self._ende_geplant = False  # eine Wiederholung des Soll-Endes ist eingeplant (eine Kette)
         self._debouncer = Debouncer(worker, DEBOUNCE_KIND, entprellen_s, self._entprellt)
         worker.register(EV_TARGET_INPUT, self._on_target_input)
         worker.register(EV_SOLL_MODUS, self._on_mode)
+        worker.register(EV_SOLL_ENDE, self._on_ende)
+        worker.register(EV_SOLL_ENDE_WIEDERHOLEN, self._on_ende_wiederholen)
 
     @property
     def aus(self) -> bool:
@@ -75,7 +114,8 @@ class SollEingang:
             self._aus.discard(grund)
         if bool(self._aus) != vorher:
             if self._aus:
-                self._wunsch_verwerfen()  # Soll-Quelle aus ist kein Wunsch (Spec 5b 3.2): auch ein offener nicht
+                self._wunsch_verwerfen()  # Soll-Quelle aus ist kein Wunsch: auch ein offener nicht
+            self._worker.post(Event(EV_SOLL_QUELLE, {"aus": bool(self._aus)}))
             self._soll_quelle_aus(bool(self._aus), self._store.value if self._aus else None)
         if grund == "modus" and war_aus and not self._aus:
             self._wieder_an()
@@ -96,9 +136,48 @@ class SollEingang:
             self._store.wiederherstellen(*self._vor_wunsch)
         self._wunsch_offen = self._lokal_offen = False
         self._vor_wunsch = None
+        if self._ende_wartet:
+            self._ende_erledigt()  # die Quelle ist aus: sie gehoert dem Kunden, das Soll-Ende ist nicht mehr Sache der Regelung
+
+    def _on_ende(self, event: Event) -> None:
+        """Ende der Regelung: die Soll-Quelle zeigt den gemerkten Wunsch (`TargetStore.value`), damit keine Betriebsart
+        ihren Wert dort stehen laesst (`ende_schreiben`: nie absenken, nicht bei unbekannter Anzeige). Nichts zu tun
+        bei Soll-Quelle aus (Modus off, Frostschutz-Stellung: die Quelle gehoert dem Kunden) und ohne Quelle. Bei einem
+        offenen, noch nicht entprellten Wunsch (der Kunde dreht gerade; sein Wert gewinnt) wird es nach dem Entprellen
+        nachgeholt. Erledigt meldet es EV_SOLL_ENDE_ERLEDIGT; bis dahin wiederholt es sich im Takt
+        SOLL_ENDE_WIEDERHOLUNG_S."""
+        if self._quelle is None or self._aus:
+            self._ende_erledigt()
+        elif self._wunsch_offen:
+            self._ende_wartet = True
+        else:
+            self._ende_wartet = False
+            self._ende_versuchen()
+
+    def _on_ende_wiederholen(self, event: Event) -> None:
+        self._ende_geplant = False
+        self._on_ende(event)
+
+    def _ende_versuchen(self) -> None:
+        assert self._quelle is not None
+        if ende_schreiben(self._store.value, self._quelle,
+                          geschrieben=lambda veraltet: self._store.note_own_write(veraltet=veraltet)):
+            self._ende_erledigt()
+        elif not self._ende_geplant:
+            self._ende_geplant = True
+            self._worker.schedule(SOLL_ENDE_WIEDERHOLUNG_S, Event(EV_SOLL_ENDE_WIEDERHOLEN))
+
+    def _ende_erledigt(self) -> None:
+        self._ende_wartet = False
+        self._worker.post(Event(EV_SOLL_ENDE_ERLEDIGT))
 
     def _on_mode(self, event: Event) -> None:
-        self._setze_aus("modus", event.data.get("mode") == MODUS_AUS)
+        """Ein Modus ohne Text (Zigbee2MQTT `system_mode: null`) ist keine Aussage: er schaltet weder an noch aus (fail
+        closed; sonst loeste er nach „aus“ ein „wieder an“ aus)."""
+        mode = event.data.get("mode")
+        if not isinstance(mode, str):
+            return
+        self._setze_aus("modus", mode == MODUS_AUS)
 
     def _on_target_input(self, event: Event) -> None:
         value, source = event.data["value"], event.data["source"]
@@ -127,7 +206,7 @@ class SollEingang:
                 return
             if not is_plausible(value, ROOM_TEMP_RANGE):
                 # Unbrauchbar (nicht endlich, Text, bool, None, ueber dem Raumbereich): aendert die Frostschutz-Stellung
-                # nicht, ist kein Wunsch (Fund M4 aus T5'); vorher hob ein einziger solcher Wert die Stellung auf.
+                # nicht, ist kein Wunsch; ein einziger solcher Wert hebt die Stellung nicht auf.
                 self._unbrauchbar_melden(value)
                 return
             self._unbrauchbar_gemeldet.clear()
@@ -175,4 +254,6 @@ class SollEingang:
                     self._schreiben(begrenzt)
             elif lokal and not self._aus:
                 self._schreiben(self._store.value)
+        if self._ende_wartet and not self._wunsch_offen:
+            self._worker.post(Event(EV_SOLL_ENDE))  # das Soll-Ende kam bei offenem Wunsch: jetzt mit dem Wert des Kunden
         self._worker.post_coalesced(EV_LOCAL_CHECK, room_target_fired=True)

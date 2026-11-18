@@ -1,0 +1,272 @@
+"""Betrieb mit den Bindings ueber _start_bridge (Harness aus runtime_helpers.py, Geraete-Pfad): der
+Hebelsatz des Konfigurationsdokuments waehlt Binding und lokale Sicherheit; fehlende Pflicht-Rollen sind ein
+Konfigurationsfehler; Vaillant bleibt unveraendert (alle Tests in test_runtime.py)."""
+import dataclasses
+import logging
+
+import pytest
+from fakes import VIESSMANN_OPTIONEN, VIESSMANN_ZUSTAND, schreibziel_eintrag
+from runtime_helpers import (
+    WEISHAUPT,
+    WEISHAUPT_STATES,
+    _advance,
+    _anlage_budget,
+    _backup,
+    _ha_verbunden,
+    _last_event,
+    _mqtt,
+    _start,
+    _start_bridge,
+    _trigger,
+)
+
+from heizungsbruecke import host as host_modul
+from smartheat_core import meldungen, write_budget
+from smartheat_core.pipeline import BUDGET_KEY
+from smartheat_runtime.backup_store import save_backup
+
+
+def _first_snapshot(env, bridge):
+    _ha_verbunden(env, bridge)  # erster Tick nach dem Start
+    return _mqtt(env).snapshots[-1]
+
+
+def _answer_levers(env, bridge, seq, levers):
+    _mqtt(env).answer(seq, levers=levers)
+    bridge.worker.run_pending()
+
+
+def test_weishaupt_start_remembers_originals_prepares_and_reports_its_levers(env):
+    env.ha.states.update(WEISHAUPT_STATES)
+    bridge = _start(env, **WEISHAUPT)
+
+    assert env.ha.writes == [("select.betriebsart", "hz_operationmode_normal")]  # Normal-Soll 20 bleibt (Register, kein Startwert)
+    backup = _backup(env)
+    assert backup["aux_originals"] == {"mode_select": "hz_operationmode_automatic", "setpoint_comfort": 22.0, "setpoint_setback": 18.0}
+    assert backup["originals"] == {"curve": 0.75, "room_setpoint": 20.0, "heat_limit": 18.0}
+    snapshot = _first_snapshot(env, bridge)
+    assert snapshot["levers"] == {"curve": 0.75, "room_setpoint": 20.0, "heat_limit": 18.0}
+    assert snapshot["readonly"] == []
+
+    _answer_levers(env, bridge, snapshot["seq"], {"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+
+    assert env.ha.writes[1:] == [
+        ("number.hk", 0.8), ("number.komfort", 23.0), ("number.normal", 23.0), ("number.swu", 17.0),
+    ]
+    assert _anlage_budget(env)["lifetime_writes"] == 5
+    assert _anlage_budget(env)["write_budget"]["writes:total"]["count"] == 5
+    assert "lifetime_writes" not in _backup(env) and "writes:total" not in _backup(env).get("write_budget", {})
+
+
+def test_weishaupt_basis_reports_the_curve_readonly_and_writes_only_the_room_setpoint(env):
+    env.ha.states.update(WEISHAUPT_STATES)
+    bridge = _start(env, **{**WEISHAUPT, "lever_set": "weishaupt_wwp_basis", "entity_heat_limit": ""})
+
+    snapshot = _first_snapshot(env, bridge)
+    assert snapshot["levers"] == {"room_setpoint": 20.0, "curve": 0.75}
+    assert snapshot["readonly"] == ["curve"]
+
+    _answer_levers(env, bridge, snapshot["seq"], {"room_setpoint": 21.5})
+    assert env.ha.writes[1:] == [("number.normal", 21.5)]
+    assert _last_event(env)["datenfehler"] is None
+
+
+def test_weishaupt_without_a_comfort_setpoint_is_a_configuration_error(env):
+    env.ha.states.update(WEISHAUPT_STATES)
+    bridge = _start_bridge(env, **{**WEISHAUPT, "entity_setpoint_comfort": ""})
+
+    assert bridge.reason == "konfigurationsfehler"
+    assert _last_event(env)["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
+    assert env.ha.writes == []
+
+
+def test_an_unknown_lever_set_is_a_configuration_error_not_vaillant(env):
+    bridge = _start_bridge(env, lever_set="buderus")
+    assert bridge.reason == "konfigurationsfehler"
+    assert _last_event(env)["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
+    assert env.ha.writes == []
+
+
+def test_weishaupt_sign_off_restores_levers_and_operating_mode(env):
+    env.ha.states.update(WEISHAUPT_STATES)
+    bridge = _start(env, **WEISHAUPT)
+    snapshot = _first_snapshot(env, bridge)
+    _answer_levers(env, bridge, snapshot["seq"], {"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+    env.ha.writes.clear()
+
+    signed_off = _start_bridge(env, **WEISHAUPT, abgemeldet=True)
+
+    assert signed_off.reason == "abgemeldet"
+    assert env.ha.writes == [
+        ("number.hk", 0.75), ("number.normal", 20.0), ("number.swu", 18.0), ("number.komfort", 22.0),
+        ("select.betriebsart", "hz_operationmode_automatic"),
+    ]
+
+
+def test_weishaupt_restart_after_the_sign_off_writes_nothing_despite_server_originals(env):
+    """Schluss-Review: die gespiegelten Ursprungswerte (Hebel und Hilfswerte) bleiben in der Konfiguration; der naechste
+    Start des abgemeldeten Geraets schreibt nichts mehr, auch wenn der Kunde Kurve und Komfort-Soll verstellt hat."""
+    ursprungswerte = {"heat_limit": 16.0, "setpoint_comfort": 21.0, "setpoint_setback": 17.0}
+    env.ha.states.update(WEISHAUPT_STATES)
+    bridge = _start(env, **WEISHAUPT, ursprungswerte=ursprungswerte)
+    snapshot = _first_snapshot(env, bridge)
+    _answer_levers(env, bridge, snapshot["seq"], {"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+    assert _start_bridge(env, **WEISHAUPT, abgemeldet=True, ursprungswerte=ursprungswerte).reason == "abgemeldet"
+    assert ("number.swu", 16.0) in env.ha.writes and ("number.komfort", 22.0) in env.ha.writes  # lokal gewinnt
+    env.ha.states.update({"number.hk": 0.6, "number.komfort": 23.0})
+    env.ha.writes.clear()
+
+    signed_off = _start_bridge(env, **WEISHAUPT, abgemeldet=True, ursprungswerte=ursprungswerte)
+
+    assert signed_off.reason == "abgemeldet" and _last_event(env)["grund"] is None
+    assert env.ha.writes == []
+
+
+def test_viessmann_start_leaves_eco_and_writes_curve_and_level_together(env):
+    env.ha.states.update(VIESSMANN_ZUSTAND)
+    bridge = _start(env, **VIESSMANN_OPTIONEN)
+
+    assert env.ha.writes == [("climate.heizkreis::preset_mode", "home")]
+    snapshot = _first_snapshot(env, bridge)
+    assert snapshot["levers"] == {"curve": 1.0, "level": 0.0, "room_setpoint": 20.0}
+
+    _answer_levers(env, bridge, snapshot["seq"], {"curve": 1.0, "level": -2.0, "room_setpoint": 21.0})
+    assert env.ha.writes[1:] == [("number.slope", 1.0), ("number.shift", -2.0), ("number.normal_temperature", 21.0)]
+    assert "lifetime_writes" not in _backup(env)
+
+
+# --- Carry-forwards aus den Reviews der Tasks 5/8 ---
+
+def _exhaust_daily_budget(env, bridge) -> int:
+    limit = bridge.override.binding.description.daily_write_limit
+    write_budget.put(
+        bridge.store, write_budget.TOTAL, write_budget.added(None, limit, env.clock(), write_budget.today()),
+    )
+    return limit
+
+
+def test_daily_limit_notice_goes_through_the_notifier_once_a_day(env):
+    # notify= der Pipeline ist Notifier.notify (Meldezustand je Schluessel): zweimal am Limit, eine Meldung.
+    env.ha.states.update(WEISHAUPT_STATES)
+    bridge = _start(env, **WEISHAUPT)
+    limit = _exhaust_daily_budget(env, bridge)
+    pushes, writes = len(env.ha.pushes), len(env.ha.writes)
+
+    for _ in range(2):
+        bridge.override.apply_server_values({"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+
+    assert env.ha.writes[writes:] == []
+    assert [push for push in env.ha.pushes[pushes:] if "Tageslimit" in push] == [
+        meldungen.text(meldungen.neu("meldung.schreibbudget", limit=limit))]
+    assert bridge.store.state.notify_states[BUDGET_KEY] == write_budget.today()
+
+
+def test_zone_preparation_at_the_daily_limit_is_a_budget_stop_not_a_failed_attempt(env, caplog):
+    # Weishaupt-Tageslimit: kein Stacktrace "Zone konnte nicht vorbereitet werden", kein Versuch im Kontingent.
+    # Das Budget ist schon beim Start aufgebraucht (10 Schreibvorgaenge heute, gespeichert wie von einem Lauf vorher).
+    save_backup(env.paths["BACKUP_PATH"], {"write_budget": {"writes:total": {"day": write_budget.today(), "count": 10}}})
+    env.ha.states.update(WEISHAUPT_STATES)
+    with caplog.at_level(logging.INFO, logger="smartheat_runtime.app"):
+        bridge = _start(env, **WEISHAUPT)
+        _trigger(env, bridge, "sensor.room_actual")
+
+    # kein Wiederholungs-Kontingent verbraucht: der naechste lokale Check (ohne 1800 s Pause) versucht es erneut
+    stopps = [record for record in caplog.records if record.getMessage().startswith("Zone nicht vorbereitet")]
+    assert [record.levelno for record in stopps] == [logging.INFO, logging.INFO]
+    assert all("Tageslimit von 10 Schreibvorgaengen erreicht" in record.getMessage() for record in stopps)
+    assert env.ha.states["select.betriebsart"] == "hz_operationmode_automatic" and env.ha.writes == []
+    assert bridge.zone_prepared is False
+    assert write_budget.get(bridge.store, write_budget.ZONE_PREPARE) is None
+    assert not any("Zone konnte nicht vorbereitet werden" in record.getMessage() for record in caplog.records)
+
+
+def test_weishaupt_daily_energy_reaches_the_server_as_a_growing_sum(env):
+    env.ha.states.update({**WEISHAUPT_STATES, "sensor.waerme_heute": 8.0})
+    env.ha.states.update({"sensor.waerme_heute::unit_of_measurement": "kWh", "sensor.waerme_heute::device_class": "energy"})
+    bridge = _start(env, **WEISHAUPT, entity_energy_thermal_heating="sensor.waerme_heute")
+    assert _mqtt(env).telemetry[-1]["energy"] == {"thermal_heating": 8.0}
+
+    env.ha.states["sensor.waerme_heute"] = 0.5  # Mitternacht
+    _advance(env, bridge, 300)
+
+    assert _mqtt(env).telemetry[-1]["energy"] == {"thermal_heating": 8.5}
+    assert _backup(env)["energy_state"] == {"thermal_heating": {"raw": 0.5, "sum": 8.5, "einheit": "kWh"}}
+
+
+# --- Anlagen-Kennung aus dem Kreis (Laufzeit) ---
+
+#: Kennung, die Add-on 1.1.0 fuer OPTIONS schrieb (roles.lever_refs_identity der Hebel-Referenzen), woertlich.
+KENNUNG_1_1_0 = ('{"curve": "number.curve_current", "heat_limit": "number.heat_limit", "min_flow": "number.min_flow", '
+                 '"room_setpoint": "number.shift_current"}')
+KREIS_KENNUNG = '{"anlage":"S","hersteller":"vaillant","nummer":0}'
+UEBERNAHME = "Anlagen-Kennung aus dem Heizkreis übernommen"
+GAS = {"sensor.gas": 812.5, "sensor.gas::device_class": "energy", "sensor.gas::unit_of_measurement": "kWh"}
+
+
+def _uebernahmen(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "smartheat_runtime.state" and r.levelno == logging.INFO
+            and r.getMessage() == UEBERNAHME]
+
+
+def test_umbenannte_hebel_entity_behaelt_die_ursprungswerte(env):
+    """Eine umbenannte Hebel-Entity (derselbe Kreis) ist dieselbe Anlage. Bis 1.1.0 aenderte sie die Kennung,
+    bind_to_tenant verwarf die Ursprungswerte, und der Start nahm die schon geregelten Werte als neue Ursprungswerte."""
+    bridge = _start(env)
+    snapshot = _first_snapshot(env, bridge)
+    _answer_levers(env, bridge, snapshot["seq"], {"curve": 1.3, "room_setpoint": 22.0, "heat_limit": 18.0, "min_flow": 22.0})
+    assert env.ha.states["number.curve_current"] == 1.3  # Gegenprobe: die Regelung hat geschrieben
+    ursprung = {key: _backup(env)[key] for key in ("originals", "restore_point")}
+    assert ursprung == {"originals": {"curve": 0.9, "room_setpoint": 22.0, "heat_limit": 16.0, "min_flow": 21.0},
+                        "restore_point": {"curve": 1.3, "room_setpoint": 22.0, "heat_limit": 18.0, "min_flow": 22.0}}
+    assert _backup(env)["plant_id"] == KREIS_KENNUNG
+    env.ha.states["number.heat_limit_neu"] = 18.0  # dieselbe Heizgrenze unter neuem Namen
+    env.ha.registry.append(schreibziel_eintrag("number.heat_limit_neu", "mypyllant"))
+
+    _start(env, entity_heat_limit="number.heat_limit_neu")
+
+    assert {key: _backup(env)[key] for key in ursprung} == ursprung and _backup(env)["plant_id"] == KREIS_KENNUNG
+
+
+def test_bestand_von_1_1_0_behaelt_ursprungswerte_und_energiesummen(env, caplog):
+    """Das Update von 1.1.0: backup.json traegt die Kennung aus den Hebel-Referenzen (und noch einen setup_id-Rest von
+    1.0.0). Der erste Start uebernimmt sie einmal (INFO), Ursprungswerte, Wiederherstellungspunkt und Energiesummen
+    bleiben; der zweite Start uebernimmt nichts mehr."""
+    bestand = {
+        "tenant_id": "test_tenant", "plant_id": KENNUNG_1_1_0, "setup_id": "test_tenant",
+        "originals": {"curve": 1.1, "room_setpoint": 20.5, "heat_limit": 17.0, "min_flow": 20.0},
+        "restore_point": {"curve": 1.1, "room_setpoint": 20.5, "heat_limit": 17.0, "min_flow": 20.0},
+        "energy_state": {"primary_heating": {"raw": 812.5, "sum": 1234.5, "einheit": "kWh"}},
+        "lifetime_writes": 42,
+    }
+    save_backup(env.paths["BACKUP_PATH"], bestand)
+    env.ha.states.update(GAS)
+    with caplog.at_level(logging.INFO, logger="smartheat_runtime.state"):
+        _start(env, entity_energy_primary_heating="sensor.gas")
+
+    backup = _backup(env)
+    assert backup["plant_id"] == KREIS_KENNUNG and backup["tenant_id"] == "test_tenant"
+    assert backup["originals"] == bestand["originals"] and backup["restore_point"] == bestand["restore_point"]
+    assert backup["energy_state"] == bestand["energy_state"]
+    assert _anlage_budget(env)["lifetime_writes"] == 42 and "lifetime_writes" not in backup  # wandert in die Anlagendatei
+    assert _uebernahmen(caplog) == [UEBERNAHME]
+    assert "Andere Anlage" not in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="smartheat_runtime.state"):
+        _start(env, entity_energy_primary_heating="sensor.gas")
+    assert _uebernahmen(caplog) == [] and _backup(env)["originals"] == bestand["originals"]
+
+
+@pytest.mark.parametrize("kreise,bleibt", [(1, False), (2, True)])
+def test_andere_anlage_setzt_die_zaehler_der_anlage_nur_bei_einem_einzigen_kreis_zurueck(env, monkeypatch, kreise, bleibt):
+    """Teilen mehrere Kreise die Zaehler der Anlage, setzt die andere Anlage eines Kreises nur dessen Zustand zurueck."""
+    save_backup(env.paths["BACKUP_PATH"], {"tenant_id": "test_tenant", "plant_id": "andere:anlage", "boost_since": None})
+    save_backup(env.paths["RUNTIME_DIR"] / "anlage_budget.json", {"lifetime_writes": 42})
+    echt = host_modul.dokument_config.boot_info
+    monkeypatch.setattr(
+        host_modul.dokument_config, "boot_info",
+        lambda *args, **kwargs: dataclasses.replace(echt(*args, **kwargs), kreise_der_anlage=kreise))
+
+    _start(env)
+
+    assert _backup(env)["plant_id"] == KREIS_KENNUNG
+    assert (_anlage_budget(env).get("lifetime_writes") == 42) is bleibt

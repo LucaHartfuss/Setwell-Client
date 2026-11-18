@@ -1,16 +1,18 @@
-"""Spec 5c 1.1/1.3: Status-Ereignis Schema 3 (Laufzeit-Status Schema 2 plus Geraet, wirksamer Soll, Hinweise)."""
+"""Status-Ereignis Schema 4: Anlage (Laufzeit-Status Schema 2 plus Geraet, Hinweise) und `kreise` mit Name, Raum, Soll
+und den Kreisfeldern der Laufzeit."""
 import logging
 import threading
 import time
 
-from conftest import FakeClock
-from fakes import FakeHa
-from geraet_helpers import konfiguration_aus_optionen
-from test_geraet_host import Device, _host, _register
-from test_runtime import OPTIONS
+import pytest
+from fakes import FakeClock, FakeHa
+from geraet_helpers import Device, _host, _register, ha_konfiguration, konfiguration_aus_optionen
+from runtime_helpers import OPTIONS
 
-from heizungsbruecke import geraet_status
+from heizungsbruecke import geraet_status, ha_sinks
+from smartheat_core import meldungen
 from smartheat_device.commands import Done, Waiting
+from smartheat_device.documents import Dokument
 from smartheat_device.host import Anzeige
 from smartheat_runtime import status
 from smartheat_runtime.status import STATUS_ABGEMELDET
@@ -25,13 +27,33 @@ def _anzeige(**changes):
     return Anzeige(**{**base, **changes})
 
 
-def _status(ha, soll=21.5):
+DOPPELT = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
+ABGELEHNT = {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "ungueltig"}, "stufe": "rot"}
+
+
+def _lokal_kreis(soll=21.5, ist=20.5, name="Wohnen"):
+    return {"name": name, "raum_soll": soll, "raum_ist": ist, "einlernphase_tag": None, "testphase_bis": None,
+            "befunde": []}
+
+
+def _lokal(soll=21.5, kreise=None, konfig_version=7, mindest_integration="1.2.0", **mehr):
+    """Die lokale Sicht (Konfiguration, Soll-Speicher, Raum, Anzeige-Dokument) mit einem Kreis oder den genannten."""
+    return lambda: {"anlage_name": "Zuhause", "konfig_version": konfig_version, "mindest_integration": mindest_integration,
+                    "kreise": kreise if kreise is not None else {1: _lokal_kreis(soll)}, **mehr}
+
+
+def _status(ha, soll=21.5, **mehr):
     seen = []
-    return geraet_status.GeraetStatus(ha, GERAET_ID, lambda: soll, laufzeit_merken=seen.append), seen
+    return geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(soll, **mehr), laufzeit_merken=seen.append), seen
 
 
 def _runtime_event(**changes):
     return {key: None for key in status.EVENT_FIELDS} | {"schema": 2, "status": "regelt"} | changes
+
+
+def _kreisliste(*nummern, je_kreis=None):
+    """`kreise` der Zusammenfassung: Kreisfelder None, je Kreis mit den Aenderungen aus je_kreis[nummer]."""
+    return [{"kreis": nr, **dict.fromkeys(status.KREIS_FELDER)} | (je_kreis or {}).get(nr, {}) for nr in nummern]
 
 
 def test_event_carries_runtime_and_device_fields():
@@ -40,9 +62,13 @@ def test_event_carries_runtime_and_device_fields():
     sink.publish(_runtime_event())
     sink.anzeige(_anzeige())
     event_type, data = ha.events[-1]
-    assert event_type == "smartheat_status" and data["schema"] == 3 and set(data) == set(geraet_status.EVENT_FIELDS)
-    assert (data["geraet_id"], data["geraet_zustand"], data["server_verbunden"], data["raum_soll"]) == (
-        GERAET_ID, "regelt", True, 21.5)
+    assert event_type == "smartheat_status" and data["schema"] == 4 and set(data) == set(geraet_status.EVENT_FIELDS)
+    assert (data["geraet_id"], data["geraet_zustand"], data["server_verbunden"], data["anlage_name"]) == (
+        GERAET_ID, "regelt", True, "Zuhause")
+    assert [kreis["kreis"] for kreis in data["kreise"]] == [1]
+    assert set(data["kreise"][0]) == set(geraet_status.KREIS_EVENT_FIELDS)
+    assert (data["kreise"][0]["raum_soll"], data["kreise"][0]["raum_ist"], data["kreise"][0]["name"]) == (
+        21.5, 20.5, "Wohnen")
     assert seen and seen[-1]["status"] == "regelt"
 
 
@@ -51,7 +77,8 @@ def test_event_before_any_input_is_a_valid_starting_snapshot():
     sink, _ = _status(ha)
     sink.anzeige(_anzeige(zustand="startet", server_ok=False))
     data = ha.events[-1][1]
-    assert set(data) == set(geraet_status.EVENT_FIELDS) and data["status"] == "startet" and data["schema"] == 3
+    assert set(data) == set(geraet_status.EVENT_FIELDS) and data["status"] == "startet" and data["schema"] == 4
+    assert [kreis["kreis"] for kreis in data["kreise"]] == [1] and data["kreise"][0]["boost"] is None
     assert data["geraet_zustand"] == "startet" and data["server_verbunden"] is False
 
 
@@ -67,46 +94,104 @@ def test_unchanged_display_sends_nothing_new():
 def test_changed_display_or_effective_target_sends_again_and_every_runtime_event_sends():
     ha = FakeHa()
     soll = [21.5]
-    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lambda: soll[0], laufzeit_merken=lambda e: None)
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lambda: _lokal(soll[0])(), laufzeit_merken=lambda e: None)
     sink.anzeige(_anzeige())
     sink.anzeige(_anzeige(server_ok=False))
     soll[0] = 19.0
     sink.anzeige(_anzeige(server_ok=False))  # Soll geaendert: inhaltliche Aenderung des Ereignisses
     assert [d["server_verbunden"] for _, d in ha.events] == [True, False, False]
-    assert ha.events[-1][1]["raum_soll"] == 19.0
+    assert ha.events[-1][1]["kreise"][0]["raum_soll"] == 19.0
     sink.publish(_runtime_event())
     sink.publish(_runtime_event())  # Lebenszeichen: auch ohne Aenderung
     assert len(ha.events) == 5
 
 
-def test_hints_messages_rejection_and_update_become_device_hints():
+BEGRENZT = {"key": "wunsch_begrenzt", "text": "15 °C",
+            **meldungen.zu_dict(meldungen.neu("meldung.wunsch_begrenzt", roh=15.0, begrenzt=18.0))}
+
+
+def test_hints_messages_rejection_and_update_become_meldungen_with_code_and_params():
     ha = FakeHa()
-    sink, _ = _status(ha)
-    sink.anzeige(_anzeige(zustand="update_noetig", hinweise=({"key": "geraet_doppelt", "stufe": "kritisch",
-                                                               "text": "läuft doppelt"},),
-                          meldungen=({"key": "wunsch_begrenzt", "text": "15 °C"},),
-                          konfiguration_abgelehnt="Entity fehlt"))
-    keys = {h["key"]: h for h in ha.events[-1][1]["geraet_hinweise"]}
-    # update_noetig mit abgelehnter Konfiguration ergibt bewusst zwei Hinweise (Grund und Handlungsanweisung)
+    sink, _ = _status(ha, update_noetig_kritisch=True)
+    sink.anzeige(_anzeige(zustand="update_noetig", hinweise=(DOPPELT,), meldungen=(BEGRENZT,),
+                          konfiguration_abgelehnt=ABGELEHNT))
+    data = ha.events[-1][1]
+    assert "geraet_hinweise" not in data
+    keys = {m["key"]: m for m in data["meldungen"]}
+    # update_noetig mit abgelehnter Konfiguration ergibt bewusst zwei Meldungen (Grund und Handlungsanweisung)
     assert set(keys) == {"geraet_doppelt", "wunsch_begrenzt", "konfiguration_abgelehnt", "update_noetig"}
-    assert all(set(h) == set(geraet_status.HINWEIS_FIELDS) for h in keys.values())
-    assert keys["konfiguration_abgelehnt"]["text"] == "Entity fehlt"
-    assert keys["geraet_doppelt"]["stufe"] == "kritisch" and keys["wunsch_begrenzt"]["stufe"] == "warnung"
+    assert keys["geraet_doppelt"] == {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {},
+                                      "stufe": "rot"}
+    assert keys["wunsch_begrenzt"]["code"] == "meldung.wunsch_begrenzt"
+    assert keys["wunsch_begrenzt"]["params"] == {"roh": 15.0, "begrenzt": 18.0}
+    assert keys["konfiguration_abgelehnt"]["params"] == {"grund": "ungueltig"}
+    # kritischer Eintrag ohne bekannten Beginn der Frist (Uhr unklar): die rote Fassung ohne Datum
+    assert keys["update_noetig"]["code"] == "meldung.update_noetig_unbekannt"
 
 
-def test_jeder_hinweis_hat_genau_key_stufe_und_text():
-    anzeige = _anzeige(zustand="gesperrt", hinweise=({"key": "geraet_doppelt", "stufe": "kritisch", "text": "x"},),
-                       meldungen=({"key": "wunsch_begrenzt", "text": "y"},), konfiguration_abgelehnt="z")
-    eintraege = geraet_status.hinweise(anzeige)
-    assert len(eintraege) == 4 and all(set(eintrag) == {"key", "stufe", "text"} for eintrag in eintraege)  # Literal V5
+def test_unter_der_gewoehnlichen_mindestversion_ist_die_meldung_orange_und_ohne_datum():
+    """Ohne kritischen Eintrag gilt kein Notbetrieb: die Meldung bittet nur um das Update, auch wenn eine Frist-Datei
+    ein Datum nennen wuerde."""
+    for ende in (None, "2026-12-01"):
+        assert geraet_status.meldungen_liste(_anzeige(zustand="update_noetig"), ende, kritisch=False) == [
+            {"key": "update_noetig", "code": "meldung.update_noetig_mindest", "params": {}, "stufe": "orange"}]
+    ha = FakeHa()
+    sink, _ = _status(ha)  # die Sicht nennt keinen kritischen Eintrag
+    sink.anzeige(_anzeige(zustand="update_noetig"))
+    assert [(m["code"], m["stufe"]) for m in ha.events[-1][1]["meldungen"]] == [("meldung.update_noetig_mindest", "orange")]
 
 
-def test_locked_device_gets_a_critical_hint_and_malformed_entries_are_dropped():
+def test_nur_unter_dem_zustand_update_noetig_gibt_es_die_meldung_zur_mindestversion():
+    for zustand in ("regelt", "startet", "gesperrt"):
+        codes = [m["code"] for m in geraet_status.meldungen_liste(_anzeige(zustand=zustand), None, kritisch=True)]
+        assert not [c for c in codes if "update_noetig" in c]
+
+
+@pytest.mark.parametrize("stufe", ["rot", "orange", "gelb"])
+def test_die_stufe_des_codes_geht_unveraendert_ins_ereignis(stufe):
+    """Das Ereignis V5 traegt die Stufe des Codes (rot/orange/gelb), keine Abbildung auf andere Namen."""
+    meldung = {"rot": meldungen.neu("meldung.geraet_doppelt"),
+               "orange": meldungen.neu("meldung.soll_quelle_aus_unbekannt"),
+               "gelb": meldungen.neu("erzeuger.hinweis", roh_text="w_1", quelle="mypyllant")}[stufe]
+    assert meldung.stufe == stufe
+    eintrag = {"key": "k", **meldungen.zu_dict(meldung)}
+    assert geraet_status.meldungen_liste(_anzeige(hinweise=(eintrag,)), kritisch=False)[0]["stufe"] == stufe
+
+
+def test_jede_meldung_hat_genau_key_code_params_und_stufe_aber_keinen_text():
+    anzeige = _anzeige(zustand="gesperrt", hinweise=(DOPPELT,), meldungen=(BEGRENZT,),
+                       konfiguration_abgelehnt=ABGELEHNT)
+    eintraege = geraet_status.meldungen_liste(anzeige, kritisch=False)
+    assert len(eintraege) == 4 and all(set(eintrag) == {"key", "code", "params", "stufe"} for eintrag in eintraege)
+    # Literal V5: die Liste nennt `kreis` (nur wenn gesetzt), das Ereignis je Uebergang dazu schema, geraet_id und offen
+    assert ha_sinks.MELDUNG_FIELDS == ("key", "code", "params", "kreis", "stufe")
+    assert ha_sinks.MELDUNG_EVENT_FIELDS == ("schema", "geraet_id", "key", "code", "params", "kreis", "stufe", "offen")
+
+
+def test_locked_device_gets_a_red_meldung_and_malformed_entries_are_dropped():
     ha = FakeHa()
     sink, _ = _status(ha)
-    sink.anzeige(_anzeige(zustand="gesperrt", hinweise=("kaputt", {"text": "ohne key"}), meldungen=({"text": "x"},)))
-    hints = ha.events[-1][1]["geraet_hinweise"]
-    assert [h["key"] for h in hints] == ["gesperrt"] and hints[0]["stufe"] == "kritisch"
+    sink.anzeige(_anzeige(
+        zustand="gesperrt",
+        hinweise=("kaputt", {"text": "ohne key"}, {"key": "x", "text": "alt"},
+                  {**DOPPELT, "code": "meldung.erfunden"}, {**DOPPELT, "stufe": "orange"}),
+        meldungen=({"text": "x"}, {"key": "ohne_code", "text": "alt"}),
+        konfiguration_abgelehnt={"code": "meldung.erfunden"}))
+    eintraege = ha.events[-1][1]["meldungen"]
+    assert [m["key"] for m in eintraege] == ["gesperrt"] and eintraege[0]["stufe"] == "rot"
+
+
+def test_das_ereignis_traegt_push_regeln_mit_standard_ohne_dokument_und_die_gelesenen_mit_dokument():
+    ha = FakeHa()
+    sink, _ = _status(ha)  # Sicht des Helfers ohne das Feld: Standard des Geraets
+    sink.anzeige(_anzeige())
+    assert ha.events[-1][1]["push_regeln"] == {"ruhe_von": 22, "ruhe_bis": 7, "tageslimit": 5}
+    assert "push_regeln" in geraet_status.EVENT_FIELDS
+    sicht = _sicht(ha_konfiguration(push_regeln={"ruhe_von": 23, "ruhe_bis": 6, "tageslimit": 2}))
+    assert sicht["push_regeln"] == {"ruhe_von": 23, "ruhe_bis": 6, "tageslimit": 2}
+    assert _sicht(None)["push_regeln"] == {"ruhe_von": 22, "ruhe_bis": 7, "tageslimit": 5}
+    ungueltig = _sicht(ha_konfiguration(push_regeln={"ruhe_von": 5, "ruhe_bis": 5, "tageslimit": 9}))
+    assert ungueltig["push_regeln"] == {"ruhe_von": 22, "ruhe_bis": 7, "tageslimit": 5}
 
 
 def test_status_event_never_carries_the_claim_code(caplog):
@@ -118,7 +203,7 @@ def test_status_event_never_carries_the_claim_code(caplog):
         sink.publish(_runtime_event(claim_code=CODE))
         sink.anzeige(_anzeige(
             device_state="nicht_uebernommen", eingerichtet=False, zustand="nicht_uebernommen",
-            hinweise=({"key": "geraet_doppelt", "stufe": "kritisch", "text": "x", "claim_code": CODE},),
+            hinweise=({**DOPPELT, "claim_code": CODE},),
             meldungen=({"key": "wunsch_begrenzt", "text": "y", "claim_code": CODE},)))
     assert ha.events and all(CODE not in str(data) for _, data in ha.events)
     assert "claim" not in str(ha.events[-1][1]).lower() and CODE not in caplog.text
@@ -182,11 +267,11 @@ def test_threads_do_not_interleave_events():
 
 
 def test_runtime_event_kept_for_sign_off_completes_the_command(tmp_path, monkeypatch):
-    """Verdrahtung wie in Task 9: laufzeit_merken legt das Laufzeit-Ereignis im Host ab, sign_off wartet darauf."""
+    """Verdrahtung: laufzeit_merken legt das Laufzeit-Ereignis im Host ab, sign_off wartet darauf."""
     konf = konfiguration_aus_optionen(OPTIONS)
     ha = FakeHa()
     host, _, _ = _host(tmp_path, monkeypatch, device=Device(konf), ha=ha)
-    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lambda: None,
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(),
                                       laufzeit_merken=lambda e: setattr(host, "runtime_status_event", e))
     host.status_sink = sink
     outcome = _register(host, tmp_path)._handlers["sign_off"]({})
@@ -200,7 +285,7 @@ def test_runtime_event_kept_for_sign_off_completes_the_command(tmp_path, monkeyp
     assert isinstance(outcome.check(), Done)
 
 
-# --- HA nicht erreichbar: Wiederholung mit Pause, eine Log-Zeile je Ausfall (Final-Review I2) ---
+# --- HA nicht erreichbar: Wiederholung mit Pause, eine Log-Zeile je Ausfall ---
 
 
 class _DownHa(FakeHa):
@@ -219,7 +304,7 @@ class _DownHa(FakeHa):
 
 def _down_status(ha):
     clock = FakeClock()
-    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lambda: 21.5, laufzeit_merken=lambda e: None, clock=clock)
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(), laufzeit_merken=lambda e: None, clock=clock)
     return sink, clock
 
 
@@ -277,7 +362,248 @@ def test_the_ha_call_runs_outside_the_state_lock():
             super().fire_event(event_type, data)
 
     ha = _Pruefend()
-    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lambda: 21.5, laufzeit_merken=lambda e: None)
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(), laufzeit_merken=lambda e: None)
     sink.publish(_runtime_event())
     sink.anzeige(_anzeige())
     assert seen == [True, True]
+
+
+# --- Schema 4: Kreise ---
+
+
+def test_zwei_kreise_stehen_getrennt_und_aufsteigend_im_ereignis():
+    ha = FakeHa()
+    kreise = {2: _lokal_kreis(23.0, 22.0, "Bad"), 1: _lokal_kreis(20.0, 19.0, "Wohnen")}
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(kreise=kreise), laufzeit_merken=lambda e: None)
+    sink.publish(_runtime_event(kreise=_kreisliste(1, 2, je_kreis={
+        1: {"abo": "aktiv", "boost": "komfort"}, 2: {"abo": "beendet", "boost": "keiner"}})))
+    kreise_im_ereignis = ha.events[-1][1]["kreise"]
+    assert [(k["kreis"], k["name"], k["raum_soll"], k["raum_ist"], k["abo"], k["boost"]) for k in kreise_im_ereignis] == [
+        (1, "Wohnen", 20.0, 19.0, "aktiv", "komfort"), (2, "Bad", 23.0, 22.0, "beendet", "keiner")]
+
+
+def test_zustand_und_kaelteschutz_stehen_je_kreis_im_ereignis():
+    ha = FakeHa()
+    kreise = {1: _lokal_kreis(), 2: _lokal_kreis(name="Bad")}
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(kreise=kreise), laufzeit_merken=lambda e: None)
+    sink.publish(_runtime_event(kreise=_kreisliste(1, 2, je_kreis={
+        1: {"zustand": "testphase", "kaelteschutz": "soll"}, 2: {"zustand": "ausser_betrieb", "kaelteschutz": "frost"}})))
+    assert [(k["kreis"], k["zustand"], k["kaelteschutz"]) for k in ha.events[-1][1]["kreise"]] == [
+        (1, "testphase", "soll"), (2, "ausser_betrieb", "frost")]
+    assert {"zustand", "kaelteschutz"} <= set(geraet_status.KREIS_EVENT_FIELDS)
+    assert not {"zustand", "kaelteschutz"} & set(geraet_status.EVENT_FIELDS)  # nur je Kreis, nicht an der Anlage
+
+
+def test_die_kreise_der_konfiguration_stehen_auch_vor_dem_ersten_laufzeit_ereignis_da():
+    ha = FakeHa()
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(kreise={1: _lokal_kreis(), 2: _lokal_kreis(name="Bad")}),
+                                      laufzeit_merken=lambda e: None)
+    sink.anzeige(_anzeige(zustand="startet", server_ok=False))
+    assert [(k["kreis"], k["abo"]) for k in ha.events[-1][1]["kreise"]] == [(1, None), (2, None)]
+
+
+def test_ein_kreis_nur_im_laufzeit_ereignis_steht_mit_leeren_lokalen_feldern_da():
+    ha = FakeHa()
+    sink, _ = _status(ha)
+    sink.publish(_runtime_event(kreise=_kreisliste(1, 3)))
+    kreis3 = ha.events[-1][1]["kreise"][1]
+    assert kreis3["kreis"] == 3 and kreis3["name"] is None and kreis3["raum_soll"] is None
+    assert kreis3["befunde"] == [] and kreis3["einlernphase_tag"] is None
+
+
+def test_laufzeit_merken_bekommt_das_flache_ereignis_ohne_kreisliste():
+    ha = FakeHa()
+    sink, seen = _status(ha)
+    sink.publish(_runtime_event(kreise=_kreisliste(1), boost="komfort"))
+    assert "kreise" not in seen[-1] and seen[-1]["boost"] == "komfort"
+    assert "boost" not in ha.events[-1][1]  # kein Alt-Feld neben den Kreisfeldern
+
+
+def test_ein_kreis_ohne_wert_im_soll_speicher_sendet_none_und_ein_geaenderter_soll_des_zweiten_kreises_sendet_neu():
+    ha = FakeHa()
+    soll = {1: None, 2: 22.0}
+    sink = geraet_status.GeraetStatus(
+        ha, GERAET_ID, lambda: _lokal(kreise={nr: _lokal_kreis(wert) for nr, wert in soll.items()})(),
+        laufzeit_merken=lambda e: None)
+    sink.anzeige(_anzeige())
+    assert [k["raum_soll"] for k in ha.events[-1][1]["kreise"]] == [None, 22.0]
+    soll[2] = 23.0
+    sink.anzeige(_anzeige())
+    assert [k["raum_soll"] for k in ha.events[-1][1]["kreise"]] == [None, 23.0]
+
+
+def test_der_kreisname_steht_nie_im_log(caplog):
+    ha = _DownHa()
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, _lokal(kreise={1: _lokal_kreis(name="GeheimerName")}),
+                                      laufzeit_merken=lambda e: None)
+    with caplog.at_level(logging.DEBUG):
+        sink.anzeige(_anzeige())
+    assert caplog.text and "GeheimerName" not in caplog.text
+
+
+def _sicht(konfiguration, soll=lambda n: 20.0, ist=lambda n: 19.0, anzeige=lambda: None):
+    dokument = None if konfiguration is None else Dokument("konfiguration", 1, konfiguration)
+    return geraet_status.lokale_sicht(lambda: dokument, soll, ist, anzeige, update_noetig_kritisch=lambda: False)()
+
+
+def test_die_lokale_sicht_uebernimmt_nur_namen_vom_typ_text_und_kreise_mit_echter_nummer():
+    sicht = _sicht({"anlage_name": "Haus", "kreise": [
+        {"kreis": 1, "name": "Wohnen"}, {"kreis": 2, "name": 7}, {"kreis": True, "name": "Falsch"},
+        {"kreis": "3", "name": "Text"}, "kein Objekt"]})
+    assert sicht["anlage_name"] == "Haus"
+    assert {n: k["name"] for n, k in sicht["kreise"].items()} == {1: "Wohnen", 2: None}
+
+
+def test_die_lokale_sicht_hat_ohne_text_als_anlagenname_keinen_namen():
+    assert _sicht({"anlage_name": 5, "kreise": []})["anlage_name"] is None
+    assert _sicht(None)["anlage_name"] is None
+
+
+# --- Version des Konfigurationsdokuments und kritische Mindestversion der Integration ---
+
+
+def _dokument(version, inhalt):
+    return Dokument("konfiguration", version, inhalt)
+
+
+def _sicht_mit(dokument):
+    return geraet_status.lokale_sicht(lambda: dokument, lambda n: 20.0, lambda n: 19.0, lambda: None,
+                                     update_noetig_kritisch=lambda: False)()
+
+
+def test_das_ereignis_traegt_konfig_version_und_mindest_integration_nach_dem_anlagennamen():
+    ha = FakeHa()
+    sink, _ = _status(ha)
+    sink.anzeige(_anzeige())
+    data = ha.events[-1][1]
+    assert (data["konfig_version"], data["mindest_integration"]) == (7, "1.2.0")
+    felder = list(geraet_status.EVENT_FIELDS)
+    assert felder.index("anlage_name") < felder.index("konfig_version") < felder.index("mindest_integration")
+    assert set(data) == set(felder)
+
+
+def test_die_lokale_sicht_liest_version_und_mindestversion_aus_demselben_dokument():
+    sicht = _sicht_mit(_dokument(7, {"anlage_name": "Haus", "mindest_integration": "1.2.0", "kreise": []}))
+    assert (sicht["konfig_version"], sicht["mindest_integration"], sicht["anlage_name"]) == (7, "1.2.0", "Haus")
+
+
+def test_ohne_konfigurationsdokument_sind_beide_felder_null():
+    sicht = _sicht_mit(None)
+    assert (sicht["konfig_version"], sicht["mindest_integration"]) == (None, None)
+
+
+def test_eine_version_die_keine_ganze_zahl_ist_gilt_als_nicht_vorhanden():
+    for version in (True, "7", 7.0, None):
+        assert _sicht_mit(_dokument(version, {"mindest_integration": "1.2.0"}))["konfig_version"] is None, version
+    assert _sicht_mit(_dokument(0, {}))["konfig_version"] == 0
+
+
+def test_eine_mindestversion_die_nicht_die_form_einer_versionsnummer_hat_gilt_als_nicht_gesetzt():
+    for wert in (None, "", 5, True, ["1.2.0"], "1.2", "v1.2.0", "1.2.0 \n", "https://example.org/x", "ha.cker.com",
+                 "1.2.3." + "a" * 30, "1.2.3-" + "a" * 17, "1.2.3 beta", "1.2.3/x",
+                 "1.2.3.com", "1.2.3.rc1", "1.2.3.dev", "1.2.3.dev1234567", "١.٢.٣", "1.2.٣",
+                 "123456.123456.123456-abcdefghijkl"):  # die letzte hat 33 Zeichen
+        assert _sicht_mit(_dokument(7, {"mindest_integration": wert}))["mindest_integration"] is None, wert
+    for wert in ("1.2.0", "10.20.30", "1.2.3-beta1", "1.2.3+build5", "1.2.3.dev4", "1.2.3-" + "a" * 16, "1.2.3-rc1",
+                 "1.2.3+b5", "123456.123456.123456-abcdefghijk"):  # die letzte hat genau 32 Zeichen
+        assert _sicht_mit(_dokument(7, {"mindest_integration": wert}))["mindest_integration"] == wert, wert
+
+
+def test_ein_folgeereignis_nach_neuer_dokumentversion_traegt_die_neue_version():
+    ha = FakeHa()
+    stand = [_dokument(7, {"mindest_integration": "1.2.0", "kreise": [{"kreis": 1, "name": "Wohnen"}]})]
+    sink = geraet_status.GeraetStatus(
+        ha, GERAET_ID, geraet_status.lokale_sicht(lambda: stand[0], lambda n: 20.0, lambda n: 19.0, lambda: None,
+                                   update_noetig_kritisch=lambda: False),
+        laufzeit_merken=lambda e: None)
+    sink.anzeige(_anzeige())
+    stand[0] = _dokument(8, {"mindest_integration": "1.3.0", "kreise": [{"kreis": 1, "name": "Wohnen"}]})
+    sink.anzeige(_anzeige())  # nur die Version hat sich geaendert: inhaltliche Aenderung, wird gesendet
+    assert [(d["konfig_version"], d["mindest_integration"]) for _, d in ha.events] == [(7, "1.2.0"), (8, "1.3.0")]
+
+
+# --- Ziele des Push und Stummschaltung (Felder der Anlage) ---
+
+
+def _sicht_bindung(**bindung):
+    """Lokale Sicht eines gueltigen Konfigurationsdokuments, dessen Bindung die genannten Felder ueberschreibt."""
+    return _sicht(ha_konfiguration(bindung=bindung))
+
+
+def test_die_lokale_sicht_traegt_ziele_und_stummschaltung_aus_der_bindung():
+    sicht = _sicht_bindung(benachrichtigung=["notify.mobile_app_handy", "notify.mobile_app_tablet"],
+                           hinweise_aus=["batterie", "schreibbudget"])
+    assert sicht["benachrichtigung"] == ["notify.mobile_app_handy", "notify.mobile_app_tablet"]
+    assert sicht["hinweise_aus"] == ["batterie", "schreibbudget"]
+
+
+def test_ohne_konfiguration_oder_ohne_felder_sind_beide_listen_leer():
+    assert (_sicht(None)["benachrichtigung"], _sicht(None)["hinweise_aus"]) == ([], [])
+    assert (_sicht({"kreise": []})["benachrichtigung"], _sicht({"kreise": []})["hinweise_aus"]) == ([], [])
+    leer = _sicht_bindung(benachrichtigung=[], hinweise_aus=[])
+    assert (leer["benachrichtigung"], leer["hinweise_aus"]) == ([], [])
+
+
+def test_eine_bindung_mit_unbekanntem_hebelsatz_gibt_leere_listen_und_wirft_nicht():
+    konfiguration = ha_konfiguration()
+    konfiguration["kreise"][0]["hebelsatz"] = "gibt_es_nicht"
+    sicht = _sicht(konfiguration)
+    assert (sicht["benachrichtigung"], sicht["hinweise_aus"]) == ([], [])
+
+
+def test_nur_handy_dienste_kommen_ins_ereignis_und_ihre_zahl_ist_begrenzt():
+    dienste = ["notify.email", "notify.mobile_app_Handy", "notify.mobile_app_", "mobile_app_x", "notify.mobile_app_ok",
+               "notify.mobile_app_ok", "notify.mobile_app_x y", 5, None]
+    assert _sicht_bindung(benachrichtigung=dienste)["benachrichtigung"] == ["notify.mobile_app_ok"]
+    viele = [f"notify.mobile_app_h{nr}" for nr in range(15)]
+    assert _sicht_bindung(benachrichtigung=viele)["benachrichtigung"] == viele[:10]
+
+
+def test_nur_bekannte_kategorien_kommen_in_hinweise_aus_und_keine_doppelten():
+    sicht = _sicht_bindung(hinweise_aus=["batterie", "notbetrieb", "zugang", "batterie", "quatsch", ["raumfuehler"]])
+    assert sicht["hinweise_aus"] == ["batterie"]
+
+
+def test_ein_ungueltiger_dienst_steht_nie_im_log_und_das_ereignis_wird_gesendet(caplog):
+    ha = FakeHa()
+    lokal = geraet_status.lokale_sicht(
+        lambda: Dokument("konfiguration", 1, ha_konfiguration(bindung={"benachrichtigung": ["notify.GeheimerDienst"]})),
+        lambda n: 20.0, lambda n: 19.0, lambda: None, update_noetig_kritisch=lambda: False)
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lokal, laufzeit_merken=lambda e: None)
+    with caplog.at_level(logging.DEBUG):
+        sink.anzeige(_anzeige())
+    assert ha.events[-1][1]["benachrichtigung"] == []
+    assert "GeheimerDienst" not in caplog.text
+
+
+def test_das_ereignis_traegt_die_felder_nach_dem_anlagennamen_und_gibt_die_listen_der_lokalen_sicht_weiter():
+    felder = list(geraet_status.EVENT_FIELDS)
+    assert {"benachrichtigung", "hinweise_aus"} <= set(felder)
+    assert felder.index("mindest_integration") < felder.index("benachrichtigung") < felder.index("hinweise_aus")
+    ha = FakeHa()
+    lokal = {**_lokal()(), "benachrichtigung": ["notify.mobile_app_handy"], "hinweise_aus": ["batterie"]}
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lambda: lokal, laufzeit_merken=lambda e: None)
+    sink.anzeige(_anzeige())
+    data = ha.events[-1][1]
+    assert (data["benachrichtigung"], data["hinweise_aus"]) == (["notify.mobile_app_handy"], ["batterie"])
+    assert set(data) == set(felder)
+
+
+def test_eine_lokale_sicht_ohne_die_felder_ergibt_leere_listen_im_ereignis():
+    ha = FakeHa()
+    sink, _ = _status(ha)  # die Sicht des Helfers kennt beide Felder nicht (Mischstand)
+    sink.anzeige(_anzeige())
+    data = ha.events[-1][1]
+    assert (data["benachrichtigung"], data["hinweise_aus"]) == ([], [])
+
+
+def test_eine_aenderung_der_ziele_ist_eine_inhaltliche_aenderung_und_wird_gesendet():
+    ha = FakeHa()
+    stand = {"benachrichtigung": [], "hinweise_aus": []}
+    sink = geraet_status.GeraetStatus(ha, GERAET_ID, lambda: {**_lokal()(), **stand}, laufzeit_merken=lambda e: None)
+    sink.anzeige(_anzeige())
+    sink.anzeige(_anzeige())
+    assert len(ha.events) == 1
+    stand["benachrichtigung"] = ["notify.mobile_app_handy"]
+    sink.anzeige(_anzeige())
+    assert [d["benachrichtigung"] for _, d in ha.events] == [[], ["notify.mobile_app_handy"]]

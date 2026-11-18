@@ -1,16 +1,19 @@
-"""Spec 5c 1.3 / 5b 5.2: HaHost liest das Konfigurationsdokument; der Raum-Soll kommt aus dem Soll-Speicher."""
+"""HaHost liest das Konfigurationsdokument; der Raum-Soll kommt aus dem Soll-Speicher."""
 import json
 
 import pytest
 from fakes import FakeHa
-from geraet_helpers import FakeGeraet, konfiguration_aus_optionen
-from test_runtime import OPTIONS, env  # noqa: F401 - env ist eine Fixture
+from geraet_helpers import FakeGeraet, bedienung_inhalt, konfiguration_aus_optionen
+from rastung_beispiele import rastung_aus
+from runtime_helpers import OPTIONS
 
 from heizungsbruecke import config
 from heizungsbruecke.ha_signals import SOLL_REF
 from heizungsbruecke.host import HaHost
+from smartheat_core import meldungen
 from smartheat_runtime import app, aufraeumen
 from smartheat_runtime.app import StartFailure
+from smartheat_runtime.notifier import Notifier
 from smartheat_runtime.ports import SourceUnavailable
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT
@@ -28,7 +31,7 @@ def test_load_builds_the_runtime_from_the_document(env):
 
 
 def test_room_target_reads_the_store_not_the_entity(env):
-    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung={"raum_soll": 21.5})
+    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung=bedienung_inhalt(21.5))
     host = HaHost(geraet, env.ha, clock=env.clock)
     host.load()
     env.ha.states[OPTIONS["entity_room_target"]] = 18.0
@@ -41,7 +44,7 @@ def test_without_document_the_host_waits_unconfigured(env):
     assert not boot.configured and not boot.signed_off
 
 
-def test_sign_off_marker_starts_signed_off(env, tmp_path):
+def test_sign_off_marker_starts_signed_off(env):
     konfiguration = konfiguration_aus_optionen(OPTIONS)
     config.ABGEMELDET_PATH.parent.mkdir(parents=True, exist_ok=True)
     config.ABGEMELDET_PATH.write_text(json.dumps({"anlage": konfiguration["anlage"]}))
@@ -49,11 +52,17 @@ def test_sign_off_marker_starts_signed_off(env, tmp_path):
     assert boot.signed_off and not boot.configured
 
 
+def _offene_markierung(alt):
+    """Wie der Start: die Markierung nach einer leeren Konfiguration schreiben und einmal lesen (prozess.aufraeumen_beim_start)."""
+    aufraeumen.markieren(config.AUFRAEUMEN_PATH, alt)
+    return aufraeumen.entscheiden(config.AUFRAEUMEN_PATH, {"anlage": None})[1]
+
+
 def test_empty_configuration_with_pending_reset_boots_signed_off_with_the_old_one(env):
-    """Spec Stufe 3 S3 Abschnitt 4: die Laufzeit setzt mit der Konfiguration der Aufraeum-Markierung zurueck."""
+    """Die Laufzeit setzt mit der Konfiguration der Aufraeum-Markierung zurueck."""
     konfiguration = konfiguration_aus_optionen(OPTIONS)
-    aufraeumen.markieren(config.AUFRAEUMEN_PATH, konfiguration)
-    host = HaHost(FakeGeraet({**konfiguration, "anlage": None}), env.ha, clock=env.clock)
+    host = HaHost(FakeGeraet({**konfiguration, "anlage": None}, start_markierung=_offene_markierung(konfiguration)),
+                  env.ha, clock=env.clock)
     boot = host.boot_info()
     assert boot.signed_off and not boot.configured and boot.tenant_id == konfiguration["anlage"]
     assert boot.aufraeumen_path == config.AUFRAEUMEN_PATH
@@ -64,7 +73,10 @@ def test_empty_configuration_after_the_reset_boots_not_configured(env):
     konfiguration = konfiguration_aus_optionen(OPTIONS)
     aufraeumen.markieren(config.AUFRAEUMEN_PATH, konfiguration)
     aufraeumen.zurueckgesetzt(config.AUFRAEUMEN_PATH, konfiguration["anlage"])
-    boot = HaHost(FakeGeraet({**konfiguration, "anlage": None}), env.ha, clock=env.clock).boot_info()
+    markierung = aufraeumen.entscheiden(config.AUFRAEUMEN_PATH, {"anlage": None})[1]
+    assert markierung is None  # erledigt: der Start loescht, es gibt nichts zurueckzusetzen
+    boot = HaHost(FakeGeraet({**konfiguration, "anlage": None}, start_markierung=markierung), env.ha,
+                  clock=env.clock).boot_info()
     assert not boot.signed_off and not boot.configured
 
 
@@ -84,9 +96,9 @@ def test_the_target_signal_is_unavailable_until_the_store_is_loaded(env):
 
 
 def test_the_stored_target_wins_over_the_server_start_value_while_a_local_wish_is_open(env):
-    config.ROOM_TARGET_PATH.parent.mkdir(parents=True, exist_ok=True)
-    config.ROOM_TARGET_PATH.write_text('{"value": 19.5, "source": "lokal", "ts": "x"}')
-    host = HaHost(FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung={"raum_soll": 22.0}, dirty=True), env.ha,
+    config.room_target_path(1).parent.mkdir(parents=True, exist_ok=True)
+    config.room_target_path(1).write_text('{"value": 19.5, "source": "lokal", "ts": "x"}')
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung=bedienung_inhalt(22.0), dirty=True), env.ha,
                   clock=env.clock)
     host.load()
     assert host.signals.get_state(SOLL_REF) == 19.5
@@ -94,7 +106,7 @@ def test_the_stored_target_wins_over_the_server_start_value_while_a_local_wish_i
 
 def test_without_a_valid_start_value_the_target_defaults(env):
     env.ha.states[OPTIONS["entity_room_target"]] = 30.0  # ausserhalb des Bedienbereichs
-    host = HaHost(FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung={"raum_soll": 30.0}), env.ha,
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung=bedienung_inhalt(30.0)), env.ha,
                   clock=env.clock)
     host.load()
     assert host.signals.get_state(SOLL_REF) == 20.0
@@ -120,8 +132,8 @@ CLIMATE_SOLL = f"{CLIMATE}::temperature"
 def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gespeichert=None):
     env.ha.states.update({CLIMATE: modus, CLIMATE_SOLL: angezeigt})
     if gespeichert is not None:
-        config.ROOM_TARGET_PATH.parent.mkdir(parents=True, exist_ok=True)
-        config.ROOM_TARGET_PATH.write_text(json.dumps(gespeichert))
+        config.room_target_path(1).parent.mkdir(parents=True, exist_ok=True)
+        config.room_target_path(1).write_text(json.dumps(gespeichert))
     geraet = FakeGeraet(konfiguration_aus_optionen({**OPTIONS, "entity_room_target": CLIMATE_SOLL}),
                         bedienung=bedienung, dirty=dirty)
     host = HaHost(geraet, env.ha, clock=env.clock)
@@ -139,17 +151,17 @@ def _erstes_lesen(env, worker, client, *, angezeigt):
 
 
 def test_the_operation_is_written_to_the_entity_at_start_and_not_turned_into_a_wish(env):
-    host, geraet, worker, client = _climate_start(env, angezeigt=19.0, bedienung={"raum_soll": 21.5})
+    host, geraet, worker, client = _climate_start(env, angezeigt=19.0, bedienung=bedienung_inhalt(21.5))
     assert (CLIMATE_SOLL, 21.5) in env.ha.writes and host.store.echo_rest() > 0
     _erstes_lesen(env, worker, client, angezeigt=19.0)
     assert geraet.wuensche == [] and host.store.value == 21.5
 
 
 def test_a_thermostat_change_during_the_addon_pause_is_overwritten_at_start(env):
-    """Heutiges Verhalten, Restpunkt 5c-D-8 (c): waehrend das Add-on stand, drehte der Nutzer das Thermostat auf 23;
+    """Heutiges Verhalten (offene-punkte.md 5c-D-8 (c)): waehrend das Add-on stand, drehte der Nutzer das Thermostat auf 23;
     gespeichert und Bedienung sind gleich (21,5, nicht dirty): der Start schreibt 21,5 an die Entity, das erste Lesen
     (noch 23) wird kein Wunsch."""
-    host, geraet, worker, client = _climate_start(env, angezeigt=23.0, bedienung={"raum_soll": 21.5},
+    host, geraet, worker, client = _climate_start(env, angezeigt=23.0, bedienung=bedienung_inhalt(21.5),
                                                   gespeichert={"value": 21.5, "source": "portal", "ts": "x"})
     assert env.ha.writes == [(CLIMATE_SOLL, 21.5)]
     _erstes_lesen(env, worker, client, angezeigt=23.0)
@@ -157,10 +169,10 @@ def test_a_thermostat_change_during_the_addon_pause_is_overwritten_at_start(env)
 
 
 def test_a_failed_start_alignment_is_done_again_on_connect(env):
-    """Final-Review I1: scheitert das Angleichen beim Start (HA lehnt ab), holt das erste Verbinden es nach, statt den
+    """Scheitert das Angleichen beim Start (HA lehnt ab), holt das erste Verbinden es nach, statt den
     alten Wert der Entity als Wunsch zu nehmen."""
     env.ha.write_error = RuntimeError("HA lehnt ab")
-    host, geraet, worker, client = _climate_start(env, angezeigt=19.0, bedienung={"raum_soll": 21.5})
+    host, geraet, worker, client = _climate_start(env, angezeigt=19.0, bedienung=bedienung_inhalt(21.5))
     assert env.ha.writes == [] and host.store.echo_rest() == 0
     env.ha.write_error = None
     _erstes_lesen(env, worker, client, angezeigt=19.0)
@@ -170,7 +182,7 @@ def test_a_failed_start_alignment_is_done_again_on_connect(env):
 
 def test_an_operation_that_arrived_during_a_restart_wins_over_the_stored_value(env):
     host, geraet, worker, client = _climate_start(
-        env, angezeigt=19.5, bedienung={"raum_soll": 22.0},
+        env, angezeigt=19.5, bedienung=bedienung_inhalt(22.0),
         gespeichert={"value": 19.5, "source": "portal", "ts": "x"})
     assert (host.store.value, host.store.source) == (22.0, "portal")
     assert (CLIMATE_SOLL, 22.0) in env.ha.writes
@@ -179,28 +191,28 @@ def test_an_operation_that_arrived_during_a_restart_wins_over_the_stored_value(e
 
 
 def test_a_pending_local_wish_keeps_the_stored_value_and_writes_nothing(env):
-    host, _, _, _ = _climate_start(env, angezeigt=19.5, bedienung={"raum_soll": 22.0}, dirty=True,
+    host, _, _, _ = _climate_start(env, angezeigt=19.5, bedienung=bedienung_inhalt(22.0), dirty=True,
                                    gespeichert={"value": 19.5, "source": "lokal", "ts": "x"})
     assert (host.store.value, host.store.source) == (19.5, "lokal") and env.ha.writes == []
 
 
 def test_an_entity_that_already_shows_the_target_is_not_written(env):
-    host, _, _, _ = _climate_start(env, angezeigt=21.5, bedienung={"raum_soll": 21.5})
+    host, _, _, _ = _climate_start(env, angezeigt=21.5, bedienung=bedienung_inhalt(21.5))
     assert env.ha.writes == [] and host.store.echo_rest() == 0
 
 
 def test_a_switched_off_thermostat_is_not_written(env):
-    """Soll-Quelle aus (Spec 5b 3.2): keine Bedienung an die Quelle; beim Wiedereinschalten gleicht der Soll-Eingang an."""
-    host, geraet, worker, client = _climate_start(env, angezeigt=19.0, bedienung={"raum_soll": 21.5}, modus="off")
+    """Soll-Quelle aus: keine Bedienung an die Quelle; beim Wiedereinschalten gleicht der Soll-Eingang an."""
+    host, geraet, worker, client = _climate_start(env, angezeigt=19.0, bedienung=bedienung_inhalt(21.5), modus="off")
     assert env.ha.writes == [] and host.store.echo_rest() == 0
     _erstes_lesen(env, worker, client, angezeigt=19.0)
     assert geraet.wuensche == [] and host.store.value == 21.5 and geraet.aus[-1] == (True, 21.5)
 
 
 def test_a_thermostat_in_frost_protection_is_not_written(env):
-    """Ein Soll bis FROSTSCHUTZ_BIS (7 °C) ist die Frostschutz-Stellung (Spec 5b 3.2): ein Neustart dreht den bewusst
+    """Ein Soll bis FROSTSCHUTZ_BIS (7 °C) ist die Frostschutz-Stellung: ein Neustart dreht den bewusst
     auf 5 °C gestellten Heizkoerper nicht wieder hoch."""
-    host, geraet, worker, client = _climate_start(env, angezeigt=5.0, bedienung={"raum_soll": 21.5})
+    host, geraet, worker, client = _climate_start(env, angezeigt=5.0, bedienung=bedienung_inhalt(21.5))
     assert env.ha.writes == [] and host.store.echo_rest() == 0
     _erstes_lesen(env, worker, client, angezeigt=5.0)
     assert geraet.wuensche == [] and host.store.value == 21.5 and geraet.aus[-1] == (True, 21.5)
@@ -208,7 +220,7 @@ def test_a_thermostat_in_frost_protection_is_not_written(env):
 
 def test_a_sensor_target_is_never_written(env):
     env.ha.states[OPTIONS["entity_room_target"]] = 19.0
-    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung={"raum_soll": 21.5})
+    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS), bedienung=bedienung_inhalt(21.5))
     host = HaHost(geraet, env.ha, clock=env.clock)
     loaded = host.load()
     host.trigger_source(loaded.manifest, RegulationWorker(env.clock))
@@ -231,7 +243,7 @@ def test_an_unknown_lever_set_fails_the_start(env):
 
 
 def test_without_binding_parameters_the_start_fails_and_with_them_it_runs(env):
-    """Spec Stufe 3 S4b 4.3: eine gespeicherte Konfiguration ohne Parameter startet nicht (Konfigurationsfehler statt
+    """Eine gespeicherte Konfiguration ohne Parameter startet nicht (Konfigurationsfehler statt
     Absturz); sobald die Konfiguration mit Parametern kommt, laeuft der Start."""
     ohne = konfiguration_aus_optionen({**OPTIONS, "bindungsparameter": None})
     with pytest.raises(StartFailure, match="Bindungsparameter"):
@@ -240,8 +252,16 @@ def test_without_binding_parameters_the_start_fails_and_with_them_it_runs(env):
     assert HaHost(FakeGeraet(mit), env.ha, clock=env.clock).load().binding.description.settle_seconds == 2100
 
 
+def test_a_stored_document_with_a_short_restore_list_does_not_start(env):
+    """Die lokale Mindestliste der Rueckstellung gilt auch fuer eine schon gespeicherte Konfiguration."""
+    konf = konfiguration_aus_optionen(OPTIONS)
+    kurz = {**konf, "bindungsparameter": {**konf["bindungsparameter"], "zurueck": [], "zurueck_optional": []}}
+    with pytest.raises(StartFailure, match="mindestens zurückstellen muss"):
+        HaHost(FakeGeraet(kurz), env.ha, clock=env.clock).load()
+
+
 def test_sign_off_without_binding_parameters_does_not_reset_and_logs_it(env, caplog):
-    """Spec Stufe 3 S4b 8: Abmelden ohne Bindungsparameter setzt nicht zurueck (kein Schreiben an HA) und loggt den
+    """Abmelden ohne Bindungsparameter setzt nicht zurueck (kein Schreiben an HA) und loggt den
     Grund; Gegenstueck zum Gateway (gateway/tests/test_host.py)."""
     ohne = konfiguration_aus_optionen({**OPTIONS, "bindungsparameter": None})
     config.ABGEMELDET_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -269,9 +289,9 @@ def test_trigger_source_is_built_on_the_real_entity_and_wishes_reach_the_device(
     assert {"platform": "state", "entity_id": OPTIONS["entity_room_target"],
             "for": {"seconds": 10}} in client.kwargs["triggers"]
     client.kwargs["on_trigger_event"]({"platform": "event", "event": {
-        "event_type": "smartheat_wunsch", "data": {"raum_soll": 22.0}, "context": {"parent_id": "p"}}})
+        "event_type": "smartheat_wunsch", "data": {"raum_soll": 22.0, "kreis": 1}, "context": {"parent_id": "p"}}})
     worker.run_pending()
-    assert geraet.wuensche == [(22.0, "smartheat_entity", "automation")]
+    assert geraet.wuensche == [(22.0, "ha", "automation")]
 
 
 def test_a_climate_target_without_attribute_is_a_start_failure(env):
@@ -282,7 +302,8 @@ def test_a_climate_target_without_attribute_is_a_start_failure(env):
 
 def _rastung_schreiben(verteilsystem):
     from smartheat_core import rastung
-    rastung.schreiben(config.RASTUNG_PATH, rastung.Rastung("vaillant_vrc720", verteilsystem),
+    rastung.schreiben(config.RASTUNG_PATH,
+                      rastung_aus(konfiguration_aus_optionen(OPTIONS), verteilsystem=verteilsystem),
                       "2026-10-14T00:00:00+00:00")
 
 
@@ -304,6 +325,87 @@ def test_load_accepts_a_configuration_that_fits_the_lock(env):
     HaHost(FakeGeraet(konfiguration_aus_optionen(OPTIONS)), env.ha, clock=env.clock).load()
 
 
+def _grund_der_ablehnung(env, optionen=None) -> StartFailure:
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen({**OPTIONS, **(optionen or {})})), env.ha, clock=env.clock)
+    with pytest.raises(StartFailure) as fehler:
+        host.load()
+    return fehler.value
+
+
+@pytest.mark.parametrize("optionen", [
+    {"lever_set": "gibt_es_nicht"},  # Hebelsatz, den diese Software nicht kennt
+    {"verteilsystem": "Wandheizung"},  # Verteilsystem ohne lokale Sicherheitswerte dieser Software
+    {"lever_set": "weishaupt_wwp"},  # Pflichtzuordnung des Hebelsatzes fehlt im Dokument
+], ids=["hebelsatz", "verteilsystem", "pflichtzuordnung"])
+def test_was_diese_software_nicht_lesen_kann_ist_ein_formgrund_der_karenz(env, optionen):
+    assert _grund_der_ablehnung(env, optionen).konfigurationsform
+
+
+def _mit_parametern(env, **aenderung) -> StartFailure:
+    konf = konfiguration_aus_optionen(OPTIONS)
+    geaendert = {**konf, "bindungsparameter": {**konf["bindungsparameter"], **aenderung}}
+    with pytest.raises(StartFailure) as fehler:
+        HaHost(FakeGeraet(geaendert), env.ha, clock=env.clock).load()
+    return fehler.value
+
+
+def test_fehlende_bindungsparameter_sind_ein_formgrund_der_karenz(env):
+    assert _grund_der_ablehnung(env, {"bindungsparameter": None}).konfigurationsform
+
+
+def test_felder_der_bindungsparameter_die_diese_software_nicht_kennt_sind_ein_formgrund_der_karenz(env):
+    assert _mit_parametern(env, neues_feld=1).konfigurationsform
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 99}},  # lockerer als lokal erlaubt
+    {"wartezeit_s": 1},  # ausserhalb der lokalen Grenzen
+    {"zurueck": [], "zurueck_optional": []},  # unterschreitet die lokale Mindestliste der Rueckstellung
+    {"schritte": {"curve": 0.05, "room_setpoint": 0.5, "heat_limit": 0.1, "min_flow": 9.0}},
+], ids=["schreibschutz", "wartezeit", "rueckstellliste", "schrittweite"])
+def test_ein_verstoss_gegen_die_lokalen_grenzen_der_bindungsparameter_meldet_sofort(env, aenderung):
+    """Die Grenzen gelten lokal und hat keine neue Software anders zu lesen: auch nach einem Softwarewechsel sofort."""
+    assert not _mit_parametern(env, **aenderung).konfigurationsform
+
+
+def test_eine_unbeschreibbare_entity_art_der_schreibziele_meldet_sofort(env):
+    """Die Entity-Art der Schreibziele ist eine lokale Positivliste, keine Frage der Form."""
+    assert not _grund_der_ablehnung(env, {"entity_heat_limit": "sensor.heizgrenze"}).konfigurationsform
+
+
+def test_ein_ungueltiger_wert_der_konfiguration_ist_kein_formgrund(env):
+    """Tagestick, Soll-Entity und Kennung hat die neue Software nicht anders zu lesen: sofort melden."""
+    assert not _grund_der_ablehnung(env, {"daily_trigger_time": "25:00"}).konfigurationsform
+    assert not _grund_der_ablehnung(env, {"entity_room_target": "climate.wz"}).konfigurationsform
+
+
+def test_ein_verstoss_gegen_die_rastung_ist_kein_formgrund(env):
+    _rastung_schreiben("Fussbodenheizung")
+    fehler = _grund_der_ablehnung(env)
+    assert "festgelegt" in fehler.grund and not fehler.konfigurationsform
+
+
+def test_ein_fehlerhafter_sicherheitswert_ist_kein_formgrund(env, monkeypatch):
+    """Ein Verstoss gegen die lokalen Sicherheitswerte (Regel 4) meldet sofort, auch nach einem Softwarewechsel."""
+    def _verletzt(*args):
+        raise ValueError("Comfort-Boost curve=9 ausserhalb [0.4, 1.5]")
+
+    monkeypatch.setattr("smartheat_runtime.dokument_config.resolve_local_safety", _verletzt)
+    fehler = _grund_der_ablehnung(env)
+    assert "Comfort-Boost" in fehler.grund and not fehler.konfigurationsform
+
+
+def test_ein_fehler_des_kanalverzeichnisses_ist_kein_formgrund(env, monkeypatch):
+    from smartheat_runtime.roles import ManifestError
+
+    def _manifest(*args, **kwargs):
+        raise ManifestError("Pflichtrolle fehlt")
+
+    monkeypatch.setattr("heizungsbruecke.host.build_manifest", _manifest)
+    fehler = _grund_der_ablehnung(env)
+    assert fehler.grund == "Pflichtrolle fehlt" and not fehler.konfigurationsform
+
+
 def test_sign_off_parts_are_none_with_a_broken_lock(env):
     config.RASTUNG_PATH.parent.mkdir(parents=True, exist_ok=True)
     config.RASTUNG_PATH.write_text("{")
@@ -311,30 +413,35 @@ def test_sign_off_parts_are_none_with_a_broken_lock(env):
     assert host.sign_off_parts() is None
 
 
+def _mit_ursprung(konfiguration, werte, **felder):
+    """Die Konfiguration mit Ursprungswerten im ersten Kreis (und weiteren Feldern der Anlage)."""
+    kreis = {**konfiguration["kreise"][0], "ursprungswerte": werte}
+    return {**konfiguration, **felder, "kreise": [kreis]}
+
+
 def test_ursprungswerte_server_reads_the_current_configuration_fresh(env):
     konfiguration = konfiguration_aus_optionen(OPTIONS)
-    geraet = FakeGeraet({**konfiguration, "ursprungswerte": {"heat_limit": 16.0}})
+    geraet = FakeGeraet(_mit_ursprung(konfiguration, {"heat_limit": 16.0}))
     host = HaHost(geraet, env.ha, clock=env.clock)
     assert host.ursprungswerte_server() == {"heat_limit": 16.0}
-    geraet._konfiguration = {**konfiguration, "ursprungswerte": {"heat_limit": 15.0}}  # neue Konfiguration trifft ein
+    geraet._konfiguration = _mit_ursprung(konfiguration, {"heat_limit": 15.0})  # neue Konfiguration trifft ein
     assert host.ursprungswerte_server() == {"heat_limit": 15.0}
 
 
 def test_ursprungswerte_server_falls_back_to_the_marker_while_the_reset_is_pending(env):
-    konfiguration = {**konfiguration_aus_optionen(OPTIONS), "ursprungswerte": {"heat_limit": 16.0}}
-    aufraeumen.markieren(config.AUFRAEUMEN_PATH, konfiguration)
-    host = HaHost(FakeGeraet({**konfiguration, "anlage": None, "ursprungswerte": {}}), env.ha, clock=env.clock)
+    konfiguration = _mit_ursprung(konfiguration_aus_optionen(OPTIONS), {"heat_limit": 16.0})
+    host = HaHost(FakeGeraet(_mit_ursprung(konfiguration, {}, anlage=None),
+                             start_markierung=_offene_markierung(konfiguration)), env.ha, clock=env.clock)
     assert host.ursprungswerte_server() == {"heat_limit": 16.0}
 
 
 def test_ursprungswerte_server_ignores_a_new_setup_while_the_reset_is_pending(env):
     """Minor 3: eine neue Einrichtung (andere Anlage) trifft ein, bevor das Zuruecksetzen gelang: die Werte der alten
     Anlage aus der Markierung gelten weiter."""
-    alt = {**konfiguration_aus_optionen(OPTIONS), "ursprungswerte": {"heat_limit": 16.0}}
-    aufraeumen.markieren(config.AUFRAEUMEN_PATH, alt)
-    geraet = FakeGeraet({**alt, "anlage": None, "ursprungswerte": {}})
+    alt = _mit_ursprung(konfiguration_aus_optionen(OPTIONS), {"heat_limit": 16.0})
+    geraet = FakeGeraet(_mit_ursprung(alt, {}, anlage=None), start_markierung=_offene_markierung(alt))
     host = HaHost(geraet, env.ha, clock=env.clock)
-    geraet._konfiguration = {**alt, "anlage": "andere_anlage", "ursprungswerte": {"heat_limit": 12.0}}
+    geraet._konfiguration = _mit_ursprung(alt, {"heat_limit": 12.0}, anlage="andere_anlage")
     assert host.ursprungswerte_server() == {"heat_limit": 16.0}
 
 
@@ -346,12 +453,14 @@ def host_mit_klima_zone(env):
 
 
 def test_abmelden_stellt_dieselben_rollen_zurueck_wie_der_hebelsatz(host_mit_klima_zone):
-    """Spec Stufe 3 S5 Review: sign_off_parts nach dem Umbau, auch fuer eine climate-Zone (::temperature)."""
+    """sign_off_parts nach dem Umbau, auch fuer eine climate-Zone (::temperature)."""
     parts = host_mit_klima_zone.sign_off_parts()
     assert parts is not None
     binding = parts.binding
     gesendet = [lever for lever in binding.description.lever_set.levers if binding.has(lever)]
-    assert gesendet == list(binding.description.lever_set.levers) == ["curve", "room_setpoint", "heat_limit"]
+    assert gesendet == list(binding.description.lever_set.levers) == [
+        "curve", "room_setpoint", "heat_limit", "min_flow",
+    ]
     assert binding.ref("room_setpoint") == "climate.zone::temperature"
     assert binding.ref("curve") == OPTIONS["entity_curve_current"]
     assert binding.ref("heat_limit") == OPTIONS["entity_heat_limit"]
@@ -374,6 +483,9 @@ class _DiensteHa(FakeHa):
     def send_notification(self, service, message):
         self.dienste.append((service, message))
 
+_MELDUNG = meldungen.neu("meldung.notbetrieb")
+_TEXT = meldungen.text(_MELDUNG)
+
 
 def test_hinweise_batterien_und_meldedienste_kommen_aus_der_bindung(env):
     options = {**OPTIONS, "notify_hints_off": ["batterie"],
@@ -383,8 +495,8 @@ def test_hinweise_batterien_und_meldedienste_kommen_aus_der_bindung(env):
                       "binary_sensor.thermostat_battery_low": "off",
                       "binary_sensor.thermostat_battery_low::device_class": "battery"})
     host = HaHost(FakeGeraet(konfiguration_aus_optionen(options), ha=ha), ha, clock=env.clock)
-    host.notify_sink.push("test", "Text")  # der Sink des Hosts schickt an die Meldedienste der Bindung
-    assert ha.dienste == [("notify.mobile_app_handy", "Text")]
+    host.notify_sink.push("test", _MELDUNG)  # der Sink des Hosts schickt an die Meldedienste der Bindung
+    assert ha.dienste == [("notify.mobile_app_handy", _TEXT)]
     assert host.boot_info().notify_hints_off == ("batterie",)
     runtime = host.load().config
     assert runtime.notify_hints_off == ("batterie",)
@@ -392,17 +504,41 @@ def test_hinweise_batterien_und_meldedienste_kommen_aus_der_bindung(env):
         ("sensor.thermostat_battery", BATTERY_PERCENT), ("binary_sensor.thermostat_battery_low", BATTERY_LOW_FLAG)]
 
 
+def test_ein_gespeichertes_hinweise_aus_mit_raumfuehler_schaltet_ihn_nicht_stumm(env, make_store):
+    """Ein Bestandsdokument von vor dem Streichen von `raumfuehler` wird beim Start ungeprueft gelesen (die Pruefung
+    folgt erst in load()): die Kategorie darf nicht stumm schalten (sie ist nie abschaltbar), die uebrigen gueltigen
+    Kategorien schon."""
+    options = {**OPTIONS, "notify_hints_off": ["raumfuehler", "batterie"]}
+    ha = _DiensteHa()
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen(options), ha=ha), ha, clock=env.clock)
+    aus = host.boot_info().notify_hints_off
+    assert aus == ("batterie",)
+    notifier = Notifier(make_store(), host.notify_sink, aus)
+    notifier.notify("raumfuehler:sensor.wz", "ausgefallen", _MELDUNG, critical=False)
+    notifier.notify("batterie:sensor.x", "niedrig", _MELDUNG, critical=False)
+    assert ha.dienste == [("notify.mobile_app_handy", _TEXT)]
+
+
+def test_ohne_raumfuehler_in_hinweise_aus_bleibt_die_liste_unveraendert(env):
+    options = {**OPTIONS, "notify_hints_off": ["schreibbudget", "batterie"]}
+    ha = _DiensteHa()
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen(options), ha=ha), ha, clock=env.clock)
+    assert host.boot_info().notify_hints_off == ("schreibbudget", "batterie")
+    assert host.load().config.notify_hints_off == ("schreibbudget", "batterie")
+
+
 def test_while_the_reset_is_pending_the_messages_go_to_the_services_of_the_marker(env):
     """Leere Konfiguration nach dem Entfernen, das Zuruecksetzen steht aus: die Meldedienste kommen aus der
     Konfiguration der Aufraeum-Markierung, nicht aus der leeren, sodass eine Meldung (etwa die kritische bei
     gescheitertem Zuruecksetzen) die Handys erreicht. Gegenprobe: ohne Markierung hat die leere Konfiguration keine."""
     konfiguration = konfiguration_aus_optionen(OPTIONS)
-    leer = {**konfiguration, "anlage": None, "bindung": {**konfiguration["bindung"], "benachrichtigung": []}}
+    kreis = konfiguration["kreise"][0]
+    leer = {**konfiguration, "anlage": None,
+            "kreise": [{**kreis, "bindung": {**kreis["bindung"], "benachrichtigung": []}}]}
     ha = _DiensteHa()
-    HaHost(FakeGeraet(leer, ha=ha), ha, clock=env.clock).notify_sink.push("wiederherstellung", "Text")
+    HaHost(FakeGeraet(leer, ha=ha), ha, clock=env.clock).notify_sink.push("wiederherstellung", _MELDUNG)
     assert ha.dienste == []
-    aufraeumen.markieren(config.AUFRAEUMEN_PATH, konfiguration)
-    host = HaHost(FakeGeraet(leer, ha=ha), ha, clock=env.clock)
+    host = HaHost(FakeGeraet(leer, ha=ha, start_markierung=_offene_markierung(konfiguration)), ha, clock=env.clock)
     assert host.boot_info().signed_off
-    host.notify_sink.push("wiederherstellung", "Text")
-    assert ha.dienste == [("notify.mobile_app_handy", "Text")]
+    host.notify_sink.push("wiederherstellung", _MELDUNG)
+    assert ha.dienste == [("notify.mobile_app_handy", _TEXT)]

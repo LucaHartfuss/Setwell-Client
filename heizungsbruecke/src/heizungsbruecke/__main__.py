@@ -1,4 +1,4 @@
-"""Einstieg des Add-ons ab 1.0.0 (Spec 5c 1.1/1.2): ein Prozess aus Geraetekern (smartheat_device, eigener Thread) und
+"""Einstieg des Add-ons: ein Prozess aus Geraetekern (smartheat_device, eigener Thread) und
 Laufzeit (smartheat_runtime, Regel-Worker im Hauptthread), wie das Gateway. Optionen nur zum Starten (bootstrap_url,
 log_level); Konfiguration und Bedienung kommen als Soll-Dokumente. Status-Ereignis (Schema 3), Discovery und
 Uebernahme-Code haengt verdrahten() an den Geraete-Host; der Geraete-Thread meldet sie in jedem Takt (anzeigen), auch
@@ -10,17 +10,19 @@ prozess.Neustart - die Laufzeit ueber den Rueckruf prozess.neustart_der_laufzeit
 Link sauber, erst danach os.execv in _exec). Anders als das Gateway (Compose startet nach Exit 0 neu) startet der
 Supervisor ein sauber beendetes Add-on nicht zuverlaessig neu, deshalb exec. SIGTERM (Supervisor stoppt das Add-on)
 endet ueber beenden ohne exec. Ein Fehler in den Schritten davor (_vorbereiten: Aufraeumen, Geraete-Host, Geraetekern)
-endet ueber prozess.starten in derselben 60-s-Pause und demselben exec (S3S6-Startabbruch).
+endet ueber prozess.starten in derselben 60-s-Pause und demselben exec.
 
-Lokaler Befehl (L4-06 Variante C, stdin_befehl): loescht der Nutzer den HA-Eintrag, schreibt die Integration `entfernen
+Lokaler Befehl (stdin_befehl): loescht der Nutzer den HA-Eintrag, schreibt die Integration `entfernen
 <geraet_id>` an das stdin des Add-ons (config.yaml stdin: true); ein Daemon-Thread liest fd 0 ungepuffert (nicht
 sys.stdin.buffer: ein darin blockierter Thread bricht das Prozessende ab) und stellt HaDeviceHost.lokal_abmelden in das
-Postfach des Geraetekerns (Device.im_geraete_thread). Das Geraet meldet sich dann wie bei sign_off ab.
+Postfach des Geraetekerns (Device.im_geraete_thread). Das Geraet meldet sich dann wie bei sign_off ab. Die Zeile
+`nachweis <geraet_id>` (Beginn der Einrichtung per Geraetecode) beantwortet der Zeilenleser selbst mit dem signierten
+Ereignis smartheat_nachweis (geraet_nachweis); fremde Geraete-IDs bewirken bei keinem Befehl etwas.
 
 Nach dem Entfernen (aufraeumen.json) setzt der naechste Start die Anlage erst zurueck wie sign_off (Laufzeit im Modus
 abgemeldet mit der alten Konfiguration aus der Markierung) und startet danach neu; erst dieser Start loescht den
 anlagengebundenen Zustand und die Hilfssensoren, bevor der Geraetekern startet - aber nur, solange die gespeicherte
-Konfiguration noch leer ist (Spec Stufe 3 S3 Abschnitt 4)."""
+Konfiguration noch leer ist."""
 import io
 import json
 import logging
@@ -31,26 +33,29 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from typing import BinaryIO
 
-from heizungsbruecke import config, derived_sensors, stdin_befehl
+from heizungsbruecke import config, derived_sensors, geraet_nachweis, stdin_befehl
 from heizungsbruecke.discovery import Discovery
 from heizungsbruecke.geraet_host import HaDeviceHost
-from heizungsbruecke.geraet_status import GeraetStatus
+from heizungsbruecke.geraet_status import GeraetStatus, lokale_sicht
 from heizungsbruecke.ha_api import HomeAssistantApi
-from heizungsbruecke.host import HaHost
+from heizungsbruecke.host import HaAnlagenHost
 from heizungsbruecke.supervisor import SupervisorApi
 from heizungsbruecke.version import ADDON_VERSION
+from smartheat_core import zustandspfade
+from smartheat_core.zeitquelle import echte_epoche
 from smartheat_device import prozess
 from smartheat_device.device import DEVICE_DIR, Device
-from smartheat_device.documents import KONFIGURATION, DocumentStore
-from smartheat_runtime import app
+from smartheat_device.documents import ANZEIGE, KONFIGURATION, DocumentStore
 from smartheat_runtime import aufraeumen as markierung
+from smartheat_runtime import kreise
 from smartheat_runtime.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BOOTSTRAP_URL = "https://accounts.hartfussha.org"
+DEFAULT_BOOTSTRAP_URL = "https://accounts.setwell.de"
 LOG_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
 #: Aufraeumen beim Start (startup: services, HA evtl. noch nicht bereit): so lange auf HA warten, um die Hilfssensoren
 #: zu loeschen; danach startet der Geraetekern trotzdem, und der naechste Start versucht es erneut.
@@ -90,11 +95,12 @@ def bootstrap_url() -> str | None:
     """Umgebung SMARTHEAT_BOOTSTRAP_URL (nur E2E/Tests) vor der Option bootstrap_url vor dem Produktions-Standard. Der
     Standard gilt nur, wenn beides fehlt (Schluessel fehlt oder null, options.json fehlt ganz): eine ungueltige Angabe
     und eine kaputte options.json fallen nie auf die Produktion zurueck (ein falsch eingestelltes Labor-Add-on meldete
-    sich sonst dort an), sondern ergeben None. Ins Log kommt nur der Grund, nie die Adresse (sie kann Zugangsdaten
-    tragen)."""
+    sich sonst dort an), sondern ergeben None. Ins Log kommt nur der Grund bzw. die Quelle (beim Standard dessen
+    Hostname), nie der Wert einer Option oder Umgebung (er kann Zugangsdaten tragen)."""
     override = os.environ.get("SMARTHEAT_BOOTSTRAP_URL")
     if override:
         quelle, value = "SMARTHEAT_BOOTSTRAP_URL", override
+        quelle_log = "aus Umgebung SMARTHEAT_BOOTSTRAP_URL"
     else:
         optionen = _optionen()
         if optionen is None:
@@ -102,12 +108,17 @@ def bootstrap_url() -> str | None:
                            "bleibt im Ruhezustand")
             return None
         quelle, value = "bootstrap_url", optionen.get("bootstrap_url")
-        value = DEFAULT_BOOTSTRAP_URL if value is None else value  # nicht gesetzt (fehlt oder null)
+        if value is None:  # nicht gesetzt (fehlt oder null)
+            value = DEFAULT_BOOTSTRAP_URL
+            quelle_log = "Standard " + str(urllib.parse.urlsplit(DEFAULT_BOOTSTRAP_URL).hostname)
+        else:
+            quelle_log = "aus Option bootstrap_url"
     grund = _url_fehler(value, http_erlaubt=quelle == "SMARTHEAT_BOOTSTRAP_URL")
     if grund is not None:
         logger.warning("%s ungueltig (%s): das Geraet meldet sich nicht an und bleibt im Ruhezustand", quelle, grund)
         return None
     assert isinstance(value, str)
+    logger.info("Bootstrap-Adresse: %s", quelle_log)  # Quelle, nie der Wert einer Option oder Umgebung
     return value.rstrip("/")
 
 
@@ -130,12 +141,13 @@ def _ha_bereit(ha_api) -> bool:
     return True
 
 
-def aufraeumen(ha_api) -> None:
+def aufraeumen(ha_api) -> markierung.Markierung | None:
     """Markierung aufraeumen.json vor dem Start des Geraetekerns (prozess.aufraeumen_beim_start); geloescht werden
     Sicherung, Notbetriebs- und Abo-Zustand, Laufzeit-Ordner und die Hilfssensoren in HA. Bleibt etwas uebrig
     (HA nicht bereit, Fehler beim Loeschen eines Helfers oder einer Datei), bleibt die Markierung fuer den naechsten
-    Start; der Start geht weiter."""
-    prozess.aufraeumen_beim_start(
+    Start; der Start geht weiter. Rueckgabe: die Markierung, wenn das Zuruecksetzen aussteht (_vorbereiten reicht sie an
+    HaDeviceHost.start_markierung; die Laufzeit liest sie nicht erneut)."""
+    return prozess.aufraeumen_beim_start(
         config.AUFRAEUMEN_PATH,
         lambda: DocumentStore(config.DEVICE_DATA_DIR / DEVICE_DIR, host=HaDeviceHost.host,
                               software_version=ADDON_VERSION, rasten=False).inhalt(KONFIGURATION),
@@ -154,25 +166,45 @@ def _anlage_loeschen(ha_api) -> bool:
             logger.warning("Home Assistant nicht bereit: Hilfssensoren werden beim naechsten Start entfernt")
     geloescht = gescheitert = False
 
-    def datei_weg(path) -> None:
-        path.unlink(missing_ok=True)  # zwischen exists und unlink verschwunden: weg
+    def eintrag_weg(path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)  # zwischen exists und unlink verschwunden: weg
 
-    # backup.json (Bindung an Einrichtung und Anlage) zuletzt und nur, wenn alle anderen Dateien geloescht sind (die
-    # Hilfssensoren zaehlen nicht): bleibt etwas liegen, verwirft bind_to_tenant es bei der Einrichtung einer anderen
-    # Anlage. Scheitert ein Loeschen (EACCES, EIO), bleibt die Markierung fuer den naechsten Start; der Start geht
-    # weiter wie bei nicht loeschbaren Hilfssensoren. exists() steht mit im try (wirft bei EIO/EACCES im stat).
-    for path, entfernen in ((config.FAILSAFE_PATH, datei_weg), (config.ENTITLEMENT_PATH, datei_weg),
-                            (config.RUNTIME_DIR, shutil.rmtree), (config.BACKUP_PATH, datei_weg)):
-        if gescheitert and path == config.BACKUP_PATH:
-            break
+    def entfernen(path, wie) -> None:
+        nonlocal geloescht, gescheitert
         try:
             if path.exists():
-                entfernen(path)
+                wie(path)
                 geloescht = True
         except OSError as error:
             gescheitert = True
             logger.warning("%s nicht geloescht (%s), neuer Versuch beim naechsten Start", path.name,
                            type(error).__name__)
+
+    # Die backup.json der Kreise (Bindung an Einrichtung und Anlage) zuletzt und nur, wenn alle anderen Dateien
+    # geloescht sind (die Hilfssensoren zaehlen nicht): bleibt etwas liegen, verwirft bind_to_tenant es bei der
+    # Einrichtung einer anderen Anlage. Scheitert ein Loeschen (EACCES, EIO), bleibt die Markierung fuer den naechsten
+    # Start; der Start geht weiter wie bei nicht loeschbaren Hilfssensoren. exists() steht mit im try (wirft bei
+    # EIO/EACCES im stat).
+    try:
+        eintraege = zustandspfade.ohne_wiederherstellungspunkt(config.RUNTIME_DIR)
+    except OSError as error:
+        eintraege = []
+        gescheitert = True
+        logger.warning("%s nicht geloescht (%s), neuer Versuch beim naechsten Start", config.RUNTIME_DIR.name,
+                       type(error).__name__)
+    for path in eintraege:
+        entfernen(path, eintrag_weg)
+    if not gescheitert:
+        for path in zustandspfade.wiederherstellungspunkte(config.RUNTIME_DIR):
+            entfernen(path, eintrag_weg)
+        # Die nie migrierte Sicherung im alten Format bindet ebenfalls an die alte Anlage; die Sicherungen
+        # `*.pre-<Release>` der Migration bleiben liegen.
+        entfernen(config.ALTER_BACKUP_PATH, eintrag_weg)
+    if not gescheitert:
+        entfernen(config.RUNTIME_DIR, shutil.rmtree)
     fertig = fertig and not gescheitert
     if geloescht and fertig:
         logger.info("Anlagengebundener Zustand geloescht (Add-on nicht mehr eingerichtet)")
@@ -180,44 +212,61 @@ def _anlage_loeschen(ha_api) -> bool:
 
 
 class _Laufzeit:
-    """Der HaHost des laufenden Starts: der Geraete-Thread liest daraus den wirksamen Raum-Soll fuer das
-    Status-Ereignis (GeraetStatus)."""
+    """Der Anlagen-Host des laufenden Starts: der Geraete-Thread liest daraus den wirksamen Raum-Soll je Kreis fuer
+    das Status-Ereignis (GeraetStatus)."""
 
-    host: HaHost | None = None
+    host: HaAnlagenHost | None = None
 
 
 status_holder = _Laufzeit()
 
 
-def _raum_soll() -> float | None:
+def _raum_soll(kreis: int) -> float | None:
     host = status_holder.host
-    store = host.store if host is not None else None
+    kreis_host = host.hosts.get(kreis) if host is not None else None
+    store = kreis_host.store if kreis_host is not None else None
     return store.value if store is not None else None
 
 
 def verdrahten(geraet: HaDeviceHost, device, ha_api, supervisor) -> GeraetStatus:
-    """Geraete-Host an den Geraetekern haengen: Status-Ereignis Schema 3 (laufzeit_merken legt das Laufzeit-Ereignis
+    """Geraete-Host an den Geraetekern haengen: Status-Ereignis Schema 4 (laufzeit_merken legt das Laufzeit-Ereignis
     fuer up/status und sign_off ab), Supervisor-Discovery und der jeweils aktuelle Uebernahme-Code."""
     geraet.verbinden(device)
-    status = GeraetStatus(ha_api, device.identity.device_id, _raum_soll,
+
+    def anzeige_inhalt() -> dict | None:
+        dokument = device.documents.aktuell(ANZEIGE)
+        return dokument.inhalt if dokument is not None else None
+
+    lokal = lokale_sicht(lambda: device.documents.aktuell(KONFIGURATION), _raum_soll, lambda kreis: (geraet.raum(kreis) or {}).get("ist"),
+                         anzeige_inhalt, kritisch_ende=geraet.kritisches_ende,
+                         update_noetig_kritisch=geraet.update_noetig_kritisch)
+    status = GeraetStatus(ha_api, device.identity.device_id, lokal,
                           laufzeit_merken=lambda event: setattr(geraet, "runtime_status_event", event))
     geraet.status_sink = status
+    geraet.geraet_id = device.identity.device_id
     geraet.discovery = Discovery(supervisor, config.DEVICE_DATA_DIR / DEVICE_DIR / "discovery.json")
     geraet.claim_code = lambda: device.identity.claim_code
     return status
 
 
 def start(geraet: HaDeviceHost, device, ha_api, status: GeraetStatus,
-          clock=time.monotonic) -> tuple[Runtime | app.IdleBridge, HaHost]:
-    """Laufzeit auf dem Link des Geraets starten (mqtt_factory); alle Neustarts gehen ueber prozess.Neustart (der
-    Rueckruf neustart der Laufzeit und EV_RELOAD des Geraete-Hosts)."""
+          clock=time.monotonic) -> tuple[kreise.Laufzeit, HaAnlagenHost]:
+    """Laufzeit der Anlage auf dem Link des Geraets starten (mqtt_factory): ein Worker je Kreis. Alle Neustarts des
+    Prozesses gehen ueber prozess.Neustart (der Rueckruf neustart der Laufzeit und EV_RELOAD des Geraete-Hosts); ein
+    Kreis mit wieder aktivem Abo oder geaenderter Konfiguration startet allein neu (Laufzeit.konfiguration_geaendert,
+    vom Geraete-Host nach jedem Konfigurationsdokument gefragt)."""
     geraet.status_sink = status
-    host = HaHost(geraet, ha_api, clock=clock)
-    status_holder.host = host
-    result = app.start(host, clock, mqtt_factory=device.laufzeit_kanal, neustart=prozess.neustart_der_laufzeit)
-    prozess.reload_anhaengen(result)
-    geraet.worker_binden(result.worker, soll_eingang=isinstance(result, Runtime))  # Ruhezustand: kein Soll-Eingang
-    return result, host
+    anlage = HaAnlagenHost(geraet, ha_api, clock=clock)
+    status_holder.host = anlage
+
+    def gestartet(kreis: int, ergebnis) -> None:  # Ruhezustand: kein Soll-Eingang
+        geraet.worker_binden(ergebnis.worker, kreis=kreis, soll_eingang=isinstance(ergebnis, Runtime))
+
+    laufzeit = kreise.start(anlage, clock, mqtt_factory=device.laufzeit_kanal, neustart=prozess.neustart_der_laufzeit,
+                            gestartet=gestartet)
+    prozess.reload_anhaengen(laufzeit)
+    geraet.laufzeit_binden(laufzeit)
+    return laufzeit, anlage
 
 
 def laufen(geraet: HaDeviceHost, device, ha_api, status: GeraetStatus, clock=time.monotonic) -> None:
@@ -237,11 +286,16 @@ def stdin_quelle() -> BinaryIO | None:
         return None
 
 
-def stdin_anhaengen(geraet: HaDeviceHost, device, quelle: BinaryIO) -> threading.Thread:
-    """Lokalen Befehl `entfernen <eigene Geraete-ID>` aus quelle lesen; der Treffer meldet das Geraet im Geraete-Thread
-    ab (HaDeviceHost.lokal_abmelden ueber das Postfach, nie nebenlaeufig zum Befehlsregister)."""
+def stdin_anhaengen(geraet: HaDeviceHost, device, quelle: BinaryIO, ha_api,
+                    uhr: Callable[[], float] = echte_epoche) -> threading.Thread:
+    """Lokale Befehle `entfernen <eigene Geraete-ID> [freigeben]` und `nachweis <eigene Geraete-ID>` aus quelle lesen;
+    `entfernen` meldet das Geraet im Geraete-Thread ab (HaDeviceHost.lokal_abmelden bzw. mit `freigeben`
+    lokal_freigeben ueber das Postfach, nie nebenlaeufig zum Befehlsregister), `nachweis` sendet das signierte Ereignis
+    smartheat_nachweis ueber ha_api (Zeit aus uhr). Eine fremde Geraete-ID bewirkt nichts."""
     return stdin_befehl.starten(quelle, device.identity.device_id,
-                                lambda: device.im_geraete_thread(geraet.lokal_abmelden))
+                                lambda: device.im_geraete_thread(geraet.lokal_abmelden),
+                                lambda: geraet_nachweis.senden(ha_api, device.identity, uhr),
+                                lambda: device.im_geraete_thread(geraet.lokal_freigeben))
 
 
 def _ruhen() -> None:
@@ -256,8 +310,9 @@ def _terminate(signum, frame) -> None:
 
 def _vorbereiten(ha_api, supervisor, url: str) -> tuple[HaDeviceHost, Device, GeraetStatus]:
     """Die Host-Schritte vor laufen; eine Ausnahme darin endet ueber prozess.starten in Pause und exec."""
-    aufraeumen(ha_api)  # vor dem Geraetekern: noch schreibt nichts in den anlagengebundenen Zustand
+    ausstehend = aufraeumen(ha_api)  # vor dem Geraetekern: noch schreibt nichts in den anlagengebundenen Zustand
     geraet = HaDeviceHost(ha_api, supervisor)
+    geraet.start_markierung = ausstehend
     device = Device(geraet, config.DEVICE_DATA_DIR, url)
     status = verdrahten(geraet, device, ha_api, supervisor)
     return geraet, device, status
@@ -281,7 +336,7 @@ def main() -> None:  # pragma: no cover - Add-on-Einstieg (Startfehler und Ruhez
     geraet, device, status = teile
     quelle = stdin_quelle()
     if quelle is not None:
-        stdin_anhaengen(geraet, device, quelle)
+        stdin_anhaengen(geraet, device, quelle, ha_api)
     laufen(geraet, device, ha_api, status)
 
 

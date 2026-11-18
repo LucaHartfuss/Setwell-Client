@@ -1,10 +1,11 @@
-"""Vertrag Geraet <-> Server (Spec 5b Abschnitte 1-3): HTTPS-Bootstrap und MQTT. Woertliche Kopie des Vertragsteils von
-heizungsserver/geraete/device_protocol.py (alles ab `SCHEMA = 1` bis einschliesslich `command_errors`; die Importe stehen je
-Seite selbst); tools/contract_check.py im Dev-Root vergleicht beide mit tools/contracts/geraet_v1.json (Plan 5b-W).
+"""Vertrag Geraet <-> Server: HTTPS-Bootstrap und MQTT. Woertliche Kopie des Vertragsteils von
+heizungsserver/geraete/device_protocol.py (alles ab `SCHEMA = 2` bis einschliesslich `command_errors`; die Importe stehen je
+Seite selbst); tools/contract_check.py im Dev-Root vergleicht beide mit tools/contracts/geraet_v1.json.
 Aenderungen nur an allen drei Stellen zugleich. Die Server-Regeln unter dem Vertragsteil (Aushandeln, Ablauf,
-Mindestversion je Host) gibt es nur auf dem Server.
+Mindestversion je Host) gibt es nur auf dem Server; unter der Marke stehen hier statt dessen die Konstanten, die nur
+das Geraet braucht (Nachweis der Einrichtung).
 
-Versionsregeln (Stufe 3 S8a-1, ersetzt Spec 2.1): V1 wird auf beiden Seiten strikt geprueft; ein fehlendes oder
+Versionsregeln: V1 wird auf beiden Seiten strikt geprueft; ein fehlendes oder
 fremdes Feld und ein falscher Typ werden abgelehnt. Ein neues Feld Server -> Geraet gibt es deshalb erst nach einem
 Geraete-Update, ein neues Feld Geraet -> Server zuerst auf dem Server (als *_OPTIONAL mit der Bedeutung bei Fehlen im
 Kommentar). Ausnahme ist das Tick-Drahtformat (Snapshot- und Telemetrie-Leser des Servers, Antwort down/setpoints im
@@ -14,8 +15,8 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-SCHEMA = 1
-SCHEMATA = (1,)
+SCHEMA = 2
+SCHEMATA = (2,)
 
 # --- HTTPS-Bootstrap (Spec 1), signiert wie der Vertrag G3 ---
 SIGNATURE_SCHEME = "SHG1"
@@ -28,7 +29,7 @@ MAX_CLOCK_SKEW_SECONDS = 300
 MAX_BODY_BYTES = 65536
 DEVICE_ID_PREFIX = "shg-"
 DEVICE_ID_HASH_CHARS = 16
-CLAIM_CODE_CHARS = 12
+CLAIM_CODE_CHARS = 16
 CSR_MAX_BYTES = 8192
 UNAUTHENTICATED_ERROR = "nicht authentifiziert"
 ROUTES: dict[str, tuple[str, str]] = {
@@ -42,8 +43,9 @@ REGISTER_FIELDS = (
 REGISTER_OPTIONAL = ("werks_nachweis",)  # fehlt = kein Nachweis (Pruefung: eigene Spec vor der Freischaltung)
 CERTIFICATE_FIELDS = ("csr",)
 CAPABILITY_FIELDS = ("drivers", "zigbee")
-CAPABILITY_OPTIONAL = ("updater", "programm")  # fehlt = false
-BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca")
+CAPABILITY_OPTIONAL = ("updater", "programm", "testphase", "kaelteschutz")  # fehlt = false
+BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca", "anker_signatur",
+                      "anker_id")
 BOOTSTRAP_OPTIONAL = ("mqtt_alpn",)  # fehlt = kein Rueckfall auf Port 443 (AN-3)
 DEVICE_STATES = ("nicht_uebernommen", "uebernommen", "gesperrt")
 
@@ -54,16 +56,21 @@ MAX_MESSAGE_BYTES = 120 * 1024  # AN-10: 120 KB zugestellt, 130 KB abgelehnt
 SESSION_EXPIRY_SECONDS = 3600  # AN-9: Hoechstwert von IoT Core
 DEVICE_SUBSCRIPTION = "down/#"  # AN-6: die Policy erlaubt nur diesen Filter
 UP_TOPICS = (
-    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "telemetry",
+    "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "up/entfernt",
+    "telemetry",
 )
-DOWN_TOPICS = ("down/config", "down/operation", "down/command", "down/setpoints")
+DOWN_TOPICS = ("down/config", "down/operation", "down/display", "down/command", "down/setpoints")
 
 HELLO_FIELDS = (
-    "schema", "schemata", "konfiguration_version", "bedienung_version", "software_version", "host", "faehigkeiten",
-    "boot_id", "uhr_synchron",
+    "schema", "schemata", "konfiguration_version", "bedienung_version", "anzeige_version", "software_version", "host",
+    "faehigkeiten", "wege", "boot_id", "uhr_synchron",
 )
-HELLO_OPTIONAL = ("device_state",)  # fehlt = Uebernahmestand des Geraets unbekannt, kein Abgleich (Spec 5c F1)
-STATUS_FIELDS = ("schema", "zustand", "runtime_status", "raum", "ts")
+#: device_state: fehlt = Uebernahmestand des Geraets unbekannt, kein Abgleich. Nur Host ha: auto_update (Schalter des
+#: Supervisors fuer das Add-on; fehlt oder null = unbekannt) und integration_version (Version der HA-Integration; fehlt oder
+#: null nach 900 s ohne Ereignis der Integration = unbekannt). Ein Geraet sendet beide immer, der Server speichert Wert und Zeit.
+HELLO_OPTIONAL = ("device_state", "auto_update", "integration_version")
+STATUS_FIELDS = ("schema", "zustand", "runtime_status", "kreise", "ts")
+STATUS_KREIS_FIELDS = ("kreis", "raum")  # ein Eintrag je Kreis der Konfiguration, Nummern aufsteigend und einmalig
 STATUS_OPTIONAL = ("ursprungswerte",)  # fehlt = keine neuen Ursprungswerte (G-4: Hebel -> Wert vor dem ersten Schreiben)
 ZUSTAENDE = (
     "startet", "nicht_uebernommen", "keine_verbindung", "wartet_auf_einrichtung", "regelt", "stoerung", "gesperrt",
@@ -71,7 +78,10 @@ ZUSTAENDE = (
 )
 RAUM_FIELDS = ("ist", "soll", "soll_quelle", "ts")
 NOTIFICATIONS_FIELDS = ("schema", "items")
-NOTIFICATION_FIELDS = ("key", "kategorie", "kritisch", "text", "offen", "ts")
+NOTIFICATION_FIELDS = ("key", "code", "params", "stufe", "offen", "ts")
+# kreis: Kreisnummer; quelle/roh: nur bei erzeuger.*, Hersteller und Roh-Code der Anlage (`[a-z0-9_]`, hoechstens 32)
+NOTIFICATION_OPTIONAL = ("kreis", "quelle", "roh")
+STUFEN = ("rot", "orange", "gelb")  # Dringlichkeit einer Meldung; rot und orange gehen als Push hinaus, gelb nie
 INVENTORY_FIELDS = ("schema", "command_id", "teil", "teile", "daten")
 INVENTUR_FILTER_FIELDS = ("plattformen", "domaenen", "geraeteklassen", "dienste")
 INVENTUR_HA_FIELDS = ("entities", "geraete", "dienste", "einheit_temperatur", "zeitzone")
@@ -96,20 +106,47 @@ RESULT_TARGETS = ("command_id", "dokument", "version")  # entweder command_id od
 RESULT_PFLICHT_DOKUMENT = ("schema", "ok")
 RESULT_OPTIONAL_DOKUMENT = ("error",)
 ERROR_FIELDS = ("grund", "details")
-WISH_FIELDS = ("schema", "wish_id", "basis_version", "ts", "uhr_synchron", "werte")
+WISH_FIELDS = ("schema", "wish_id", "kreis", "basis_version", "ts", "uhr_synchron", "werte")
 WISH_OPTIONAL = ("roh", "herkunft", "durch")  # fehlt = nicht begrenzt bzw. unbekannt
 WISH_WERTE = ("raum_soll",)
-HERKUNFT = ("thermostat", "soll_entity", "smartheat_entity")
+#: Das Geraet verlaesst das Konto (nach der lokalen Abmeldung): die Wahl des Nutzers beim Entfernen der Verbindung. `freigeben`
+#: bittet den Server, das Geraet aus dem Konto zu loesen; `behalten` laesst es dort (der Server fuehrt es weiter als abgemeldet).
+ENTFERNT_FIELDS = ("schema", "wahl", "ts")
+ENTFERNT_WAHLEN = ("behalten", "freigeben")
+HERKUNFT = ("thermostat", "soll_entity", "ha")
 DURCH = ("nutzer", "automation")
 
-DOKUMENTE = ("konfiguration", "bedienung")
+DOKUMENTE = ("konfiguration", "bedienung", "anzeige")
 DOKUMENT_SOFTWARE = "software"  # nur in up/result: Ergebnis eines Updates, version = Software-Version (Text)
-DOKUMENT_TOPICS = {"konfiguration": "down/config", "bedienung": "down/operation"}
+DOKUMENT_TOPICS = {"konfiguration": "down/config", "bedienung": "down/operation", "anzeige": "down/display"}
+#: Konfiguration: anlagenweit die Felder dieser Liste, je Kreis `KONFIGURATION_KREIS_FIELDS` (Hebelsatz, Verteilsystem,
+#: Bindung, Raeume, Abo), je Raum `KONFIGURATION_RAUM_FIELDS`. `profil` und die Raumfuehler-Liste gibt es nicht mehr.
 KONFIGURATION_FIELDS = (
-    "schema", "version", "anlage", "profil", "hebelsatz", "verteilsystem", "bindung", "raumfuehler", "tagestick", "abo",
-    "mindest_software", "software", "bindungsparameter",
+    "schema", "version", "anlage", "anlage_name", "weg", "kreise", "tagestick", "mindest_software",
+    "mindest_integration", "software", "bindungsparameter", "push_regeln", "update_noetig", "updates",
 )
-KONFIGURATION_OPTIONAL = ("ursprungswerte",)  # fehlt = keine Ursprungswerte auf dem Server
+#: update_noetig: null oder der Zeitpunkt (Epoche-Sekunden), ab dem die kritische Mindestversion fuer dieses Geraet gilt; das
+#: Geraet liest es auch aus einer Konfiguration, die es wegen mindest_software ablehnt. updates (nur mit der Faehigkeit
+#: `updater`, sonst null): die Einstellung des Kunden zu Updates, `UPDATES_FIELDS` mit den Werten `UPDATES_FUNKTIONEN`
+#: und `UPDATES_SICHERHEIT`.
+UPDATES_FIELDS = ("funktion", "sicherheit")
+UPDATES_FUNKTIONEN = ("automatisch", "aufschub", "aus")
+UPDATES_SICHERHEIT = ("automatisch", "aus")
+KONFIGURATION_KREIS_FIELDS = ("kreis", "name", "bindung", "raeume", "hebelsatz", "verteilsystem", "abo")
+#: ursprungswerte: fehlt = keine Ursprungswerte auf dem Server; zustand: fehlt = in_betrieb (der Server sendet ihn nur an ein
+#: Geraet mit der Faehigkeit des Zustands, sonst lehnte dessen strenge Pruefung das Feld ab).
+KONFIGURATION_KREIS_OPTIONAL = ("ursprungswerte", "zustand")
+KONFIGURATION_RAUM_FIELDS = ("raum", "name", "rolle", "fuehler", "soll_quelle", "versatz_k", "ziel_fest")
+RAUM_ROLLEN = ("referenz", "kontroll")
+#: Hoechstens so viele Kreise je Geraet (Nachrichten und Konfiguration), Nutzer-Entscheidung.
+KREISE_MAX = 4
+RAEUME_MAX, RAUM_FUEHLER_MAX = 8, 8  # Raeume je Kreis, Fuehler je Raum
+#: Anbindungswege, die ein Geraet heute ausfuehrt, und ihre Abbildung aus der Bindung (HA: Plattform der Integration,
+#: Gateway: Treiber-ID); `simulation` ist der Testweg (nur Labor). Ein anderer Weg ist `weg_unbekannt`.
+WEGE = ("vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus", "simulation")
+WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
+                     "weishaupt_modbus": "weishaupt_modbus"}
+WEG_DES_TREIBERS = {"vicare_cloud": "viessmann_vicare", "simulation": "simulation"}
 # Spec Stufe 3 S4b 4.1: Herstellerwissen der Bindung (G-7). Pflicht fuer eine eingerichtete Konfiguration, null in einer
 # leeren -- bewusste Ausnahme von der Versionsregel ohne neue Schema-Nummer: Geraete bis 1.0.0 ignorieren das Feld.
 BINDUNGSPARAMETER_FIELDS = (
@@ -129,27 +166,46 @@ HA_ROLLEN = (
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",
     "system_water_pressure", "efficiency_ratio", "generator_hours", "generator_starts", "generator_state",
     "energy_electrical_heating", "energy_electrical_dhw", "energy_primary_heating", "energy_primary_dhw",
-    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total",
+    "energy_thermal_heating", "energy_thermal_dhw", "energy_electrical_total", "fault_codes",
 )
-HA_HINWEISE = ("raumfuehler", "batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: Hinweise, die die Person abschalten darf; die Hinweise des Raumfuehlers gehoeren nicht dazu.
+HA_HINWEISE = ("batterie", "manueller_eingriff", "quellwechsel", "schreibbudget", "schreibzaehler")
+#: push_regeln der Konfiguration: null (Standard des Geraets) oder genau diese Felder; Ruhezeit in ganzen Stunden
+#: (von und bis verschieden), Pushes je Tag. Ein Wert ausserhalb liest das Geraet als Standard, es lehnt nicht ab.
+PUSH_REGELN_FIELDS = ("ruhe_von", "ruhe_bis", "tageslimit")
+PUSH_STUNDEN = (0, 23)
+PUSH_TAGESLIMIT = (1, 5)
 TREIBER_FIELDS = ("id", "parameter")
-SOFTWARE_FIELDS = ("version", "manifest_url", "manifest_sha256", "signature")
+#: einmalig: der Kunde hat „jetzt aktualisieren“ gewaehlt, das Geraet installiert diese Version einmal, auch gegen seine
+#: Einstellung zu Updates.
+SOFTWARE_FIELDS = ("version", "manifest_url", "manifest_sha256", "signature", "einmalig")
 ABO = ("aktiv", "inaktiv")
-BEDIENUNG_FIELDS = ("schema", "version", "modus", "raum_soll", "quelle", "ts")
+KREIS_ZUSTAENDE = ("in_betrieb", "ausser_betrieb", "testphase_ohne")
+BEDIENUNG_FIELDS = ("schema", "version", "kreise", "quelle", "ts")
+BEDIENUNG_KREIS_FIELDS = ("kreis", "modus", "raum_soll")  # ein Eintrag je Kreis, Nummern aufsteigend und einmalig
 MODI = ("manuell",)
+# Anzeige: ein Eintrag je Kreis der Konfiguration, nur Host ha; der Server schreibt, das Geraet zeigt und prueft den
+# vollen Feldsatz (einlernphase_tag, testphase_bis null = nicht aktiv; befunde, aufgaben, raumziele leere Listen;
+# kennzahlen leeres Objekt)
+ANZEIGE_FIELDS = ("schema", "version", "kreise")
+ANZEIGE_KREIS_FIELDS = (
+    "kreis", "einlernphase_tag", "testphase_bis", "befunde", "aufgaben", "kennzahlen", "raumziele",
+)
+KREIS_MIN = 1  # kleinste Kreisnummer in Nachrichten und Dokumenten
+KREIS_MAX = 2**31 - 1  # groesste: die Nummer passt in eine Datenbankspalte vom Typ integer
 QUELLEN = ("portal", "geraet", "auftrag")
 RAUM_SOLL_MIN, RAUM_SOLL_MAX, RAUM_SOLL_STEP = 15.0, 25.0, 0.5
+RAUM_VERSATZ_MAX = 3.0  # Betrag des Versatzes eines zusaetzlichen Referenzraums (K); das feste Ziel nutzt RAUM_SOLL_MIN/MAX
 URSPRUNG_MAX_HEBEL, URSPRUNG_HEBEL_MAX_CHARS = 16, 64  # Ursprungswerte: hoechstens so viele Hebel, Namen so lang
 URSPRUNG_WERT_MAX = 1e12  # groesster Betrag einer Zahl in ursprungswerte
 DOKUMENT_ERRORS = (
     "schema_unbekannt", "ungueltig", "hebelsatz_eingerastet", "sicherheitswerte_fehlen", "rolle_unzulaessig",
-    "doppelt_belegt", "treiber_parameter", "update_noetig", "ausserhalb_bereich",
+    "doppelt_belegt", "treiber_parameter", "update_noetig", "ausserhalb_bereich", "weg_unbekannt", "weg_mehrfach",
 )
 SOFTWARE_ERRORS = (
     "manifest_ungueltig", "signatur_ungueltig", "updater_zu_alt", "version_zu_alt", "start_fehlgeschlagen",
-    "ungesund", "server_unerreichbar",
+    "ungesund", "server_unerreichbar", "manifest_abgelaufen", "einstellung_aus",
 )
-HINWEIS_STUFEN = ("info", "warnung", "kritisch")
 MELDUNGEN = ("wunsch_begrenzt", "soll_quelle_aus", "geraet_doppelt", "update_noetig", "gesperrt")
 
 COMMAND_FIELDS = ("schema", "command_id", "kind", "payload", "expires_at")
@@ -173,7 +229,7 @@ COMMANDS: dict[str, Command] = {
     "zigbee_permit_join": Command(("seconds",), (), 60, ("zigbee_nicht_bereit",)),
     "zigbee_devices": Command((), ("devices",), 60, ("zigbee_nicht_bereit",)),
     "driver_login": Command(
-        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code", "ciphertext"),
+        ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code"),
         ("code_challenge", "code_challenge_method"), 120,
         ("treiber_unbekannt", "login_nicht_noetig", "login_fehlgeschlagen", "anlage_nicht_erreichbar"),
     ),
@@ -182,15 +238,25 @@ COMMANDS: dict[str, Command] = {
                          "stunden*3600+3600", ("filter",)),
     "sign_off": Command((), ("zurueckgesetzt", "werte"), 24 * 3600, ("nicht_eingerichtet", "keine_bestaetigung")),
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
-    "claim_state": Command(("device_state",), (), 24 * 3600),
+    # konto_hinweis: Maske der Adresse des uebernehmenden Kontos (`a***@e***.com`), nur an Gateways; fehlt = kein Hinweis.
+    "claim_state": Command(("device_state",), (), 24 * 3600, payload_optional=("konto_hinweis",)),
     "diagnostics": Command((), (), 300),
-    "hinweis": Command(("key", "stufe", "text"), (), 24 * 3600),
+    # Liest an der Anbindung, ob der gewaehlte Weg dieselbe Anlage meint (Nutzlast: der Weg aus `WEGE`).
+    "weg_pruefen": Command(("weg",), ("ergebnis",), 3600, ("weg_unbekannt", "weg_mehrfach")),
+    "hinweis": Command(("key", "code", "params", "stufe"), (), 24 * 3600),
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
     "finish": ("phase", "driver_id", "code", "redirect_uri"),
-    "password": ("phase", "driver_id", "ciphertext"),
 }
+#: Ergebnisse von `weg_pruefen`.
+WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
+#: Laengste Zeichenkette von `claim_state.konto_hinweis` (die Maske ist kuerzer; laenger lehnt der Server ab, das Geraet liest sie nicht).
+KONTO_HINWEIS_MAX_ZEICHEN = 100
+#: Form der Maske in `claim_state.konto_hinweis` (`a***@e***.com`, die Endung nur mit Punkt in der Domain; keine Sterne, Punkte,
+#: `@`, Leerraum oder Steuerzeichen in den sichtbaren Teilen). Der Server stellt nur eine Maske dieser Form zu (sonst keinen Hinweis),
+#: das Geraet speichert nur eine Maske dieser Form.
+KONTO_HINWEIS_MUSTER = r"[^\s*@.\x00-\x1f\x7f]\*\*\*@[^\s*@.\x00-\x1f\x7f]\*\*\*(\.[^\s*@.\x00-\x1f\x7f]+)?"
 # Spec Stufe 3 S5 6.1 (G-6): Fehler tragen Code und details, keine Texte. details nur mit diesen Schluesseln: `feld`
 # aus PRUEF_FELDER, `regel` aus PRUEF_REGELN, die uebrigen endliche Zahlen; freie Texte gibt es darin nicht.
 DETAIL_FIELDS = ("feld", "regel", "min", "max", "wert", "anzahl")
@@ -198,10 +264,12 @@ PRUEF_REGELN = ("fehlt", "ungueltig", "anzahl", "bereich", "format", "doppelt", 
 #: Pruefbare Felder: die Namen aus den Feldlisten dieses Vertrags (abgeleitet: ein neues Feld ist ohne zweite Liste
 #: pruefbar).
 PRUEF_FELDER = tuple(dict.fromkeys((
-    *KONFIGURATION_FIELDS, *KONFIGURATION_OPTIONAL, *BINDUNGSPARAMETER_FIELDS, *SCHREIBSCHUTZ_FIELDS,
+    *KONFIGURATION_FIELDS, *KONFIGURATION_KREIS_FIELDS, *KONFIGURATION_KREIS_OPTIONAL, *KONFIGURATION_RAUM_FIELDS,
+    *BINDUNGSPARAMETER_FIELDS, *SCHREIBSCHUTZ_FIELDS,
     *BINDUNG_GATEWAY_FIELDS, *TREIBER_FIELDS, *BINDUNG_HA_FIELDS, *BINDUNG_HA_OPTIONAL, *KREIS_FIELDS, *KREIS_OPTIONAL,
     *HA_ROLLEN,
-    *BEDIENUNG_FIELDS, *COMMAND_FIELDS, *INVENTUR_FILTER_FIELDS, *INVENTUR_FILTER_GATEWAY_FIELDS,
+    *BEDIENUNG_FIELDS, *BEDIENUNG_KREIS_FIELDS, *ANZEIGE_FIELDS, *ANZEIGE_KREIS_FIELDS, *COMMAND_FIELDS,
+    *INVENTUR_FILTER_FIELDS, *INVENTUR_FILTER_GATEWAY_FIELDS,
     *(feld for command in COMMANDS.values() for feld in (*command.payload, *command.payload_optional)),
 )))
 _SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]+")
@@ -234,3 +302,16 @@ def parse_topic(value: str) -> tuple[str, str] | None:
 
 def command_errors(kind: str) -> tuple[str, ...]:
     return COMMANDS[kind].errors + COMMON_ERRORS
+
+
+# --- Server-Regeln (nicht im Vertrag) ---
+# Nur im Geraet (der Server hat die Gegenstuecke in einrichtung/geraetecode.py): der Nachweis fuer den Geraetecode der
+# Einrichtung. Das Geraet signiert mit canonical_string nur diese festen Werte; ein anderer Pfad oder Koerper steht
+# nirgends zur Wahl.
+NACHWEIS_METHOD = "POST"
+NACHWEIS_PATH = "/einrichtung/v1/geraetecode"
+NACHWEIS_BODY = b"{}"
+#: Versionsweiche des Servers: ein Feld der Konfiguration, das erst ab einer Softwareversion des Hosts gilt (Feld -> Host ->
+#: Version). Das Geraet liest sie nicht; sie steht hier, damit beide Seiten dieselben Namen tragen. Leer, solange kein
+#: Feld nach dem Schnitt dazukam.
+FELD_MINDESTVERSION: dict[str, dict[str, str]] = {}

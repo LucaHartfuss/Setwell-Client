@@ -1,15 +1,23 @@
 [project]
 name = "smartheat-gateway"
-version = "0.2.0"
+dynamic = ["version"]
 requires-python = ">=3.12"
-dependencies = ["paho-mqtt>=2.1,<3", "requests>=2.31,<3", "cryptography>=46,<51", "segno>=1.6,<2", "tzdata>=2025.2"]
+dependencies = ["paho-mqtt>=2.1,<3", "requests>=2.31,<3", "cryptography>=46,<51", "tzdata>=2025.2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-xdist>=3.6,<4", "pyyaml>=6.0,<7", "ruff==0.16.9", "pyright==1.1.414", "vulture==2.16"]
 
+[tool.setuptools.dynamic]
+version = {attr = "smartheat_gateway.version.GATEWAY_VERSION"}
+
 [tool.pytest.ini_options]
 pythonpath = ["src", "../heizungsbruecke/src", "../heizungsbruecke/testhilfen"]
 testpaths = ["tests"]
+# tmp_path nur fehlgeschlagener Tests des letzten Laufs behalten: /tmp ist lokal ein tmpfs im RAM
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
+# die Akzeptanzsuite laeuft nur allein (scripts/check.sh, Schritt akzeptanz): ihre conftest.py verlangt --confcutdir
+addopts = "--ignore=tests/akzeptanz"
 
 [tool.ruff]
 line-length = 120
@@ -29,7 +37,7 @@ known-first-party = ["smartheat_core", "smartheat_device", "smartheat_runtime", 
 
 [tool.pyright]
 include = ["src"]
-extraPaths = ["../heizungsbruecke/src"]
+extraPaths = ["src", "../heizungsbruecke/src"]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
 

@@ -4,15 +4,17 @@ import stat
 
 import pytest
 
-from smartheat_device import documents
+from smartheat_device import wire
 from smartheat_runtime.soll_speicher import (
+    BEDIENBEREICH_MAX,
+    BEDIENBEREICH_MIN,
+    BEDIENBEREICH_STEP,
     ECHO_WINDOW_SECONDS,
     PENDING_SECONDS,
     SOURCE_LOKAL,
     SOURCE_PORTAL,
     SOURCE_THERMOSTAT,
     TargetStore,
-    im_bedienbereich,
     is_valid_portal_target,
 )
 
@@ -168,13 +170,11 @@ def test_a_limited_wish_keeps_the_thermostat_as_source(tmp_path, clock):
     assert not store.begrenzen(15.0)
 
 
-@pytest.mark.parametrize("value", [
-    15, 15.0, 25, 25.0, 21.5, 14.99, 25.01, 14.5, 25.5, 21.3, 0, -1, 1e308, 10**400, True, False, None, "21", [21.0],
-    float("nan"), float("inf"), float("-inf"), *[15 + step * 0.1 for step in range(0, 101)],
-])
-def test_bedienbereich_equals_the_device_rule(value):
-    """Die Laufzeit importiert smartheat_device nicht (Reinheit): die lokale Kopie muss dieselbe Regel sein."""
-    assert im_bedienbereich(value) is documents.im_bedienbereich(value)
+def test_bedienbereich_gleich_dem_vertrag():
+    """Der Bedienbereich der Laufzeit ist der des Vertrags (smartheat_device.wire); documents.py prueft mit
+    derselben Funktion, es gibt keine zweite Kopie mehr."""
+    assert (wire.RAUM_SOLL_MIN, wire.RAUM_SOLL_MAX, wire.RAUM_SOLL_STEP) == (
+        BEDIENBEREICH_MIN, BEDIENBEREICH_MAX, BEDIENBEREICH_STEP)
 
 
 def test_lokal_applies_at_once_without_echo_check(tmp_path, clock):
@@ -208,7 +208,7 @@ def test_echo_rest_counts_down_the_window_after_an_own_write(tmp_path, clock):
 
 
 def test_portal_confirming_the_same_value_keeps_the_source(tmp_path, clock):
-    """Nr. 40 (Restpunkt 5c-W-12): bestaetigt der Server mit apply_portal den geltenden Wert, bleibt die Soll-Quelle;
+    """Bestaetigt der Server mit apply_portal den geltenden Wert, bleibt die Soll-Quelle;
     nur ein anderer Wert setzt sie auf portal."""
     changes = []
     store = _store(tmp_path, clock, changes=changes)
@@ -235,3 +235,101 @@ def test_portal_confirming_a_local_wish_keeps_the_source_lokal(tmp_path, clock):
 
     assert store.apply_portal(23.0)            # anderer Wert: die Bedienung des Servers gilt
     assert (store.value, store.source, len(changes)) == (23.0, SOURCE_PORTAL, 2)
+
+
+def _wunsch_datei(tmp_path, inhalt) -> "os.PathLike":
+    pfad = tmp_path / "room_target.json"
+    pfad.write_text(inhalt if isinstance(inhalt, str) else json.dumps(inhalt))
+    return pfad
+
+
+@pytest.mark.parametrize("quelle", [SOURCE_PORTAL, SOURCE_LOKAL, SOURCE_THERMOSTAT])
+def test_gespeicherter_wunsch_liefert_den_gemerkten_wert(tmp_path, quelle):
+    from smartheat_runtime.soll_speicher import gespeicherter_wunsch
+
+    pfad = _wunsch_datei(tmp_path, {"value": 21.5, "source": quelle, "ts": "x"})
+    assert gespeicherter_wunsch(pfad) == 21.5
+
+
+@pytest.mark.parametrize("inhalt", [
+    {"value": 3.0, "source": SOURCE_PORTAL}, {"value": 99.0, "source": SOURCE_PORTAL},
+    {"value": "21", "source": SOURCE_PORTAL}, {"value": None, "source": SOURCE_PORTAL},
+    {"value": 21.0, "source": "fremd"}, {"value": 21.0}, [], "{kaputt",
+])
+def test_gespeicherter_wunsch_verwirft_unbrauchbares(tmp_path, inhalt):
+    from smartheat_runtime.soll_speicher import gespeicherter_wunsch
+
+    assert gespeicherter_wunsch(_wunsch_datei(tmp_path, inhalt)) is None
+
+
+def test_gespeicherter_wunsch_ohne_datei_legt_keine_an(tmp_path):
+    from smartheat_runtime.soll_speicher import gespeicherter_wunsch
+
+    pfad = tmp_path / "unter" / "room_target.json"
+    assert gespeicherter_wunsch(pfad) is None
+    assert not pfad.exists() and not pfad.parent.exists()
+
+
+# --- Fristen genau an der Grenze, Rueckgaben als Wahrheitswert ---------------------------------------------------
+
+def test_das_echo_fenster_dauert_sechzig_sekunden_und_endet_genau_dann(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(22.0)
+    store.note_own_write()
+    assert store.echo_rest() == 60
+
+    clock.advance(59.9)
+    assert store.apply_thermostat(19.0) is False  # noch im Echo-Fenster
+    assert store.value == 22.0
+
+    clock.advance(0.1)  # genau 60 Sekunden: das Fenster ist zu
+    assert store.echo_rest() == 0.0
+    assert store.apply_thermostat(19.0) is True and store.value == 19.0
+
+
+def test_ein_offener_befehl_verfaellt_nach_dreissig_minuten_genau(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+
+    clock.advance(1799)
+    assert store.apply_thermostat(20.0) is False  # alter Wert, Befehl noch offen
+
+    clock.advance(1)  # genau 1800 Sekunden: der Befehl ist verfallen, der Wert des Thermostats gilt
+    assert store.apply_thermostat(20.0) is True
+    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+
+
+def test_ein_zweiter_befehl_nach_genau_dreissig_minuten_erbt_die_alten_werte_nicht(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+    clock.advance(1800)  # der erste Befehl ist verfallen
+    store.apply_portal(23.0)
+    store.note_own_write()
+    clock.advance(300)
+
+    assert store.apply_thermostat(20.0) is True  # kein alter Wert mehr, sondern eine Eingabe am Thermostat
+    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+
+
+def test_die_rueckgaben_der_eingaenge_sind_wahrheitswerte(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.apply_portal(21.3) is False  # nicht im Raster
+    assert store.apply_portal(20.0) is False  # geltendes Soll
+    assert store.apply_lokal(40.0) is False
+    assert store.begrenzen(20.0) is False  # keine Aenderung
+
+    store.apply_portal(22.0)
+    store.note_own_write()
+    assert store.apply_thermostat(19.0) is False  # Echo-Fenster
+
+    clock.advance(120)
+    assert store.apply_thermostat(40.0) is False  # unplausibel
+    assert store.apply_thermostat(22.0) is False  # Bestaetigung des Schreibwerts
+    store.apply_portal(23.0)
+    store.note_own_write()
+    clock.advance(120)
+    assert store.apply_thermostat(22.0) is False  # veralteter Wert bei offenem Befehl
+    assert store.apply_thermostat(23.0) is False  # bestaetigt
+    assert store.apply_thermostat(23.0) is False  # geltendes Soll

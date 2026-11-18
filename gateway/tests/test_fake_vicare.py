@@ -5,7 +5,11 @@ import urllib.parse
 import urllib.request
 
 import pytest
-from fake_vicare.server import FakeVicare
+from fake_vicare import server as fake_server
+from fake_vicare.server import DEFAULT, FakeVicare
+
+from smartheat_core import hausmodell
+from smartheat_gateway.drivers.simulation import ERZEUGER as ERZEUGER_DES_TREIBERS
 
 IDS = ("2012345", "7637415000000001", "0")
 FEATURES = f"/iot/v2/features/installations/{IDS[0]}/gateways/{IDS[1]}/devices/{IDS[2]}/features"
@@ -78,6 +82,174 @@ def test_a_command_is_checked_against_its_constraints_and_changes_the_feature(fa
     assert (props["shift"]["value"], props["slope"]["value"]) == (2, 1.1)
     assert server.commands[-1] == {"feature": "heating.circuits.0.heating.curve", "command": "setCurve",
                                    "params": {"shift": 2, "slope": 1.1}}
+
+
+CURVE = "heating.circuits.0.heating.curve"
+NORMAL = "heating.circuits.0.operating.programs.normal"
+ROOM = "heating.circuits.0.sensors.temperature.room"
+SUPPLY = "heating.circuits.0.sensors.temperature.supply"
+STATISTICS = "heating.burners.0.statistics"
+FAR_FUTURE = 10 ** 9  # Token-Laufzeit: die Test-Uhr springt um Stunden
+
+
+@pytest.fixture
+def modell(clock):
+    """Fake mit Hausmodell (Standard) auf der Test-Uhr; die Tokens ueberleben die Spruenge der Uhr."""
+    server = FakeVicare(clock=clock)
+    server.control({"token_ttl": FAR_FUTURE})
+    base = server.start()
+    token = login(base)["access_token"]
+    yield server, base, token, clock
+    server.stop()
+
+
+def features(base, token):
+    return {f["feature"]: f for f in call(base, "GET", FEATURES, token=token)[1]["data"]}
+
+
+def prop(items, feature, name):
+    return items[feature]["properties"][name]["value"]
+
+
+VIESSMANN = ERZEUGER_DES_TREIBERS["viessmann_vicare"]
+
+
+def kern(schritte, *, slope=1.4, shift=0.0, soll=20.0, aussen=5.0):
+    """Direktlauf des Kerns mit den Eingaengen, die der Fake aus seinen Features bildet: die Verschiebung der Kurve ist
+    das Niveau allein, das Raum-Soll ist der Mindestvorlauf und damit das Raum-Soll der Formel."""
+    zustand = hausmodell.Anlagenzustand(room=20.0, burner_hours=1000.0)
+    letzter = None
+    for _ in range(schritte):
+        letzter = hausmodell.anlage_schritt(
+            zustand, hausmodell.HOUSES["H1"], VIESSMANN, (slope, shift, 16.0), aussen, 0.0, 12.0, soll,
+            hausmodell.Betriebsflags(), None)
+    return zustand, letzter
+
+
+def command(base, token, feature, name, body):
+    return call(base, "POST", f"{FEATURES}/{feature}/commands/{name}", body, token=token)[0]
+
+
+def test_the_room_sensor_follows_the_heating_curve_of_the_core(modell):
+    server, base, token, clock = modell
+    assert prop(features(base, token), ROOM, "value") == 20.0
+    clock.advance(12 * 3600)
+    items = features(base, token)
+    zustand, _ = kern(12 * 12)
+    assert prop(items, ROOM, "value") == round(zustand.room, 2) != 20.0
+    assert prop(items, SUPPLY, "value") == round(max(VIESSMANN.flow(1.4, 0.0, 5.0, 20.0), 20.0), 1)
+    assert prop(items, "heating.sensors.temperature.outside", "value") == 5
+
+
+def test_the_fake_calculates_with_the_generator_of_the_simulation_driver():
+    """Der Fake-Container kennt den Treiber nicht und fuehrt die Werte selbst; sie duerfen nicht auseinanderlaufen."""
+    assert fake_server.ERZEUGER == VIESSMANN
+
+
+@pytest.mark.parametrize("slope, shift, soll", [(1.4, 0.0, 20.0), (2.2, 6.0, 23.0)])
+def test_the_supply_equals_a_direct_run_of_the_core_with_the_viessmann_generator(modell, slope, shift, soll):
+    """Steigung und Niveau aus der Kurve, das Raum-Soll aus dem Normalprogramm: das Raum-Soll geht nur einmal in die
+    Formel ein (als Mindestvorlauf), nicht noch einmal in der Verschiebung."""
+    server, base, token, clock = modell
+    assert command(base, token, CURVE, "setCurve", {"shift": shift, "slope": slope}) == 200
+    assert command(base, token, NORMAL, "setTemperature", {"targetTemperature": soll}) == 200
+    clock.advance(6 * 3600)
+    items = features(base, token)
+    zustand, letzter = kern(6 * 12, slope=slope, shift=shift, soll=soll)
+    erwartet = round(max(VIESSMANN.flow(slope, shift, 5.0, soll), soll), 1)
+    assert letzter.geliefert
+    assert prop(items, SUPPLY, "value") == erwartet
+    assert prop(items, ROOM, "value") == round(zustand.room, 2)
+
+
+def test_a_higher_curve_heats_the_room_more(modell):
+    server, base, token, clock = modell
+    assert command(base, token, CURVE, "setCurve", {"shift": 0, "slope": 3.5}) == 200
+    clock.advance(12 * 3600)
+    hoch = prop(features(base, token), ROOM, "value")
+    zustand, _ = kern(12 * 12, slope=3.5)
+    assert hoch == round(zustand.room, 2)
+    other = FakeVicare(clock=clock)
+    other.control({"token_ttl": FAR_FUTURE})
+    base2 = other.start()
+    try:
+        token2 = login(base2)["access_token"]
+        assert command(base2, token2, CURVE, "setCurve", {"shift": 0, "slope": 0.2}) == 200
+        clock.advance(12 * 3600)
+        assert prop(features(base2, token2), ROOM, "value") < hoch - 1.0
+    finally:
+        other.stop()
+
+
+def test_a_command_acts_from_its_moment_on(modell):
+    server, base, token, clock = modell
+    clock.advance(6 * 3600)
+    features(base, token)  # rechnet die ersten sechs Stunden mit der Kurve 1,4
+    assert command(base, token, CURVE, "setCurve", {"shift": 0, "slope": 3.5}) == 200
+    clock.advance(6 * 3600)
+    erster, _ = kern(6 * 12)
+    zustand = erster
+    for _ in range(6 * 12):
+        hausmodell.anlage_schritt(zustand, hausmodell.HOUSES["H1"], VIESSMANN,
+                                  (3.5, 0.0, 16.0), 5.0, 0.0, 12.0, 20.0, hausmodell.Betriebsflags(), None)
+    assert prop(features(base, token), ROOM, "value") == round(zustand.room, 2)
+
+
+def test_set_temperature_and_shift_change_the_core_inputs(modell):
+    server, base, token, clock = modell
+    assert command(base, token, NORMAL, "setTemperature", {"targetTemperature": 24}) == 200
+    assert command(base, token, CURVE, "setCurve", {"shift": 3, "slope": 1.4}) == 200
+    clock.advance(6 * 3600)
+    zustand, _ = kern(6 * 12, shift=3.0, soll=24.0)
+    assert prop(features(base, token), ROOM, "value") == round(zustand.room, 2)
+
+
+def test_the_burner_statistics_are_advanced_by_the_core(modell):
+    server, base, token, clock = modell
+    clock.advance(6 * 3600)
+    items = features(base, token)
+    zustand, _ = kern(6 * 12)
+    assert prop(items, STATISTICS, "hours") == round(zustand.burner_hours, 3) > 1000.0
+    assert prop(items, STATISTICS, "starts") == zustand.burner_starts
+    assert prop(items, "heating.burners.0", "active") is True
+
+
+def test_the_model_needs_time_not_polls(modell):
+    server, base, token, clock = modell
+    clock.advance(100)
+    features(base, token)
+    clock.advance(100)
+    features(base, token)
+    clock.advance(100)  # 300 s in drei Abfragen = ein Schritt, auch wenn die Reste einzeln darunter liegen
+    zustand, _ = kern(1)
+    assert prop(features(base, token), ROOM, "value") == round(zustand.room, 2)
+    assert prop(features(base, token), ROOM, "value") == round(zustand.room, 2)  # ohne Zeit keine Aenderung
+
+
+def test_a_reset_restarts_the_model(modell):
+    server, base, token, clock = modell
+    clock.advance(12 * 3600)
+    assert prop(features(base, token), ROOM, "value") != 20.0
+    server.control({"reset": True, "token_ttl": FAR_FUTURE})
+    token = login(base)["access_token"]
+    assert prop(features(base, token), ROOM, "value") == 20.0
+
+
+def test_recordings_stay_static_without_the_model(clock):
+    server = FakeVicare({"0": json.loads(json.dumps(DEFAULT))}, clock=clock)
+    server.control({"token_ttl": FAR_FUTURE})
+    base = server.start()
+    try:
+        token = login(base)["access_token"]
+        before = features(base, token)
+        assert command(base, token, CURVE, "setCurve", {"shift": 0, "slope": 3.5}) == 200
+        clock.advance(12 * 3600)
+        after = features(base, token)
+        assert ROOM not in after and STATISTICS not in after
+        assert prop(after, SUPPLY, "value") == prop(before, SUPPLY, "value") == 35
+        assert prop(after, CURVE, "slope") == 3.5
+    finally:
+        server.stop()
 
 
 def test_switches_offline_rate_limit_and_invalid_grant(fake):

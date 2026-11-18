@@ -1,4 +1,4 @@
-"""Modulgrenzen des Add-on-Repos (Audit 5 A5-59, Konsolidierung K4; Spec Stufe 3 S6 4.4), wie
+"""Modulgrenzen des Add-on-Repos (Konsolidierung K4), wie
 HeizungssteuerungServer/tests/test_modulgrenzen.py: jedes Paket importiert nur die Standardbibliothek, die erlaubten
 eigenen Pakete und die genannten Drittpakete in genau den genannten Dateien. Schichtung core <- runtime <- device <-
 Hosts; die Hosts kennen sich nie. Das Gateway-Image kopiert jedes Kernpaket, das das Gateway importiert."""
@@ -25,7 +25,7 @@ ERLAUBT = {
 DRITTE = {
     "smartheat_core": {},
     "smartheat_runtime": {},
-    "smartheat_device": {"cryptography": {"identity.py"}, "paho": {"link.py"}, "requests": {"bootstrap.py"}},
+    "smartheat_device": {"cryptography": {"identity.py", "anker.py"}, "paho": {"link.py"}, "requests": {"bootstrap.py"}},
     "heizungsbruecke": None,  # None: Drittpakete frei (requests, websocket ...), eigene Pakete nach ERLAUBT
     "smartheat_gateway": None,
 }

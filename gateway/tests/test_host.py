@@ -1,19 +1,24 @@
-"""Laufzeit-Host des Gateways ab 0.6.0 (Spec SHG G2 3.1, Spec 5b Plan D2 Task 5): Start aus dem Konfigurationsdokument,
+"""Laufzeit-Host des Gateways: Start aus dem Konfigurationsdokument,
 Startfehler mit stabilem Schluessel, Hebelsatz, Abmelden, Manifest nach der ersten Abfrage, Batterien, Anlagen-Kennung."""
+import json
 import logging
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import bindung_beispiele
 import pytest
 from bindung_beispiele import VIESSMANN_VICARE_BINDING
-from configs import SENSOR, THERMOSTAT, bedienung, dokumente_schreiben, konfiguration
+from configs import SENSOR, THERMOSTAT, bedienung, dokumente_schreiben, konfiguration, kreis_bindung, leer
 from fake_vicare.server import GOOD_CODE, FakeVicare
 from fakes import FakeBus
 from geraet_fakes import geraet_fuer
+from rastung_beispiele import rastung_aus
 from world import GatewayWorld
 
 from smartheat_core import dateien, rastung
 from smartheat_gateway import config as gateway_config
+from smartheat_gateway import host as host_modul
 from smartheat_gateway.drivers import registry
 from smartheat_gateway.drivers.base import DriverError
 from smartheat_gateway.drivers.registry import create
@@ -23,9 +28,10 @@ from smartheat_gateway.paths import Paths
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime import aufraeumen
 from smartheat_runtime.app import IDLE_NOT_CONFIGURED, IdleBridge, RestoreParts, StartFailure
-from smartheat_runtime.roles import ManifestError
+from smartheat_runtime.roles import ManifestError, lever_refs_identity
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT, BatteryRef
+from smartheat_runtime.state import StateStore, bind_to_tenant
 
 VICARE = {"id": "vicare_cloud", "parameter": {"installation_id": 2012345, "gateway_serial": "7637415000000001",
                                                "device_id": "0", "heizkreis": 0, "poll_seconds": 300.0}}
@@ -38,12 +44,20 @@ def world(data_dir, monkeypatch, clock):
     world.close()
 
 
-def _host(paths, konf, clock, *, bus=None, wait=0.1):
+def _host(paths, konf, clock, *, bus=None, wait=0.1, start_markierung=None):
+    """`wait=None`: die Standard-Wartezeit des Hosts."""
     bus = bus or FakeBus()
     mirror = ZigbeeMirror(bus, clock)
     mirror.start()
-    return GatewayHost(paths, bus, mirror, geraet_fuer(paths, mirror, konf), clock=clock, devices_wait_seconds=wait,
-                       driver_threads=False)
+    wartezeit = {} if wait is None else {"devices_wait_seconds": wait}
+    return GatewayHost(paths, bus, mirror, geraet_fuer(paths, mirror, konf, start_markierung=start_markierung),
+                       clock=clock, driver_threads=False, **wartezeit)
+
+
+def _offene_markierung(paths, alt):
+    """Wie der Start: die Markierung nach einer leeren Konfiguration schreiben und einmal lesen."""
+    aufraeumen.markieren(paths.aufraeumen, alt)
+    return aufraeumen.entscheiden(paths.aufraeumen, {"anlage": None})[1]
 
 
 def test_not_configured_is_idle(world):
@@ -63,7 +77,7 @@ def test_configured_start_regulates_with_gateway_texts_and_batteries(world):
         BatteryRef(f"zigbee:{THERMOSTAT}:battery_low", BATTERY_LOW_FLAG),
     }
     assert result.manifest.refs["room_actual"] == "raum:mittel"
-    assert world.geraet.zustand.raum["soll"] == 20.0
+    assert world.geraet.raum()["soll"] == 20.0
 
 
 def test_invalid_room_sensor_is_a_config_error(world):
@@ -91,6 +105,14 @@ def test_load_refuses_missing_binding_parameters_with_the_config_key(data_dir, c
     assert host.driver is None
 
 
+def test_load_refuses_a_short_restore_list_with_the_config_key(data_dir, clock):
+    parameter = bindung_beispiele.parameter("viessmann_vicare", zurueck=["curve"])
+    host = _host(Paths(data_dir), konfiguration(bindungsparameter=parameter), clock)
+    with pytest.raises(StartFailure, match="mindestens zurückstellen muss") as error:
+        host.load()
+    assert error.value.key == "konfiguration" and host.driver is None
+
+
 def test_sign_off_parts_are_none_without_binding_parameters(data_dir, clock, caplog):
     paths = Paths(data_dir)
     gateway_config.abmelden(paths, "test-tenant")
@@ -109,7 +131,7 @@ def test_driver_lever_set_must_match_the_configured_lever_set(world):
     dokumente_schreiben(world.paths, konfiguration(hebelsatz="vaillant_vrc720"))  # Treiber simuliert viessmann_vicare
     result = world.start_runtime()
     assert isinstance(result, IdleBridge) and result.reason == "konfigurationsfehler"
-    assert "Hebelsatz" in world.status()["grund"]
+    assert world.status()["grund"] == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
     assert world.host.driver is None
 
 
@@ -129,10 +151,10 @@ def test_sign_off_with_a_matching_plant_restores_with_the_driver(data_dir, clock
 
 
 def test_empty_configuration_with_pending_reset_boots_signed_off_with_the_old_one(data_dir, clock):
-    """Spec Stufe 3 S3 Abschnitt 4: die Laufzeit setzt mit der Konfiguration der Aufraeum-Markierung zurueck."""
+    """Die Laufzeit setzt mit der Konfiguration der Aufraeum-Markierung zurueck."""
     paths = Paths(data_dir)
-    aufraeumen.markieren(paths.aufraeumen, konfiguration())
-    host = _host(paths, {**konfiguration(), "anlage": None}, clock)
+    host = _host(paths, {**konfiguration(), "anlage": None}, clock,
+                 start_markierung=_offene_markierung(paths, konfiguration()))
     boot = host.boot_info()
     assert boot.signed_off and not boot.configured and boot.tenant_id == "test-tenant"
     assert boot.aufraeumen_path == paths.aufraeumen
@@ -141,10 +163,83 @@ def test_empty_configuration_with_pending_reset_boots_signed_off_with_the_old_on
 
 def test_load_refuses_a_configuration_that_does_not_fit_the_lock(data_dir, clock):
     paths = Paths(data_dir)
-    rastung.schreiben(paths.rastung, rastung.Rastung("viessmann_vicare", "Fussbodenheizung"), "2026-10-14T00:00:00+00:00")
+    rastung.schreiben(paths.rastung, rastung_aus(konfiguration(), verteilsystem="Fussbodenheizung"),
+                      "2026-10-14T00:00:00+00:00")
     with pytest.raises(StartFailure, match="festgelegt") as error:
         _host(paths, konfiguration(), clock).load()
     assert error.value.key == "konfiguration"
+
+
+def _ablehnung(paths, konf, clock) -> StartFailure:
+    with pytest.raises(StartFailure) as fehler:
+        _host(paths, konf, clock).load()
+    return fehler.value
+
+
+def test_ein_verstoss_gegen_die_rastung_ist_kein_formgrund_der_karenz(data_dir, clock):
+    paths = Paths(data_dir)
+    rastung.schreiben(paths.rastung, rastung_aus(konfiguration(), verteilsystem="Fussbodenheizung"),
+                      "2026-10-14T00:00:00+00:00")
+    assert not _ablehnung(paths, konfiguration(), clock).konfigurationsform
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"hebelsatz": "gibt-es-nicht"},  # Hebelsatz, den diese Software nicht kennt
+    {"verteilsystem": "Wandheizung"},  # Verteilsystem ohne lokale Sicherheitswerte dieser Software
+    {"bindungsparameter": None},  # Bindungsparameter fehlen (Pflichtfelder des Hebelsatzes)
+], ids=["hebelsatz", "verteilsystem", "bindungsparameter"])
+def test_was_diese_software_nicht_lesen_kann_ist_ein_formgrund_der_karenz(data_dir, clock, aenderung):
+    assert _ablehnung(Paths(data_dir), konfiguration(**aenderung), clock).konfigurationsform
+
+
+def test_felder_der_bindungsparameter_die_diese_software_nicht_kennt_sind_ein_formgrund_der_karenz(data_dir, clock):
+    parameter = {**bindung_beispiele.parameter("viessmann_vicare"), "neues_feld": 1}
+    assert _ablehnung(Paths(data_dir), konfiguration(bindungsparameter=parameter), clock).konfigurationsform
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"wartezeit_s": 1},  # ausserhalb der lokalen Grenzen
+    {"schreibschutz": {"tag": None, "lebensdauer_hinweis": None, "durchsetzen_tag": 99}},  # lockerer als lokal erlaubt
+    {"zurueck": ["curve"]},  # unterschreitet die lokale Mindestliste der Rueckstellung
+    {"schreibgruppen": [["curve", "room_setpoint"]]},  # keine erlaubte Schreibgruppe (Positivliste)
+], ids=["wartezeit", "schreibschutz", "rueckstellliste", "schreibgruppe"])
+def test_ein_verstoss_gegen_die_lokalen_grenzen_der_bindungsparameter_meldet_sofort(data_dir, clock, aenderung):
+    parameter = bindung_beispiele.parameter("viessmann_vicare", **aenderung)
+    fehler = _ablehnung(Paths(data_dir), konfiguration(bindungsparameter=parameter), clock)
+    assert fehler.key == "konfiguration" and not fehler.konfigurationsform
+
+
+def test_ein_ungueltiger_wert_der_konfiguration_ist_kein_formgrund(data_dir, clock):
+    assert not _ablehnung(Paths(data_dir), konfiguration(tagestick="25:00"), clock).konfigurationsform
+
+
+def test_ein_fehlender_schluessel_im_dokument_meldet_sofort(data_dir, clock, monkeypatch):
+    def _luecke(*args, **kwargs):
+        raise KeyError("raumfuehler")
+
+    monkeypatch.setattr(gateway_config, "parse_dokument", _luecke)
+    assert not _ablehnung(Paths(data_dir), konfiguration(), clock).konfigurationsform
+
+
+def test_ein_treiberfehler_und_ein_fehler_des_kanalverzeichnisses_sind_kein_formgrund(data_dir, clock, monkeypatch):
+    unbekannt = {"treiber": {"id": "simulation", "parameter": {"lever_set": "gibt-es-nicht"}}, "thermostat": None}
+    treiber = _ablehnung(Paths(data_dir), konfiguration(bindung=unbekannt), clock)
+    assert treiber.key == "treiber" and not treiber.konfigurationsform
+
+    def _manifest(*args, **kwargs):
+        raise ManifestError("Treiber liefert Pflicht-Rollen nicht: curve")
+
+    monkeypatch.setattr(host_modul, "build_manifest", _manifest)
+    manifest = _ablehnung(Paths(data_dir), konfiguration(), clock)
+    assert manifest.key == "manifest" and not manifest.konfigurationsform
+
+
+def test_ein_hebelsatz_des_treibers_gegen_die_konfiguration_ist_kein_formgrund(data_dir, clock):
+    """Treiber und Konfiguration meinen verschiedene Hebelsaetze: die Sicherheitswerte passen nicht zum Treiber."""
+    binding = {"treiber": {"id": "simulation", "parameter": {"lever_set": "weishaupt_wwp", "heizkreis": 0}},
+               "thermostat": THERMOSTAT}
+    fehler = _ablehnung(Paths(data_dir), konfiguration(bindung=binding), clock)
+    assert "weicht von der Konfiguration" in fehler.grund and not fehler.konfigurationsform
 
 
 def test_sign_off_parts_are_none_with_a_broken_lock(data_dir, clock):
@@ -236,7 +331,7 @@ def _host_mit_z2m(data_dir, clock, konf, *, wait=0.1):
 
 def test_a_sensor_as_the_bound_thermostat_stops_the_start_before_any_driver_exists(data_dir, clock, monkeypatch, caplog):
     erzeugt = _erzeugte_treiber(monkeypatch)
-    konf = konfiguration(bindung={**konfiguration()["bindung"], "thermostat": SENSOR})
+    konf = konfiguration(bindung={**kreis_bindung(), "thermostat": SENSOR})
     host, _ = _host_mit_z2m(data_dir, clock, konf)
     with pytest.raises(StartFailure) as fehler:
         host.load()
@@ -258,7 +353,7 @@ def test_the_counter_probe_starts_with_a_real_thermostat_and_creates_one_driver(
 def test_a_thermostat_the_mirror_does_not_know_as_a_defined_device_starts_as_before(data_dir, clock, monkeypatch, ohne):
     erzeugt = _erzeugte_treiber(monkeypatch)
     fern = "0x00124b0000000077"
-    konf = konfiguration(bindung={**konfiguration()["bindung"], "thermostat": fern})
+    konf = konfiguration(bindung={**kreis_bindung(), "thermostat": fern})
     host, z2m = _host_mit_z2m(data_dir, clock, konf)
     if ohne == "ohne_definition":
         z2m.add_ohne_definition(fern)
@@ -268,23 +363,82 @@ def test_a_thermostat_the_mirror_does_not_know_as_a_defined_device_starts_as_bef
 
 def test_a_start_without_a_bound_thermostat_does_not_check_one(data_dir, clock, monkeypatch):
     erzeugt = _erzeugte_treiber(monkeypatch)
-    konf = konfiguration(bindung={**konfiguration()["bindung"], "thermostat": None})
+    konf = konfiguration(bindung={**kreis_bindung(), "thermostat": None})
     host, _ = _host_mit_z2m(data_dir, clock, konf)
     host.load()
     assert erzeugt == ["simulation"]
 
 
-def test_the_device_list_is_awaited_once_for_the_thermostat_check_and_the_batteries(data_dir, clock):
+def _fake_uhr(monkeypatch, *, bei=None):
+    """Ersetzt `time` im Host durch eine Uhr, die nur `sleep` vorstellt: die Pausen stehen in der Liste, die Wartezeit
+    laeuft nicht in Wanduhrzeit. `bei=(sekunden, funktion)` ruft die Funktion einmal, sobald die Uhr so weit ist."""
+    jetzt = [0.0]
+    pausen = []
+    offen = [bei]
+
+    def sleep(sekunden):
+        pausen.append(sekunden)
+        jetzt[0] += sekunden
+        if offen[0] and jetzt[0] >= offen[0][0]:
+            funktion, offen[0] = offen[0][1], None
+            funktion()
+
+    monkeypatch.setattr(host_modul, "time", SimpleNamespace(monotonic=lambda: jetzt[0], sleep=sleep))
+    return pausen
+
+
+def test_the_device_list_is_awaited_once_for_the_thermostat_check_and_the_batteries(data_dir, clock, monkeypatch):
+    pausen = _fake_uhr(monkeypatch)
     host = _host(Paths(data_dir), konfiguration(), clock, wait=0.3)
-    started = time.monotonic()
-    host.load()  # leeres bridge/devices: eine Wartezeit, nicht zwei
-    assert 0.25 <= time.monotonic() - started < 0.55
+    host.load()  # leeres bridge/devices: eine Wartezeit (0.3 s in Pausen zu 0.2 s), nicht zwei
+    assert pausen == [host_modul.BATTERY_POLL_SECONDS] * 2 == [0.2, 0.2]
+
+
+def test_a_device_list_that_arrives_after_a_cold_boot_still_gives_the_battery_monitoring(data_dir, clock, monkeypatch):
+    """Nach einem Stromausfall veroeffentlicht Zigbee2MQTT bridge/devices erst nach Node-Start und Stick (Pi 4:
+    15 bis 30 s); die Batterien werden nur beim Laden aufgeloest und spaeter nie nachgezogen (BR-GW-1)."""
+    from fake_z2m import FakeZigbee2Mqtt
+
+    bus = FakeBus()
+    host = _host(Paths(data_dir), konfiguration(), clock, bus=bus, wait=None)
+
+    def z2m_kommt():
+        z2m = FakeZigbee2Mqtt(bus)
+        z2m.add_sensor(SENSOR)
+        z2m.add_thermostat(THERMOSTAT)
+
+    _fake_uhr(monkeypatch, bei=(35.0, z2m_kommt))
+    loaded = host.load()
+    assert {ref.ref for ref in loaded.config.battery_refs} == {
+        f"zigbee:{SENSOR}:battery", f"zigbee:{THERMOSTAT}:battery_low"}
 
 
 def test_load_reports_the_plant_identity_of_the_driver(data_dir, clock):
     loaded = _host(Paths(data_dir), konfiguration(), clock).load()
     assert loaded.plant_id == registry.plant_id(
         {"id": "simulation", "parameter": {"lever_set": "viessmann_vicare", "heizkreis": 0}})
+    assert loaded.plant_id == '{"anlage":"viessmann_vicare","hersteller":"simulation","nummer":0}'
+
+
+def test_ohne_heizkreis_im_treiber_gibt_es_keine_kennung_und_der_start_scheitert_laut(data_dir, clock):
+    ohne = {"treiber": {"id": "simulation", "parameter": {"lever_set": "viessmann_vicare"}}, "thermostat": None}
+    with pytest.raises(StartFailure) as fehler:
+        _host(Paths(data_dir), konfiguration(bindung=ohne), clock).load()
+    assert fehler.value.key == "konfiguration"
+
+
+def test_die_uebernahme_der_frueheren_ha_kennung_greift_beim_gateway_nie(data_dir, clock):
+    """app.start reicht frueher=lever_refs_identity(manifest) auch beim Gateway weiter. Seine Kennung traegt den
+    Schluessel "hersteller", den kein Hebel hat: frueher ist nie gleich, ein Bestand einer anderen Anlage wird weiter
+    verworfen."""
+    loaded = _host(Paths(data_dir), konfiguration(), clock).load()
+    frueher = lever_refs_identity(loaded.manifest)
+    assert frueher != loaded.plant_id and "hersteller" in json.loads(loaded.plant_id) and "hersteller" not in json.loads(frueher)
+    store = StateStore(Path(data_dir) / "backup.json", Path(data_dir) / "failsafe_state.json")
+    store.update(tenant_id="t1", plant_id=registry.plant_id({"id": "simulation", "parameter": {"lever_set": "x", "heizkreis": 1}}),
+                 originals={"curve": 1.4})
+    assert bind_to_tenant(store, "t1", loaded.plant_id, frueher=frueher) == "andere_anlage"
+    assert store.state.originals == {}
 
 
 def test_manifest_requires_the_roles_of_the_lever_set(data_dir, clock):
@@ -302,6 +456,20 @@ def test_manifest_requires_the_roles_of_the_lever_set(data_dir, clock):
         build_manifest(Partial())
 
 
+def test_das_manifest_nennt_je_raum_mit_fuehler_eine_raumreferenz(data_dir, clock):
+    driver = create("simulation", {"lever_set": "viessmann_vicare"}, Paths(data_dir), clock=clock, writer=True,
+                    description=VIESSMANN_VICARE_BINDING)
+    manifest = build_manifest(driver, ((1, ("zigbee:0x1:temperature",)), (4, ("zigbee:0x2:temperature",))))
+    assert manifest.raum_refs == {1: "raum:1", 4: "raum:4"}
+    assert build_manifest(driver).raum_refs == {}
+
+
+def test_der_geladene_kreis_liest_seine_raeume_einzeln(data_dir, clock):
+    loaded = _host(Paths(data_dir), konfiguration(), clock).load()
+    assert loaded.manifest.raum_refs == {1: "raum:1"}
+    assert loaded.config.referenzraeume == ((1, 0.0),)
+
+
 def test_abo_comes_from_the_document(data_dir, clock):
     loaded = _host(Paths(data_dir), konfiguration(abo="inaktiv"), clock).load()
     assert loaded.config.abo_source() == "inactive"
@@ -313,27 +481,27 @@ def test_gateway_texts_never_name_home_assistant():
 
 
 def test_ursprungswerte_server_reads_the_current_configuration_fresh(data_dir, clock):
-    """Spec Stufe 3 S3 5.2: frisch aus dem Dokument; trifft ein, ohne dass die Laufzeit neu startet."""
-    host = _host(Paths(data_dir), {**konfiguration(), "ursprungswerte": {"heat_limit": 16.0}}, clock)
+    """Frisch aus dem Dokument; trifft ein, ohne dass die Laufzeit neu startet."""
+    host = _host(Paths(data_dir), konfiguration(ursprungswerte={"heat_limit": 16.0}), clock)
     assert host.ursprungswerte_server() == {"heat_limit": 16.0}
-    host._geraet.device.konf = {**konfiguration(), "ursprungswerte": {"heat_limit": 15.0}}
+    host._geraet.device.konf = konfiguration(ursprungswerte={"heat_limit": 15.0})
     assert host.ursprungswerte_server() == {"heat_limit": 15.0}
 
 
 def test_ursprungswerte_server_falls_back_to_the_marker_while_the_reset_is_pending(data_dir, clock):
     paths = Paths(data_dir)
-    alt = {**konfiguration(), "ursprungswerte": {"heat_limit": 16.0}}
-    aufraeumen.markieren(paths.aufraeumen, alt)
-    host = _host(paths, {**alt, "anlage": None, "ursprungswerte": {}}, clock)
+    alt = konfiguration(ursprungswerte={"heat_limit": 16.0})
+    host = _host(paths, leer(), clock,
+                 start_markierung=_offene_markierung(paths, alt))
     assert host.ursprungswerte_server() == {"heat_limit": 16.0}
 
 
 def test_ursprungswerte_server_ignores_a_new_setup_while_the_reset_is_pending(data_dir, clock):
     paths = Paths(data_dir)
-    alt = {**konfiguration(), "ursprungswerte": {"heat_limit": 16.0}}
-    aufraeumen.markieren(paths.aufraeumen, alt)
-    host = _host(paths, {**alt, "anlage": None, "ursprungswerte": {}}, clock)
-    host._geraet.device.konf = {**alt, "anlage": "andere-anlage", "ursprungswerte": {"heat_limit": 12.0}}
+    alt = konfiguration(ursprungswerte={"heat_limit": 16.0})
+    host = _host(paths, leer(), clock,
+                 start_markierung=_offene_markierung(paths, alt))
+    host._geraet.device.konf = konfiguration(anlage="andere-anlage", ursprungswerte={"heat_limit": 12.0})
     assert host.ursprungswerte_server() == {"heat_limit": 16.0}
 
 
@@ -380,13 +548,38 @@ def _thermostat_writes(world):
             if topic == f"zigbee2mqtt/{THERMOSTAT}/set"]
 
 
+def _thermostat_an(world, **zustand):
+    """Das Thermostat meldet vor dem Start (retained wie Zigbee2MQTT): sein letzter bekannter Zustand."""
+    world.z2m.report(THERMOSTAT, **{"system_mode": "heat", "occupied_heating_setpoint": 20.0,
+                                    "local_temperature": 20.0, **zustand})
+
+
+@pytest.mark.parametrize("gespeichert", [20.0, 22.5], ids=["Bedienung beim Start", "Angleichen beim Start"])
+@pytest.mark.parametrize("zustand", [{"system_mode": "off"}, {"occupied_heating_setpoint": 5.0}],
+                         ids=["aus", "Frostschutz"])
+def test_the_start_writes_nothing_to_a_thermostat_whose_last_known_state_is_off(world, gespeichert, zustand):
+    """Bedienung 22,5 ohne offene lokale Aenderung; das Thermostat hat vor dem Neustart aus bzw. die
+    Frostschutz-Stellung gemeldet. Weder die Bedienung des Servers beim Start noch das Angleichen erreicht es; die
+    Bedienung gilt im Speicher."""
+    _thermostat_an(world, **zustand)
+    dateien.schreiben_json(world.paths.room_target(1), {"value": gespeichert, "source": "portal", "ts": "t"},
+                           modus=dateien.LESBAR)
+    dokumente_schreiben(world.paths, konfiguration())
+    dateien.schreiben_json(world.paths.device_dir / "bedienung.json",
+                           {"version": 1, "inhalt": bedienung(22.5), "dirty": False}, modus=dateien.PRIVAT)
+    world.start_runtime()
+    world.run()
+    assert world.host._store.value == 22.5 and _thermostat_writes(world) == []
+
+
 @pytest.mark.parametrize(("dirty", "soll", "schreibt"), [(False, 22.5, [22.5]), (True, 20.0, [])],
                          ids=["Bedienung gilt und gleicht das Thermostat an", "offene lokale Aenderung gilt vor"])
 def test_an_open_local_change_keeps_the_start_from_aligning_the_thermostat(world, dirty, soll, schreibt):
     """Die Bedienung des Servers (22,5) weicht vom gespeicherten Soll (20,0) ab. Ohne offene lokale Aenderung gilt sie
     und das Thermostat wird beim Start angeglichen; mit offener Aenderung (dirty) bleibt das lokale Soll, nichts geht
-    ans Thermostat."""
-    dateien.schreiben_json(world.paths.room_target, {"value": 20.0, "source": "portal", "ts": "t"}, modus=dateien.LESBAR)
+    ans Thermostat. Das Thermostat hat vor dem Start gemeldet (bekannter Zustand, an)."""
+    _thermostat_an(world)
+    dateien.schreiben_json(world.paths.room_target(1), {"value": 20.0, "source": "portal", "ts": "t"}, modus=dateien.LESBAR)
     dokumente_schreiben(world.paths, konfiguration())
     dateien.schreiben_json(world.paths.device_dir / "bedienung.json",
                            {"version": 1, "inhalt": bedienung(22.5), "dirty": dirty}, modus=dateien.PRIVAT)
@@ -404,13 +597,13 @@ def test_a_sensor_value_that_is_not_plausible_never_becomes_the_room_temperature
     world.start_runtime()
     world.connect()
     world.advance(30)
-    assert world.geraet.zustand.raum["ist"] == 20.0  # vorher anders
+    assert world.geraet.raum()["ist"] == 20.0  # vorher anders
     world.z2m.report(SENSOR, temperature=wert)
     world.advance(30)
-    assert world.geraet.zustand.raum["ist"] is None
+    assert world.geraet.raum()["ist"] is None
     world.z2m.report(SENSOR, temperature=21.0)
     world.advance(30)
-    assert world.geraet.zustand.raum["ist"] == 21.0
+    assert world.geraet.raum()["ist"] == 21.0
 
 
 @pytest.mark.parametrize(("dirty", "schreibt"), [(False, [22.5]), (True, [])],
@@ -418,8 +611,9 @@ def test_a_sensor_value_that_is_not_plausible_never_becomes_the_room_temperature
 def test_the_operation_equal_to_the_stored_target_aligns_the_thermostat_only_without_an_open_local_change(
         world, dirty, schreibt):
     """Der zweite Pfad des Angleichens: die Bedienung des Servers entspricht schon dem gespeicherten Soll (kein
-    Portal-Ereignis), das Thermostat bekommt es direkt, ausser eine lokale Aenderung ist offen."""
-    dateien.schreiben_json(world.paths.room_target, {"value": 22.5, "source": "portal", "ts": "t"}, modus=dateien.LESBAR)
+    Portal-Ereignis), das Thermostat bekommt es direkt, ausser eine lokale Aenderung ist offen. Bekannter Zustand: an."""
+    _thermostat_an(world)
+    dateien.schreiben_json(world.paths.room_target(1), {"value": 22.5, "source": "portal", "ts": "t"}, modus=dateien.LESBAR)
     dokumente_schreiben(world.paths, konfiguration())
     dateien.schreiben_json(world.paths.device_dir / "bedienung.json",
                            {"version": 1, "inhalt": bedienung(22.5), "dirty": dirty}, modus=dateien.PRIVAT)
@@ -428,13 +622,38 @@ def test_the_operation_equal_to_the_stored_target_aligns_the_thermostat_only_wit
     assert world.host._store.value == 22.5 and _thermostat_writes(world) == schreibt
 
 
-def test_the_start_puts_a_bound_w100_into_thermostat_mode_and_aligns_it_rounded(world):
-    """Fixrunde A, L4-22: Thermostatmodus und Anzeige vor dem Soll (der Konverter verwirft ein Soll, solange Zigbee2MQTT
-    den Modus fuer OFF haelt), das Soll ganzzahlig kaufmaennisch gerundet (22,5 -> 23), kein heat beim Start."""
+def test_an_operation_at_start_reaches_a_bound_w100_only_after_it_reports_on(world):
+    """Gespeichert 20, Bedienung 22,5; das W100 hat retained thermostat_mode OFF gemeldet. Die
+    Bedienung gilt sofort im Speicher, ans Geraet geht sie erst nach der Meldung ON, genau einmal gerundet, ohne heat."""
     w100 = "0x54ef44100140eb34"  # Testwert
     world.z2m.add_w100(w100)
-    dateien.schreiben_json(world.paths.room_target, {"value": 22.5, "source": "portal", "ts": "t"}, modus=dateien.LESBAR)
-    bindung = {**konfiguration()["bindung"], "thermostat": w100}
+    world.z2m.report(w100, thermostat_mode="OFF", system_mode="heat", occupied_heating_setpoint=20,
+                     local_temperature=20.0)
+    dateien.schreiben_json(world.paths.room_target(1), {"value": 20.0, "source": "portal", "ts": "t"}, modus=dateien.LESBAR)
+    bindung = {**kreis_bindung(), "thermostat": w100}
+    dokumente_schreiben(world.paths, konfiguration(bindung=bindung))
+    dateien.schreiben_json(world.paths.device_dir / "bedienung.json",
+                           {"version": 1, "inhalt": bedienung(22.5), "dirty": False}, modus=dateien.PRIVAT)
+    world.start_runtime()
+    world.run()
+    modus = [{"thermostat_mode": "ON"}, {"auto_hide_middle_line": False}]
+    assert world.host._store.value == 22.5
+    assert [body for ieee, body in world.z2m.set_requests if ieee == w100] == modus
+    world.z2m.report(w100, thermostat_mode="ON")
+    world.run()
+    assert [body for ieee, body in world.z2m.set_requests if ieee == w100] == modus + [{"occupied_heating_setpoint": 23.0}]
+    assert world.z2m.verworfen == []
+
+
+def test_the_start_puts_a_bound_w100_into_thermostat_mode_and_aligns_it_rounded(world):
+    """Thermostatmodus und Anzeige vor dem Soll (der Konverter verwirft ein Soll, solange Zigbee2MQTT
+    den Modus fuer OFF haelt), das Soll ganzzahlig kaufmaennisch gerundet (22,5 -> 23), kein heat beim Start. Das W100
+    hat vor dem Start thermostat_mode ON und heat gemeldet."""
+    w100 = "0x54ef44100140eb34"  # Testwert
+    world.z2m.add_w100(w100)
+    world.z2m.report(w100, thermostat_mode="ON", system_mode="heat", occupied_heating_setpoint=20, local_temperature=20.0)
+    dateien.schreiben_json(world.paths.room_target(1), {"value": 22.5, "source": "portal", "ts": "t"}, modus=dateien.LESBAR)
+    bindung = {**kreis_bindung(), "thermostat": w100}
     dokumente_schreiben(world.paths, konfiguration(bindung=bindung))
     dateien.schreiben_json(world.paths.device_dir / "bedienung.json",
                            {"version": 1, "inhalt": bedienung(22.5), "dirty": False}, modus=dateien.PRIVAT)
@@ -443,3 +662,10 @@ def test_the_start_puts_a_bound_w100_into_thermostat_mode_and_aligns_it_rounded(
     assert [body for ieee, body in world.z2m.set_requests if ieee == w100] == [
         {"thermostat_mode": "ON"}, {"auto_hide_middle_line": False}, {"occupied_heating_setpoint": 23.0}]
     assert world.host._store.value == 22.5
+
+
+def test_die_boot_info_nennt_die_anlagendatei_neben_den_kreisordnern(data_dir, clock):
+    paths = Paths(data_dir)
+    boot = _host(paths, konfiguration(), clock).boot_info()
+    assert boot.anlage_budget_path == paths.runtime_dir / "anlage_budget.json"
+    assert boot.backup_path.parent.parent == boot.anlage_budget_path.parent

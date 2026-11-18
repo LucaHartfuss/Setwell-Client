@@ -57,7 +57,7 @@ def test_get_raw_state_raises_on_ha_failure_states(bad_state):
     mock_response.raise_for_status.return_value = None
 
     with (patch("heizungsbruecke.ha_api.requests.get", autospec=True, return_value=mock_response),
-          pytest.raises(SignalUngueltig)):  # erwartet ungueltig (L4-17), kein Programmfehler
+          pytest.raises(SignalUngueltig)):  # erwartet ungueltig, kein Programmfehler
         api.get_raw_state("sensor.mode")
 
 
@@ -527,12 +527,11 @@ def test_create_template_sensor_runs_template_flow_with_temperature_fields():
     assert ha_ws.kommandos == [{"id": 1, "type": "config/entity_registry/list"}]
 
 
-@pytest.mark.parametrize("platform", ["statistics", "template"])
-def test_delete_helper_deletes_the_config_entry_of_the_entity(platform):
+def test_delete_helper_deletes_the_config_entry_of_the_entity():
     api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
     registry = [
         {"entity_id": "sensor.other", "config_entry_id": "e1", "platform": "mypyllant"},
-        {"entity_id": "sensor.smartheat_t1_dart", "config_entry_id": "e2", "platform": platform},
+        {"entity_id": "sensor.smartheat_t1_dart", "config_entry_id": "e2", "platform": "template"},
     ]
     mock_response = Mock(spec=requests.Response)
     mock_response.raise_for_status.return_value = None
@@ -576,8 +575,8 @@ def test_delete_helper_refuses_config_entries_of_other_integrations(platform):
 
 @pytest.mark.parametrize("entity_id", ["sensor.fremder_helfer", "sensor.", "smartheat_t1_dart"])
 def test_delete_helper_refuses_entities_without_smartheat_prefix(entity_id):
-    """Wie delete_input_number: nur Entities mit dem Objekt-Teil-Praefix `smartheat_`, auch wenn
-    eine fremde Entity zufaellig auf der Plattform template/statistics liegt."""
+    """Nur Entities mit dem Objekt-Teil-Praefix `smartheat_`, auch wenn
+    eine fremde Entity zufaellig auf der Plattform template liegt."""
     api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
     ha_ws = HaWebSocket([{"entity_id": entity_id, "config_entry_id": "e_fremd", "platform": "template"}])
     with (
@@ -681,40 +680,26 @@ def test_set_hvac_mode_posts_correct_payload():
     )
 
 
-def test_delete_input_number_sends_ws_command():
+@pytest.mark.parametrize("platform", ["statistics", "mypyllant"])
+def test_delete_helper_refuses_every_platform_but_template(platform):
+    """Das Add-on legt nur Template-Helfer an: auch ein Config-Entry der Plattform statistics mit SmartHeat-Namen wird
+    nicht geloescht."""
     api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
-    ha_ws = HaWebSocket(None)
-    with ha_ws.angeschlossen():
-        api.delete_input_number("input_number.smartheat_x_tagesmittel")
+    registry = [{"entity_id": "sensor.smartheat_t1_dart", "config_entry_id": "e2", "platform": platform}]
+    with (
+        HaWebSocket(registry).angeschlossen(),
+        patch("heizungsbruecke.ha_api.requests.delete", autospec=True) as mock_delete,
+        pytest.raises(RuntimeError, match="kein SmartHeat-Hilfssensor"),
+    ):
+        api.delete_helper("sensor.smartheat_t1_dart")
 
-    assert ha_ws.urls == ["ws://supervisor/core/api/websocket"]
-    assert ha_ws.kommandos == [{"id": 1, "type": "input_number/delete", "input_number_id": "smartheat_x_tagesmittel"}]
-
-
-def test_delete_input_number_refuses_non_input_number_entities():
-    api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
-    ha_ws = HaWebSocket(None)
-    with ha_ws.angeschlossen(), pytest.raises(RuntimeError):
-        api.delete_input_number("sensor.smartheat_x_tagesmittel")
-
-    assert ha_ws.urls == []
-
-
-def test_delete_input_number_refuses_entities_without_smartheat_prefix():
-    """Wie delete_helper(): nur SmartHeat-eigene Helfer werden geloescht, kein fremder
-    input_number-Helfer wird versehentlich getroffen."""
-    api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
-    ha_ws = HaWebSocket(None)
-    with ha_ws.angeschlossen(), pytest.raises(RuntimeError, match="kein SmartHeat-Hilfssensor"):
-        api.delete_input_number("input_number.fremder_helfer")
-
-    assert ha_ws.urls == []
+    mock_delete.assert_not_called()
 
 
 def test_delete_helper_deletes_a_renamed_helper_by_its_config_entry_title():
     api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
     registry = [{"entity_id": "sensor.heizraum_zuhause_smartheat_t1_dat", "config_entry_id": "e2",
-                 "platform": "statistics"}]
+                 "platform": "template"}]
     entries = [{"entry_id": "e1", "title": "Zuhause"}, {"entry_id": "e2", "title": "SmartHeat t1 DAT"}]
     mock_response = Mock(spec=requests.Response)
     mock_response.raise_for_status.return_value = None
@@ -733,7 +718,7 @@ def test_delete_helper_deletes_a_renamed_helper_by_its_config_entry_title():
 @pytest.mark.parametrize("title", ["Wohnzimmer Statistik", "SmartHeat t2 DAT", "SmartHeat t1", None])
 def test_delete_helper_refuses_a_renamed_helper_with_a_foreign_title(title):
     api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
-    registry = [{"entity_id": "sensor.umbenannt", "config_entry_id": "e2", "platform": "statistics"}]
+    registry = [{"entity_id": "sensor.umbenannt", "config_entry_id": "e2", "platform": "template"}]
     entries = [] if title is None else [{"entry_id": "e2", "title": title}]
     with (
         HaWebSocket(registry, entries).angeschlossen(),
@@ -745,7 +730,7 @@ def test_delete_helper_refuses_a_renamed_helper_with_a_foreign_title(title):
     mock_delete.assert_not_called()
 
 
-# --- Plan 3b: Weishaupt-Betriebsart und Viessmann-Heizprogramm ---
+# --- Weishaupt-Betriebsart und Viessmann-Heizprogramm ---
 
 def test_select_option_posts_correct_payload():
     api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
@@ -822,6 +807,33 @@ def test_get_attribute_raises_when_missing_or_empty(attributes):
 
     with patch("heizungsbruecke.ha_api.requests.get", autospec=True, return_value=mock_response), pytest.raises(ValueError):
         api.get_attribute("climate.heizkreis", "preset_mode")
+
+
+def test_get_attribute_roh_returns_the_json_value_unchanged_and_none_when_missing():
+    api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
+    liste = [{"serial_number": "1", "codes": [{"code": "F.28", "type": "ERROR"}]}]
+    antworten = [{"attributes": {"diagnostic_trouble_codes": liste}}, {"attributes": {}}]
+    erwartet = [liste, None]
+    for antwort, soll in zip(antworten, erwartet, strict=True):
+        mock_response = Mock(spec=requests.Response)
+        mock_response.json.return_value = antwort
+        mock_response.raise_for_status.return_value = None
+        with patch("heizungsbruecke.ha_api.requests.get", autospec=True, return_value=mock_response) as mock_get:
+            assert api.get_attribute_roh("binary_sensor.anlage_trouble_codes", "diagnostic_trouble_codes") == soll
+        mock_get.assert_called_once_with(
+            "http://supervisor/core/api/states/binary_sensor.anlage_trouble_codes",
+            headers={"Authorization": "Bearer test-token"},
+            timeout=10,
+        )
+
+
+def test_get_attribute_roh_raises_on_http_error():
+    api = HomeAssistantApi(base_url="http://supervisor", token="test-token")
+    mock_response = Mock(spec=requests.Response)
+    mock_response.raise_for_status.side_effect = requests.HTTPError("404")
+
+    with patch("heizungsbruecke.ha_api.requests.get", autospec=True, return_value=mock_response), pytest.raises(requests.HTTPError):
+        api.get_attribute_roh("binary_sensor.x", "diagnostic_trouble_codes")
 
 
 def test_registries_use_the_ws_command_and_ignore_other_answers():

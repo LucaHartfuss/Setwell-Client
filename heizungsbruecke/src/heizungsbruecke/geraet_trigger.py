@@ -1,21 +1,25 @@
-"""HA-Trigger im Geraete-Pfad (Spec 5c 1.3, Vertrag smartheat_runtime.ports.TriggerSource): ein subscribe_trigger auf
-die Soll-Entity (mit for: 10 s, wie bis 0.36), ihren HVAC-Modus (Climate), das Raumfuehler-Mittel, das Ereignis
+"""HA-Trigger im Geraete-Pfad (Vertrag smartheat_runtime.ports.TriggerSource): ein subscribe_trigger auf
+die Soll-Entity (mit for: 10 s), ihren HVAC-Modus (Climate), das Raumfuehler-Mittel, das Ereignis
 smartheat_wunsch der Integration und den Tagestick. Der WS-Thread stellt nur Ereignisse in den Worker ein; dort
 entscheidet der Soll-Eingang (smartheat_runtime.soll_eingang, entprellen 0 s): Wunsch mit Herkunft (soll_entity bzw.
-smartheat_entity) und durch (nutzer/automation aus dem HA-Kontext), Thermostat aus/Frostschutz, Angleichen der
-Soll-Entity (nur Climate ist schreibbar) ohne Echo."""
+ha) und durch (nutzer/automation aus dem HA-Kontext), Thermostat aus/Frostschutz, Angleichen der
+Soll-Entity (nur Climate ist schreibbar) ohne Echo. Das Ereignis smartheat_integration (Lebenszeichen der Integration)
+geht nur in den Stand der Integration (integration_stand), nie in den Worker."""
 import logging
 import math
 import time
+from collections.abc import Callable
 from typing import TypeGuard
 
 from heizungsbruecke.ha_trigger_client import HaTriggerClient
+from heizungsbruecke.integration_stand import IntegrationStand
+from heizungsbruecke.push_stand import PushStand
 from smartheat_core.logtext import lesbar
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.dokument_config import ConfigError
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
 from smartheat_runtime.soll_eingang import EV_SOLL_MODUS, EV_TARGET_INPUT, FROSTSCHUTZ_BIS, SollEingang
-from smartheat_runtime.soll_speicher import SOURCE_LOKAL, SOURCE_THERMOSTAT, TargetStore
+from smartheat_runtime.soll_speicher import KREIS, SOURCE_LOKAL, SOURCE_THERMOSTAT, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
 logger = logging.getLogger(__name__)
@@ -36,8 +40,13 @@ NACHLESEN_PUFFER_SECONDS = 1.0
 OHNE_ZAHL_LOG_SECONDS = 3600.0
 
 EREIGNIS_WUNSCH = "smartheat_wunsch"
+#: Lebenszeichen der Integration (Version und gelesene Status-Schemata), gelesen in integration_stand.
+EREIGNIS_INTEGRATION = "smartheat_integration"
+#: Die Integration hat einen Push-Eintrag nach 24 h aufgegeben (Stufe und Kreis), gelesen in push_aufgegeben_lesen.
+EREIGNIS_PUSH_AUFGEGEBEN = "smartheat_push_aufgegeben"
 HERKUNFT_SOLL = "soll_entity"
-HERKUNFT_SMARTHEAT = "smartheat_entity"
+HERKUNFT_SMARTHEAT = "ha"
+_PUSH_STUFEN = ("rot", "orange")
 
 
 def durch_aus_kontext(context) -> str | None:
@@ -80,6 +89,31 @@ def pruefe_soll_ref(soll_ref: str | None) -> None:
                           f"{soll_ref}::temperature erforderlich")
 
 
+def _wunsch_kreis(daten) -> int | None:
+    """Der Kreis, dem das Ereignis smartheat_wunsch gilt: `kreis` der Ereignisdaten (Pflicht); fehlt er oder ist er
+    ungueltig (kein ganzzahliger Kreis ab 1), ist das Ergebnis None."""
+    wert = daten.get("kreis") if isinstance(daten, dict) else None
+    return wert if isinstance(wert, int) and not isinstance(wert, bool) and wert >= 1 else None
+
+
+def push_aufgegeben_lesen(daten, anlagenkreise: frozenset[int] | None = None) -> tuple[str, int | None] | None:
+    """(Stufe, Kreis) aus dem Ereignis smartheat_push_aufgegeben; None, wenn der Kern nicht lesbar ist. Pflicht sind
+    `schema` (ganze Zahl ab 1) und `stufe` (rot oder orange). Der Kreis gilt nur, wenn er eine ganze Zahl ab 1 ist und
+    (mit Anlage) zur Anlage gehoert, sonst ist die Aussage anlagenweit (Kreis None). Fremde Felder zaehlen nicht; das
+    Ereignis ist nicht vertrauenswuerdig und wirft hier nie."""
+    if not isinstance(daten, dict):
+        return None
+    schema, stufe = daten.get("schema"), daten.get("stufe")
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema < 1:
+        return None
+    if not isinstance(stufe, str) or stufe not in _PUSH_STUFEN:
+        return None
+    kreis = _wunsch_kreis(daten)
+    if kreis is not None and anlagenkreise is not None and kreis not in anlagenkreise:
+        kreis = None
+    return stufe, kreis
+
+
 def _wunschwert(value) -> float | None:
     """raum_soll aus dem Ereignis smartheat_wunsch: eine endliche Zahl oder ein Text, der eine ist (HA-YAML sendet
     oft Text, etwa \"22.5\"); alles andere None."""
@@ -96,7 +130,7 @@ class HaSollQuelle:
     """Die Soll-Entity als Soll-Quelle (SollQuelle): schreibbar nur als Climate-Entity (Attribut temperature).
     angleichen_offen: das letzte Schreiben an die Climate-Entity ist gescheitert (HA Core startet, HA lehnt ab), die
     Entity zeigt also nicht das geltende Soll; bis zum naechsten gelungenen Schreiben holt build() die Angleichung nach,
-    statt einen gezeigten Wert als Eingabe zu nehmen (Final-Review I1). Nur Worker-Thread (und der Start davor)."""
+    statt einen gezeigten Wert als Eingabe zu nehmen. Nur Worker-Thread (und der Start davor)."""
 
     def __init__(self, ha_api, soll_ref: str) -> None:
         self._ha, self._ref = ha_api, soll_ref
@@ -122,19 +156,35 @@ class HaSollQuelle:
             return None
         return float(value) if _is_number(value) else None
 
+    def aus(self) -> bool:
+        """Die Climate-Entity zeigt den Modus off (unlesbar zaehlt nicht als aus)."""
+        if not self._entity.startswith("climate."):
+            return False
+        try:
+            return self._ha.get_raw_state(self._entity) == "off"
+        except Exception:
+            return False
+
 
 def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_ref: str | None, *,
           tagestick: str | None, wache_s: float, wunsch, soll_quelle_aus,
-          quelle: HaSollQuelle | None = None) -> HaTriggerClient:
-    """soll_ref: die echte Soll-Entity aus der Konfiguration (nicht manifest.refs["room_target"], das ist SOLL_REF).
+          quelle: HaSollQuelle | None = None, kreis: int = KREIS,
+          anlagenkreise: frozenset[int] | None = None, integration_stand: IntegrationStand | None = None,
+          push_stand: PushStand | None = None, uhr: Callable[[], float] = time.monotonic) -> HaTriggerClient:
+    """integration_stand: nimmt das Lebenszeichen der Integration (Ereignis smartheat_integration, anlagenweit) auf, nach
+    der monotonen uhr; nur der Client, der ihn bekommt, abonniert das Ereignis (ohne Stand gibt es kein Abonnement).
+    push_stand: ebenso fuer das Ereignis smartheat_push_aufgegeben (Stufe und Kreis, nur im Stand, nie im Worker).
+    kreis: der Heizkreis des Clients; ein Ereignis smartheat_wunsch gilt dem Kreis seiner Ereignisdaten (Pflicht;
+    ohne gueltigen Kreis wird es verworfen) und erreicht nur den Client dieses Kreises. anlagenkreise: alle Kreise der
+    Anlage; gilt ein Wunsch keinem davon, meldet das nur der Client des niedrigsten Kreises (sonst eine Meldung je Kreis). soll_ref: die echte Soll-Entity aus der Konfiguration (nicht manifest.refs["room_target"], das ist SOLL_REF).
     tagestick: Uhrzeit des taeglichen Ticks (HH:MM) oder None; wache_s: Takt des lokalen Checks (RuntimeConfig).
     Der Bericht der Soll-Entity (EV_SOLL_BERICHT) geht als Eingabe der Soll-Quelle in den Soll-Eingang. Faellt er in
     das Echo-Fenster nach dem eigenen Schreiben, verwirft ihn der Soll-Speicher; HA meldet einen unveraenderten Wert
     nie wieder. Deshalb liest EV_SOLL_NACHLESEN die Entity kurz nach dem Fenster einmal erneut und gibt den Wert
     durch denselben Weg (Pending-/Stale-Logik entscheidet). Bei jeder (Re-)Verbindung liest EV_SOLL_LESEN Modus und Soll
     (Aenderungen waehrend der Trennung, Thermostat schon aus beim Start). Solange der WebSocket getrennt ist, liest
-    EV_SOLL_WACHE im Takt des lokalen Checks dasselbe (bis 0.36 las der Watchdog den Raum-Soll direkt aus HA; jetzt kommt
-    er nur ueber den Soll-Eingang in den Soll-Speicher). Nur HA; das Gateway bleibt unberuehrt.
+    EV_SOLL_WACHE im Takt des lokalen Checks dasselbe (der Raum-Soll kommt nur ueber den Soll-Eingang in den Soll-Speicher, nie
+    direkt aus HA). Nur HA; das Gateway bleibt unberuehrt.
 
     Gescheiterte Angleichung (quelle.angleichen_offen: Bedienung vom Server, Angleichen beim Start, Zurueckschreiben
     eines Wunschs): jeder gezeigte Wert (Bericht, Nachlesen, Lesen beim Verbinden und in der Wache; die Wache liest dann
@@ -167,6 +217,10 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
             trigger["attribute"] = attribute
         triggers.append(trigger)
     triggers.append({"platform": "event", "event_type": EREIGNIS_WUNSCH})
+    if integration_stand is not None:
+        triggers.append({"platform": "event", "event_type": EREIGNIS_INTEGRATION})
+    if push_stand is not None:
+        triggers.append({"platform": "event", "event_type": EREIGNIS_PUSH_AUFGEGEBEN})
     if tagestick:
         triggers.append({"platform": "time", "at": tagestick})
 
@@ -192,7 +246,7 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
             eingabe(wert, durch)
             return
         if eingang.aus or wert <= FROSTSCHUTZ_BIS:  # Soll-Quelle aus: wie bisher, der Soll-Eingang gleicht beim
-            quelle.angleichen_offen = False  # Wiedereinschalten an; Frostschutz bleibt unangetastet (Spec 5b 3.2)
+            quelle.angleichen_offen = False  # Wiedereinschalten an; Frostschutz bleibt unangetastet
             eingabe(wert, durch)
             return
         if wert == store.value:  # zeigt das Soll doch (HA hat es trotz Fehler uebernommen)
@@ -286,6 +340,26 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
         platform = trigger.get("platform")
         if platform == "event":
             event = trigger.get("event") or {}
+            if event.get("event_type") == EREIGNIS_INTEGRATION:
+                if integration_stand is not None:  # nur Version und Schemata; kein Wunsch, kein lokaler Check
+                    integration_stand.ereignis(event.get("data"), uhr())
+                return
+            if event.get("event_type") == EREIGNIS_PUSH_AUFGEGEBEN:
+                if push_stand is not None:  # nur Stufe und Kreis; kein Wunsch, kein lokaler Check, kein Log von Inhalten
+                    gelesen = push_aufgegeben_lesen(event.get("data"), anlagenkreise)
+                    if gelesen is not None:
+                        push_stand.aufgegeben(gelesen[0], gelesen[1], uhr())
+                return
+            ziel = _wunsch_kreis(event.get("data"))
+            if ziel is None:
+                logger.warning("Ereignis %s mit ungueltigem Kreis verworfen", EREIGNIS_WUNSCH)
+                return
+            if anlagenkreise is not None and ziel not in anlagenkreise:
+                if kreis == min(anlagenkreise):
+                    logger.warning("Ereignis %s mit unbekanntem Kreis verworfen", EREIGNIS_WUNSCH)
+                return
+            if ziel != kreis:
+                return  # gilt dem Client eines anderen Kreises
             value = (event.get("data") or {}).get("raum_soll")
             number = _wunschwert(value)
             if number is None:

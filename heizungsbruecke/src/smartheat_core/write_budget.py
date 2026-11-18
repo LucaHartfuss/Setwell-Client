@@ -1,4 +1,4 @@
-"""Schreibbudget fuer Cloud-Schreibvorgaenge (TP12b, Spec 3.1; AU-015). Die Hersteller-Cloud
+"""Schreibbudget fuer Cloud-Schreibvorgaenge. Die Hersteller-Cloud
 (myVAILLANT) sperrt bei zu vielen Aufrufen ~2 h; ein gescheiterter Schreibvorgang darf deshalb nie
 in jedem lokalen Check wiederholt werden.
 
@@ -7,7 +7,10 @@ Ein Log je Schluessel in BridgeState.write_budget (backup.json): {"day", "count"
 `last` laeuft auf der monotonen Worker-Uhr und wird beim Laden verworfen (state._parse_budget): nach
 einem Neustart gilt das Tageslimit weiter, der Mindestabstand beginnt neu."""
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import TypeGuard
 
 from smartheat_core import wallclock
 from smartheat_core.logtext import lesbar
@@ -29,7 +32,7 @@ class Rule:
 
 # Zonenvorbereitung: nur Fehlschlaege, 1/30 min, 6/Tag. Ein Erfolg kostet nichts.
 RETRY_QUOTA = Rule(every_attempt=False, waits=(INTERVAL_SECONDS,), max_per_day=MAX_PER_DAY)
-# Boost-Start (Comfort und Notfall, je eigener Zaehler): jeder Start zaehlt, auch ein erfolgreicher (A6-01, Regel 4):
+# Boost-Start (Comfort und Notfall, je eigener Zaehler): jeder Start zaehlt, auch ein erfolgreicher (Regel 4):
 # hoechstens 6 am Tag, mindestens 30 min Abstand.
 START_QUOTA = Rule(every_attempt=True, waits=(INTERVAL_SECONDS,), max_per_day=MAX_PER_DAY)
 # Rueckkehr zu den Regelwerten (Boost-Ende, Wiederherstellung): 5/15/30 min, dann alle 30 min, nie
@@ -37,7 +40,7 @@ START_QUOTA = Rule(every_attempt=True, waits=(INTERVAL_SECONDS,), max_per_day=MA
 RETURN_STAIRCASE = Rule(every_attempt=False, waits=(300, 900, INTERVAL_SECONDS), max_per_day=None)
 
 ENFORCE_PREFIX = "enforce:"
-# Plan 3b: physische Schreibvorgaenge des Tages ueber alle Hebel (BindingDescription.daily_write_limit, Weishaupt).
+# Physische Schreibvorgaenge des Tages ueber alle Hebel (BindingDescription.daily_write_limit, Weishaupt).
 TOTAL = "writes:total"
 ZONE_PREPARE = "zone_prepare"
 BOOST_START = "boost_start"
@@ -46,12 +49,69 @@ BOOST_END = "boost_end"
 RESTORE = "restore"
 
 
+# Tag der Tageszaehler (Schreibbudget, Durchsetzen). Er folgt der Wanduhr nur bei vertrauenswuerdiger Uhr
+# (`tag_fortschreiben`): ein Uhrsprung ueber die Tagesgrenze darf die Zaehler nicht zuruecksetzen, sonst waeren am selben
+# Tag erneut so viele Schreibvorgaenge erlaubt. Ohne Vertrauen schreitet der Tag nach der monotonen Uhr fort (je volle
+# 24 Stunden einer weiter, nie rueckwaerts, nie schneller): ein Zaehler mit Tageslimit, den der Kaelteschutz teilt, darf
+# ohne synchronisierte Uhr nicht bis zum Neustart festhaengen. Prozessweit wie die Wanduhr; der erste Aufruf nimmt den
+# Tag der Wanduhr, es gibt davor nichts zu schuetzen. `_anker` ist der Stand der monotonen Uhr, ab dem der Tag zaehlt.
+_tag: str | None = None
+_anker: float | None = None
+
+_TAG_SEKUNDEN = 86_400.0
+
+
 def today() -> str:
-    return wallclock.today().isoformat()
+    """Tag der Tageszaehler, ISO-Datum."""
+    global _tag, _anker
+    if _tag is None:
+        _tag = wallclock.today().isoformat()
+        _anker = None
+    return _tag
+
+
+def _vertraut(uhr_vertrauenswuerdig: Callable[[], bool]) -> bool:
+    """Das Urteil der Uhr; ein Fehler beim Urteilen gilt als nicht vertrauenswuerdig."""
+    try:
+        return uhr_vertrauenswuerdig() is True
+    except Exception as fehler:
+        logger.warning("Uhrvertrauen nicht erfragbar (%s), der Tag der Zaehler folgt der monotonen Uhr", type(fehler).__name__)
+        return False
+
+
+def tag_fortschreiben(uhr_vertrauenswuerdig: Callable[[], bool], monoton: Callable[[], float]) -> None:
+    """Stellt den Tag der Zaehler auf den der Wanduhr, aber nur mit vertrauenswuerdiger Uhr (vorwaerts wie rueckwaerts).
+    Ohne Vertrauen rueckt er je volle 24 Stunden der monotonen Uhr (`monoton`, der Port `clock`) um einen Tag vor. Das
+    Urteil wird nur bei abweichendem Tag erfragt (es kostet eine Abfrage des Zeitdienstes). Im Worker-Thread vor jedem
+    Ereignis aufrufen."""
+    global _tag, _anker
+    jetzt = monoton()
+    wand = wallclock.today().isoformat()
+    if _tag is None:
+        _tag, _anker = wand, jetzt
+        return
+    if _anker is None:
+        _anker = jetzt
+    if _tag != wand and _vertraut(uhr_vertrauenswuerdig):
+        _tag, _anker = wand, jetzt
+        return
+    ganze_tage = int((jetzt - _anker) // _TAG_SEKUNDEN)
+    if ganze_tage > 0:
+        _tag = (date.fromisoformat(_tag) + timedelta(days=ganze_tage)).isoformat()
+        _anker += ganze_tage * _TAG_SEKUNDEN
+
+
+def _heutig(entry: dict | None, day: str) -> TypeGuard[dict]:
+    """Zaehlt der Eintrag zum Tag `day`? Auch ein Eintrag eines spaeteren Tages (die Uhr stand beim Start vor und wurde
+    zurueckgestellt): er gilt als heute, sonst waeren die Schreibvorgaenge, die er zaehlt, vergessen. Tage sind ISO-Daten."""
+    if entry is None:
+        return False
+    eintrag_tag = entry.get("day")
+    return eintrag_tag == day or (isinstance(eintrag_tag, str) and eintrag_tag > day)
 
 
 def allowed(entry: dict | None, rule: Rule, now: float, day: str) -> bool:
-    if entry is None or entry.get("day") != day:
+    if not _heutig(entry, day):
         return True
     count = entry["count"]
     if rule.max_per_day is not None and count >= rule.max_per_day:
@@ -63,10 +123,11 @@ def allowed(entry: dict | None, rule: Rule, now: float, day: str) -> bool:
 
 
 def counted(entry: dict | None, now: float, day: str) -> dict:
-    """Eintrag nach einem gezaehlten Versuch; ein Eintrag vom Vortag beginnt neu."""
-    if entry is None or entry.get("day") != day:
+    """Eintrag nach einem gezaehlten Versuch; ein Eintrag vom Vortag beginnt neu, einer eines spaeteren Tages zaehlt weiter
+    (und gilt danach als heutiger)."""
+    if entry is None or not _heutig(entry, day):
         return {"day": day, "count": 1, "last": now}
-    return {**entry, "count": entry["count"] + 1, "last": now}
+    return {**entry, "day": day, "count": entry["count"] + 1, "last": now}
 
 
 def enforce_rule(per_day: int) -> Rule:
@@ -75,20 +136,21 @@ def enforce_rule(per_day: int) -> Rule:
 
 
 def added(entry: dict | None, count: int, now: float, day: str) -> dict:
-    """Eintrag nach `count` weiteren Schreibvorgaengen (TOTAL); ein Eintrag vom Vortag beginnt neu."""
-    if entry is None or entry.get("day") != day:
+    """Eintrag nach `count` weiteren Schreibvorgaengen (TOTAL); ein Eintrag vom Vortag beginnt neu, einer eines spaeteren
+    Tages zaehlt weiter (und gilt danach als heutiger)."""
+    if entry is None or not _heutig(entry, day):
         return {"day": day, "count": count, "last": now}
-    return {**entry, "count": entry["count"] + count, "last": now}
+    return {**entry, "day": day, "count": entry["count"] + count, "last": now}
 
 
 def count_today(entry: dict | None, day: str) -> int:
-    return entry["count"] if entry is not None and entry.get("day") == day else 0
+    return entry["count"] if _heutig(entry, day) else 0
 
 
 def limit_first_reached(entry: dict | None, rule: Rule, day: str) -> bool:
     """True, wenn das Tageslimit heute erreicht und noch nicht gemeldet ist (`limit_notified`)."""
     return (
-        rule.max_per_day is not None and entry is not None and entry.get("day") == day
+        rule.max_per_day is not None and _heutig(entry, day)
         and entry["count"] >= rule.max_per_day and entry.get("limit_notified") != day
     )
 

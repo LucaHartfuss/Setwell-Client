@@ -1,235 +1,39 @@
-"""Spec 5b 5.1: das Geraet - Bootstrap, hello, Dokumente, Befehle, Bedienwunsch, Status, Meldungen, Rettungsweg,
+"""Das Geraet - Bootstrap, hello, Dokumente, Befehle, Bedienwunsch, Status, Meldungen, Rettungsweg,
 Laufzeit-Kanal. Link und Bootstrap-Server sind Fakes; die Wire-Formate sind die des Vertrags."""
-import itertools
 import json
 import math
 import queue
 import threading
 import time
 
+import konfig_form
 import pytest
-from bindung_beispiele import parameter
-from device_helpers import GeraeteCa, zertifikat_fuer
+from device_helpers import WALL, FakeHost, FakeLink, World, _anzeige, _konfiguration, _leer
 
-from smartheat_core import config_check, dateien
-from smartheat_device import bootstrap, commands, device, identity, wire, wish
+from smartheat_core import config_check, dateien, meldungen
+from smartheat_device import bootstrap, commands, device, identity, nachrichten, wire, wish
 from smartheat_device.geraet_host_basis import EV_RELOAD, GeraetHostBasis
 from smartheat_runtime import aufraeumen
 from smartheat_runtime.runtime import EV_MQTT_CONNECTED, EV_SETPOINTS
 from smartheat_runtime.worker import RegulationWorker
 
-WALL = 1_800_000_000.0
-SENSOR = "zigbee:0x00124b0000000001:temperature"
+HINWEIS = {"key": "geraet_doppelt", "code": "meldung.geraet_doppelt", "params": {}, "stufe": "rot"}
+
 SOFTWARE = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
-            "signature": "sig"}
-
-
-def _konfiguration(version=1, **changes):
-    inhalt = {
-        "anlage": "kunde3", "profil": "viessmann_gastherme_heizkoerper", "hebelsatz": "viessmann_vicare",
-        "verteilsystem": "Heizkoerper",
-        "bindung": {"treiber": {"id": "simulation", "parameter": {}}, "thermostat": None},
-        "raumfuehler": [SENSOR], "tagestick": "12:12", "abo": "aktiv", "mindest_software": "0.6.0", "software": None,
-        "bindungsparameter": parameter("viessmann_vicare"),
-    }
-    inhalt.update(changes)
-    return {"schema": 1, "version": version, **inhalt}
+            "signature": "sig", "einmalig": False}
 
 
 def _bedienung(version=3, raum_soll=21.0):
-    return {"schema": 1, "version": version, "modus": "manuell", "raum_soll": raum_soll, "quelle": "portal",
-            "ts": "2027-01-15T07:00:00+00:00"}
+    return {"schema": 2, "version": version, "kreise": [{"kreis": 1, "modus": "manuell", "raum_soll": raum_soll}],
+            "quelle": "portal", "ts": "2027-01-15T07:00:00+00:00"}
 
 
 def _command(kind="diagnostics", command_id="c1", payload=None):
-    return {"schema": 1, "command_id": command_id, "kind": kind, "payload": payload or {},
+    return {"schema": 2, "command_id": command_id, "kind": kind, "payload": payload or {},
             "expires_at": "2027-01-15T09:00:00+00:00"}
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.now = 1000.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-class FakeHost:
-    host = "gateway"
-
-    def __init__(self, version="0.6.0") -> None:
-        self.version = version
-        self.synchron: bool | None = True
-        self.konfigurationen, self.bedienungen, self.software, self.anzeigen_liste = [], [], [], []
-        self.status: dict | None = {"status": "regelt"}
-        self.raum_wert: dict | None = {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t0"}
-        self.treiber_details: dict | None = None
-        self.handlers: dict = {}
-        self.ursprung: dict = {}
-
-    def ursprungswerte(self):
-        return dict(self.ursprung)
-
-    def faehigkeiten(self):
-        return {"drivers": ["simulation"], "zigbee": True, "updater": True}
-
-    def uhr_synchron(self):
-        return self.synchron
-
-    def treiber_pruefen(self, bindung):
-        return self.treiber_details
-
-    def befehle_eintragen(self, register):
-        for kind, handler in self.handlers.items():
-            register.register(kind, handler)
-
-    def konfiguration_vorbereiten(self, alt, neu):
-        pass
-
-    def konfiguration_uebernommen(self, alt, neu):
-        self.konfigurationen.append((alt, neu))
-
-    def bedienung_uebernommen(self, inhalt):
-        self.bedienungen.append(inhalt)
-
-    def software_soll(self, software):
-        self.software.append(software)
-
-    def runtime_status(self):
-        return self.status
-
-    def raum(self):
-        return self.raum_wert
-
-    def anzeigen(self, anzeige):
-        self.anzeigen_liste.append(anzeige)
-
-
-_CLIENT_NUMMERN = itertools.count(1)
-
-
-class FakeLink:
-    def __init__(self, device_id, zugang, key_pem, ereignis) -> None:
-        self.device_id, self.zugang, self.key_pem, self.ereignis = device_id, zugang, key_pem, ereignis
-        self.connected = self.started = self.stopped = False
-        self.sent: list[tuple[str, dict]] = []
-        self.connect_failures = 0
-        self.client_nr = 0
-        self._mid_basis = 0  # paho zaehlt mids je Client ab 1
-
-    def start(self):
-        self.started = True
-        self.client_nr = next(_CLIENT_NUMMERN)
-
-    def stop(self):
-        self.stopped, self.connected = True, False
-
-    def publish(self, name, payload):
-        if not self.connected:
-            return None
-        # wie der echte Link: nie NaN/Inf hinaus (Testoffensive T2, Nr. 17), json wirft dann ValueError
-        self.sent.append((name, json.loads(json.dumps(payload, allow_nan=False))))
-        return len(self.sent) - self._mid_basis
-
-    def port_wechseln_falls_noetig(self):
-        pass
-
-    # --- Teststeuerung ---
-
-    def neuer_client(self):
-        """Wie port_wechseln_falls_noetig: alter Client weg (mit seinen unbestaetigten Nachrichten), neuer Client,
-        dessen mids wieder bei 1 beginnen."""
-        self.client_nr = next(_CLIENT_NUMMERN)
-        self._mid_basis = len(self.sent)
-        self.connected = False
-        self.ereignis("getrennt")
-
-    def verbinden(self):
-        self.connected = True
-        self.ereignis("verbunden")
-
-    def trennen(self):
-        self.connected = False
-        self.ereignis("getrennt")
-
-    def gesendet(self, mid, client_nr=None, ok=True):
-        """PUBACK des Brokers; wie der Link traegt das Ereignis die Nummer des Clients, der gesendet hat, und ob der
-        Reason Code ein Erfolg war."""
-        self.ereignis("gesendet", mid, self.client_nr if client_nr is None else client_nr, ok)
-
-    def empfangen(self, name, body):
-        self.ereignis("nachricht", name, json.dumps(body).encode())
-
-    def topics(self):
-        return [name for name, _ in self.sent]
-
-    def of(self, name):
-        return [payload for topic, payload in self.sent if topic == name]
-
-
-class ScriptedBootstrap:
-    def __init__(self) -> None:
-        self.script: dict[str, list] = {"register": [], "certificate": []}
-        self.calls, self.idents = [], []
-
-    def register(self, **kwargs):
-        self.calls.append(("register", kwargs))
-        return self._next("register")
-
-    def certificate(self):
-        self.calls.append(("certificate", None))
-        return self._next("certificate")
-
-    def _next(self, route):
-        answer = self.script[route].pop(0)
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
-
-
-class World:
-    def __init__(self, tmp_path, host=None, *, access=True) -> None:
-        self.dir = tmp_path / device.DEVICE_DIR
-        self.host = host or FakeHost()
-        self.ca = GeraeteCa()
-        self.clock = Clock()
-        self.links: list[FakeLink] = []
-        self.client = ScriptedBootstrap()
-        ident = identity.load_or_create(self.dir)
-        self.zugang = self.neuer_zugang(ident)
-        if access:
-            bootstrap.speichern(self.dir, bootstrap.Antwort("uebernommen", self.zugang))
-
-        def client_for(ident):
-            self.client.idents.append(ident)
-            return self.client
-
-        self.device = device.Device(self.host, tmp_path, "https://accounts.example.test", clock=self.clock,
-                                    wall=lambda: WALL, bootstrap_client=client_for, link_factory=self._link)
-
-    def neuer_zugang(self, ident=None):
-        ident = ident or self.device.identity
-        return bootstrap.Zugang(zertifikat_fuer(ident, self.ca), bootstrap.Endpoint("mqtt.e2e.test", 8883, self.ca.pem))
-
-    def _link(self, *args):
-        self.links.append(FakeLink(*args))
-        return self.links[-1]
-
-    @property
-    def link(self) -> FakeLink:
-        return self.links[-1]
-
-    def verbinden(self):
-        self.device.schritt()
-        self.link.verbinden()
-        self.device.schritt()
-
-    def empfangen(self, name, body):
-        self.link.empfangen(name, body)
-        self.device.schritt()
-
-
-# --- Ursprungswerte im Status (Spec Stufe 3 S3 5.1, G-4) ---
+# --- Ursprungswerte im Status (G-4) ---
 
 def test_status_carries_only_originals_the_server_does_not_know(tmp_path):
     world = World(tmp_path)
@@ -268,7 +72,7 @@ def test_status_respects_v1_limits(tmp_path):
 
 
 def test_ursprungswert_genau_auf_der_grenze_von_1e12(tmp_path):
-    """URSPRUNG_WERT_MAX = 1e12 als Literal aus der Spec (nicht ueber die Konstante): beide Vorzeichen gehen hinaus,
+    """URSPRUNG_WERT_MAX = 1e12 als Literal (nicht ueber die Konstante): beide Vorzeichen gehen hinaus,
     ein Hauch darueber nicht."""
     assert wire.URSPRUNG_WERT_MAX == 1e12
     world = World(tmp_path)
@@ -307,7 +111,8 @@ def test_first_start_registers_then_connects_and_says_hello(tmp_path):
     world.device.schritt()
     (hello,) = world.link.of("up/hello")
     assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
-    assert hello == {"schema": 1, "schemata": [1], "konfiguration_version": 0, "bedienung_version": 0,
+    assert hello == {"schema": 2, "schemata": [2], "konfiguration_version": 0, "bedienung_version": 0,
+                     "anzeige_version": 0, "wege": ["simulation"],
                      "software_version": "0.6.0", "host": "gateway", "faehigkeiten": world.host.faehigkeiten(),
                      "boot_id": world.device.boot_id, "uhr_synchron": True, "device_state": "nicht_uebernommen"}
     assert world.device.zustand() == "nicht_uebernommen"
@@ -339,13 +144,127 @@ def test_hello_after_a_reconnect_reports_the_taken_versions(tmp_path):
     assert (hello["konfiguration_version"], hello["bedienung_version"]) == (4, 2)
 
 
+def _ha_welt(tmp_path, **werte):
+    host = FakeHost()
+    host.host = "ha"
+    if werte:
+        host.hello_werte = werte
+    return World(tmp_path, host)
+
+
+def test_hello_des_ha_hosts_traegt_auto_update_und_integration_version(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    (hello,) = world.link.of("up/hello")
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state", "auto_update", "integration_version"}
+    assert (hello["auto_update"], hello["integration_version"]) == (True, "1.2.0")
+
+
+def test_hello_des_gateways_traegt_beide_felder_nie_und_der_host_wird_nicht_gefragt(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    for _ in range(3):
+        world.device.schritt()
+    assert all("auto_update" not in hello and "integration_version" not in hello for hello in world.link.of("up/hello"))
+    assert world.host.hello_felder_aufrufe == 0
+
+
+def test_ein_gescheiterter_hostrueckruf_meldet_beide_felder_unbekannt_und_loggt_nichts_geheimes(tmp_path, caplog):
+    world = _ha_welt(tmp_path)
+    world.host.hello_werte = RuntimeError("GEHEIM")
+    world.verbinden()
+    hello = world.link.of("up/hello")[-1]
+    assert (hello["auto_update"], hello["integration_version"]) == (None, None)
+    assert "GEHEIM" not in caplog.text and "RuntimeError" in caplog.text
+    world.host.hello_werte = {"auto_update": False, "integration_version": "1.3.0"}
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert (hello["auto_update"], hello["integration_version"]) == (False, "1.3.0")
+    assert len(world.link.of("up/hello")) == 2
+
+
+@pytest.mark.parametrize("werte", [{"auto_update": "ja", "integration_version": 5},
+                                   {"auto_update": 1, "integration_version": ["1.2.0"]},
+                                   {"auto_update": None, "integration_version": None}, {}])
+def test_ungueltige_oder_fehlende_hostwerte_gehen_als_unbekannt_hinaus(tmp_path, werte):
+    world = _ha_welt(tmp_path)
+    world.host.hello_werte = werte
+    world.verbinden()
+    (hello,) = world.link.of("up/hello")
+    assert (hello["auto_update"], hello["integration_version"]) == (None, None)
+
+
+def test_eine_aenderung_der_werte_sendet_im_naechsten_takt_ein_neues_hello_sonst_keines(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    for _ in range(5):
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == 1
+    world.host.hello_werte = {"auto_update": True, "integration_version": None}
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert len(world.link.of("up/hello")) == 2 and hello["integration_version"] is None
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == 2
+    world.host.hello_werte = {"auto_update": False, "integration_version": None}
+    world.clock.now += device.HELLO_NACHSENDEN_MIN_SECONDS
+    world.device.schritt()
+    assert [h["auto_update"] for h in world.link.of("up/hello")] == [True, True, False]
+
+
+def test_ein_kippendes_feld_sendet_hoechstens_ein_hello_je_60_sekunden_und_die_letzte_aenderung_geht_nicht_verloren(
+        tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    anzahl = len(world.link.of("up/hello"))
+    versionen = ["1.2.0", "1.3.0"]
+    for sekunde in range(1, 60):  # jede Sekunde kippt die Integration zwischen zwei Versionen
+        world.host.hello_werte = {"auto_update": True, "integration_version": versionen[sekunde % 2]}
+        world.clock.now += 1
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 1  # das erste Nachsenden geht gleich, danach ist Pause
+    world.host.hello_werte = {"auto_update": True, "integration_version": "9.9.9"}
+    world.clock.now += 1  # 59 s nach dem ersten Nachsenden
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 1
+    world.clock.now += 1  # 60 s danach: der aktuelle Stand geht hinaus
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 2
+    assert world.link.of("up/hello")[-1]["integration_version"] == "9.9.9"
+    world.device.schritt()
+    assert len(world.link.of("up/hello")) == anzahl + 2  # unveraendert: nichts mehr
+
+
+def test_der_abstand_gilt_zwischen_nachgesendeten_hellos_nicht_gegen_das_erste_nach_dem_verbinden(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    world.host.hello_werte = {"auto_update": False, "integration_version": "1.2.0"}
+    world.device.schritt()  # sofort nach dem Verbinden: das erste Nachsenden wartet nicht
+    assert len(world.link.of("up/hello")) == 2
+
+
+def test_ohne_verbindung_geht_kein_hello_hinaus_und_das_naechste_traegt_den_aktuellen_stand(tmp_path):
+    world = _ha_welt(tmp_path)
+    world.verbinden()
+    world.link.trennen()
+    world.host.hello_werte = {"auto_update": False, "integration_version": "2.0.0"}
+    for _ in range(3):
+        world.device.schritt()
+    assert len(world.link.of("up/hello")) == 1
+    world.link.verbinden()
+    world.device.schritt()
+    hello = world.link.of("up/hello")[-1]
+    assert len(world.link.of("up/hello")) == 2
+    assert (hello["auto_update"], hello["integration_version"]) == (False, "2.0.0")
+
+
 # --- Dokumente ---
 
 def test_a_configuration_is_taken_reported_and_handed_to_the_host(tmp_path):
     world = World(tmp_path)
     world.verbinden()
     world.empfangen("down/config", _konfiguration())
-    assert world.link.of("up/result") == [{"schema": 1, "dokument": "konfiguration", "version": 1, "ok": True}]
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
     ((alt, neu),) = world.host.konfigurationen
     assert alt is None and neu["anlage"] == "kunde3" and world.host.software == [None]
     assert world.device.konfiguration() == neu and world.device.abo_status() == "active"
@@ -361,18 +280,19 @@ def test_a_rejected_configuration_keeps_the_old_one_and_tells_the_display(tmp_pa
     assert result["ok"] is False and result["error"] == {
         "grund": "treiber_parameter", "details": {"feld": "parameter", "regel": "ungueltig"}}
     assert world.host.konfigurationen == []
-    assert world.host.anzeigen_liste[-1].konfiguration_abgelehnt == device.ABLEHNUNG_ANZEIGE.format(
-        grund="treiber_parameter")
+    assert world.host.anzeigen_liste[-1].konfiguration_abgelehnt == {
+        "code": "meldung.konfiguration_abgelehnt", "params": {"grund": "treiber_parameter"}, "stufe": "rot"}
 
 
 def test_a_rejection_from_before_5c_shows_the_local_hint_with_the_code_and_reports_no_text(tmp_path):
-    """dokumente.json von vor 5c traegt einen Text an Stelle 2: der lokale Hinweis nennt nur den Code (Spec 6.3, E2 A)."""
+    """dokumente.json von vor 5c traegt einen Text an Stelle 2: der lokale Hinweis nennt nur den Code."""
     (tmp_path / device.DEVICE_DIR).mkdir(parents=True)
     (tmp_path / device.DEVICE_DIR / "dokumente.json").write_text(json.dumps(
         {"update_anlass": None, "abgelehnt": {"konfiguration": [3, "ungueltig", "Alter Gerätetext"]}}))
     world = World(tmp_path)
     hinweis = world.device.anzeige().konfiguration_abgelehnt
-    assert hinweis == device.ABLEHNUNG_ANZEIGE.format(grund="ungueltig") and "Alter" not in hinweis
+    assert hinweis == {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "ungueltig"}, "stufe": "rot"}
+    assert "Alter" not in str(hinweis)
     assert world.device.documents.ablehnung("konfiguration") == (3, "ungueltig", None)
 
 
@@ -389,7 +309,7 @@ class UnpruefbarHost(FakeHost):
 
 
 def test_an_unverifiable_configuration_is_neither_taken_nor_refused_and_is_checked_again_later(tmp_path):
-    """Spec 5c 1.3: HA nicht erreichbar -> keine Ablehnung (der Server stellt eine abgelehnte Version nicht erneut zu),
+    """HA nicht erreichbar -> keine Ablehnung (der Server stellt eine abgelehnte Version nicht erneut zu),
     das Geraet haelt das Dokument zurueck und prueft nach dem Wiederholabstand erneut, ohne neue Zustellung."""
     world = World(tmp_path, UnpruefbarHost())
     world.verbinden()
@@ -405,12 +325,49 @@ def test_an_unverifiable_configuration_is_neither_taken_nor_refused_and_is_check
     world.host.unpruefbar = False
     world.clock.now += device.PRUEFUNG_WIEDERHOLEN_SECONDS
     world.device.schritt()
-    assert world.link.of("up/result") == [{"schema": 1, "dokument": "konfiguration", "version": 1, "ok": True}]
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
     assert len(world.host.konfigurationen) == 1 and world.host.software == [None]
     calls = world.host.aufrufe
     world.clock.now += 10 * device.PRUEFUNG_WIEDERHOLEN_SECONDS
     world.device.schritt()
     assert world.host.aufrufe == calls and len(world.link.of("up/result")) == 1  # erledigt, kein weiterer Versuch
+
+
+@pytest.mark.parametrize("datei", ["konfiguration.json", "dokumente.json"])
+def test_datentraegerfehler_beim_speichern_haelt_zurueck_und_wiederholt(tmp_path, monkeypatch, caplog, datei):
+    """Ein OSError beim Speichern (vor dem Dokument bzw. erst beim Zustand danach) verliert die Konfiguration nicht
+    bis zur naechsten Verbindung: das Geraet haelt sie zurueck (eine ERROR-Zeile, ohne Text) und gibt nach dem
+    Wiederholabstand das Ergebnis und die Uebernahme."""
+    from smartheat_device import documents
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(version=1))
+    assert len(world.host.konfigurationen) == 1
+    echt, offen = dateien.schreiben_json, [True]
+
+    def schreiben(pfad, *args, **kwargs):
+        if pfad.name == datei and offen[0]:
+            offen[0] = False
+            raise OSError("Datentraeger voll: geheim")
+        return echt(pfad, *args, **kwargs)
+
+    monkeypatch.setattr(documents.dateien, "schreiben_json", schreiben)
+    results = len(world.link.of("up/result"))
+    world.empfangen("down/config", _konfiguration(version=2, tagestick="12:30"))
+    assert len(world.link.of("up/result")) == results and len(world.host.konfigurationen) == 1  # zurueckgehalten
+    zeilen = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(zeilen) == 1 and "OSError" in zeilen[0] and "geheim" not in caplog.text
+    world.clock.now += device.PRUEFUNG_WIEDERHOLEN_SECONDS - 1
+    world.device.schritt()
+    assert len(world.link.of("up/result")) == results  # noch zu frueh
+    world.clock.now += 1
+    world.device.schritt()
+    assert world.link.of("up/result")[-1] == {"schema": 2, "dokument": "konfiguration", "version": 2, "ok": True}
+    assert world.device.documents.version("konfiguration") == 2 and len(world.host.konfigurationen) == 2
+    assert world.host.konfigurationen[-1][1]["tagestick"] == "12:30"
+    world.clock.now += 10 * device.PRUEFUNG_WIEDERHOLEN_SECONDS
+    world.device.schritt()
+    assert len(world.link.of("up/result")) == results + 1  # erledigt, kein weiterer Versuch
 
 
 def test_an_unverifiable_configuration_that_gets_refused_later_says_so_once(tmp_path):
@@ -450,13 +407,7 @@ def test_a_held_configuration_is_only_rechecked_while_connected(tmp_path):
     assert world.host.konfigurationen == []
     world.link.verbinden()
     world.device.schritt()
-    assert world.link.of("up/result") == [{"schema": 1, "dokument": "konfiguration", "version": 1, "ok": True}]
-
-
-def _leer(version):
-    return {"schema": 1, "version": version, "anlage": None, "profil": None, "hebelsatz": None, "verteilsystem": None,
-            "bindung": None, "raumfuehler": [], "tagestick": None, "abo": None, "mindest_software": "0.6.0",
-            "software": None, "bindungsparameter": None}
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
 
 
 class BasisHost(GeraetHostBasis, FakeHost):
@@ -477,7 +428,7 @@ class BasisHost(GeraetHostBasis, FakeHost):
 
 def test_a_failing_cleanup_marker_holds_the_empty_configuration_back_until_it_can_be_written(tmp_path, monkeypatch,
                                                                                                caplog):
-    """Review Focus 1 (Spec Testoffensive 12.6, Nr. 38): laesst sich die Aufraeum-Markierung nicht schreiben, bleibt die
+    """Laesst sich die Aufraeum-Markierung nicht schreiben, bleibt die
     alte Konfiguration gespeichert (die Laufzeit regelt mit ihr weiter), kein up/result, keine Markierung, kein
     Neustart;
     eine ERROR-Zeile je Zurueckhalten. Ist der Ordner wieder beschreibbar, uebernimmt die Wiederholung nach 30 s,
@@ -527,7 +478,7 @@ def test_a_failing_cleanup_marker_holds_the_empty_configuration_back_until_it_ca
         world.clock.now += 1
         world.device.schritt()
     worker.run_pending()
-    assert world.link.of("up/result")[-1] == {"schema": 1, "dokument": "konfiguration", "version": 2, "ok": True}
+    assert world.link.of("up/result")[-1] == {"schema": 2, "dokument": "konfiguration", "version": 2, "ok": True}
     assert world.device.konfiguration()["anlage"] is None and world.device.documents.version("konfiguration") == 2
     alt = {key: value for key, value in _konfiguration(version=1).items() if key not in ("schema", "version")}
     assert json.loads(pfad.read_text()) == {"anlage": "kunde3", "konfiguration": alt, "zurueckgesetzt": False}
@@ -586,9 +537,7 @@ def test_an_empty_configuration_is_handed_over(tmp_path):
     world = World(tmp_path)
     world.verbinden()
     world.empfangen("down/config", _konfiguration())
-    leer = {**_konfiguration(version=2), "anlage": None, "profil": None, "hebelsatz": None, "verteilsystem": None,
-            "bindung": None, "raumfuehler": [], "tagestick": None, "abo": None}
-    world.empfangen("down/config", leer)
+    world.empfangen("down/config", _leer(version=2))
     assert world.host.konfigurationen[-1][1]["anlage"] is None and world.device.abo_status() == "unknown"
 
 
@@ -596,7 +545,8 @@ def test_an_operation_goes_to_the_host(tmp_path):
     world = World(tmp_path)
     world.verbinden()
     world.empfangen("down/operation", _bedienung(raum_soll=21.5))
-    assert [b["raum_soll"] for b in world.host.bedienungen] == [21.5] and world.device.bedienung()["raum_soll"] == 21.5
+    assert [b["kreise"][0]["raum_soll"] for b in world.host.bedienungen] == [21.5]
+    assert world.device.bedienung()["kreise"][0]["raum_soll"] == 21.5
 
 
 def test_unknown_topics_and_broken_messages_are_ignored(tmp_path):
@@ -611,19 +561,19 @@ def test_unknown_topics_and_broken_messages_are_ignored(tmp_path):
 
 @pytest.mark.parametrize("name", wire.DOWN_TOPICS)
 def test_every_contract_down_topic_reaches_exactly_its_receiver_and_takes_effect(tmp_path, name):
-    """ck F-client-kern-43: je Down-Topic des Vertrags die Wirkung genau eines Empfaengers (gespeichertes Dokument,
+    """Je Down-Topic des Vertrags die Wirkung genau eines Empfaengers (gespeichertes Dokument,
     Befehlsergebnis, EV_SETPOINTS ueber den echten Laufzeit-Kanal); die anderen bleiben unberuehrt. Ein neues Topic
     ohne Eintrag in `koerper` scheitert hier mit KeyError."""
     world = World(tmp_path)
     worker, sollwerte = RegulationWorker(clock=world.clock), []
     worker.register(EV_SETPOINTS, sollwerte.append)
     worker.register(EV_MQTT_CONNECTED, lambda event: None)
-    world.device.laufzeit_kanal(worker)
+    world.device.laufzeit_kanal(worker, 1)
     world.verbinden()
     koerper = {"down/config": _konfiguration(version=1), "down/operation": _bedienung(version=3),
-               "down/command": _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                            "text": "Kopie stoppen"}),
-               "down/setpoints": {"seq": "s1"}}
+               "down/display": _anzeige(version=2),
+               "down/command": _command("hinweis", payload=HINWEIS),
+               "down/setpoints": {"kreis": 1, "seq": "s1"}}
     assert (world.device.konfiguration(), world.device.bedienung(), world.link.of("up/result")) == (None, None, [])
     world.empfangen(name, koerper[name])
     worker.run_pending()
@@ -633,11 +583,14 @@ def test_every_contract_down_topic_reaches_exactly_its_receiver_and_takes_effect
         and [e.get("dokument") for e in ergebnisse] == ["konfiguration"],
         "bedienung": world.device.bedienung() is not None and world.host.bedienungen != []
         and [e.get("dokument") for e in ergebnisse] == ["bedienung"],
+        "anzeige": world.device.documents.inhalt("anzeige") is not None
+        and [e.get("dokument") for e in ergebnisse] == ["anzeige"] and world.host.bedienungen == [],
         "befehl": [(e.get("command_id"), e.get("ok")) for e in ergebnisse] == [("c1", True)]
         and world.device.hinweise.alle() != (),
-        "sollwerte": [event.data["payload"] for event in sollwerte] == [{"seq": "s1"}],
+        "sollwerte": [event.data["payload"] for event in sollwerte] == [{"kreis": 1, "seq": "s1"}],
     }
-    erwartet = {"down/config": "konfiguration", "down/operation": "bedienung", "down/command": "befehl",
+    erwartet = {"down/config": "konfiguration", "down/operation": "bedienung", "down/display": "anzeige",
+                "down/command": "befehl",
                 "down/setpoints": "sollwerte"}
     assert [art for art, wirkt in wirkung.items() if wirkt] == [erwartet[name]]
 
@@ -648,8 +601,7 @@ def test_a_foreign_down_topic_reaches_nobody(tmp_path, caplog):
     world = World(tmp_path)
     world.verbinden()
     with caplog.at_level("WARNING", logger=device.logger.name):
-        world.empfangen("down/zukunft", _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                                     "text": "Kopie stoppen"}))
+        world.empfangen("down/zukunft", _command("hinweis", payload=HINWEIS))
         world.link.ereignis("nachricht", "down/zukunft", b"{kaputt")
         world.device.schritt()
     assert world.link.of("up/result") == []
@@ -659,7 +611,7 @@ def test_a_foreign_down_topic_reaches_nobody(tmp_path, caplog):
 
 
 def test_the_debug_line_of_a_foreign_topic_escapes_its_name(tmp_path, caplog):
-    """Fixrunde 1 zu T6-Rest Task 3: der Name eines unbekannten Topics kommt vom Broker; im DEBUG-Log steht er mit
+    """Der Name eines unbekannten Topics kommt vom Broker; im DEBUG-Log steht er mit
     Escape auf einer Zeile."""
     world = World(tmp_path)
     world.verbinden()
@@ -688,10 +640,8 @@ def test_commands_run_once_across_reconnects(tmp_path):
 def test_a_hint_command_reaches_the_display(tmp_path):
     world = World(tmp_path)
     world.verbinden()
-    world.empfangen("down/command", _command("hinweis", payload={"key": "geraet_doppelt", "stufe": "kritisch",
-                                                                 "text": "Kopie stoppen"}))
-    assert world.host.anzeigen_liste[-1].hinweise == (
-        {"key": "geraet_doppelt", "stufe": "kritisch", "text": "Kopie stoppen"},)
+    world.empfangen("down/command", _command("hinweis", payload=HINWEIS))
+    assert world.host.anzeigen_liste[-1].hinweise == (HINWEIS,)
 
 
 def test_inventory_parts_go_up_before_the_result(tmp_path):
@@ -700,9 +650,9 @@ def test_inventory_parts_go_up_before_the_result(tmp_path):
     world = World(tmp_path, host)
     world.verbinden()
     world.empfangen("down/command", _command("inventory", payload={"stunden": 1}))
-    assert world.link.of("up/inventory") == [{"schema": 1, "command_id": "c1", "teil": 1, "teile": 1,
+    assert world.link.of("up/inventory") == [{"schema": 2, "command_id": "c1", "teil": 1, "teile": 1,
                                               "daten": {"kandidaten": [1, 2]}}]
-    assert world.link.of("up/result") == []  # erst nach dem PUBACK der Teile (L4-02)
+    assert world.link.of("up/result") == []  # erst nach dem PUBACK der Teile
     world.link.gesendet(world.link.topics().index("up/inventory") + 1)
     world.device.schritt()
     names = world.link.topics()
@@ -838,7 +788,7 @@ def test_software_results_go_up_only_after_hello(tmp_path):
     assert world.device.ergebnis_software("0.6.1", True) is False
     world.verbinden()
     assert world.device.ergebnis_software("0.6.1", False, "ungesund") is True
-    assert world.link.of("up/result") == [{"schema": 1, "dokument": "software", "version": "0.6.1", "ok": False,
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "software", "version": "0.6.1", "ok": False,
                                            "error": {"grund": "ungesund"}}]
     with pytest.raises(ValueError):
         world.device.ergebnis_software("0.6.1", False, "erfunden")
@@ -858,6 +808,39 @@ def test_new_claim_code_only_while_not_claimed(tmp_path):
     results = world.link.of("up/result")
     assert results[0]["ok"] is True and results[1]["error"]["grund"] == "bereits_uebernommen"
     assert world.device.identity.claim_code == new
+
+
+def test_neuer_uebernahme_code_meldet_neu_uebernommen_und_keine_verbindung(tmp_path):
+    """Die Methode, die auch der Knopfdruck des Gateways ruft: gespeichert wird nur bei "neu"."""
+    world = World(tmp_path)
+    world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang),
+                                       bootstrap.Unavailable("register: HTTP 503"),
+                                       bootstrap.Antwort("uebernommen", world.zugang)]
+    world.verbinden()
+    alt = world.device.identity.claim_code
+    assert world.device.neuer_uebernahme_code() == "neu"
+    neu = world.device.identity.claim_code
+    assert neu != alt and identity.load_or_create(world.dir).claim_code == neu
+    assert world.device.neuer_uebernahme_code() == "keine_verbindung"
+    assert world.device.identity.claim_code == neu and identity.load_or_create(world.dir).claim_code == neu
+    assert world.device.neuer_uebernahme_code() == "uebernommen"
+    assert world.device.identity.claim_code == neu and identity.load_or_create(world.dir).claim_code == neu
+    assert bootstrap.device_state(world.dir) == "uebernommen"
+
+
+@pytest.mark.parametrize(("ergebnis", "antwort"), [
+    ("neu", None), ("keine_verbindung", {"grund": "intern"}), ("uebernommen", {"grund": "bereits_uebernommen"})])
+def test_new_claim_code_befehl_unveraendert(tmp_path, ergebnis, antwort):
+    """Der Befehl (HA, Server) ruft dieselbe Methode wie der Knopf und antwortet wie vorher: Erfolg, intern,
+    bereits_uebernommen."""
+    world = World(tmp_path)
+    world.verbinden()
+    aufrufe = []
+    world.device.neuer_uebernahme_code = lambda: aufrufe.append(1) or ergebnis
+    world.empfangen("down/command", _command("new_claim_code", "c1"))
+    assert aufrufe == [1]
+    letzte = world.link.of("up/result")[-1]
+    assert (letzte["ok"], letzte.get("error")) == (antwort is None, antwort)
 
 
 def test_new_claim_code_mit_zu_grossem_koerper_endet_als_intern_und_sendet_nichts(tmp_path, caplog):
@@ -890,11 +873,21 @@ def test_hello_reports_the_claim_state_the_device_knows(tmp_path):
     world.verbinden()
     (hello,) = world.link.of("up/hello")
     assert hello["device_state"] == bootstrap.device_state(world.dir) == "nicht_uebernommen"
-    assert set(hello) == set(wire.HELLO_FIELDS) | set(wire.HELLO_OPTIONAL)
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
+
+
+def test_weg_pruefen_is_refused_as_not_supported(tmp_path):
+    """Der Befehl gehoert zum Vertrag, ein Handler fehlt noch: das Geraet lehnt ihn mit einem Grund des Vertrags ab."""
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/command", _command("weg_pruefen", "c1", {"weg": "simulation"}))
+    ergebnis = world.link.of("up/result")[-1]
+    assert ergebnis["ok"] is False and ergebnis["error"]["grund"] == "nicht_unterstuetzt"
+    assert "nicht_unterstuetzt" in wire.command_errors("weg_pruefen")
 
 
 def test_claim_state_hides_the_code_and_waits_for_setup(tmp_path):
-    """Spec 5c 1.1/F1: nach der Uebernahme ohne Code melden; der Zustand wird wartet_auf_einrichtung."""
+    """Nach der Uebernahme ohne Code melden; der Zustand wird wartet_auf_einrichtung."""
     world = World(tmp_path, access=False)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
     world.verbinden()
@@ -908,7 +901,7 @@ def test_claim_state_hides_the_code_and_waits_for_setup(tmp_path):
 
 @pytest.mark.parametrize("value", ["gesperrt", "nicht_uebernommen"])
 def test_claim_state_accepts_only_uebernommen(tmp_path, value):
-    """Final-Review F-3: frei wird ein Geraet nur ueber new_claim_code (neuer Code); claim_state nicht_uebernommen
+    """Frei wird ein Geraet nur ueber new_claim_code (neuer Code); claim_state nicht_uebernommen
     zeigte sonst nach einer Uebernahme den alten Code wieder an."""
     world = World(tmp_path, access=False)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
@@ -945,7 +938,8 @@ def test_a_wish_is_limited_applied_buffered_and_sent_after_hello(tmp_path):
     world.device.schritt()
     assert world.link.of("up/wish") == []
     assert world.host.anzeigen_liste[-1].meldungen == (
-        {"key": "wunsch_begrenzt", "text": "Thermostat auf 14 °C gestellt, SmartHeat regelt auf 15 °C"},)
+        {"key": "wunsch_begrenzt", "text": "Thermostat auf 14 °C gestellt, SmartHeat regelt auf 15 °C",
+         **meldungen.zu_dict(wish.begrenzt_meldung(14.0, 15.0, "thermostat"))},)
     world.link.sent.clear()
     world.link.verbinden()
     world.device.schritt()
@@ -956,7 +950,7 @@ def test_a_wish_is_limited_applied_buffered_and_sent_after_hello(tmp_path):
         3, {"raum_soll": 15.0}, 14.0, "thermostat", "nutzer")
     world.link.gesendet(names.index("up/wish") + 1)
     world.device.schritt()
-    assert world.device.wunsch_puffer.wunsch is None
+    assert world.device.wunsch_puffer.wunsch(1) is None
 
 
 def test_a_puback_with_an_error_code_does_not_confirm_the_wish(tmp_path):
@@ -968,7 +962,7 @@ def test_a_puback_with_an_error_code_does_not_confirm_the_wish(tmp_path):
     mid = world.link.topics().index("up/wish") + 1
     world.link.gesendet(mid, ok=False)
     world.device.schritt()
-    assert world.device.wunsch_puffer.wunsch is not None
+    assert world.device.wunsch_puffer.wunsch(1) is not None
     assert world.link.topics().count("up/wish") == 1  # gesperrt, kein Sekundentakt
     world.clock.now += wish.WUNSCH_NACH_ABLEHNUNG_SECONDS - 1
     world.device.schritt()
@@ -978,7 +972,110 @@ def test_a_puback_with_an_error_code_does_not_confirm_the_wish(tmp_path):
     assert world.link.topics().count("up/wish") == 2  # nach 60 s erneut
     world.link.gesendet(len(world.link.sent))
     world.device.schritt()
-    assert world.device.wunsch_puffer.wunsch is None
+    assert world.device.wunsch_puffer.wunsch(1) is None
+
+
+# --- Entfernen: das Geraet verlaesst das Konto ---
+
+def _abgemeldet_mit_wahl(tmp_path):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+    world.host.entfernen = "freigeben"
+    world.verbinden()
+    return world
+
+
+def test_the_release_choice_goes_out_after_hello_and_the_signed_off_status(tmp_path):
+    world = World(tmp_path)
+    world.host.entfernen = "freigeben"
+    world.verbinden()
+    assert "up/entfernt" not in world.link.topics()  # die Laufzeit regelt noch: nichts wird gemeldet
+    world.host.status = {"status": "abgemeldet"}
+    world.clock.now += device.STATUS_MIN_SECONDS
+    world.device.schritt()
+    names = world.link.topics()
+    assert names.index("up/hello") < names.index("up/status") < names.index("up/entfernt")
+    assert world.link.of("up/status")[-1]["runtime_status"] == {"status": "abgemeldet"}
+    (sent,) = world.link.of("up/entfernt")
+    assert set(sent) == set(wire.ENTFERNT_FIELDS) and sent["wahl"] == "freigeben" and sent["schema"] == wire.SCHEMA
+
+
+def test_without_a_release_choice_nothing_leaves_the_account(tmp_path):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+    world.verbinden()
+    world.clock.now += 3600
+    world.device.schritt()
+    assert "up/entfernt" not in world.link.topics() and world.host.entfernen_zugestellt == 0
+
+
+def test_the_release_choice_is_delivered_with_the_puback_and_never_sent_again(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    mid = world.link.topics().index("up/entfernt") + 1
+    assert world.host.entfernen == "freigeben" and world.host.entfernen_zugestellt == 0  # noch nicht bestaetigt
+    world.link.gesendet(mid)
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 1 and world.host.entfernen is None
+    world.clock.now += 3600
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 1
+
+
+def test_a_puback_of_an_old_client_or_for_another_message_does_not_deliver_the_release_choice(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    mid = world.link.topics().index("up/entfernt") + 1
+    world.link.gesendet(mid, client_nr=world.link.client_nr + 1)
+    world.link.gesendet(mid + 5)
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 0 and world.host.entfernen == "freigeben"
+
+
+def test_an_unconfirmed_release_choice_is_resent_after_the_retry_period_only(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    world.link.gesendet(world.link.topics().index("up/entfernt") + 1, ok=False)  # Fehler-PUBACK
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 0
+    world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS - 1
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 1  # gesperrt, kein Sekundentakt
+    world.clock.now += 1
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 2
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    assert world.host.entfernen_zugestellt == 1
+    world.clock.now += 3600
+    world.device.schritt()
+    assert world.link.topics().count("up/entfernt") == 2
+
+
+def test_the_release_choice_waits_for_the_connection_and_hello_again(tmp_path):
+    world = _abgemeldet_mit_wahl(tmp_path)
+    world.link.trennen()
+    world.link.sent.clear()
+    world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    assert "up/entfernt" not in world.link.topics()  # getrennt: nichts geht hinaus
+    world.link.verbinden()
+    world.device.schritt()
+    names = world.link.topics()
+    assert names[0] == "up/hello" and "up/entfernt" in names
+
+
+def test_a_failing_release_callback_sends_nothing_and_logs_only_the_error_kind(tmp_path, caplog):
+    world = World(tmp_path)
+    world.host.status = {"status": "abgemeldet"}
+
+    def kaputt():
+        raise OSError("/data/geheim")
+
+    world.host.entfernen_wahl = kaputt
+    with caplog.at_level("ERROR"):
+        world.verbinden()
+        world.clock.now += device.ENTFERNT_WIEDERHOLUNG_SECONDS
+        world.device.schritt()
+    assert "up/entfernt" not in world.link.topics()
+    assert "entfernen_wahl" in caplog.text and "geheim" not in caplog.text
 
 
 def test_losing_wish_takes_the_resent_operation(tmp_path):
@@ -989,7 +1086,7 @@ def test_losing_wish_takes_the_resent_operation(tmp_path):
     world.device.schritt()
     assert world.device.documents.aktuell("bedienung").dirty
     world.empfangen("down/operation", _bedienung(version=3, raum_soll=21.0))  # Server: Wunsch verliert
-    assert [b["raum_soll"] for b in world.host.bedienungen] == [21.0, 21.0]
+    assert [b["kreise"][0]["raum_soll"] for b in world.host.bedienungen] == [21.0, 21.0]
     assert not world.device.documents.aktuell("bedienung").dirty
 
 
@@ -1029,7 +1126,8 @@ def test_setpoint_source_off_is_shown_and_cleared(tmp_path):
     world.device.soll_quelle_aus(True, 21.0)
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ({"key": "soll_quelle_aus", "text": (
-        "Thermostat ist aus, SmartHeat regelt weiter auf 21 °C; Heizung aus über die Sommersperre bzw. im Portal")},)
+        "Thermostat ist aus, SmartHeat regelt weiter auf 21 °C; Heizung aus über die Sommersperre bzw. im Portal"),
+        **meldungen.zu_dict(wish.soll_quelle_aus_meldung(21.0))},)
     world.device.soll_quelle_aus(False)
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ()
@@ -1037,7 +1135,7 @@ def test_setpoint_source_off_is_shown_and_cleared(tmp_path):
 
 @pytest.mark.parametrize("herkunft, durch", [("app", None), (None, "katze"), ("app", "katze")])
 def test_a_wish_with_an_unknown_origin_or_actor_is_refused_in_the_calling_thread(tmp_path, herkunft, durch):
-    """5b-D1-4: wie eine nicht endliche Zahl schon im aufrufenden Thread (der Host wendet den Wert sonst an, als waere
+    """Wie eine nicht endliche Zahl schon im aufrufenden Thread (der Host wendet den Wert sonst an, als waere
     er angenommen); nichts kommt in die Inbox, kein up/wish."""
     world = World(tmp_path)
     world.verbinden()
@@ -1045,7 +1143,7 @@ def test_a_wish_with_an_unknown_origin_or_actor_is_refused_in_the_calling_thread
         world.device.wunsch(22.0, herkunft=herkunft, durch=durch)
     assert world.device._inbox.empty()
     world.device.schritt()
-    assert world.link.of("up/wish") == [] and world.device.wunsch_puffer.wunsch is None
+    assert world.link.of("up/wish") == [] and world.device.wunsch_puffer.wunsch(1) is None
     assert world.device.wunsch(22.0, herkunft="thermostat", durch="nutzer") == 22.0  # Gegenprobe: gueltig geht hoch
     world.device.schritt()
     assert [w["werte"] for w in world.link.of("up/wish")] == [{"raum_soll": 22.0}]
@@ -1065,7 +1163,7 @@ def test_refused_wishes_are_logged_once_per_reason_without_the_value(tmp_path, c
 
 
 def test_setpoint_source_off_without_a_value_keeps_the_message_open(tmp_path):
-    """5b-D1-4: soll_quelle_aus(True) ohne wirksames Soll schliesst die Meldung nicht, sie bleibt offen (Text ohne
+    """soll_quelle_aus(True) ohne wirksames Soll schliesst die Meldung nicht, sie bleibt offen (Text ohne
     Wert); erst soll_quelle_aus(False) schliesst sie."""
     ohne_wert = "Thermostat ist aus, SmartHeat regelt weiter; Heizung aus über die Sommersperre bzw. im Portal"
     world = World(tmp_path)
@@ -1076,15 +1174,19 @@ def test_setpoint_source_off_without_a_value_keeps_the_message_open(tmp_path):
     world.device.soll_quelle_aus(True)
     world.clock.now += 10
     world.device.schritt()
-    assert world.host.anzeigen_liste[-1].meldungen == ({"key": "soll_quelle_aus", "text": ohne_wert},)
+    assert world.host.anzeigen_liste[-1].meldungen == ({
+        "key": "soll_quelle_aus", "text": ohne_wert,
+        **meldungen.zu_dict(wish.soll_quelle_aus_meldung(None))},)
     (item,) = world.link.of("up/notifications")[-1]["items"]
-    assert (item["key"], item["offen"], item["text"]) == ("soll_quelle_aus", True, ohne_wert)
+    assert (item["key"], item["offen"], item["code"], item["params"]) == (
+        "soll_quelle_aus", True, "meldung.soll_quelle_aus_unbekannt", {})
+    assert "text" not in item
     world.device.soll_quelle_aus(False)
     world.clock.now += 10
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ()
-    assert [(i["key"], i["offen"]) for i in world.link.of("up/notifications")[-1]["items"]] == [
-        ("soll_quelle_aus", False)]
+    assert [(i["key"], i["offen"], i["code"]) for i in world.link.of("up/notifications")[-1]["items"]] == [
+        ("soll_quelle_aus", False, "meldung.soll_quelle_aus_unbekannt")]  # geschlossen wird die gemerkte Meldung
 
 
 def test_setpoint_source_off_without_a_value_opens_the_message_without_a_value(tmp_path):
@@ -1092,7 +1194,8 @@ def test_setpoint_source_off_without_a_value_opens_the_message_without_a_value(t
     world.device.soll_quelle_aus(True)
     world.device.schritt()
     assert world.host.anzeigen_liste[-1].meldungen == ({"key": "soll_quelle_aus", "text": (
-        "Thermostat ist aus, SmartHeat regelt weiter; Heizung aus über die Sommersperre bzw. im Portal")},)
+        "Thermostat ist aus, SmartHeat regelt weiter; Heizung aus über die Sommersperre bzw. im Portal"),
+        **meldungen.zu_dict(wish.soll_quelle_aus_meldung(None))},)
 
 
 # --- Status und Meldungen ---
@@ -1125,13 +1228,18 @@ def test_status_ignores_the_timestamp_of_the_room(tmp_path):
 def test_notifications_are_batched_and_sent_again_after_a_reconnect(tmp_path):
     world = World(tmp_path)
     world.verbinden()
-    world.device.meldung("notbetrieb", "Notbetrieb aktiv", offen=True)
-    world.device.meldung("raumfuehler:0x1", "Fühler weg", offen=True, kritisch=False)
+    notbetrieb = meldungen.neu("meldung.notbetrieb")
+    world.device.meldung("notbetrieb", notbetrieb, offen=True)
+    world.device.meldung("raumfuehler:sensor.bad_temp", meldungen.neu("meldung.raumfuehler_ok", fuehler="Bad"),
+                         offen=True)
     world.device.schritt()
     (batch,) = world.link.of("up/notifications")
-    assert [item["key"] for item in batch["items"]] == ["notbetrieb", "raumfuehler:0x1"]
-    assert batch["items"][1]["kategorie"] == "raumfuehler" and set(batch["items"][0]) == set(wire.NOTIFICATION_FIELDS)
-    world.device.meldung("notbetrieb", "", offen=False)
+    fuehler_key = nachrichten.draht_key("raumfuehler:sensor.bad_temp")[0]
+    assert [item["key"] for item in batch["items"]] == ["notbetrieb", fuehler_key]
+    assert [item["stufe"] for item in batch["items"]] == ["rot", "orange"]
+    assert [item["code"] for item in batch["items"]] == ["meldung.notbetrieb", "meldung.raumfuehler_ok"]
+    assert set(batch["items"][0]) == set(wire.NOTIFICATION_FIELDS)
+    world.device.meldung("notbetrieb", notbetrieb, offen=False)
     world.device.schritt()
     assert len(world.link.of("up/notifications")) == 1  # binnen 10 s
     world.clock.now += device.MELDUNGEN_MIN_SECONDS
@@ -1140,7 +1248,32 @@ def test_notifications_are_batched_and_sent_again_after_a_reconnect(tmp_path):
     world.link.trennen()
     world.link.verbinden()
     world.device.schritt()
-    assert [i["key"] for i in world.link.of("up/notifications")[-1]["items"]] == ["raumfuehler:0x1"]
+    assert [i["key"] for i in world.link.of("up/notifications")[-1]["items"]] == [fuehler_key]
+
+
+def test_eine_erzeugermeldung_traegt_quelle_und_roh_auf_dem_draht_andere_meldungen_nicht(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    stoerung = meldungen.neu("erzeuger.stoerung", roh_text="f_28", quelle="mypyllant")
+    world.device.meldung("kreis-2:erzeuger_stoerung:f_28", stoerung, offen=True)
+    world.device.meldung("notbetrieb", meldungen.neu("meldung.notbetrieb"), offen=True)
+    world.device.schritt()
+    (batch,) = world.link.of("up/notifications")
+    erzeuger, andere = batch["items"]
+    assert (erzeuger["code"], erzeuger["params"], erzeuger["stufe"]) == ("erzeuger.stoerung", {"roh_text": "f_28"}, "rot")
+    assert (erzeuger["quelle"], erzeuger["roh"], erzeuger["kreis"], erzeuger["offen"]) == ("mypyllant", "f_28", 2, True)
+    assert erzeuger["key"].startswith("erzeuger_stoerung:") and "f_28" not in erzeuger["key"]
+    assert "quelle" not in andere and "roh" not in andere
+
+
+def test_das_schliessen_einer_erzeugermeldung_geht_ohne_quelle_und_roh_auf_den_draht(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.meldung("erzeuger_stoerung:f_28", None, offen=False)
+    world.device.schritt()
+    (batch,) = world.link.of("up/notifications")
+    (item,) = batch["items"]
+    assert (item["code"], item["offen"]) == (None, False) and "quelle" not in item and "roh" not in item
 
 
 # --- Rettungsweg ---
@@ -1158,7 +1291,7 @@ def test_three_auth_failures_take_the_rescue_path_and_reconnect_with_a_new_certi
 
 
 def test_a_blocked_device_never_shows_the_claim_code(tmp_path):
-    """Die Sperre steht nur im Speicher; device_state bleibt auf der Platte nicht_uebernommen (Spec 5c F1)."""
+    """Die Sperre steht nur im Speicher; device_state bleibt auf der Platte nicht_uebernommen."""
     world = World(tmp_path, access=False)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang),
                                        bootstrap.NotAuthenticated("r")]
@@ -1260,8 +1393,129 @@ def test_a_failing_software_callback_still_answers_and_hands_over(tmp_path, capl
     world = World(tmp_path, SoftwareFehlerHost())
     world.verbinden()
     world.empfangen("down/config", _konfiguration())
-    assert world.link.of("up/result") == [{"schema": 1, "dokument": "konfiguration", "version": 1, "ok": True}]
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
     assert len(world.host.konfigurationen) == 1
+    assert "RuntimeError" in caplog.text and "geheimer Parameter" not in caplog.text
+
+
+UPDATES = {"funktion": "aufschub", "sicherheit": "automatisch"}
+
+
+def test_the_updates_setting_of_a_configuration_reaches_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    assert world.host.updates == [UPDATES]
+
+
+def test_a_configuration_without_updates_hands_the_host_no_setting(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration())
+    assert world.host.updates == [None]
+
+
+def test_an_invalid_updates_field_keeps_the_last_setting_for_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    world.empfangen("down/config", _konfiguration(version=2, updates={"funktion": "morgen", "sicherheit": "aus"}))
+    assert world.host.updates[-1] == UPDATES
+
+
+def test_a_date_in_update_noetig_makes_the_state_critical_and_tells_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    assert world.device.update_noetig_kritisch() is False
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    assert world.device.update_noetig_kritisch() is True
+    assert world.host.kritisch_geaendert == [True]
+    world.empfangen("down/config", _konfiguration(version=2, update_noetig=1900000000))
+    assert world.host.kritisch_geaendert == [True]  # unveraendert: nichts zu melden
+
+
+def test_removing_the_date_ends_the_critical_state_and_tells_the_host(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    world.empfangen("down/config", _konfiguration(version=2, update_noetig=None))
+    assert world.device.update_noetig_kritisch() is False
+    assert world.host.kritisch_geaendert == [True, False]
+
+
+def test_update_noetig_null_without_a_date_tells_the_host_nothing(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=None))
+    assert world.device.update_noetig_kritisch() is False
+    assert world.host.kritisch_geaendert == []
+
+
+def test_the_critical_state_survives_a_restart_of_the_device(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(update_noetig=1900000000))
+    neu = World(tmp_path)
+    assert neu.device.update_noetig_kritisch() is True
+
+
+def _kritisch_ohne_update(tmp_path):
+    """Ein Geraet unter der Mindestversion 0.7.0 mit Datum: kritisch, die Konfiguration abgelehnt."""
+    world = World(tmp_path, FakeHost(version="0.6.0"))
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(mindest_software="0.7.0", update_noetig=1900000000))
+    assert world.device.update_noetig_kritisch() is True
+    return world
+
+
+def test_a_restart_with_the_required_version_and_no_new_configuration_is_no_longer_critical(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    neu = World(tmp_path, FakeHost(version="0.7.0"))  # Update eingespielt, der Server hat noch nichts erneut geschickt
+    assert neu.device.update_noetig_kritisch() is False
+    assert neu.device.zustand() != "update_noetig"
+    assert World(tmp_path, FakeHost(version="0.7.1")).device.update_noetig_kritisch() is False
+
+
+def test_a_restart_below_the_required_version_stays_critical(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    assert World(tmp_path, FakeHost(version="0.6.0")).device.update_noetig_kritisch() is True
+    assert World(tmp_path, FakeHost(version="0.6.9")).device.update_noetig_kritisch() is True
+
+
+def test_a_new_server_state_with_a_date_above_the_running_version_is_critical_again(tmp_path):
+    _kritisch_ohne_update(tmp_path)
+    neu = World(tmp_path, FakeHost(version="0.7.0"))
+    neu.verbinden()
+    neu.empfangen("down/config", _konfiguration(version=2, mindest_software="0.8.0", update_noetig=1900000001))
+    assert neu.device.update_noetig_kritisch() is True
+
+
+def test_the_updates_setting_reaches_the_host_from_a_rejected_configuration(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(hebelsatz="gibt_es_nicht", updates=UPDATES))
+    assert world.link.of("up/result")[0]["ok"] is False
+    assert world.host.updates == [UPDATES]
+
+
+def test_a_dokument_other_than_a_configuration_never_touches_the_updates_setting(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/operation", _bedienung(version=3))
+    assert world.host.updates == []
+
+
+class UpdatesFehlerHost(FakeHost):
+    def updates_soll(self, updates):
+        raise RuntimeError("geheimer Parameter")
+
+
+def test_a_failing_updates_callback_still_answers_and_hands_over(tmp_path, caplog):
+    world = World(tmp_path, UpdatesFehlerHost())
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(updates=UPDATES))
+    assert world.link.of("up/result") == [{"schema": 2, "dokument": "konfiguration", "version": 1, "ok": True}]
+    assert len(world.host.konfigurationen) == 1 and world.host.software == [None]
     assert "RuntimeError" in caplog.text and "geheimer Parameter" not in caplog.text
 
 
@@ -1287,7 +1541,7 @@ def test_a_failing_capabilities_callback_sends_hello_on_a_later_tick(tmp_path, c
 
 
 class WerfenderHost(FakeHost):
-    """Host, dessen Rueckrufe in `werfen` bei jedem Aufruf werfen (5b-D1-4, Review Focus 4); der Text ist geheim."""
+    """Host, dessen Rueckrufe in `werfen` bei jedem Aufruf werfen; der Text ist geheim."""
 
     def __init__(self, *werfen: str) -> None:
         super().__init__()
@@ -1316,9 +1570,9 @@ class WerfenderHost(FakeHost):
         self._pruefen("ursprungswerte")
         return super().ursprungswerte()
 
-    def raum(self):
+    def raum(self, kreis=1):
         self._pruefen("raum")
-        return super().raum()
+        return super().raum(kreis)
 
     def anzeigen(self, anzeige):
         self.anzeigen_versuche += 1
@@ -1423,7 +1677,37 @@ def test_a_failing_room_callback_skips_the_status_of_that_tick(tmp_path, caplog)
     _genau_eine_zeile(caplog, "raum")
     world.host.werfen.clear()
     world.device.schritt()
-    assert world.link.of("up/status")[-1]["raum"] == world.host.raum_wert
+    assert world.link.of("up/status")[-1]["kreise"] == [{"kreis": 1, "raum": world.host.raum_wert}]
+
+
+def _zwei_kreise():
+    def kreis(nummer):
+        bindung = {"treiber": {"id": "simulation", "parameter": {"heizkreis": nummer}}, "thermostat": None}
+        return konfig_form.kreis({"bindung": bindung, "raumfuehler": [f"zigbee:0x{nummer:016x}:temperature"],
+                                  "hebelsatz": "viessmann_vicare", "verteilsystem": "Heizkoerper", "abo": "aktiv"},
+                                 nummer=nummer)
+
+    return _konfiguration(kreise=[kreis(1), kreis(2)])
+
+
+def test_the_status_lists_every_circuit_of_the_configuration_with_its_own_room(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _zwei_kreise())
+    zwei = {"ist": 18.0, "soll": 20.0, "soll_quelle": "portal", "ts": "t2"}
+    world.host.raum_werte = {2: zwei}
+    world.clock.now += device.STATUS_MIN_SECONDS
+    world.device.schritt()
+    assert world.link.of("up/status")[-1]["kreise"] == [{"kreis": 1, "raum": world.host.raum_wert},
+                                                         {"kreis": 2, "raum": zwei}]
+
+
+def test_the_status_without_a_configuration_lists_circuit_one(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.clock.now += device.STATUS_MIN_SECONDS
+    world.device.schritt()
+    assert world.link.of("up/status")[-1]["kreise"] == [{"kreis": 1, "raum": world.host.raum_wert}]
 
 
 def test_failing_originals_are_sent_as_none(tmp_path, caplog):
@@ -1493,7 +1777,7 @@ def test_a_status_outside_the_contract_is_not_sent_and_the_next_valid_one_is(tmp
 
 
 def test_ein_nicht_endlicher_wert_im_status_wird_nicht_gesendet_der_takt_lebt_weiter(tmp_path, caplog):
-    """Testoffensive T2, Nr. 17: allow_nan=False des Links ist der letzte Riegel; Device._publish faengt den ValueError
+    """allow_nan=False des Links ist der letzte Riegel; Device._publish faengt den ValueError
     (Text ohne Werte), sendet nichts und der naechste gueltige Status geht hinaus."""
     world = World(tmp_path)
     world.verbinden()
@@ -1509,13 +1793,13 @@ def test_ein_nicht_endlicher_wert_im_status_wird_nicht_gesendet_der_takt_lebt_we
     world.clock.now += 60
     world.host.raum_wert = {"ist": None, "soll": 22.0, "soll_quelle": "portal", "ts": "t2"}
     world.device.schritt()
-    assert world.link.of("up/status")[-1]["raum"]["ist"] is None and len(world.link.of("up/status")) == anzahl + 1
+    assert world.link.of("up/status")[-1]["kreise"][0]["raum"]["ist"] is None and len(world.link.of("up/status")) == anzahl + 1
 
 
 def test_an_own_message_outside_the_contract_keys_is_logged_not_raised(tmp_path, caplog):
     world = World(tmp_path)
     world.verbinden()
-    world.device._inbox.put(("eigene", "frei_erfunden", "Text"))
+    world.device._inbox.put(("eigene", "frei_erfunden", meldungen.neu("meldung.notbetrieb")))
     world.device.schritt()
     assert "Vertragsfehler" in caplog.text and world.link.of("up/notifications") == []
 
@@ -1527,18 +1811,69 @@ def test_setpoints_reach_the_runtime_and_snapshots_the_link(tmp_path):
     worker, seen = RegulationWorker(clock=world.clock), []
     worker.register(EV_SETPOINTS, seen.append)
     worker.register(EV_MQTT_CONNECTED, lambda event: None)
-    channel = world.device.laufzeit_kanal(worker)
+    channel = world.device.laufzeit_kanal(worker, 1)
     world.verbinden()
-    world.empfangen("down/setpoints", {"seq": "s1"})
+    world.empfangen("down/setpoints", {"kreis": 1, "seq": "s1"})
     worker.run_pending()
-    assert [event.data["payload"] for event in seen] == [{"seq": "s1"}]
+    assert [event.data["payload"] for event in seen] == [{"kreis": 1, "seq": "s1"}]
     channel.publish_snapshot({"room_target": 21.0})
     assert world.link.of("up/snapshot") == [{"room_target": 21.0}]
 
 
+def _kreis_worker(world):
+    worker, seen = RegulationWorker(clock=world.clock), []
+    worker.register(EV_SETPOINTS, seen.append)
+    worker.register(EV_MQTT_CONNECTED, lambda event: None)
+    return worker, seen
+
+
+def test_setpoints_go_only_to_the_worker_of_their_kreis(tmp_path):
+    world = World(tmp_path)
+    (worker1, seen1), (worker2, seen2) = _kreis_worker(world), _kreis_worker(world)
+    world.device.laufzeit_kanal(worker1, 1)
+    world.device.laufzeit_kanal(worker2, 2)
+    world.verbinden()
+    world.empfangen("down/setpoints", {"kreis": 2, "seq": "s2"})
+    world.empfangen("down/setpoints", {"kreis": 1, "seq": "s1"})
+    worker1.run_pending()
+    worker2.run_pending()
+    assert [e.data["payload"]["seq"] for e in seen1] == ["s1"]
+    assert [e.data["payload"]["seq"] for e in seen2] == ["s2"]
+
+
+@pytest.mark.parametrize("kreis", [None, True, "1", 1.0, 0, 3])
+def test_setpoints_without_a_usable_or_known_kreis_reach_nobody(tmp_path, kreis):
+    world = World(tmp_path)
+    (worker1, seen1), (worker2, seen2) = _kreis_worker(world), _kreis_worker(world)
+    world.device.laufzeit_kanal(worker1, 1)
+    world.device.laufzeit_kanal(worker2, 2)
+    world.verbinden()
+    world.empfangen("down/setpoints", {"kreis": kreis, "seq": "x"})
+    world.empfangen("down/setpoints", {"seq": "ohne"})
+    worker1.run_pending()
+    worker2.run_pending()
+    assert seen1 == [] and seen2 == []
+
+
+def test_both_kreis_channels_share_the_one_link_and_both_hear_the_connection(tmp_path):
+    world = World(tmp_path)
+    verbunden, kanaele = [], []
+    for kreis in (1, 2):
+        worker = RegulationWorker(clock=world.clock)
+        worker.register(EV_MQTT_CONNECTED, lambda event, kreis=kreis: verbunden.append(kreis))
+        kanaele.append((world.device.laufzeit_kanal(worker, kreis), worker))
+    world.verbinden()
+    for _, worker in kanaele:
+        worker.run_pending()
+    assert sorted(verbunden) == [1, 2]
+    for kreis, (kanal, _) in zip((1, 2), kanaele, strict=True):
+        kanal.publish_snapshot({"kreis": kreis})
+    assert [p["kreis"] for p in world.link.of("up/snapshot")] == [1, 2]
+
+
 def test_runtime_messages_wait_for_hello(tmp_path):
     world = World(tmp_path)
-    channel = world.device.laufzeit_kanal(RegulationWorker(clock=world.clock))
+    channel = world.device.laufzeit_kanal(RegulationWorker(clock=world.clock), 1)
     world.device.schritt()
     world.link.connected = True  # verbunden, aber das Ereignis (und damit hello) steht noch aus
     channel.publish_snapshot({"room_target": 21.0})
@@ -1581,7 +1916,7 @@ def test_no_connection_for_five_minutes_shows_no_connection(tmp_path):
 
 
 def test_the_device_counts_no_connection_only_after_more_than_300_seconds(tmp_path):
-    """ck F-client-kern-46: Grenze als Literal (Spec: laenger als 300 s), genau auf der Grenze und eins daneben."""
+    """Grenze als Literal (laenger als 300 s), genau auf der Grenze und eins daneben."""
     world = World(tmp_path)
     world.device.schritt()
     world.clock.now += 300
@@ -1603,7 +1938,7 @@ class WartendeInbox(queue.Queue):
 
 
 def test_a_stop_while_waiting_for_the_inbox_runs_no_further_tick(tmp_path, monkeypatch):
-    """5b-D2-4: stop() waehrend run auf die Inbox wartet; das naechste Ereignis weckt den Thread, aber es folgt kein
+    """stop() waehrend run auf die Inbox wartet; das naechste Ereignis weckt den Thread, aber es folgt kein
     Takt mehr (er koennte nach dem DISCONNECT einen neuen Link oeffnen), und run endet."""
     monkeypatch.setattr(device, "TICK_SECONDS", 30.0)  # kein Takt durch Zeitablauf, solange der Test laeuft
     world = World(tmp_path)
@@ -1658,10 +1993,10 @@ def test_nach_dem_wegfall_der_ursache_wird_ein_erneuter_fehler_wieder_geloggt(tm
     assert caplog.text.count("up/status nicht gesendet") == 2
 
 
-# --- Mutationsprobe T4' (Task 12): Grenzen und Zustaende des Takts ---
+# --- Mutationsprobe T4': Grenzen und Zustaende des Takts ---
 
 def test_the_device_thread_waits_one_second_per_tick_and_is_a_daemon(tmp_path):
-    """Der Takt wartet hoechstens 1 s auf ein Ereignis (Literal aus der Spec, nicht TICK_SECONDS); der Geraete-Thread
+    """Der Takt wartet hoechstens 1 s auf ein Ereignis (Literal, nicht TICK_SECONDS); der Geraete-Thread
     haelt das Prozessende nicht auf."""
     world = World(tmp_path)
     timeouts = []
@@ -1710,12 +2045,38 @@ def test_at_most_fifty_notifications_go_in_one_message(tmp_path):
     world = World(tmp_path)
     world.verbinden()
     for i in range(51):
-        world.device.meldung(f"raumfuehler:0x{i:02x}", "Fühler weg", offen=True, kritisch=False)
+        world.device.meldung(f"raumfuehler:0x{i:02x}", meldungen.neu("meldung.raumfuehler_ok", fuehler="Bad"), offen=True)
     world.device.schritt()
     assert [len(batch["items"]) for batch in world.link.of("up/notifications")] == [50]
     world.clock.now += 10
     world.device.schritt()
     assert [len(batch["items"]) for batch in world.link.of("up/notifications")] == [50, 1]
+
+
+def test_no_entity_id_room_name_or_free_text_reaches_the_wire_in_a_notification(tmp_path):
+    """Schluessel, Fuehler, Bezeichnung, Rollen und Detail tragen Entity-IDs und Raumnamen: auf dem Draht (Text, Key,
+    Parameter) steht davon nichts, nur Code, Zahlen und Codeformen."""
+    world = World(tmp_path)
+    world.verbinden()
+    namen = ("sensor.wohnzimmer_temp", "Wohnzimmer", "climate.vaillant_zuhause", "number.zuhause_circuit_0_x")
+    world.device.meldung(f"raumfuehler:{namen[0]}", meldungen.neu("meldung.raumfuehler_keiner", fuehler=namen[1]),
+                         offen=True)
+    world.device.meldung(f"kreis-2:batterie:{namen[0]}",
+                         meldungen.neu("meldung.batterie_schwach_prozent", bezeichnung=namen[1], prozent=12), offen=True)
+    world.device.meldung("datenfehler", meldungen.neu("meldung.datenfehler_lokal", rollen=f"ist ({namen[2]})"),
+                         offen=True)
+    world.device.meldung("schreiben", meldungen.neu("meldung.datenfehler_schreiben", detail=namen[3]), offen=True)
+    world.device.meldung("konfiguration", meldungen.neu("meldung.konfiguration_fehler", grund=f"{namen[1]} {namen[2]}"),
+                         offen=True)
+    world.device.schritt()
+    items = world.link.of("up/notifications")[-1]["items"]
+    assert len(items) == 5
+    gesendet = json.dumps(world.link.of("up/notifications"))
+    for name in namen:
+        assert name not in gesendet
+    assert all(set(item) <= {*wire.NOTIFICATION_FIELDS, *wire.NOTIFICATION_OPTIONAL} for item in items)
+    assert [item.get("kreis") for item in items] == [None, 2, None, None, None]
+    assert items[4]["params"] == {"grund": "unbekannt"}
 
 
 def test_an_own_notification_of_the_device_is_not_critical(tmp_path):
@@ -1724,7 +2085,7 @@ def test_an_own_notification_of_the_device_is_not_critical(tmp_path):
     world.device.soll_quelle_aus(True, 21.0)
     world.device.schritt()
     (item,) = world.link.of("up/notifications")[-1]["items"]
-    assert (item["key"], item["kritisch"], item["offen"]) == ("soll_quelle_aus", False, True)
+    assert (item["key"], item["stufe"], item["offen"]) == ("soll_quelle_aus", "orange", True)
 
 
 @pytest.mark.parametrize(("ursprung", "erwartet"), [
@@ -1790,6 +2151,37 @@ def test_after_a_reconnect_the_status_follows_hello_at_once(tmp_path):
     assert world.link.topics()[-2:] == ["up/hello", "up/status"]
 
 
+def test_status_nach_hello_kommt_nach_gescheitertem_rueckruf(tmp_path):
+    """Scheitert ein Rueckruf beim erzwungenen Status nach hello, geht der Status im naechsten Takt
+    hinaus, auch ohne inhaltliche Aenderung und binnen 10 s nach dem letzten (sonst saehe der Server ihn nicht)."""
+    world = World(tmp_path, WerfenderHost())
+    world.verbinden()
+    assert len(world.link.of("up/status")) == 1
+    world.link.trennen()
+    world.host.werfen.add("runtime_status")
+    world.link.verbinden()
+    world.device.schritt()  # hello geht hinaus, der erzwungene Status scheitert
+    assert world.link.topics()[-1] == "up/hello"
+    world.host.werfen.clear()
+    world.clock.now += 1
+    world.device.schritt()
+    assert world.link.topics()[-2:] == ["up/hello", "up/status"]
+    world.clock.now += 1
+    world.device.schritt()  # der Merker ist nach dem gesendeten Status zurueck: unveraendert gibt es keinen weiteren
+    assert world.link.topics()[-2:] == ["up/hello", "up/status"]
+
+
+def test_ein_dauerhaft_werfendes_raum_laesst_den_status_nach_hello_aus(tmp_path):
+    """V2: kein erfundener Raum; der Merker bleibt, bis ein Status wirklich gesendet ist."""
+    world = World(tmp_path, WerfenderHost("raum"))
+    world.verbinden()
+    _fuenf_takte(world)
+    assert world.link.of("up/status") == []
+    world.host.werfen.clear()
+    world.device.schritt()
+    assert len(world.link.of("up/status")) == 1
+
+
 def test_after_the_rescue_the_new_link_sends_nothing_before_hello_and_no_second_certificate(tmp_path):
     world = World(tmp_path)
     world.verbinden()
@@ -1830,7 +2222,7 @@ def test_a_blocked_device_sends_nothing_on_the_next_link_before_hello(tmp_path):
 
 def test_the_runtime_channel_counts_no_failures_without_a_link(tmp_path):
     world = World(tmp_path)
-    channel = world.device.laufzeit_kanal(RegulationWorker(clock=world.clock))
+    channel = world.device.laufzeit_kanal(RegulationWorker(clock=world.clock), 1)
     assert channel.connect_failures == 0
     world.device.schritt()
     world.link.connect_failures = 3
@@ -1857,7 +2249,7 @@ def test_a_message_of_exactly_120_kib_is_read_one_byte_more_is_dropped(tmp_path,
 def test_setpoints_without_a_runtime_channel_are_ignored_without_an_error(tmp_path, caplog):
     world = World(tmp_path)
     world.verbinden()
-    world.empfangen("down/setpoints", {"seq": "s1"})
+    world.empfangen("down/setpoints", {"kreis": 1, "seq": "s1"})
     assert _fehlerzeilen(caplog) == []
 
 
@@ -1936,7 +2328,7 @@ def test_a_blocked_device_does_not_recheck_a_held_configuration(tmp_path):
     assert world.device.documents.version("konfiguration") == 0
 
 
-# --- Aufgaben des Hosts im Geraete-Thread (L4-06 Variante C) ---
+# --- Aufgaben des Hosts im Geraete-Thread ---
 
 def test_eine_aufgabe_laeuft_erst_im_geraete_thread_und_ein_fehler_haelt_ihn_nicht_auf(tmp_path, caplog):
     world = World(tmp_path)
@@ -1953,3 +2345,34 @@ def test_eine_aufgabe_laeuft_erst_im_geraete_thread_und_ein_fehler_haelt_ihn_nic
     assert gelaufen == [threading.current_thread()]  # schritt() ist hier der Geraete-Thread
     fehler = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert len(fehler) == 1 and "Fehler im Geraete-Thread (PermissionError)" in fehler[0] and "geheim" not in fehler[0]
+
+
+# --- Kreise in den Nachrichten ---
+
+def test_the_status_carries_the_room_per_circuit_and_the_hello_the_ways(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    (status,) = world.link.of("up/status")
+    assert status["kreise"] == [{"kreis": 1, "raum": world.host.raum_wert}] and "raum" not in status
+    assert world.link.of("up/hello")[0]["wege"] == world.host.wege()
+
+
+def test_a_wish_for_a_circuit_carries_its_number(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/operation", _bedienung(version=3))
+    assert world.device.wunsch(22.0, herkunft="thermostat", durch="nutzer") == 22.0
+    assert world.device.wunsch(23.0, herkunft="ha", durch="nutzer", kreis=2) == 23.0
+    world.device.schritt()
+    assert [(w["kreis"], w["werte"]) for w in world.link.of("up/wish")] == [
+        (1, {"raum_soll": 22.0}), (2, {"raum_soll": 23.0})]
+
+
+@pytest.mark.parametrize("kreis", [0, -1, True, 1.0, "1", None])
+def test_a_wish_for_a_wrong_circuit_never_reaches_the_inbox(tmp_path, kreis):
+    world = World(tmp_path)
+    world.verbinden()
+    with pytest.raises(ValueError):
+        world.device.wunsch(22.0, herkunft="thermostat", kreis=kreis)
+    world.device.schritt()
+    assert world.link.of("up/wish") == [] and world.device.wunsch_puffer.wunsch(1) is None

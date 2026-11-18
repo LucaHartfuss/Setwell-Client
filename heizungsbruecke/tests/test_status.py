@@ -1,4 +1,4 @@
-"""Status-Kanal des Add-ons (Spec TP7 1.1, 3.1)."""
+"""Status-Kanal des Add-ons."""
 import json
 import logging
 from datetime import UTC, datetime
@@ -29,16 +29,14 @@ def test_runtime_schema_and_heartbeat():
 
 
 @pytest.mark.parametrize("flags,state,expected", [
-    (Flags(abgemeldet=True, konfigurationsfehler=True, zugang_abgelehnt=True, abo_beendet=True, gestartet=True),
+    (Flags(abgemeldet=True, konfigurationsfehler=True, abo_beendet=True, gestartet=True),
      BridgeState(delivery=DeliveryState(notbetrieb=True)), "abgemeldet"),
-    (Flags(konfigurationsfehler=True, zugang_abgelehnt=True, abo_beendet=True), BridgeState(), "konfigurationsfehler"),
-    (Flags(zugang_abgelehnt=True, abo_beendet=True), BridgeState(), "zugang_abgelehnt"),
-    (Flags(zugang_abgelehnt=True, gestartet=True), BridgeState(abo_inactive_since=SINCE), "abo_inaktiv"),
+    (Flags(konfigurationsfehler=True, abo_beendet=True), BridgeState(), "konfigurationsfehler"),
     (Flags(abo_beendet=True), BridgeState(), "abo_beendet"),
     (Flags(), BridgeState(abo_finished=True, abo_inactive_since=SINCE), "abo_beendet"),
     (Flags(), BridgeState(abo_inactive_since=SINCE, delivery=DeliveryState(notbetrieb=True)), "abo_inaktiv"),
     # Notbetrieb/Datenfehler vor dem ersten MQTT-Connect (Tunnel nie aufgebaut): sichtbar statt
-    # "startet" (TP7-Gates 2026-09-29).
+    # "startet".
     (Flags(), BridgeState(delivery=DeliveryState(notbetrieb=True, pending=PendingTick(seq="s", trigger="daily"))),
      "notbetrieb"),
     (Flags(), BridgeState(delivery=DeliveryState(datenfehler=DataFault("local", ("dat",)))), "datenfehler"),
@@ -54,7 +52,7 @@ def test_overall_status_takes_the_first_matching_state(flags, state, expected):
 
 
 def test_veralteter_notbetrieb_vor_dem_start_ist_startet():
-    """L4-09: Notbetrieb ohne offenen Tick stammt aus dem Abo-inaktiv-Modus (abo.enter_inactive) und ist beim Start
+    """Notbetrieb ohne offenen Tick stammt aus dem Abo-inaktiv-Modus (abo.enter_inactive) und ist beim Start
     veraltet; bis zum ersten abgeschlossenen Start zeigt der Status `startet` statt eines kurzen `notbetrieb`. Ein
     echter Notbetrieb hat einen offenen Tick und bleibt vor dem Start sichtbar; nach dem Start gilt der Notbetrieb
     immer."""
@@ -87,7 +85,7 @@ def test_event_carries_every_field():
         "status": "regelt", "grund": None, "notbetrieb": False, "datenfehler": None, "boost": "notfall",
         "letzte_serverantwort": "2026-10-01T12:00:05+02:00", "hebelsatz": "vaillant_vrc720",
         "hebel": {"curve": 0.9, "room_setpoint": 22.0, "heat_limit": None, "min_flow": None}, "gelernt": None,
-        "abo": "aktiv", "abo_frist_ende": None,
+        "abo": "aktiv", "abo_frist_ende": None, "zustand": "regelt", "kaelteschutz": "aus",
         "hinweise": {
             "raumfuehler_ausgefallen": ["sensor.a", "sensor.b"], "batterie_niedrig": ["sensor.x"],
             "manueller_eingriff": {
@@ -116,15 +114,59 @@ def test_ein_wert_innerhalb_des_vertrags_bleibt_unveraendert(caplog):  # Gegenpr
     assert (event["status"], event["boost"], event["abo"]) == ("regelt", "notfall", "aktiv") and not caplog.text
 
 
+@pytest.mark.parametrize("flags,state,kreis,erwartet", [
+    (Flags(gestartet=True), BridgeState(), "in_betrieb", "regelt"),
+    (Flags(gestartet=True), BridgeState(), "testphase_ohne", "testphase"),
+    (Flags(gestartet=True), BridgeState(), "ausser_betrieb", "ausser_betrieb"),
+    (Flags(gestartet=True), BridgeState(abo_inactive_since=SINCE), "in_betrieb", "abo_inaktiv"),
+    (Flags(gestartet=True, abo_beendet=True), BridgeState(), "in_betrieb", "abo_beendet"),
+    (Flags(gestartet=True), BridgeState(abo_finished=True), "in_betrieb", "abo_beendet"),
+    # Vorrang: ausser_betrieb > abo_beendet > abo_inaktiv > testphase > regelt
+    (Flags(gestartet=True), BridgeState(abo_inactive_since=SINCE), "testphase_ohne", "abo_inaktiv"),
+    (Flags(gestartet=True, abo_beendet=True), BridgeState(abo_inactive_since=SINCE), "testphase_ohne", "abo_beendet"),
+    (Flags(gestartet=True, abo_beendet=True), BridgeState(abo_inactive_since=SINCE), "ausser_betrieb", "ausser_betrieb"),
+    (Flags(gestartet=True), BridgeState(abo_inactive_since=SINCE), "ausser_betrieb", "ausser_betrieb"),
+])
+def test_zustand_des_kreises_nach_vorrang(flags, state, kreis, erwartet):
+    event = build_event("client1", flags, state, VAILLANT, ADDON_VERSION, kreiszustand=kreis)
+    assert event["zustand"] == erwartet and event["zustand"] in status.KREIS_ZUSTAND_VALUES
+
+
+def test_ohne_angabe_gilt_der_kreis_als_in_betrieb():
+    event = build_event("client1", Flags(gestartet=True), BridgeState(), VAILLANT, ADDON_VERSION)
+    assert event["zustand"] == "regelt"
+
+
+@pytest.mark.parametrize("art,erwartet", [(None, "aus"), ("soll", "soll"), ("frost", "frost")])
+def test_kaelteschutz_des_kreises_aus_dem_zustand(art, erwartet):
+    event = build_event("client1", Flags(gestartet=True), BridgeState(kaelteschutz_art=art), VAILLANT, ADDON_VERSION)
+    assert event["kaelteschutz"] == erwartet and event["kaelteschutz"] in status.KAELTESCHUTZ_VALUES
+
+
+def test_kaelteschutz_eines_kreises_ausser_betrieb_wird_gemeldet_wie_der_zustand_ihn_fuehrt():
+    event = build_event("client1", Flags(gestartet=True), BridgeState(kaelteschutz_art="frost"), VAILLANT,
+                        ADDON_VERSION, kreiszustand="ausser_betrieb")
+    assert (event["zustand"], event["kaelteschutz"]) == ("ausser_betrieb", "frost")
+
+
+@pytest.mark.parametrize("helfer, feld, ersatz", [("_kreis_zustand", "zustand", "regelt"),
+                                                  ("_kaelteschutz", "kaelteschutz", "aus")])
+def test_zustand_und_kaelteschutz_ausserhalb_des_vertrags_werden_ersetzt_und_geloggt(monkeypatch, caplog, helfer, feld,
+                                                                                    ersatz):
+    monkeypatch.setattr(status, helfer, lambda *a, **k: "irgendwas")  # Fehlerinjektion, Zusicherung auf build_event
+    event = build_event("client1", Flags(gestartet=True), BridgeState(), VAILLANT, ADDON_VERSION)
+    assert event[feld] == ersatz and feld in caplog.text and "irgendwas" not in caplog.text
+
+
 def test_die_hinweise_haben_genau_die_felder_des_vertrags():
     event = build_event("client1", Flags(gestartet=True), BridgeState(), VAILLANT, ADDON_VERSION)
     assert set(event["hinweise"]) == {"raumfuehler_ausgefallen", "batterie_niedrig", "manueller_eingriff"}
 
 
-def test_event_carries_levers_of_the_lever_set_and_derived_min_flow(make_store):
+def test_event_carries_levers_of_the_lever_set_incl_min_flow(make_store):
     store = make_store()
-    store.update(restore_point={"curve": 1.05, "room_setpoint": 21.0, "heat_limit": 16.0},
-                 learned={"curve": 1.05, "heat_limit": 16.2}, min_flow_current=20.5)
+    store.update(restore_point={"curve": 1.05, "room_setpoint": 21.0, "heat_limit": 16.0, "min_flow": 20.5},
+                 learned={"curve": 1.05, "heat_limit": 16.2})
     event = build_event("t1", Flags(), store.state, VAILLANT, ADDON_VERSION)
     assert event["hebelsatz"] == "vaillant_vrc720"
     assert event["hebel"] == {"curve": 1.05, "room_setpoint": 21.0, "heat_limit": 16.0, "min_flow": 20.5}
@@ -145,10 +187,10 @@ def test_event_without_learned_values_reports_none(make_store):
 @pytest.mark.parametrize("wert", [float("nan"), float("inf"), float("-inf"), 10**400],
                          ids=["nan", "inf", "-inf", "riesig"])
 def test_nicht_endliche_laufzeitwerte_stehen_nie_im_status(make_store, wert):
-    """Testoffensive T2, Nr. 17 (Review Focus 2): ein NaN-Hebel legt den Status nicht lahm; das Feld wird None."""
+    """Ein NaN-Hebel legt den Status nicht lahm; das Feld wird None."""
     store = make_store()
-    store.update(restore_point={"curve": wert, "room_setpoint": 21.0, "heat_limit": 16.0},
-                 learned={"curve": wert, "heat_limit": 16.2}, min_flow_current=wert,
+    store.update(restore_point={"curve": wert, "room_setpoint": 21.0, "heat_limit": 16.0, "min_flow": wert},
+                 learned={"curve": wert, "heat_limit": 16.2},
                  manual_override={"levers": {"curve": wert, "room_setpoint": 22.0},
                                   "erkannt": "2026-10-03T11:00:00+02:00"})
     event = build_event("t1", Flags(), store.state, VAILLANT, ADDON_VERSION)
@@ -186,11 +228,29 @@ def test_abo_inactive_carries_the_end_of_the_grace_period():
     assert (event["abo"], event["abo_frist_ende"]) == ("inaktiv", "2026-10-31")
 
 
+START = status.laufzeitgrund("start_fehlgeschlagen")
+SCHEITERT = status.laufzeitgrund("zuruecksetzen_scheitert", sekunden=30)
+WIEDERHERSTELLUNG = status.laufzeitgrund("wiederherstellung_scheitert")
+
+
+def test_laufzeitgrund_ist_ein_code_mit_parametern_und_nur_aus_der_liste():
+    assert SCHEITERT == {"code": "status.grund_zuruecksetzen_scheitert", "params": {"sekunden": 30}}
+    assert START == {"code": "status.grund_start_fehlgeschlagen", "params": {}}
+    assert status.GRUENDE == ("start_fehlgeschlagen", "zustand_nicht_migriert", "andere_anlage",
+                              "konfiguration_ungueltig", "zuruecksetzen_scheitert", "wiederherstellung_scheitert")
+    with pytest.raises(ValueError):
+        status.laufzeitgrund("frei erfunden")
+    with pytest.raises(ValueError):
+        status.laufzeitgrund("start_fehlgeschlagen", sekunden=1)
+    with pytest.raises(ValueError):
+        status.laufzeitgrund("zuruecksetzen_scheitert")
+
+
 @pytest.mark.parametrize("flags,state,expected", [
-    (Flags(konfigurationsfehler=True, grund="Entity fehlt"), BridgeState(), "Entity fehlt"),
-    (Flags(abgemeldet=True, grund="scheitert"), BridgeState(), "scheitert"),
-    (Flags(gestartet=True, grund="alt"), BridgeState(), None),
-    (Flags(abo_beendet=True, grund="Zuruecksetzen scheitert"), BridgeState(), "Zuruecksetzen scheitert"),
+    (Flags(konfigurationsfehler=True, grund=START), BridgeState(), START),
+    (Flags(abgemeldet=True, grund=SCHEITERT), BridgeState(), SCHEITERT),
+    (Flags(gestartet=True, grund=START), BridgeState(), None),
+    (Flags(abo_beendet=True, grund=WIEDERHERSTELLUNG), BridgeState(), WIEDERHERSTELLUNG),
 ])
 def test_reason_is_only_sent_with_a_state_that_has_one(flags, state, expected):
     assert build_event("t", flags, state, VAILLANT, ADDON_VERSION)["grund"] == expected
@@ -224,6 +284,25 @@ def test_reporter_sees_changes_in_the_store(make_store):
     assert ha_api.fire_event.call_args.args[1]["boost"] == "komfort"
 
 
+def test_ein_zustandswechsel_des_kreises_loest_ohne_neustart_ein_ereignis_aus(make_store):
+    ha_api = MagicMock(spec=HomeAssistantApi)
+    zustand = ["in_betrieb"]
+    reporter = StatusReporter(HaEventSink(ha_api), "client1", make_store(), VAILLANT, ADDON_VERSION,
+                              zustand_source=lambda: zustand[0])
+    reporter.update(gestartet=True)
+    assert (ha_api.fire_event.call_count, ha_api.fire_event.call_args.args[1]["zustand"]) == (1, "regelt")
+    reporter.publish_if_changed()
+    assert ha_api.fire_event.call_count == 1
+
+    zustand[0] = "testphase_ohne"
+    reporter.publish_if_changed()
+    assert (ha_api.fire_event.call_count, ha_api.fire_event.call_args.args[1]["zustand"]) == (2, "testphase")
+
+    zustand[0] = "ausser_betrieb"
+    reporter.publish_if_changed()
+    assert (ha_api.fire_event.call_count, ha_api.fire_event.call_args.args[1]["zustand"]) == (3, "ausser_betrieb")
+
+
 def test_failed_send_is_logged_and_repeated_on_the_next_check(make_store, caplog):
     ha_api = MagicMock(spec=HomeAssistantApi)
     ha_api.fire_event.side_effect = [RuntimeError("HA weg"), None]
@@ -235,10 +314,6 @@ def test_failed_send_is_logged_and_repeated_on_the_next_check(make_store, caplog
 
     assert "konnte nicht gesendet werden" in caplog.text
     assert ha_api.fire_event.call_count == 2
-
-
-def test_the_status_event_has_no_setup_id():
-    assert "setup_id" not in status.EVENT_FIELDS
 
 
 def test_unwritable_disk_is_a_local_data_fault_ranked_after_notbetrieb():
@@ -254,8 +329,3 @@ def test_a_delivery_fault_wins_over_the_disk_in_the_event():
     state = BridgeState(delivery=DeliveryState(datenfehler=DataFault("server", ("x",))))
     event = build_event("t", Flags(gestartet=True), state, VAILLANT, ADDON_VERSION, storage_failed=True)
     assert event["datenfehler"] == {"art": "server", "rollen": []}
-
-
-def test_hinweise_no_longer_carry_waerme_fehlt():
-    event = build_event("t", Flags(gestartet=True), BridgeState(), VAILLANT, ADDON_VERSION)
-    assert "waerme_fehlt" not in event["hinweise"]

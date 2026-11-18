@@ -1,9 +1,9 @@
-"""Testoffensive T4' Task 8 (Spec §5 "Kompromittierter Server"): Angriffsszenarien ueber die ganze Kette. Ein Server, der
+"""Kompromittierter Server: Angriffsszenarien ueber die ganze Kette. Ein Server, der
 sehr viele Befehle oder lauter kaputte Dokumente und Antworten sendet, waehrend die Laufzeit regelt, bringt weder den
 Geraete-Thread noch den Regel-Worker zum Stehen und keinen Wert ausserhalb der lokalen Grenzen auf die Anlage (Regel 4).
 
 Aufbau wie produktiv, nur ohne Netz und ohne Threads: der echte Geraetekern (`smartheat_device.device.Device` mit dem
-Fake-Link aus test_device_device.py), der echte HA-Host (`HaDeviceHost`, `__main__.verdrahten` und `__main__.start`)
+Fake-Link aus device_helpers.py), der echte HA-Host (`HaDeviceHost`, `__main__.verdrahten` und `__main__.start`)
 und die echte Laufzeit (`HaHost`, Regel-Worker, Pipeline) auf Fake-HA und Fake-Uhr. Ein Durchlauf ist eine Runde:
 Nachrichten in die Inbox des Geraets, `Device.schritt()` (Geraete-Thread: Nachrichten und ein Takt), `run_pending()`
 (Regel-Worker), dann die Uhr vor. Die Anlage startet wie nach einem Neustart des Add-ons mit gespeicherten Dokumenten
@@ -22,12 +22,10 @@ import random
 from collections import Counter
 
 import pytest
-from geraet_helpers import konfiguration_aus_optionen
-from test_device_device import World
-from test_main_geraet import FakeSupervisor, geraet_env  # noqa: F401 - geraet_env ist eine Fixture
-from test_property_geraet import NICHT_NUMERISCH, SAETZE
+from device_helpers import World
+from geraet_helpers import FakeSupervisor, konfiguration_aus_optionen
+from runtime_helpers import NICHT_NUMERISCH, OPTIONS, SAETZE, _set_room_target, _trigger
 from test_regel4_werte import HK, TABELLE
-from test_runtime import OPTIONS, _set_room_target, _trigger, env  # noqa: F401 - env: Fixture
 
 import heizungsbruecke.__main__ as main_module
 from smartheat_core import dateien
@@ -37,7 +35,14 @@ from smartheat_device.documents import DocumentStore
 HEBELSATZ = "vaillant_vrc720"
 BEREICHE = TABELLE[(HEBELSATZ, HK)][0]  # lokale Grenzen je Hebel, Literal aus test_regel4_werte.py
 ENTITIES = SAETZE[HEBELSATZ][2]  # Entity -> Hebel
-HINWEIS_STUFE = "info"
+#: Hinweise ohne Parameter (rot): die Schluessel, deren Nutzlast die Flut gueltig bauen kann
+FLUT_SCHLUESSEL = ("geraet_doppelt", "update_noetig", "gesperrt")
+
+
+def _hinweis(key, **aendern):
+    params = {"ende": "2026-12-01"} if key == "update_noetig" else {}  # nur diese Meldung traegt ein Datum
+    return {"key": key, "code": f"meldung.{key}", "params": params, "stufe": "rot", **aendern}
+
 
 
 @pytest.fixture(autouse=True)
@@ -52,12 +57,12 @@ def _ohne_fsync(monkeypatch):
 class Anlage:
     """Geraetekern, HA-Host und Laufzeit verdrahtet wie in __main__, auf Fake-HA und gemeinsamer Fake-Uhr."""
 
-    def __init__(self, env, tmp_path) -> None:  # noqa: F811 - env: die Umgebung der Fixture
+    def __init__(self, env, tmp_path) -> None:
         self.env = env
         supervisor = FakeSupervisor()
         for entity in ("number.curve_current", "number.shift_current", "number.min_flow", "number.heat_limit"):
             env.ha.registry.append({"entity_id": entity, "platform": "mypyllant", "config_entry_id": "e1"})
-        # lokale Positivliste (A6-02): die Sensoren der Bindung tragen ihre Klasse im Zustand, wie im echten HA
+        # lokale Positivliste: die Sensoren der Bindung tragen ihre Klasse im Zustand, wie im echten HA
         for entity in ("sensor.room_actual", "sensor.room_target", "sensor.outdoor_temp", "sensor.flow_temperature",
                        "sensor.flow_setpoint"):
             env.ha.states[f"{entity}::device_class"] = "temperature"
@@ -67,15 +72,15 @@ class Anlage:
         # Einrichtung: der erste Prozess nimmt Konfiguration und Bedienung an (der Host fordert dafuer einen Neustart an)
         einrichtung = World(daten, main_module.HaDeviceHost(env.ha, supervisor, clock=env.clock))
         einrichtung.verbinden()
-        einrichtung.empfangen("down/config", {"schema": 1, "version": 1, **self.konfiguration})
-        einrichtung.empfangen("down/operation", {"schema": 1, "version": 1, "modus": "manuell", "raum_soll": 21.0,
-                                                 "quelle": "portal", "ts": "2027-01-15T07:00:00+00:00"})
+        einrichtung.empfangen("down/config", {"schema": 2, "version": 1, **self.konfiguration})
+        einrichtung.empfangen("down/operation", _bedienung(1))
         assert einrichtung.device.documents.eingerichtet()
         # Betrieb: neuer Prozess auf denselben Dateien
         self.geraet = main_module.HaDeviceHost(env.ha, supervisor, clock=env.clock)
         self.world = World(daten, self.geraet)
         status = main_module.verdrahten(self.geraet, self.world.device, env.ha, supervisor)
-        self.bridge, _ = main_module.start(self.geraet, self.world.device, env.ha, status, clock=env.clock)
+        laufzeit, _ = main_module.start(self.geraet, self.world.device, env.ha, status, clock=env.clock)
+        self.bridge = laufzeit.kreise()[1]  # die Laufzeit des einen Kreises
         self.bridge.worker.run_pending()
         self.world.verbinden()
         env.trigger_clients[-1].kwargs["on_connected"]()
@@ -108,9 +113,9 @@ class Anlage:
 
     def antwort(self, **hebel) -> None:
         """Gueltige Serverantwort auf den letzten Tick."""
-        werte = {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0, **hebel}
-        self.senden("down/setpoints", {"schema": 4, "seq": self.snapshots()[-1]["seq"], "ts": "x", "status": "ok",
-                                       "reason": None, "levers": werte, "learned": None})
+        werte = {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0, "min_flow": 20.5, **hebel}
+        self.senden("down/setpoints", {"schema": 5, "kreis": 1, "seq": self.snapshots()[-1]["seq"], "ts": "x", "status": "ok",
+                                       "code": None, "params": None, "levers": werte, "learned": None})
 
     def stand(self) -> dict:
         state = self.bridge.store.state
@@ -141,7 +146,7 @@ JE_RUNDE = FLUT_ANZAHL // RUNDEN
 
 
 def _befehl(command_id, kind, payload, **extra):
-    return {"schema": 1, "command_id": command_id, "kind": kind, "payload": payload,
+    return {"schema": 2, "command_id": command_id, "kind": kind, "payload": payload,
             "expires_at": "2027-01-15T09:00:00+00:00", **extra}
 
 
@@ -150,35 +155,33 @@ def _flut() -> tuple[list[dict], list[str]]:
     zufall = random.Random(20261018)
     einzeln: list[dict] = []
     for nr in range(700):  # gueltig: Hinweis mit wenigen Schluesseln (die Datei waechst nicht mit der Flut)
-        einzeln.append(_befehl(f"f{len(einzeln):04d}", "hinweis",
-                               {"key": f"flut{nr % 8}", "stufe": HINWEIS_STUFE, "text": f"Text {nr}"}))
+        einzeln.append(_befehl(f"f{len(einzeln):04d}", "hinweis", _hinweis(FLUT_SCHLUESSEL[nr % 3])))
     for _ in range(300):
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "diagnostics", {}))
     for _ in range(200):
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "reboot_everything", {}))  # unbekannte Art
     for nr in range(200):
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "diagnostics", {}, fremd=nr))  # fremdes Feld
-    for nr in range(150):  # Nutzlast: Liste, fremdes Feld, zu langer Text
-        payload = [[], {"key": "k", "stufe": HINWEIS_STUFE, "text": "t", "fremd": 1},
-                   {"key": "k", "stufe": HINWEIS_STUFE, "text": "x" * 1001}][nr % 3]
+    for nr in range(150):  # Nutzlast: Liste, fremdes Feld, Code eines anderen Schluessels
+        payload = [[], _hinweis("gesperrt", fremd=1), _hinweis("gesperrt", code="meldung.update_noetig")][nr % 3]
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "hinweis", payload))
     for _ in range(150):  # eine Art, die HA nicht kann
         einzeln.append(_befehl(f"f{len(einzeln):04d}", "zigbee_permit_join", {"seconds": 30}))
     assert len(einzeln) == 1700
     ohne_id = []
-    for nr in range(100):  # gueltig bis auf die ID: liefe er, bliebe der Hinweis "ohne-id" stehen
+    for nr in range(100):  # gueltig bis auf die ID: liefe er, stuende der Hinweis wunsch_begrenzt in der Datei
         ohne_id.append(_befehl([None, 123, "", "x" * 65, "a\ud800b", ["f0000"], {"id": 1}, True, 1.5, "\udfff"][nr % 10],
-                               "hinweis", {"key": "ohne-id", "stufe": HINWEIS_STUFE, "text": "Angriff"}))
+                               "hinweis", _hinweis("wunsch_begrenzt", params={"roh": 30, "begrenzt": 25}, stufe="orange")))
         if nr % 25 == 0:
             del ohne_id[-1]["command_id"]  # und ganz ohne
     reihe = [(nachricht, True) for nachricht in einzeln] + [(nachricht, False) for nachricht in ohne_id]
     zufall.shuffle(reihe)
     gueltige = [nachricht["command_id"] for nachricht, gueltig in reihe if gueltig]  # Reihenfolge des ersten Auftretens
-    for _ in range(200):  # Duplikate: dieselbe ID, andere Nutzlast ("dup-attack"), kurz nach dem Original
+    for _ in range(200):  # Duplikate: dieselbe ID, andere Nutzlast (soll_quelle_aus), kurz nach dem Original
         quelle = zufall.choice([i for i, (_, gueltig) in enumerate(reihe) if gueltig])
         ziel = min(len(reihe), quelle + 1 + zufall.randint(0, 80))
         reihe.insert(ziel, (_befehl(reihe[quelle][0]["command_id"], "hinweis",
-                                    {"key": "dup-attack", "stufe": HINWEIS_STUFE, "text": "zweiter Lauf"}), False))
+                                    _hinweis("soll_quelle_aus", params={"wirksam": 5}, stufe="orange")), False))
     assert len(reihe) == FLUT_ANZAHL
     return [nachricht for nachricht, _ in reihe], gueltige
 
@@ -188,13 +191,13 @@ def _gespeicherte_ergebnisse(anlage) -> list:
 
 
 def test_eine_befehlsflut_haelt_die_regelung_nicht_an_und_den_speicher_bei_500(
-        geraet_env, tmp_path, caplog):  # noqa: F811
+        geraet_env, tmp_path, caplog):
     """ck:376: 2000 Befehle ueber down/command (1700 verschiedene gueltige IDs, 200 Duplikate mit anderer Nutzlast, 100 ohne
     gueltige ID), waehrend die Laufzeit Ticks, Comfort-Boost und Notbetrieb mit Notfall-Boost durchlaeuft (Fake-Uhr):
     die Tick-Zaehler steigen, befehle.json haelt hoechstens die letzten 500 Ergebnisse, ein Duplikat laeuft nicht noch
     einmal, ein Befehl ohne gueltige ID nie, jeder Schreibwert liegt in der lokalen Grenze. sign_off ist nicht Teil der
     Flut: der Befehl beendet die Regelung dem Vertrag nach (test_runtime.py)."""
-    env = geraet_env  # noqa: F811
+    env = geraet_env
     reihe, gueltige = _flut()
     assert len(gueltige) == 1700 and len(set(gueltige)) == 1700
     anlage = Anlage(env, tmp_path)
@@ -267,7 +270,7 @@ def test_eine_befehlsflut_haelt_die_regelung_nicht_an_und_den_speicher_bei_500(
 
     # nichts davon lief mit der falschen Nutzlast: weder das Duplikat noch der Befehl ohne gueltige ID
     schluessel = {eintrag["key"] for eintrag in anlage.device.hinweise.alle()}
-    assert schluessel == {f"flut{nr}" for nr in range(8)}
+    assert schluessel == set(FLUT_SCHLUESSEL)
 
     # Geraete-Thread und Regel-Worker liefen durch: kein Fehler mit Ausnahme, auch sonst keiner im Log
     fehler = _fehler_im_log(caplog)
@@ -279,8 +282,8 @@ def test_eine_befehlsflut_haelt_die_regelung_nicht_an_und_den_speicher_bei_500(
 
 KAPUTT_ANZAHL = 100
 #: gueltig aufgebaute Antworten mit Werten weit ausserhalb der lokalen Grenzen: zu hoch, zu niedrig
-WILDE_ANTWORTEN = ({"curve": 9.9, "room_setpoint": 99.0, "heat_limit": 99.0},
-                   {"curve": -5.0, "room_setpoint": -40.0, "heat_limit": -40.0})
+WILDE_ANTWORTEN = ({"curve": 9.9, "room_setpoint": 99.0, "heat_limit": 99.0, "min_flow": 99.0},
+                   {"curve": -5.0, "room_setpoint": -40.0, "heat_limit": -40.0, "min_flow": -40.0})
 #: Namen der Varianten, die das Geraet verwirft, bevor es sie liest (zu gross, kein JSON, keine Nachricht): keine Antwort
 UNGELESEN = {"Uebergroesse", "kein JSON", "Liste"}
 
@@ -292,31 +295,47 @@ def _grosser_text() -> str:
 def _kaputte_konfigurationen(konfiguration: dict) -> list:
     """Je Eintrag (Name, Koerper oder Bytes): kaputte down/config; Version setzt der Aufrufer ein."""
     def mit(**aenderung):
-        return lambda version: {"schema": 1, "version": version, **konfiguration, **aenderung}
+        return lambda version: {"schema": 2, "version": version, **konfiguration, **aenderung}
+
+    def im_kreis(**aenderung):
+        return mit(kreise=[{**konfiguration["kreise"][0], **aenderung}])
+
+    def im_raum(**aenderung):
+        kreis = konfiguration["kreise"][0]
+        return im_kreis(raeume=[{**kreis["raeume"][0], **aenderung}, *kreis["raeume"][1:]])
 
     lockerer_schutz = json.loads(json.dumps(konfiguration["bindungsparameter"]))
     lockerer_schutz["schreibschutz"] = {**lockerer_schutz["schreibschutz"], "durchsetzen_tag": 7}
     return [
         ("fremdes Feld", mit(gift=1)),
-        ("NaN im Raumfuehler", mit(raumfuehler=[float("nan")])),
+        ("NaN im Fuehler", im_raum(fuehler=[float("nan")])),
         ("Uebergroesse", mit(anlage=_grosser_text())),
         ("Surrogat", mit(anlage="a\ud800b")),
         ("lockerer Schreibschutz", mit(bindungsparameter=lockerer_schutz)),
-        ("anderer Hebelsatz", mit(hebelsatz="viessmann_vicare")),
-        ("anderes Verteilsystem", mit(verteilsystem="Fussbodenheizung")),
+        ("anderer Hebelsatz", im_kreis(hebelsatz="viessmann_vicare")),
+        ("anderes Verteilsystem", im_kreis(verteilsystem="Fussbodenheizung")),
         ("Tagestick keine Uhrzeit", mit(tagestick=5)),
         ("Riesenzahl", mit(tagestick=10**400)),
-        ("Feld fehlt", lambda version: {k: v for k, v in {"schema": 1, "version": version, **konfiguration}.items()
-                                         if k != "bindung"}),
+        ("Feld fehlt", lambda version: {k: v for k, v in {"schema": 2, "version": version, **konfiguration}.items()
+                                         if k != "kreise"}),
         ("kein JSON", lambda version: b"{kaputt"),
         ("Liste", lambda version: b"[1, 2]"),
     ]
 
 
+def _bedienung(version: int, *, eintrag: dict | None = None, **huelle) -> dict:
+    """Gueltige Bedienung mit dem Kreis 1; `eintrag` aendert den Kreiseintrag, `huelle` die Felder darum."""
+    kreis = {"kreis": 1, "modus": "manuell", "raum_soll": 21.0, **(eintrag or {})}
+    return {"schema": 2, "version": version, "kreise": [kreis], "quelle": "portal",
+            "ts": "2027-01-15T07:00:00+00:00", **huelle}
+
+
 def _kaputte_bedienungen() -> list:
     def mit(**aenderung):
-        return lambda version: {"schema": 1, "version": version, "modus": "manuell", "raum_soll": 21.0,
-                                "quelle": "portal", "ts": "2027-01-15T07:00:00+00:00", **aenderung}
+        return lambda version: _bedienung(version, eintrag=aenderung)
+
+    def mit_huelle(**aenderung):
+        return lambda version: _bedienung(version, **aenderung)
 
     return [
         ("NaN", mit(raum_soll=float("nan"))),
@@ -325,9 +344,9 @@ def _kaputte_bedienungen() -> list:
         ("unter dem Bereich", mit(raum_soll=14.5)),
         ("falscher Schritt", mit(raum_soll=21.3)),
         ("Text", mit(raum_soll="21")),
-        ("fremdes Feld", mit(gift=1)),
-        ("Surrogat", mit(quelle="a\udfffb")),
-        ("Uebergroesse", mit(quelle=_grosser_text())),
+        ("fremdes Feld", mit_huelle(gift=1)),
+        ("Surrogat", mit_huelle(quelle="a\udfffb")),
+        ("Uebergroesse", mit_huelle(quelle=_grosser_text())),
         ("Riesenzahl", mit(raum_soll=10**400)),
         ("unbekannter Modus", mit(modus="gift")),
     ]
@@ -336,7 +355,7 @@ def _kaputte_bedienungen() -> list:
 def _kaputte_antworten(seq: str) -> list:
     """Kaputte down/setpoints zum offenen Tick seq."""
     def mit(**aenderung):
-        return {"schema": 4, "seq": seq, "ts": "x", "status": "ok", "reason": None,
+        return {"schema": 5, "kreis": 1, "seq": seq, "ts": "x", "status": "ok", "code": None, "params": None,
                 "levers": {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0}, "learned": None, **aenderung}
 
     return [
@@ -346,8 +365,10 @@ def _kaputte_antworten(seq: str) -> list:
         ("Hebel fehlt", mit(levers={"curve": 0.95})),
         ("fremder Hebel", mit(levers={"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0, "gift": 1.0})),
         ("falsches Schema", mit(schema=3)),
-        ("Surrogat im Grund", mit(reason="a\ud800b")),
-        ("Uebergroesse", mit(reason=_grosser_text())),
+        ("fremder Kreis", mit(kreis=2)),
+        ("Kreis als Text", mit(kreis="1")),
+        ("Surrogat im Grund", mit(status="rejected", code="a\ud800b", params={})),
+        ("Uebergroesse", mit(status="rejected", code=_grosser_text(), params={})),
         ("Riesenzahl", mit(levers={"curve": 10**400, "room_setpoint": 23.0, "heat_limit": 16.0})),
         ("unbekannter Status", mit(status="gift")),
         ("gelernte Werte Text", mit(learned={"curve": "x", "heat_limit": float("nan")})),
@@ -355,14 +376,14 @@ def _kaputte_antworten(seq: str) -> list:
 
 
 def test_100_kaputte_dokumente_und_antworten_im_wechsel_mit_ticks_aendern_die_konfiguration_nicht(
-        geraet_env, tmp_path, caplog):  # noqa: F811
+        geraet_env, tmp_path, caplog):
     """ck:377: 100 kaputte Konfigurationen, Bedienungen und Serverantworten (fremde Felder, NaN, Unendlich, Uebergroesse,
     Surrogat, Riesenzahl, kein JSON) im Wechsel mit Ticks der laufenden Laufzeit: die gespeicherte Konfiguration und
     Bedienung bleiben die gueltigen (auch nach dem Neuladen von der Platte), die Laufzeit startet nicht neu, jeder
     Schreibwert liegt in der lokalen Grenze, kein ERROR mit Ausnahme im Log. Gegenprobe: zwischendurch gueltige
     Antworten (auch mit Werten ausserhalb der Grenze, geklemmt) werden geschrieben, danach nimmt das Geraet eine
     gueltige Bedienung an."""
-    env = geraet_env  # noqa: F811
+    env = geraet_env
     anlage = Anlage(env, tmp_path)
     konfiguration, store = anlage.konfiguration, anlage.device.documents
     assert (store.version("konfiguration"), store.version("bedienung")) == (1, 1)
@@ -415,7 +436,7 @@ def test_100_kaputte_dokumente_und_antworten_im_wechsel_mit_ticks_aendern_die_ko
         ("bedienung", "ungueltig"), ("bedienung", "ausserhalb_bereich")}
     # die gespeicherte Konfiguration und Bedienung sind unveraendert die gueltigen, auch von der Platte gelesen
     assert store.inhalt("konfiguration") == konfiguration
-    assert store.inhalt("bedienung")["raum_soll"] == 21.0
+    assert store.inhalt("bedienung")["kreise"][0]["raum_soll"] == 21.0
     assert (store.version("konfiguration"), store.version("bedienung")) == (1, 1)
     neu = DocumentStore(anlage.world.dir, host="ha", software_version="1.0.0")
     assert (neu.inhalt("konfiguration"), neu.version("konfiguration")) == (konfiguration, 1)
@@ -424,7 +445,7 @@ def test_100_kaputte_dokumente_und_antworten_im_wechsel_mit_ticks_aendern_die_ko
     assert len(anlage.snapshots()) - ticks_vorher >= 50
     # Schreibwerte nur in den Grenzen; die gueltigen Antworten wurden geschrieben und geklemmt
     assert _alle_schreibwerte_in_den_grenzen(env.ha) > schreibwerte_vorher
-    # Der Notfall-Boost startet hoechstens alle 30 min (A6-34): die Stichprobe am Rundenende trifft ihn nicht mehr, weil
+    # Der Notfall-Boost startet hoechstens alle 30 min: die Stichprobe am Rundenende trifft ihn nicht mehr, weil
     # sein einziger Start in eine Runde ohne Notbetrieb am Rundenende faellt. Er lief mit, wenn sein Start gezaehlt ist,
     # die Notfall-Zeile geschrieben wurde (Log) und die Maximalwerte in den Schreibvorgaengen stehen.
     emergency_start = anlage.bridge.store.state.write_budget.get("emergency_start", {}).get("count", 0)
@@ -436,14 +457,13 @@ def test_100_kaputte_dokumente_und_antworten_im_wechsel_mit_ticks_aendern_die_ko
     # zu niedrige Antwortwerte kamen als unterer Grenzwert an (den schreibt sonst nichts); die obere Seite deckt
     # _alle_schreibwerte_in_den_grenzen ab (der Comfort-Boost schreibt dort ohnehin das Maximum)
     for entity, hebel in (("number.curve_current", "curve"), ("number.shift_current", "room_setpoint"),
-                          ("number.heat_limit", "heat_limit")):
+                          ("number.heat_limit", "heat_limit"), ("number.min_flow", "min_flow")):
         assert (entity, BEREICHE[hebel][0]) in env.ha.writes, hebel
     assert anlage.bridge.store.state.learned == {}  # die gueltigen Antworten lernen nichts, die kaputten bleiben ohne Wirkung
     # Gegenprobe: das Geraet nimmt nach der Flut ein gueltiges Dokument an
-    anlage.senden("down/operation", {"schema": 1, "version": 500, "modus": "manuell", "raum_soll": 22.0,
-                                     "quelle": "portal", "ts": "2027-01-15T07:00:00+00:00"})
+    anlage.senden("down/operation", _bedienung(500, eintrag={"raum_soll": 22.0}))
     anlage.runde(30)
-    assert (store.version("bedienung"), store.inhalt("bedienung")["raum_soll"]) == (500, 22.0)
+    assert (store.version("bedienung"), store.inhalt("bedienung")["kreise"][0]["raum_soll"]) == (500, 22.0)
     fehler = _fehler_im_log(caplog)
     assert [r.getMessage() for r in fehler if r.exc_info] == []
     assert [r.getMessage() for r in fehler] == []

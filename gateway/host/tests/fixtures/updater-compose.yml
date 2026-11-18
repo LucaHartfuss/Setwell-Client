@@ -1,9 +1,11 @@
-# Nur fuer tests/test_gateway_updater.sh (Plan G2b-1 Task 15; ab 0.6.0 Plan 5b D2).
+# Nur fuer tests/test_gateway_updater.sh.
 # Abgeleitet von gateway/compose/docker-compose.yml: ohne zigbee2mqtt, Netz wan extern (shg-upd-wan, dort laufen der
 # Fake-Bootstrap shg-upd-bootstrap, der Fake-Broker und der Updater-Container), runtime ohne ports. Der Bundle-Bau
-# (gateway/host/tests/fixtures/make_test_bundles.py) ersetzt build: der Gateway-Dienste durch das Image mit Digest.
+# (gateway/host/tests/fixtures/make_test_bundles.py) ersetzt build: der Gateway-Dienste durch das Image aus dem Archiv
+# (smartheat-gateway@<Index-Digest>, pull_policy: never).
 # security_opt label:disable: auf SELinux-Hosts (Fedora) duerfen die Container die Bind-Mounts sonst nicht lesen
-# (wie docker-compose.dev.yml); ohne SELinux wirkungslos. Ausgeschrieben (ohne Anker) erzeugt mit as_fixture aus
+# (wie docker-compose.dev.yml); ohne SELinux wirkungslos. Die Laufzeit prueft die Antworten des Fake-Bootstraps gegen den
+# oeffentlichen Testanker (SHG_FAKE_PKI aus gateway.env des Tests, wie im Dev-Overlay). Ausgeschrieben erzeugt mit as_fixture aus
 # host/tests/test_fixture_drift.py.
 x-hardening:
   read_only: true
@@ -63,10 +65,6 @@ services:
     - smartheat_gateway.init
     network_mode: none
     environment:
-      SHG_BUS_DIR: /bus
-      SHG_ZIGBEE_DIR: /zigbee2mqtt
-      SHG_DATA_DIR: /data
-      SHG_HOST_DIR: /host
       ZIGBEE_ADAPTER: ${ZIGBEE_ADAPTER:-ember}
     volumes:
     - ${SHG_ROOT:-/var/lib/smartheat}/bus:/bus
@@ -106,22 +104,23 @@ services:
     environment:
       SHG_BUS_HOST: mosquitto
       SHG_BUS_CREDENTIALS: /run/shg-bus/bus.json
-      SHG_DATA_DIR: /data
-      SHG_HOST_DIR: /host
       SHG_DEVICE_API_URL: http://shg-upd-bootstrap:8090
       SHG_PORTAL_BASE_URL: ${SHG_PORTAL_BASE_URL:-}
       SHG_DIAG_HOSTNAMES: ${SHG_DIAG_HOSTNAMES:-}
       TZ: ${TZ:-Europe/Berlin}
+      SMARTHEAT_ANKER_DATEI: /anker/anker.pem
+      SMARTHEAT_TESTKENNUNG: updater-test
     volumes:
     - ${SHG_ROOT:-/var/lib/smartheat}/data:/data
     - ${SHG_ROOT:-/var/lib/smartheat}/host:/host:ro
     - ${SHG_ROOT:-/var/lib/smartheat}/bus/credentials/runtime:/run/shg-bus:ro
+    - ${SHG_FAKE_PKI:?SHG_FAKE_PKI fehlt}/anker.pub:/anker/anker.pem:ro
     healthcheck:
       test:
       - CMD
       - python
       - -c
-      - import os,sys,time,urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3); sys.exit(time.time()
+      - import os,sys,time,urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=3); sys.exit(time.time()
         - os.path.getmtime('/tmp/shg-runtime-alive') > 120)
       interval: 30s
       timeout: 5s
@@ -140,7 +139,7 @@ services:
       driver: journald
       options:
         tag: '{{.Name}}'
-    image: eclipse-mosquitto:2@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408
+    image: eclipse-mosquitto:2@sha256:75d6662dee52c947dc9dd9c29f1d8d7ffef78ddaf38001caa09755681e8bbc98
     user: 1000:1000
     networks:
     - bus
@@ -150,6 +149,7 @@ services:
     volumes:
     - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     - ${SHG_ROOT:-/var/lib/smartheat}/bus/mosquitto:/mosquitto/config/bus:ro
+    - ${SHG_ROOT:-/var/lib/smartheat}/bus/mosquitto-daten:/mosquitto/data
 networks:
   bus:
     internal: true

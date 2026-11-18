@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Abschnitt "## <Version>" aus einem CHANGELOG fuer die Release-Notizen des Signier-Jobs (Audit 4, A4-36): der Job
+"""Abschnitt "## <Version>" aus einem CHANGELOG fuer die Release-Notizen des Signier-Jobs: der Job
 nimmt Notizen aus dem eigenen, getaggten Checkout statt aus dem Artefakt des Build-Jobs. Gleiche Regel wie
 changelog_section in tools/release_gate.py (Dev-Root), hier ohne Abhaengigkeit auf das Root-Repo.
 
@@ -24,6 +24,24 @@ def section(text: str, version: str) -> str | None:
             found = "\n".join(body).strip()
             return found + "\n" if found else None
     return None
+
+
+def unterabschnitt(text: str, version: str, name: str) -> str | None:
+    """Der Text unter "### <name>" im Abschnitt der Version (bis zur naechsten "### "-Zeile), leer ohne die Ueberschrift
+    oder ohne Eintrag darunter; None, wenn die Version keinen (oder einen leeren) Abschnitt hat."""
+    abschnitt = section(text, version)
+    if abschnitt is None:
+        return None
+    heading = f"### {name}"
+    body: list[str] = []
+    drin = False
+    for line in abschnitt.splitlines():
+        if line.startswith("### "):
+            drin = line.rstrip() == heading
+        elif drin:
+            body.append(line)
+    found = "\n".join(body).strip()
+    return found + "\n" if found else ""
 
 
 def main(argv: list[str]) -> int:

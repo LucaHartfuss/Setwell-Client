@@ -1,10 +1,11 @@
-"""vicare_cloud als PlantBinding (Spec G4 1.2) gegen den Fake-ViCare-Server."""
+"""vicare_cloud als PlantBinding gegen den Fake-ViCare-Server."""
+import copy
 import json
 import threading
 
 import pytest
 from bindung_beispiele import VIESSMANN_VICARE_BINDING as BINDING
-from fake_vicare.server import GOOD_CODE, FakeVicare
+from fake_vicare.server import DEFAULT, GOOD_CODE, FakeVicare
 from test_vicare_capabilities import GARBAGE, good_features, number
 from test_vicare_capabilities import feature as feature_dict
 
@@ -15,19 +16,20 @@ from smartheat_gateway.drivers.base import DriverError
 from smartheat_gateway.drivers.vicare_cloud import capabilities as caps
 from smartheat_gateway.drivers.vicare_cloud import driver as vicare_driver
 from smartheat_gateway.drivers.vicare_cloud import oauth
-from smartheat_gateway.drivers.vicare_cloud.driver import ViCareCloudDriver
+from smartheat_gateway.drivers.vicare_cloud.driver import QUOTA, ViCareCloudDriver
 from smartheat_gateway.paths import Paths
 from smartheat_gateway.quota import QuotaExhausted
 from smartheat_runtime import delivery
+from smartheat_runtime.texts import HA_TEXTS
 
 PARAMETER = {"installation_id": 2012345, "gateway_serial": "7637415000000001", "device_id": "0", "heizkreis": 0,
              "poll_seconds": 300.0}
 REDIRECT = "https://portal.test/oauth/callback"
 
 
-@pytest.fixture
-def env(tmp_path, clock, monkeypatch):
-    server = FakeVicare()
+def _umgebung(tmp_path, clock, monkeypatch, recordings=None):
+    """Fake (ohne `recordings` mit Hausmodell, sonst statisch) und ein angemeldeter, einmal abgefragter Treiber."""
+    server = FakeVicare(recordings)
     base = server.start()
     monkeypatch.setenv("SHG_TEST_ENDPOINTS", "1")
     monkeypatch.setenv("SHG_VICARE_IAM_BASE", base)
@@ -39,12 +41,26 @@ def env(tmp_path, clock, monkeypatch):
     assert set(challenge) == {"code_challenge", "code_challenge_method"} and challenge["code_challenge_method"] == "S256"
     driver.login_finish({"phase": "finish", "driver_id": "vicare_cloud", "code": GOOD_CODE, "redirect_uri": REDIRECT})
     driver.poll_once()
-    yield server, driver, paths, clock
-    server.stop()
+    return server, driver, paths, clock
+
+
+@pytest.fixture
+def env(tmp_path, clock, monkeypatch):
+    umgebung = _umgebung(tmp_path, clock, monkeypatch)
+    yield umgebung
+    umgebung[0].stop()
+
+
+@pytest.fixture
+def env_statisch(tmp_path, clock, monkeypatch):
+    """Wie `env`, aber mit den unveraenderlichen Features der Aufzeichnung: Tests setzen Werte von Hand."""
+    umgebung = _umgebung(tmp_path, clock, monkeypatch, {"0": copy.deepcopy(DEFAULT)})
+    yield umgebung
+    umgebung[0].stop()
 
 
 def test_parameters_are_checked_by_the_driver(tmp_path):
-    # Audit 4, A4-34 (GW-7)
+    # Parameter ausserhalb der Grenzen oder vom falschen Typ werden abgelehnt
     for bad in ({"poll_seconds": 0}, {"poll_seconds": -5}, {"poll_seconds": 60}, {"poll_seconds": True},
                 {"poll_seconds": "300"}, {"installation_id": "x"}, {"installation_id": True}, {"heizkreis": -1},
                 {"gateway_serial": ""}, {"device_id": 0}):
@@ -106,16 +122,16 @@ def test_reads_come_from_the_cache_without_a_new_api_call(env):
 
 
 def test_curve_and_level_are_written_as_one_group_without_reverting_the_first_member(env):
-    """Praezisierung 6: der zweite setCurve nimmt die eben geschriebene Steigung, nicht die aus dem alten Cache."""
+    """Der zweite setCurve nimmt die eben geschriebene Steigung, nicht die aus dem alten Cache."""
     server, driver, paths, clock = env
     driver.write("curve", 1.1)
     driver.write("level", 3.0)
     assert [c["params"] for c in server.commands] == [{"shift": 0, "slope": 1.1}, {"shift": 3, "slope": 1.1}]
-    assert driver.physical_writes == 2  # ohne write_group zaehlt die Pipeline beide Schreibvorgaenge (A6-09)
+    assert driver.physical_writes == 2  # ohne write_group zaehlt die Pipeline beide Schreibvorgaenge
 
 
 def test_a_write_group_sends_one_setcurve_with_both_values(env):
-    # Audit 4, A4-31 (GW-4): keine Zwischenstellung mit dem alten Partnerwert, ein Aufruf aus dem Kontingent
+    # Keine Zwischenstellung mit dem alten Partnerwert, ein Aufruf aus dem Kontingent
     server, driver, paths, clock = env
     driver.write_group({"curve": 1.2, "level": 1.0})
     assert [c["params"] for c in server.commands] == [{"shift": 1, "slope": 1.2}] and driver.physical_writes == 1
@@ -183,12 +199,27 @@ def test_a_stale_cache_raises_value_error_and_under_an_exhausted_quota_quota_exh
     clock.advance(3 * 300 + 1)
     with pytest.raises(ValueError):
         driver.read("curve")
-    for _ in range(1200 - driver._guard.used()):  # der Abruf der Fixture zaehlt schon mit
+    for _ in range(1200 - len(driver._guard._load()["aufrufe"])):  # der Abruf der Fixture zaehlt schon mit
         driver._guard.take()
     with pytest.raises(QuotaExhausted):
         driver.read("curve")
     with pytest.raises(QuotaExhausted):
         driver.write("curve", 1.2)
+
+
+def test_the_quota_notice_exists_only_while_the_quota_is_exhausted_and_the_cache_is_stale(env):
+    """Ein erschoepftes Kontingent mit frischem Cache stoert den Kunden nicht; erst veraltete Daten ohne Aussicht auf
+    eine Abfrage werden gemeldet, und mit dem Ende der Sperre (hier: das Fenster rutscht weiter) ist die Meldung weg."""
+    server, driver, paths, clock = env
+    assert driver.kontingent_erschoepft() is False
+    for _ in range(1200 - len(driver._guard._load()["aufrufe"])):
+        driver._guard.take()
+    assert driver.kontingent_erschoepft() is False  # Cache noch frisch
+    clock.advance(3 * 300 + 1)
+    assert driver.kontingent_erschoepft() is True
+    jetzt = driver._guard._now()
+    driver._guard._now = lambda: jetzt + 86400 + 1  # alle Aufrufe liegen ausserhalb des Fensters
+    assert driver.kontingent_erschoepft() is False
 
 
 @pytest.mark.parametrize(("alter_s", "frisch"), [(899, True), (900, True), (901, False)])
@@ -204,7 +235,7 @@ def test_the_cache_is_fresh_up_to_exactly_three_poll_intervals(env, alter_s, fri
 
 
 def test_an_expired_login_is_not_logged_in_and_writes_nothing(env):
-    """Review Focus 1: kein Schreibvorgang, Datenfehler (Lesen wirft), Portal-Knopf 'Anmeldung erneuern' existiert."""
+    """Kein Schreibvorgang, Datenfehler (Lesen wirft), Portal-Knopf 'Anmeldung erneuern' existiert."""
     server, driver, paths, clock = env
     server.control({"reset": True})  # der Fake kennt die Tokens nicht mehr
     driver.poll_once()               # 401 -> Erneuerung abgelehnt -> die Anmeldung gilt als abgelaufen
@@ -212,9 +243,9 @@ def test_an_expired_login_is_not_logged_in_and_writes_nothing(env):
     with pytest.raises(DriverError) as error:
         driver.write("curve", 1.2)
     assert error.value.grund == "nicht_angemeldet" and driver.physical_writes == 0 and server.commands == []
-    # Lokale Meldung (Spec Stufe 3 S5 6.3): der Kunde liest einen deutschen Satz, nie den nackten Code.
+    # Lokale Meldung: der Kunde liest einen deutschen Satz, nie den nackten Code.
     schreibfehler = DeviceWriteError("curve", "treiber:curve", error.value)
-    text = delivery.notification_text(delivery.NOTIFY_DATENFEHLER_WRITE, (str(schreibfehler),), {})
+    text = HA_TEXTS.text(delivery.notification_meldung(delivery.NOTIFY_DATENFEHLER_WRITE, (str(schreibfehler),), {}))
     assert "Anmeldung" in text and "erneuern" in text and "nicht_angemeldet" not in text
 
 
@@ -293,7 +324,7 @@ def test_erkennung_mit_offline_cloud_und_abgelaufener_anmeldung_nutzt_die_vertra
 
 
 def test_limits_come_from_the_command_constraints_of_the_plant(env):
-    """Praezisierung 13 (Client2-Bereitschaft): dieselben Grenzen, die die Probe in `hebel` meldet; ohne Constraint None."""
+    """Dieselben Grenzen, die die Probe in `hebel` meldet; ohne Constraint None."""
     server, driver, paths, clock = env
     assert driver.limits("curve") == (0.2, 3.5)
     assert driver.limits("level") == (-13.0, 40.0)
@@ -333,11 +364,11 @@ def test_poll_and_reads_from_many_threads_do_not_corrupt_the_cache(env):
     assert errors == []
 
 
-# --- Ergaenzungen (Review Focus 1, 3, 7; Anmeldephasen; Ueberlagerung) ---
+# --- Ergaenzungen (Anmeldephasen, Ueberlagerung) ---
 
 
 def test_quota_exhausted_mid_write_group_keeps_the_cloud_value_as_the_one_to_read(env):
-    """Review Focus 3: der erste setCurve geht durch, der zweite scheitert an der 429-Sperre; danach schreibt nichts
+    """Der erste setCurve geht durch, der zweite scheitert an der 429-Sperre; danach schreibt nichts
     mehr, und read() zeigt weiter den Wert der Cloud, nie die halbe Gruppe (kein Zwischenzustand als Ursprungswert)."""
     server, driver, paths, clock = env
     driver.write("curve", 1.1)
@@ -454,7 +485,7 @@ class _Installations:
 
 
 def test_erkennung_mehrerer_installationen_gibt_eine_anlage_je_heizgeraet(tmp_path, clock):
-    """Review Focus 7: getrennte Anlagen mit eigener Kennung und eigenem Index; ein Geraet ohne Heizung zaehlt nicht."""
+    """Getrennte Anlagen mit eigener Kennung und eigenem Index; ein Geraet ohne Heizung zaehlt nicht."""
     api = _Installations(good_features())
     driver = ViCareCloudDriver({}, Paths(tmp_path), clock=clock, api=api)  # type: ignore[arg-type]
     daten = driver.erkennung()
@@ -530,7 +561,7 @@ def test_inventory_sample_without_parameters_finds_the_heating_device(env):
     assert driver.inventory_sample()["werte"]["level_current"] == 0
 
 
-# --- Fix-Runde 1: Programmwechsel als Ueberlagerung mit Zeitstempel (nachlaufende Cloud) ---
+# --- Programmwechsel als Ueberlagerung mit Zeitstempel (nachlaufende Cloud) ---
 
 
 def _activate_eco(server):
@@ -593,9 +624,9 @@ def test_after_prepare_any_non_foreign_program_of_the_cloud_confirms(env):
     assert driver.read_aux() == {"mode_select": "reduced"} and driver.is_prepared()
 
 
-def test_delivery_signals_are_reported_when_the_cloud_has_the_features(env):
-    # Audit 4 P-B (W-1): Betriebsstunden, Starts, Brennerstatus und Betriebsart als Signale
-    server, driver, paths, clock = env
+def test_delivery_signals_are_reported_when_the_cloud_has_the_features(env_statisch):
+    # Betriebsstunden, Starts, Brennerstatus und Betriebsart als Signale
+    server, driver, paths, clock = env_statisch
     assert not {"generator_hours", "generator_starts", "generator_state", "operating_mode"} & set(driver.signals())
     for feature in server.features["0"]:
         if feature["feature"] == "heating.burners.0":
@@ -618,3 +649,22 @@ def test_aux_zulaessig_accepts_only_the_known_programs(env):
         assert driver.aux_zulaessig("mode_select", program) is True
     assert driver.aux_zulaessig("mode_select", "reduced; drop") is False
     assert driver.aux_zulaessig("setpoint_comfort", "eco") is False
+
+
+def test_zwei_heizkreise_zaehlen_dieselbe_kontingentdatei(tmp_path, clock):
+    """Das Kontingent der Cloud gehoert dem Konto, nicht dem Kreis: Treiber verschiedener Heizkreise derselben Anlage
+    fuehren eine Datei; zusammen duerfen sie das Kontingent nicht ueberschreiten, auf beiden Seiten der Grenze."""
+    paths = Paths(tmp_path)
+    eins = ViCareCloudDriver({**PARAMETER, "heizkreis": 0}, paths, clock=clock)
+    zwei = ViCareCloudDriver({**PARAMETER, "heizkreis": 1}, paths, clock=clock)
+
+    for _ in range(QUOTA.hard_limit - 1):
+        eins._guard.take()
+    zwei._guard.take()  # der letzte erlaubte Zugriff, vom anderen Kreis
+
+    assert [p.name for p in paths.quota_dir.iterdir()] == ["vicare_cloud.json"]
+    assert len(json.loads((paths.quota_dir / "vicare_cloud.json").read_text())["aufrufe"]) == QUOTA.hard_limit
+    with pytest.raises(QuotaExhausted):
+        eins._guard.take()
+    with pytest.raises(QuotaExhausted):
+        zwei._guard.take()

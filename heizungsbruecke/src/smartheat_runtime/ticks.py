@@ -1,6 +1,7 @@
 """Tick-Zustellung ausfuehren: die Aktionen der Zustandsmaschine `delivery` (Versuch,
 Abo-Abfrage, Zeitplan, Meldungen) und die Server-Antworten."""
 import logging
+import re
 import uuid
 from typing import TypeGuard
 
@@ -8,7 +9,7 @@ from smartheat_core import wallclock
 from smartheat_core.logtext import lesbar
 from smartheat_core.pipeline import DeviceWriteError
 from smartheat_core.zahlen import ist_endliche_zahl
-from smartheat_runtime import abo, delivery, entitlement
+from smartheat_runtime import abo, delivery, entitlement, kreiszustand, testphase
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.runtime import EV_ACK_TIMEOUT, EV_RETRY_DUE, Runtime
 from smartheat_runtime.snapshot import SNAPSHOT_SCHEMA_VERSION, publish_snapshot, read_snapshot
@@ -19,12 +20,27 @@ logger = logging.getLogger(__name__)
 
 _SETPOINT_STATUSES_WITH_VALUES = (delivery.STATUS_OK, delivery.STATUS_SKIPPED)
 
+# Gruende, die das Geraet selbst nennt, wenn eine Serverantwort nicht brauchbar ist (Datenfehler vom Server).
+CODE_SCHEMA_UNBEKANNT = "antwort_schema_unbekannt"
+CODE_KREIS_UNPASSEND = "antwort_kreis_unpassend"
+CODE_UNGUELTIG = "antwort_ungueltig"
+
+#: Form eines Grundes auf dem Draht (Vertrag der Antwort): kurzer Name aus Kleinbuchstaben, Ziffern und Unterstrich.
+_CODE_FORM = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _code_der_antwort(payload: dict) -> str | None:
+    """Der `code` der Serverantwort, wenn er die Form eines Grundes hat; alles andere (Text, Zahl, zu lang) ist keiner.
+    Fremder Inhalt kommt so nie in Datenfehler, Push, Speicher oder Log."""
+    code = payload.get("code")
+    return code if isinstance(code, str) and _CODE_FORM.fullmatch(code) else None
+
 
 _LEARNED_KEYS = frozenset({"curve", "heat_limit"})
 
 
 def _store_learned(rt: Runtime, learned) -> None:
-    """Lernwerte der Antwort fuer das Statusereignis (Plan 3c). Nur Anzeige: ungueltige Werte werden geloggt und
+    """Lernwerte der Antwort fuer das Statusereignis. Nur Anzeige: ungueltige Werte werden geloggt und
     ignoriert, ein Speicherfehler bricht die Antwort nicht ab (der Regelpfad ist schon durch)."""
     if not (
         isinstance(learned, dict) and learned and set(learned) <= _LEARNED_KEYS
@@ -42,7 +58,7 @@ def start_tick(rt: Runtime, trigger: str) -> None:
     deliver(rt, delivery.TickDue(seq=str(uuid.uuid4()), trigger=trigger))
 
 
-# Pruef-Tick (TP12b, Spec 1): der Server lernt nur auf "daily"; ein target_change bei unveraendertem
+# Pruef-Tick: der Server lernt nur auf "daily"; ein target_change bei unveraendertem
 # Soll ergibt Vorsteuerung null und dieselben Werte.
 PROBE_TRIGGER = "target_change"
 
@@ -112,9 +128,9 @@ def _attempt(rt: Runtime, seq: str, trigger: str):
     # Kurz nach einem eigenen Schreiben (erster Start: _prime schreibt die Startverschiebung, der
     # erzwungene Tick folgt Sekunden spaeter; eine Soll-Aenderung kurz vor dem Tagestick) zeigt HA bei
     # mypyllant noch die alten Werte; der Server protokolliert beim Erstkontakt die gemeldeten Werte und
-    # vergleicht sie an jedem Tagestick mit seinen zuletzt gesendeten ("Anlage folgt nicht"). Wie
-    # derived.sync: bis LeverPipeline.settled gilt fuer jeden geschriebenen Hebel der eigene letzte Schreibwert
-    # (Audit 3, A3-02: auch Steigung und Heizgrenze, nicht nur die Parallelverschiebung). Der vorbereitete Hebel
+    # vergleicht sie an jedem Tagestick mit seinen zuletzt gesendeten ("Anlage folgt nicht"). Bis
+    # LeverPipeline.settled gilt fuer jeden geschriebenen Hebel der eigene letzte Schreibwert
+    # (auch Steigung, Heizgrenze und Mindestvorlauf, nicht nur die Parallelverschiebung). Der vorbereitete Hebel
     # (Vaillant: Wunschtemperatur der Zone) faellt sonst bei ruhender Zone auf den Wiederherstellungspunkt zurueck.
     pipeline = rt.override
     binding = pipeline.binding
@@ -124,7 +140,15 @@ def _attempt(rt: Runtime, seq: str, trigger: str):
         if not pipeline.settled(lever) and last is not None:
             known[lever] = last
         elif lever == binding.description.prepared_lever:
-            known[lever] = binding.read_or(lever, rt.store.state.restore_point.get(lever))
+            # Ruhende Zone beim ersten Start: noch kein Wiederherstellungspunkt, dann gilt das stabile Raum-Soll,
+            # aber nur bei vorbereiteter Zone (rt.zone_prepared). Sonst bliebe es beim Datenfehler, und die Antwort
+            # auf den Snapshot schriebe die Serverwerte und stellte dabei die nie vorbereitete Zone um. Hier wird
+            # nur gemeldet, der Wiederherstellungspunkt bleibt unberuehrt; die Antwort schreibt ihn.
+            state = rt.store.state
+            fallback = state.restore_point.get(lever)
+            if fallback is None and rt.zone_prepared:
+                fallback = state.stable_target
+            known[lever] = binding.read_or(lever, fallback)
     read = read_snapshot(rt.manifest, rt.signals, binding, known)
     if read.invalid:
         logger.warning("Snapshot (seq=%s) zurueckgehalten, ungueltige Werte: %s", seq, ", ".join(read.invalid))
@@ -146,7 +170,7 @@ def _attempt(rt: Runtime, seq: str, trigger: str):
     try:
         publish_snapshot(
             rt.mqtt_client, seq=seq, trigger=trigger, room_target=read.room_target, levers=read.levers,
-            manual_override=pending_override, readonly=read.readonly,
+            manual_override=pending_override, readonly=read.readonly, kreis=rt.config.kreis,
         )
         rt.manual_override_sent = pending_override
         rt.manual_override_seq = seq
@@ -215,9 +239,9 @@ def _notify(rt: Runtime, action) -> None:
         **rt.manifest.refs,
         **{lever: binding.ref(lever) for lever in binding.description.lever_set.levers if binding.has(lever)},
     }
-    text = delivery.notification_text(action.kind, action.detail, refs, rt.texts)
+    meldung = delivery.notification_meldung(action.kind, action.detail, refs)
     key, state = _notice(action.kind, action.detail)
-    rt.notifier.notify(key, state, text, critical=True)
+    rt.notifier.notify(key, state, meldung, critical=True)
 
 
 def _record_answer(rt: Runtime) -> None:
@@ -252,7 +276,7 @@ def _valid_levers(levers, expected: tuple[str, ...]) -> TypeGuard[dict[str, floa
 
 
 def handle_setpoints(rt: Runtime, payload: dict) -> None:
-    """Server-Antwort (nur Schema 4), zaehlt nur fuer den offenen Tick (auch verspaetet). Gueltige
+    """Server-Antwort (nur Schema 5), zaehlt nur fuer den offenen Tick (auch verspaetet). Gueltige
     Werte gehen vor dem Ack auf die Anlage. Ein unbekanntes Schema, ein unbekannter Status oder
     ungueltige Werte zaehlen als Datenfehler vom Server. Kann die Anlage die Werte nicht
     uebernehmen, ist das eine Antwort mit eigenem Datenfehler (`WriteFailed`), kein Serverausfall."""
@@ -269,22 +293,34 @@ def handle_setpoints(rt: Runtime, payload: dict) -> None:
 
     schema = payload.get("schema")
     if type(schema) is not int or schema != SNAPSHOT_SCHEMA_VERSION:
-        # Nur Schema 4 wird verstanden; alles andere zaehlt wie eine ungueltige Antwort (Datenfehler
+        # Nur Schema 5 wird verstanden; alles andere zaehlt wie eine ungueltige Antwort (Datenfehler
         # vom Server, sofort sichtbar) statt still verworfen zu werden und erst ueber den
         # Ack-Timeout im Notbetrieb zu enden.
-        reason = f"ungültige Serverantwort (unbekanntes Schema {schema!r})"
-        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, reason)
-        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, reason=reason))
+        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, CODE_SCHEMA_UNBEKANNT)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=CODE_SCHEMA_UNBEKANNT))
+        return
+
+    kreis = payload.get("kreis")
+    if type(kreis) is not int or kreis != rt.config.kreis:
+        # Die Antwort gilt einem anderen Kreis (oder nennt keinen): ihre Werte gehoeren nicht auf diese Anlage.
+        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, CODE_KREIS_UNPASSEND)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=CODE_KREIS_UNPASSEND))
         return
 
     status = payload.get("status")
     levers = payload.get("levers")
     expected = rt.override.binding.description.lever_set.levers
-    if status in _SETPOINT_STATUSES_WITH_VALUES and _valid_levers(levers, expected):
+    if status in _SETPOINT_STATUSES_WITH_VALUES and _valid_levers(levers, expected) and (
+            testphase.aktiv(rt) or kreiszustand.ausser_betrieb(rt)):
+        # Testphase ohne Setwell und Kreis ausser Betrieb: die Antwort wird quittiert, ihre Werte und ihr Lernstand
+        # gehen nicht an die Anlage.
+        logger.info("Setpoints-Antwort (seq=%s) ohne Setwell fuer diesen Kreis nur quittiert", seq)
+        deliver(rt, delivery.Ack(seq=seq, status=status))
+    elif status in _SETPOINT_STATUSES_WITH_VALUES and _valid_levers(levers, expected):
         _clear_sent_manual_override(rt)
         if status == delivery.STATUS_SKIPPED:
             logger.info(
-                "Server hat fuer seq=%s nicht gelernt (%r), Werte unveraendert uebernommen", seq, payload.get("reason"),
+                "Server hat fuer seq=%s nicht gelernt (%s), Werte unveraendert uebernommen", seq, _code_der_antwort(payload),
             )
         try:
             rt.override.apply_server_values({lever: levers[lever] for lever in expected})
@@ -302,13 +338,9 @@ def handle_setpoints(rt: Runtime, payload: dict) -> None:
         _store_learned(rt, payload.get("learned"))
         deliver(rt, delivery.Ack(seq=seq, status=status))
     elif status == delivery.STATUS_REJECTED:
-        reason = payload.get("reason")
-        reason = reason if isinstance(reason, str) and reason else None
-        # Grund vom Server mit repr: ein einzelnes Surrogat braeche die UTF-8-Ausgabe des Logs, ein Zeilenumbruch
-        # faelschte eine zweite Logzeile (Testoffensive T6).
-        logger.warning("Server hat Snapshot (seq=%s) abgelehnt: %r", seq, reason)
-        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, reason=reason))
+        code = _code_der_antwort(payload)
+        logger.warning("Server hat Snapshot (seq=%s) abgelehnt: %s", seq, code)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=code))
     else:
-        reason = f"ungültige Serverantwort (status={status!r}, levers={levers!r}, erwartet: {', '.join(expected)})"
-        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, reason)
-        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, reason=reason))
+        logger.warning("Setpoints-Antwort (seq=%s): %s - nichts geschrieben", seq, CODE_UNGUELTIG)
+        deliver(rt, delivery.Ack(seq=seq, status=delivery.STATUS_REJECTED, code=CODE_UNGUELTIG))

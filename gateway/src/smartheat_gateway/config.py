@@ -1,4 +1,4 @@
-"""Konfiguration des Gateways als Dokument vom Server (Spec 5b 3.1/5.2, Plan D2): die Laufzeit-Konfiguration liest
+"""Konfiguration des Gateways als Dokument vom Server: die Laufzeit-Konfiguration liest
 smartheat_runtime.dokument_config, die Bindung (Treiber, Thermostat, Raumfuehler) dieses Modul. Dazu die Pruefung der
 Treiberparameter fuer config_check, der Startwert des Soll-Speichers und die Abmelde-Markierung (sign_off)."""
 import logging
@@ -6,12 +6,14 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from smartheat_core import kreisansicht
 from smartheat_device import fehler
 from smartheat_gateway.drivers import registry
 from smartheat_gateway.drivers.registry import driver_ids
 from smartheat_gateway.paths import Paths
 from smartheat_runtime import dokument_config
 from smartheat_runtime.dokument_config import ConfigError
+from smartheat_runtime.plan_quelle import PlanEingabe
 from smartheat_runtime.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -26,35 +28,46 @@ class GatewayBindung:
     driver_parameter: dict
     room_sensors: tuple[str, ...]
     thermostat: str | None
+    raeume: tuple[tuple[int, tuple[str, ...]], ...] = ()  # (Nummer, Fuehler) jedes Raums mit Fuehler, auch Kontrollraeume
 
     def driver_spec(self) -> dict:
         return {"id": self.driver_id, "parameter": dict(self.driver_parameter)}
 
 
-def bindung(konfiguration) -> GatewayBindung:
-    """Bindung des Gateways aus dem Konfigurationsdokument (Spec 5b 3.1): bindung.treiber, bindung.thermostat,
-    raumfuehler. Wirft ConfigError (StartFailure beim Start); config_check hat das Dokument beim Uebernehmen geprueft."""
-    raw = konfiguration.get("bindung") if isinstance(konfiguration, Mapping) else None
+def bindung(konfiguration, kreis: int | None = None) -> GatewayBindung:
+    """Bindung des Heizkreises `kreis` (ohne Angabe des ersten) aus dem Konfigurationsdokument: bindung.treiber,
+    bindung.thermostat, raumfuehler. Wirft ConfigError (StartFailure beim Start); config_check hat das Dokument beim
+    Uebernehmen geprueft."""
+    sicht = kreisansicht.sicht(konfiguration, kreis)
+    raw = sicht.get("bindung")
     treiber = raw.get("treiber") if isinstance(raw, Mapping) else None
     driver_id = treiber.get("id") if isinstance(treiber, Mapping) else None
     parameter = treiber.get("parameter") if isinstance(treiber, Mapping) else None
     if driver_id not in driver_ids() or not isinstance(parameter, Mapping):
         raise ConfigError(f"Treiber {driver_id!r} unbekannt oder ohne Parameter – {dokument_config.RECONFIGURE_HINT}")
-    sensors = konfiguration.get("raumfuehler")
+    sensors = sicht["raumfuehler"]  # nur die Fuehler der Referenzraeume
     if not isinstance(sensors, list) or not sensors or any(
             not isinstance(ref, str) or not ROOM_SENSOR_REF.fullmatch(ref) for ref in sensors):
         raise ConfigError(f"Raumfühler ({sensors!r}) ungültig – {dokument_config.RECONFIGURE_HINT}")
     thermostat = raw.get("thermostat") if isinstance(raw, Mapping) else None
     if thermostat is not None and (not isinstance(thermostat, str) or not IEEE.fullmatch(thermostat)):
         raise ConfigError(f"Thermostat ({thermostat!r}) ist keine IEEE-Adresse – {dokument_config.RECONFIGURE_HINT}")
-    return GatewayBindung(driver_id, dict(parameter), tuple(sensors), thermostat)
+    raeume = tuple((nummer, tuple(fuehler)) for nummer, fuehler in kreisansicht.raeume_fuehler(konfiguration, kreis))
+    if any(not ROOM_SENSOR_REF.fullmatch(ref) for _, fuehler in raeume for ref in fuehler):
+        raise ConfigError(f"Raumfühler eines Raums ungültig – {dokument_config.RECONFIGURE_HINT}")
+    return GatewayBindung(driver_id, dict(parameter), tuple(sensors), thermostat, raeume)
 
 
-def parse_dokument(konfiguration, paths: Paths,
-                   abo_source: Callable[[], str]) -> tuple[RuntimeConfig, GatewayBindung]:
+def parse_dokument(konfiguration, paths: Paths, abo_source: Callable[[], str], kreis: int | None = None,
+                   zustand_source: Callable[[], str] | None = None,
+                   update_noetig_source: Callable[[], bool] | None = None,
+                   plan_source: Callable[[], PlanEingabe | None] | None = None) -> tuple[RuntimeConfig, GatewayBindung]:
+    """Laufzeitkonfiguration und Bindung des Heizkreises `kreis` (ohne Angabe des ersten)."""
+    nummer = dokument_config.kreisnummer(konfiguration, kreis)
     runtime = dokument_config.runtime_config(
-        konfiguration, rastung_pfad=paths.rastung, entitlement_path=paths.entitlement, abo_source=abo_source)
-    return runtime, bindung(konfiguration)
+        konfiguration, rastung_pfad=paths.rastung, entitlement_path=paths.entitlement(nummer), abo_source=abo_source,
+        kreis=kreis, zustand_source=zustand_source, update_noetig_source=update_noetig_source, plan_source=plan_source)
+    return runtime, bindung(konfiguration, kreis)
 
 
 def treiber_pruefen(paths: Paths, bindung_inhalt) -> dict | None:
@@ -77,6 +90,12 @@ def treiber_pruefen(paths: Paths, bindung_inhalt) -> dict | None:
 def abgemeldet(paths: Paths, konfiguration) -> bool:
     """Abmelde-Markierung (sign_off) fuer die Anlage der aktuellen Konfiguration?"""
     return dokument_config.abgemeldet(paths.abgemeldet, konfiguration)
+
+
+def abmeldung_vom_server(paths: Paths) -> None:
+    """Der Server hat abgemeldet (Befehl sign_off): die Abmeldung gehoert ihm, auch wenn ein Werksreset sie zuerst gesetzt
+    hat. Ein verworfener Reset hebt sie dann nie auf (Vermerk `werksreset_abmeldung.json` weg)."""
+    paths.werksreset_abmeldung.unlink(missing_ok=True)
 
 
 def abmelden(paths: Paths, anlage: str) -> bool:

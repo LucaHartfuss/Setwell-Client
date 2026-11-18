@@ -1,10 +1,10 @@
-"""Befehle (Spec 5b 3.4): Register, in das der Host seine Befehle eintraegt, und Einmal-Ausfuehrung (Muster des
-Gateway-Agenten bis 0.5.0). Ein Befehl wird hoechstens einmal ausgefuehrt; sein Ergebnis steht vor dem Senden in
+"""Befehle: Register, in das der Host seine Befehle eintraegt, und Einmal-Ausfuehrung.
+Ein Befehl wird hoechstens einmal ausgefuehrt; sein Ergebnis steht vor dem Senden in
 <daten>/device/befehle.json (Liste [command_id, ok, result, error], letzte DONE_KEEP, aelteste zuerst) und geht bei
 einem Duplikat (erneute Zustellung nach hello, auch ueber einen Neustart) erneut hoch; der Server behaelt das erste.
 Ueber den Ablauf entscheidet nur der Server (expires_at wird nicht gegen die eigene Uhr geprueft). Jeder gemeldete
 Grund steht in der Liste des Befehls (wire.command_errors), sonst geht `intern` hoch und die Fehlerart ins Log.
-Fehler tragen Grund und details, keine Texte (Spec Stufe 3 S5 6.2): den Text bildet der Server.
+Fehler tragen Grund und details, keine Texte: den Text bildet der Server.
 
 Hoechstens einmal gilt auch ueber einen Neustart: bevor ein Handler laeuft, steht in derselben Liste ein Marker
 "gestartet" ([command_id, null, null, null]). Kommt eine so markierte command_id nach einem Neustart erneut (weder
@@ -15,9 +15,9 @@ Neustart selbst ausloest), laeuft nach einem Neustart bei erneuter Zustellung no
 erneut zugestellten Nachricht. Fertige Befehle beantwortet das Register auch dann aus dem Speicher.
 
 Ein Handler liefert Done, Failed oder Waiting; wartende Befehle prueft pruefen() ohne zu blockieren. Done kann eine
-Inventur tragen: sie geht als up/inventory vor dem Ergebnis (Spec 3.4); ohne Verbindung wartet der Befehl, bis sie
+Inventur tragen: sie geht als up/inventory vor dem Ergebnis; ohne Verbindung wartet der Befehl, bis sie
 gesendet ist, und das Ergebnis geht erst, wenn der Broker alle Teile bestaetigt hat (inventur_bestaetigt, PUBACK):
-ein Neustart davor laesst den Marker "gestartet" stehen, die (wiederholbare) Erkennung laeuft dann erneut (L4-02).
+ein Neustart davor laesst den Marker "gestartet" stehen, die (wiederholbare) Erkennung laeuft dann erneut.
 Eingebaut, weil jedes Geraet ihn koennen muss: hinweis (Hinweise)."""
 import logging
 import time
@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from smartheat_core import dateien
+from smartheat_core import dateien, meldungen
 from smartheat_core.logtext import lesbar
 from smartheat_device import fehler, nachrichten, wire
 
@@ -46,8 +46,6 @@ INVENTUR_BESTAETIGUNG_SECONDS = 60.0
 #: Eine feste Zahl, weil das Register expires_at bewusst nicht gegen die eigene Uhr prueft (Modul-Doku oben); drei
 #: Versuche decken einen kurzen Ausfall ab, ohne bei dauerhaft ausbleibendem PUBACK endlos weiterzusenden.
 INVENTUR_VERSUCHE_MAX = 3
-HINWEIS_KEY_MAX_CHARS = 64
-HINWEIS_TEXT_MAX_CHARS = 1000
 #: Arten, deren Pflichtfelder die Phase bestimmt (Command.payload ist dort die Vereinigung aller Phasen,
 #: wire.DRIVER_LOGIN_PHASES): die Annahme prueft nur fremde Felder, die Phasenregel steht im Handler des Hosts.
 PHASENBEFEHLE = ("driver_login",)
@@ -56,7 +54,7 @@ PHASENBEFEHLE = ("driver_login",)
 @dataclass(frozen=True)
 class Done:
     result: dict
-    inventur: dict | None = None  # Spec 3.4: geht als up/inventory vor dem Ergebnis
+    inventur: dict | None = None  # Geht als up/inventory vor dem Ergebnis
 
 
 @dataclass(frozen=True)
@@ -138,10 +136,6 @@ class CommandRegister:
         if wiederholbar:
             self._wiederholbar.add(kind)
 
-    @property
-    def kinds(self) -> frozenset[str]:
-        return frozenset(self._handlers)
-
     def empfangen(self, message: dict) -> None:
         """down/command: einmal ausfuehren; ein Duplikat wiederholt nur das gespeicherte Ergebnis."""
         command_id = message.get("command_id")
@@ -160,7 +154,7 @@ class CommandRegister:
             elif kind in self._wiederholbar:
                 # gestartet, Neustart: idempotent, noch einmal ausfuehren. Bewusste Grenze: je Neustart einmal, solange
                 # der Server den Befehl zustellt (bis expires_at); eine Neustart-Schleife wiederholt auch die
-                # Cloud-Abfrage einer Erkennung je Neustart (L4-02, Abschlussreview Nit 1).
+                # Cloud-Abfrage einer Erkennung je Neustart.
                 self._finish_or_wait(command_id, kind, self._execute(command_id, kind, message))
             else:  # gestartet, Ergebnis unbekannt (Neustart): nicht noch einmal ausfuehren
                 self._finish_or_wait(command_id, "", Failed("intern"))
@@ -202,6 +196,8 @@ class CommandRegister:
                 return Failed("ungueltige_nutzlast", fehler.details(feld, "fehlt"))
         if fremd := fehler.fremdes_feld(message, wire.COMMAND_FIELDS):
             return Failed("ungueltige_nutzlast", fremd)
+        if message["schema"] not in wire.SCHEMATA:
+            return Failed("ungueltige_nutzlast", fehler.details("schema", "unbekannt"))
         payload = message["payload"]
         handler = self._handlers.get(kind)
         if handler is None:
@@ -308,34 +304,49 @@ class CommandRegister:
         dateien.schreiben_json(self._path, [[cid, *value] for cid, value in self._done.items()], modus=dateien.PRIVAT)
 
 
-def _valid_hint(key, value) -> bool:
-    return (isinstance(key, str) and isinstance(value, dict) and value.get("stufe") in wire.HINWEIS_STUFEN
-            and isinstance(value.get("text"), str))
+def _gespeicherter_hinweis(key, ablage) -> dict | None:
+    """Ablage eines Hinweises (Code, Parameter, Stufe) oder None, wenn sie nicht zum Schluessel passt (alte Datei)."""
+    meldung = meldungen.aus_dict(ablage)
+    if key in wire.MELDUNGEN and meldung is not None and meldung.code == meldungen.PREFIX + key:
+        return meldungen.zu_dict(meldung)
+    return None
 
 
 class Hinweise:
-    """Befehl hinweis (Spec 3.4): der Server setzt oder loescht einen Hinweis am Geraet (key, stufe, text; leerer Text
-    = loeschen), z. B. geraet_doppelt. Anzeigen macht der Host (Gateway: Seite, HA: Reparatur-Hinweis, 5c)."""
+    """Befehl hinweis: der Server setzt oder loescht einen Hinweis am Geraet (key aus wire.MELDUNGEN, code, params,
+    stufe; code None = loeschen), z. B. geraet_doppelt. Code, Parameter und Stufe prueft die Meldungstabelle des
+    Geraets. Anzeigen macht der Host (Gateway: Seite, HA: Reparatur-Hinweis, 5c)."""
 
     def __init__(self, device_dir: Path) -> None:
         self._path = device_dir / HINWEISE_FILE
         raw = dateien.lesen_json(self._path)
-        self._items: dict[str, dict] = (
-            {key: value for key, value in raw.items() if _valid_hint(key, value)} if isinstance(raw, dict) else {})
+        items = {key: _gespeicherter_hinweis(key, value) for key, value in raw.items()} if isinstance(raw, dict) else {}
+        self._items: dict[str, dict] = {key: value for key, value in items.items() if value is not None}
 
     def handler(self, payload: dict) -> Outcome:
-        key, stufe, text = payload.get("key"), payload.get("stufe"), payload.get("text")
-        if not (isinstance(key, str) and 0 < len(key) <= HINWEIS_KEY_MAX_CHARS):
-            raise InvalidPayload("key", "ungueltig")
-        if stufe not in wire.HINWEIS_STUFEN:
-            raise InvalidPayload("stufe", "unbekannt")
-        if not isinstance(text, str) or len(text) > HINWEIS_TEXT_MAX_CHARS:
-            raise InvalidPayload("text", "ungueltig")
-        if text:
-            self._items[key] = {"stufe": stufe, "text": text}
+        key, code, params, stufe = (payload.get(feld) for feld in ("key", "code", "params", "stufe"))
+        if key not in wire.MELDUNGEN:  # auch ein Nicht-Text, ein leerer oder ein langer Schluessel
+            raise InvalidPayload("key", "unbekannt")
+        items = dict(self._items)
+        if code is None:
+            if stufe is not None:
+                raise InvalidPayload("stufe", "ungueltig")
+            if params != {}:
+                raise InvalidPayload("params", "ungueltig")
+            items.pop(key, None)
         else:
-            self._items.pop(key, None)
-        dateien.schreiben_json(self._path, self._items, modus=dateien.PRIVAT)
+            if code != meldungen.PREFIX + key:
+                raise InvalidPayload("code", "unbekannt")
+            if stufe != meldungen.TABELLE[code].stufe or not isinstance(stufe, str):
+                raise InvalidPayload("stufe", "ungueltig")
+            if not isinstance(params, dict):
+                raise InvalidPayload("params", "ungueltig")
+            try:
+                items[key] = meldungen.zu_dict(meldungen.Meldung(code, params, stufe))
+            except ValueError:
+                raise InvalidPayload("params", "ungueltig") from None
+        dateien.schreiben_json(self._path, items, modus=dateien.PRIVAT)
+        self._items = items
         return Done({})
 
     def alle(self) -> tuple[dict, ...]:

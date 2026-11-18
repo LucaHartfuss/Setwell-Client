@@ -4,7 +4,7 @@ from bindung_beispiele import VAILLANT_MYPYLLANT
 from heizungsbruecke.manifest import build_manifest, entity_ref
 from smartheat_runtime.roles import ManifestError
 
-# room_actual kommt immer aus derived_sensors (Raumtemperatur-Template, Spec TP6 3.2).
+# room_actual kommt immer aus derived_sensors (Raumtemperatur-Template).
 ROOM_ACTUAL = {"room_actual": "sensor.smartheat_t1_raumtemperatur"}
 
 BASE = {
@@ -40,7 +40,7 @@ def test_build_manifest_includes_optional_role_when_present():
 
 
 def test_build_manifest_missing_profile_required_role_raises():
-    # entity_min_flow fehlt -- ist Pflicht (TP11).
+    # entity_min_flow fehlt -- ist Pflicht.
     options = {key: value for key, value in BASE.items() if key != "min_flow"}
 
     with pytest.raises(ManifestError, match="min_flow"):
@@ -111,7 +111,7 @@ def test_every_snapshot_lever_is_mapped_by_the_required_roles():
 
     binding = HaPlantBinding(None, build_manifest(BASE, DERIVED), VAILLANT_MYPYLLANT)
     assert [lever for lever in binding.description.lever_set.levers if binding.has(lever)] == [
-        "curve", "room_setpoint", "heat_limit",
+        "curve", "room_setpoint", "heat_limit", "min_flow",
     ]
 
 
@@ -153,3 +153,12 @@ def test_build_manifest_checks_the_roles_of_the_lever_set():
     manifest = build_manifest({**options, "setpoint_setback": "number.absenk"}, {"room_actual": "sensor.r"},
                               "weishaupt_wwp_basis")
     assert manifest.refs["mode_select"] == "select.betriebsart"
+
+
+def test_build_manifest_traegt_die_raumsensoren_je_raumnummer():
+    manifest = build_manifest(BASE, ROOM_ACTUAL, raum_refs={1: "sensor.raum_1", 3: "sensor.raum_3"})
+    assert manifest.raum_refs == {1: "sensor.raum_1", 3: "sensor.raum_3"}
+
+
+def test_build_manifest_ohne_raumsensoren_hat_keine_raumrefs():
+    assert build_manifest(BASE, ROOM_ACTUAL).raum_refs == {}

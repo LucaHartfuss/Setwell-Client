@@ -2,7 +2,6 @@ import importlib.util
 import logging
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +16,7 @@ from smartheat_runtime.roles import ChannelManifest
 def test_publish_telemetry_publishes_payload():
     mqtt_client = MagicMock(spec=MqttChannel)
 
-    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False)
+    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False, kreis=1)
 
     mqtt_client.publish_telemetry.assert_called_once()
     payload = mqtt_client.publish_telemetry.call_args.args[0]
@@ -35,7 +34,7 @@ def test_run_telemetry_tick_reads_room_actual_and_publishes():
 
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=True, failsafe_active=False,
-    )
+    kreis=1)
 
     ha_api.get_state.assert_called_once_with("sensor.room_actual")
     mqtt_client.publish_telemetry.assert_called_once()
@@ -47,14 +46,14 @@ def test_run_telemetry_tick_reads_room_actual_and_publishes():
 
 @pytest.mark.parametrize("wert", [float("nan"), float("inf"), float("-inf")])
 def test_run_telemetry_tick_sendet_kein_nicht_endliches_room_actual(wert, caplog):
-    """Testoffensive T2, Nr. 17: room_actual ist Pflicht der Telemetrie (der Server lehnt sie sonst ab); ein
+    """room_actual ist Pflicht der Telemetrie (der Server lehnt sie sonst ab); ein
     nicht endlicher Wert wird nicht gesendet (Warnung), der naechste Tick liest erneut."""
     manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
     ha_api = MagicMock(spec=SignalSource)
     ha_api.get_state.return_value = wert
     mqtt_client = MagicMock(spec=MqttChannel)
 
-    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False)
+    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
 
     mqtt_client.publish_telemetry.assert_not_called()
     assert "room_actual" in caplog.text
@@ -70,7 +69,7 @@ def test_ein_ausfall_von_room_actual_warnt_einmal_und_die_wiederaufnahme_meldet_
 
     def takt(wert):
         ha_api.get_state.return_value = wert
-        telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False)
+        telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
         return mqtt_client.publish_telemetry.call_count
 
     def zeilen(stufe):
@@ -94,7 +93,7 @@ def test_ein_ausfall_von_room_actual_warnt_einmal_und_die_wiederaufnahme_meldet_
 
 
 def test_ein_ungueltiges_signal_warnt_einmal_ohne_traceback_bis_zum_naechsten_gelungenen_senden(caplog):
-    """L4-17: SignalUngueltig (Fuehler liefert keinen gueltigen Wert) ist erwartet: eine WARNING ohne Traceback, weitere
+    """SignalUngueltig (Fuehler liefert keinen gueltigen Wert) ist erwartet: eine WARNING ohne Traceback, weitere
     Takte nur DEBUG, nach gelungenem Senden wieder eine WARNING; kein ERROR."""
     manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
     ha_api = MagicMock(spec=SignalSource)
@@ -103,7 +102,7 @@ def test_ein_ungueltiges_signal_warnt_einmal_ohne_traceback_bis_zum_naechsten_ge
     def takt(wert):
         ha_api.get_state.side_effect = wert if isinstance(wert, Exception) else None
         ha_api.get_state.return_value = wert
-        telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False)
+        telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
 
     def zeilen(stufe):
         return [r for r in caplog.records if r.levelno == stufe and r.name == "smartheat_runtime.telemetry"]
@@ -121,6 +120,35 @@ def test_ein_ungueltiges_signal_warnt_einmal_ohne_traceback_bis_zum_naechsten_ge
         assert len(zeilen(logging.WARNING)) == 2 and zeilen(logging.ERROR) == []
 
 
+def test_an_unavailable_source_warns_once_without_traceback(caplog):
+    """SourceUnavailable (lokaler Bus getrennt, HA nicht erreichbar) ist erwartet: je Ausfall eine WARNING
+    ohne Traceback, weitere Takte nur DEBUG, nach gelungenem Senden warnt ein neuer Ausfall wieder; kein ERROR."""
+    manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
+    ha_api = MagicMock(spec=SignalSource)
+    mqtt_client = MagicMock(spec=MqttChannel)
+
+    def takt(wert):
+        ha_api.get_state.side_effect = wert if isinstance(wert, Exception) else None
+        ha_api.get_state.return_value = wert
+        telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
+
+    def zeilen(stufe):
+        return [r for r in caplog.records if r.levelno == stufe and r.name == "smartheat_runtime.telemetry"]
+
+    getrennt = SourceUnavailable("lokaler Bus getrennt")
+    with caplog.at_level(logging.DEBUG, logger="smartheat_runtime.telemetry"):
+        takt(getrennt)
+        takt(getrennt)
+        assert len(zeilen(logging.WARNING)) == 1 and len(zeilen(logging.DEBUG)) == 1
+        assert zeilen(logging.ERROR) == [] and zeilen(logging.WARNING)[0].exc_info is None
+        assert "lokaler Bus getrennt" in zeilen(logging.WARNING)[0].getMessage()
+        mqtt_client.publish_telemetry.assert_not_called()
+        takt(20.5)  # Gegenprobe: die Wiederaufnahme sendet wieder
+        mqtt_client.publish_telemetry.assert_called_once()
+        takt(getrennt)  # nach einem gelungenen Senden warnt ein neuer Ausfall wieder
+        assert len(zeilen(logging.WARNING)) == 2 and zeilen(logging.ERROR) == []
+
+
 @pytest.mark.parametrize("fehler", [ValueError("x"), RuntimeError("Hickup")])
 def test_ein_anderer_fehler_der_telemetrie_bleibt_ein_error_mit_traceback(fehler, caplog):
     manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
@@ -129,7 +157,7 @@ def test_ein_anderer_fehler_der_telemetrie_bleibt_ein_error_mit_traceback(fehler
     mqtt_client = MagicMock(spec=MqttChannel)
 
     with caplog.at_level(logging.DEBUG, logger="smartheat_runtime.telemetry"):
-        telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False)
+        telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
 
     (zeile,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert zeile.exc_info is not None and "Fehler beim Veroeffentlichen" in zeile.getMessage()
@@ -150,7 +178,7 @@ def test_run_telemetry_tick_includes_configured_optional_kpi_fields():
 
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert payload["flow_temperature"] == 45.2
@@ -166,7 +194,7 @@ def test_run_telemetry_tick_omits_unconfigured_optional_kpi_fields():
 
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert "flow_temperature" not in payload
@@ -202,7 +230,7 @@ def test_run_telemetry_tick_builds_energy_subobject_from_configured_channels():
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
         einheiten={"thermal_heating": "kWh", "electrical_heating": "kWh"},
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert payload["energy"] == {"thermal_heating": 1234.5, "electrical_heating": 300.1}
@@ -228,7 +256,7 @@ def test_run_telemetry_tick_omits_failing_optional_sensor_but_publishes_rest():
 
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=True, failsafe_active=False,
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert payload["room_actual"] == 20.5
@@ -250,7 +278,7 @@ def test_run_telemetry_tick_omits_operating_mode_when_sensor_unavailable():
 
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert payload["room_actual"] == 20.5
@@ -276,7 +304,7 @@ def test_run_telemetry_tick_omits_non_finite_kpi_values():
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
         einheiten={"thermal_heating": "kWh", "thermal_dhw": "kWh"},
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert payload["room_actual"] == 20.5
@@ -305,7 +333,7 @@ def test_run_telemetry_tick_omits_energy_key_when_all_channels_fail():
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
         einheiten={"thermal_heating": "kWh", "thermal_dhw": "kWh"},
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert payload["room_actual"] == 20.5
@@ -319,7 +347,7 @@ def test_run_telemetry_tick_skips_when_room_actual_not_mapped():
 
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
-    )
+    kreis=1)
 
     ha_api.get_state.assert_not_called()
     mqtt_client.publish_telemetry.assert_not_called()
@@ -331,7 +359,7 @@ def test_publish_telemetry_includes_datenfehler_when_given():
     telemetry.publish_telemetry(
         mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False,
         datenfehler=DataFault("write", ("curve", "number.x", "Timeout")),
-    )
+    kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert payload["datenfehler"] == {"source": "write", "detail": ["curve", "number.x", "Timeout"]}
@@ -340,7 +368,7 @@ def test_publish_telemetry_includes_datenfehler_when_given():
 def test_publish_telemetry_omits_datenfehler_without_fault():
     mqtt_client = MagicMock(spec=MqttChannel)
 
-    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False)
+    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False, kreis=1)
 
     assert telemetry.DATENFEHLER_KEY not in mqtt_client.publish_telemetry.call_args.args[0]
 
@@ -354,9 +382,36 @@ def test_run_telemetry_tick_passes_datenfehler_through():
     telemetry.run_telemetry_tick(
         manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
         datenfehler=DataFault("local", ("dat",)),
-    )
+    kreis=1)
 
     assert mqtt_client.publish_telemetry.call_args.args[0]["datenfehler"] == {"source": "local", "detail": ["dat"]}
+
+
+def test_die_telemetrie_traegt_die_erzeugerstoerung_oder_null():
+    mqtt_client = MagicMock(spec=MqttChannel)
+    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False, kreis=1)
+    assert mqtt_client.publish_telemetry.call_args.args[0]["erzeuger_stoerung"] is None  # Feld da, keine Stoerung
+
+    telemetry.publish_telemetry(
+        mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False, kreis=1,
+        erzeuger_stoerung="f_28")
+    assert mqtt_client.publish_telemetry.call_args.args[0]["erzeuger_stoerung"] == "f_28"
+
+
+def test_der_tick_reicht_die_erzeugerstoerung_durch_aber_nicht_bei_nur_raeumen():
+    manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
+    ha_api = MagicMock(spec=SignalSource)
+    ha_api.get_state.return_value = 20.5
+    mqtt_client = MagicMock(spec=MqttChannel)
+
+    telemetry.run_telemetry_tick(
+        manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1, erzeuger_stoerung="f_28")
+    assert mqtt_client.publish_telemetry.call_args.args[0]["erzeuger_stoerung"] == "f_28"
+
+    telemetry.run_telemetry_tick(
+        manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=2, nur_raeume=True,
+        erzeuger_stoerung="f_28")
+    assert "erzeuger_stoerung" not in mqtt_client.publish_telemetry.call_args.args[0]
 
 
 def test_run_telemetry_tick_survives_exception_without_propagating(monkeypatch, caplog):
@@ -368,35 +423,89 @@ def test_run_telemetry_tick_survives_exception_without_propagating(monkeypatch, 
     with caplog.at_level("ERROR"):
         telemetry.run_telemetry_tick(
             manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False,
-        )  # must not raise
+        kreis=1)  # must not raise
 
     assert "Telemetrie" in caplog.text
 
 
 def test_regulation_fields_and_local_ts():
-    manifest = SimpleNamespace(refs={
+    manifest = ChannelManifest(refs={
         "room_actual": "sensor.r", "outdoor_temp": "sensor.o", "flow_setpoint": "sensor.vl",
     })
     ha = MagicMock(spec=SignalSource)
     ha.get_state.side_effect = {"sensor.r": 20.1, "sensor.o": 3.5, "sensor.vl": 41.0}.__getitem__
     mqtt = MagicMock(spec=MqttChannel)
-    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, room_target=20.5)
+    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, room_target=20.5, kreis=1)
     payload = mqtt.publish_telemetry.call_args.args[0]
     assert (payload["room_target"], payload["outdoor_temp"], payload["flow_setpoint"]) == (20.5, 3.5, 41.0)
     assert datetime.fromisoformat(payload["ts"]).tzinfo is not None
 
 
 def test_read_regulation_fields_liest_aussentemperatur_und_vorlaufsoll_aus_den_signalen():
-    manifest = SimpleNamespace(refs={"outdoor_temp": "sensor.o", "flow_setpoint": "sensor.vl", "room_target": "x.y"})
+    manifest = ChannelManifest(refs={"outdoor_temp": "sensor.o", "flow_setpoint": "sensor.vl", "room_target": "x.y"})
     signals = MagicMock(spec=SignalSource)
     signals.get_state.side_effect = {"sensor.o": 3.5, "sensor.vl": 41.0, "x.y": 99.0}.__getitem__
     assert telemetry.read_regulation_fields(manifest, signals, 20.5) == {
-        "room_target": 20.5, "outdoor_temp": 3.5, "flow_setpoint": 41.0}  # room_target aus dem Argument, nicht 99.0
+        "room_target": 20.5, "outdoor_temp": 3.5, "flow_setpoint": 41.0, "raeume": []}  # room_target aus dem Argument, nicht 99.0
     assert sorted(call.args[0] for call in signals.get_state.call_args_list) == ["sensor.o", "sensor.vl"]  # nie "x.y"
 
 
+def _raeume_manifest(raum_refs):
+    return ChannelManifest(refs={"room_actual": "sensor.r"}, raum_refs=raum_refs)
+
+
+def test_die_telemetrie_traegt_den_ist_wert_je_raum_nach_raumnummer_sortiert():
+    manifest = _raeume_manifest({3: "sensor.k", 1: "sensor.a", 2: "sensor.b"})
+    signals = MagicMock(spec=SignalSource)
+    signals.get_state.side_effect = {"sensor.a": 20.5, "sensor.b": 19.25, "sensor.k": 17.0}.__getitem__
+    felder = telemetry.read_regulation_fields(manifest, signals, None)
+    assert felder["raeume"] == [{"raum": 1, "ist": 20.5}, {"raum": 2, "ist": 19.25}, {"raum": 3, "ist": 17.0}]
+
+
+@pytest.mark.parametrize("schlecht", [
+    RuntimeError("unavailable"), SignalUngueltig("kein Fuehler"), 99.0, -10.01, 35.01, float("nan"), float("inf"),
+    "kalt", None, True,
+])
+def test_ein_raum_ohne_gueltigen_wert_fehlt_in_der_liste_die_uebrigen_bleiben(schlecht):
+    manifest = _raeume_manifest({1: "sensor.a", 2: "sensor.b"})
+    signals = MagicMock(spec=SignalSource)
+
+    def _get(ref):
+        wert = {"sensor.a": 20.5, "sensor.b": schlecht}[ref]
+        if isinstance(wert, Exception):
+            raise wert
+        return wert
+
+    signals.get_state.side_effect = _get
+    assert telemetry.read_regulation_fields(manifest, signals, None)["raeume"] == [{"raum": 1, "ist": 20.5}]
+
+
+@pytest.mark.parametrize("wert", [-10.0, 4.9, 35.0])
+def test_die_randwerte_des_raumbereichs_gelten_als_gueltig(wert):
+    manifest = _raeume_manifest({1: "sensor.a"})
+    signals = MagicMock(spec=SignalSource)
+    signals.get_state.return_value = wert
+    assert telemetry.read_regulation_fields(manifest, signals, None)["raeume"] == [{"raum": 1, "ist": wert}]
+
+
+def test_ohne_raeume_im_manifest_ist_die_liste_leer_aber_da():
+    signals = MagicMock(spec=SignalSource)
+    assert telemetry.read_regulation_fields(_raeume_manifest({}), signals, None)["raeume"] == []
+
+
+def test_der_tick_sendet_raeume_neben_room_actual():
+    manifest = _raeume_manifest({1: "sensor.a", 2: "sensor.k"})
+    ha = MagicMock(spec=SignalSource)
+    ha.get_state.side_effect = {"sensor.r": 20.0, "sensor.a": 19.5, "sensor.k": 22.0}.__getitem__
+    mqtt = MagicMock(spec=MqttChannel)
+    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, room_target=None, kreis=1)
+    payload = mqtt.publish_telemetry.call_args.args[0]
+    assert payload["room_actual"] == 20.0
+    assert payload["raeume"] == [{"raum": 1, "ist": 19.5}, {"raum": 2, "ist": 22.0}]
+
+
 def test_unreadable_regulation_field_is_omitted():
-    manifest = SimpleNamespace(refs={"room_actual": "sensor.r", "outdoor_temp": "sensor.o"})
+    manifest = ChannelManifest(refs={"room_actual": "sensor.r", "outdoor_temp": "sensor.o"})
     ha = MagicMock(spec=SignalSource)
 
     def _get(ref):
@@ -405,7 +514,7 @@ def test_unreadable_regulation_field_is_omitted():
         return 20.1
     ha.get_state.side_effect = _get
     mqtt = MagicMock(spec=MqttChannel)
-    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, room_target=None)
+    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, room_target=None, kreis=1)
     payload = mqtt.publish_telemetry.call_args.args[0]
     assert "outdoor_temp" not in payload and "room_target" not in payload
 
@@ -420,7 +529,7 @@ def test_delivery_roles_are_read_and_published():
     ha_api.get_raw_state.side_effect = lambda entity_id: {"sensor.b": "HEATING"}[entity_id]
     mqtt_client = MagicMock(spec=MqttChannel)
 
-    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False)
+    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert (payload["generator_hours"], payload["generator_starts"], payload["generator_state"]) == (
@@ -435,7 +544,7 @@ def test_unreadable_delivery_roles_are_left_out_and_unmapped_ones_are_not_read()
     ha_api.get_raw_state.side_effect = RuntimeError("unavailable")
     mqtt_client = MagicMock(spec=MqttChannel)
 
-    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False)
+    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
 
     payload = mqtt_client.publish_telemetry.call_args.args[0]
     assert not any(role in payload for role in telemetry.DELIVERY_ROLES)
@@ -466,13 +575,7 @@ def test_kpi_role_constants():
     assert "generator_hours" in telemetry.KPI_NUMERIC_ROLES and "generator_starts" in telemetry.KPI_NUMERIC_ROLES
 
 
-def test_the_telemetry_no_longer_carries_waerme_fehlt():
-    mqtt_client = MagicMock(spec=MqttChannel)
-    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False)
-    assert "waerme_fehlt" not in mqtt_client.publish_telemetry.call_args.args[0]
-
-
-# --- Plan 3b: Energie-Normalisierung (Tageszaehler) ---
+# --- Energie-Normalisierung (Tageszaehler) ---
 
 ENERGY_MANIFEST = ChannelManifest(refs={"energy_thermal_heating": "sensor.waerme_heute"})
 KWH = {"thermal_heating": "kWh"}
@@ -534,7 +637,7 @@ def test_total_counters_get_no_normalizer():
     assert telemetry.energy_normalizer(object(), "total") is None
 
 
-# --- Spec Stufe 3 S4b 5 (A5-11): Energie nur mit der erwarteten Einheit ---
+# --- Energie nur mit der erwarteten Einheit ---
 
 def test_energie_in_wh_wird_als_kwh_gesendet():
     manifest = ChannelManifest(refs={"energy_primary_heating": "sensor.gas"})
@@ -645,9 +748,106 @@ def _fremde_einheit(ha_api):
 @pytest.mark.parametrize("pfad", [_regelfeld, _kpi_wert, _einheit_nicht_lesbar, _fremde_einheit],
                          ids=["regelfeld", "kpi_wert", "einheit_nicht_lesbar", "fremde_einheit"])
 def test_fremder_text_aus_der_signalquelle_steht_nur_escaped_im_log(caplog, pfad):
-    """T6-Rest, R-c: der Fehlertext beim Lesen (Regelfeld, KPI-Wert, Einheit) und die gemeldete Einheit selbst kommen
+    """Der Fehlertext beim Lesen (Regelfeld, KPI-Wert, Einheit) und die gemeldete Einheit selbst kommen
     aus HA bzw. vom lokalen Bus; in der Logzeile stehen sie nur als Escape (Zeilenumbruch, U+202E, U+061C)."""
     ha_api = MagicMock(spec=SignalSource)
     with caplog.at_level(logging.WARNING, logger="smartheat_runtime.telemetry"):
         zeile = pfad(ha_api)
     assert zeile in logzeilen(caplog)
+
+
+def test_die_telemetrie_traegt_den_kreis():
+    for kreis in (1, 2):
+        mqtt_client = MagicMock(spec=MqttChannel)
+        telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False,
+                                    failsafe_active=False, kreis=kreis)
+        assert mqtt_client.publish_telemetry.call_args.args[0]["kreis"] == kreis
+
+
+def test_der_telemetrie_takt_reicht_den_kreis_durch():
+    mqtt_client = MagicMock(spec=MqttChannel)
+    ha_api = MagicMock(spec=SignalSource)
+    ha_api.get_state.return_value = 20.5
+    manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
+
+    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=2)
+
+    assert mqtt_client.publish_telemetry.call_args.args[0]["kreis"] == 2
+
+
+# --- V1b-Kennzeichen je Kreis: testphase_ohne, kaelteschutz ---
+
+@pytest.mark.parametrize("testphase_ohne, kaelteschutz", [
+    (False, "aus"), (False, "soll"), (False, "frost"), (True, "aus"), (True, "frost"),
+])
+def test_die_telemetrie_traegt_testphase_und_kaelteschutz(testphase_ohne, kaelteschutz):
+    mqtt_client = MagicMock(spec=MqttChannel)
+
+    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False,
+                                kreis=1, testphase_ohne=testphase_ohne, kaelteschutz=kaelteschutz)
+
+    payload = mqtt_client.publish_telemetry.call_args.args[0]
+    assert payload["testphase_ohne"] is testphase_ohne
+    assert payload["kaelteschutz"] == kaelteschutz
+
+
+def test_ohne_angabe_gilt_kein_kennzeichen():
+    mqtt_client = MagicMock(spec=MqttChannel)
+
+    telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False, failsafe_active=False,
+                                kreis=1)
+
+    payload = mqtt_client.publish_telemetry.call_args.args[0]
+    assert payload["testphase_ohne"] is False and payload["kaelteschutz"] == "aus"
+
+
+def test_die_wertemenge_des_kaelteschutzes():
+    assert telemetry.KAELTESCHUTZ_WERTE == ("aus", "soll", "frost")
+
+
+def test_ein_unbekannter_kaelteschutz_wird_am_absender_abgelehnt():
+    mqtt_client = MagicMock(spec=MqttChannel)
+
+    with pytest.raises(ValueError, match="kaelteschutz"):
+        telemetry.publish_telemetry(mqtt_client=mqtt_client, room_actual=20.5, boost_active=False,
+                                    failsafe_active=False, kreis=1, kaelteschutz="warm")
+
+    mqtt_client.publish_telemetry.assert_not_called()
+
+
+def test_der_telemetrie_takt_reicht_die_kennzeichen_durch():
+    mqtt_client = MagicMock(spec=MqttChannel)
+    ha_api = MagicMock(spec=SignalSource)
+    ha_api.get_state.return_value = 20.5
+    manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
+
+    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=2,
+                                 testphase_ohne=True, kaelteschutz="soll")
+
+    payload = mqtt_client.publish_telemetry.call_args.args[0]
+    assert payload["testphase_ohne"] is True and payload["kaelteschutz"] == "soll"
+
+
+def test_der_raumwerte_takt_sendet_keine_kennzeichen():
+    mqtt_client = MagicMock(spec=MqttChannel)
+    ha_api = MagicMock(spec=SignalSource)
+    ha_api.get_state.return_value = 20.5
+    manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
+
+    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1,
+                                 nur_raeume=True, testphase_ohne=True, kaelteschutz="frost")
+
+    payload = mqtt_client.publish_telemetry.call_args.args[0]
+    assert set(payload) == {"kreis", "room_actual", "boost_active", "failsafe_active", "ts", "raeume"}
+
+
+def test_der_telemetrie_takt_sendet_ohne_angabe_keine_testphase_und_keinen_kaelteschutz():
+    mqtt_client = MagicMock(spec=MqttChannel)
+    ha_api = MagicMock(spec=SignalSource)
+    ha_api.get_state.return_value = 20.5
+    manifest = ChannelManifest(refs={"room_actual": "sensor.room_actual"})
+
+    telemetry.run_telemetry_tick(manifest, ha_api, mqtt_client, boost_active=False, failsafe_active=False, kreis=1)
+
+    payload = mqtt_client.publish_telemetry.call_args.args[0]
+    assert payload["testphase_ohne"] is False and payload["kaelteschutz"] == "aus"

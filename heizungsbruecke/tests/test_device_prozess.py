@@ -1,4 +1,4 @@
-"""Lebenszyklus des Geraeteprozesses, beide Hosts (Spec Stufe 3 S6 4.2/4.3). Die Host-Einstiege pruefen
+"""Lebenszyklus des Geraeteprozesses, beide Hosts. Die Host-Einstiege pruefen
 test_main_geraet.py (HA) und gateway/tests/test_runtime_main.py."""
 import errno
 import logging
@@ -6,7 +6,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeClock
+from fakes import FakeClock
 
 from smartheat_device import prozess
 from smartheat_device.geraet_host_basis import EV_RELOAD
@@ -121,7 +121,7 @@ def test_beenden_laesst_das_laufende_ereignis_des_geraete_threads_fertig_werden(
 
 
 def test_beenden_stoppt_auch_einen_link_den_der_letzte_takt_nach_dem_ersten_stop_oeffnete():
-    """Restpunkt 5b-D2-4: Device.run fuehrt nach stop() noch einen Takt aus."""
+    """Device.run fuehrt nach stop() noch einen Takt aus."""
     gestoppt = threading.Event()
     device = SimpleNamespace(link=SimpleNamespace(stopped=False))
 
@@ -265,7 +265,7 @@ def test_ohne_eigene_pause_nimmt_laufen_time_sleep_zur_laufzeit(monkeypatch):
     assert ("pause", 60.0) in order and order[-1] == "neustart"
 
 
-# --- starten: die Host-Schritte vor laufen (S3S6-Startabbruch) ---
+# --- starten: die Host-Schritte vor laufen ---
 
 @pytest.mark.parametrize("fehler", [OSError(errno.EROFS, "geheim"), RuntimeError("geheim")], ids=["oserror", "runtime"])
 def test_ein_fehler_im_start_pausiert_60_s_und_startet_neu(caplog, fehler):
@@ -324,7 +324,7 @@ def test_ein_scheiternder_rueckruf_vor_der_pause_im_start_laesst_pause_und_neust
 
 
 def test_sigterm_in_der_startpause_endet_ohne_neustart():
-    """Review Focus 3: ein SIGTERM (SystemExit) in der Pause nach einem Startfehler beendet wie in laufen."""
+    """Ein SIGTERM (SystemExit) in der Pause nach einem Startfehler beendet wie in laufen."""
     order = []
 
     def pause(seconds):
@@ -465,6 +465,26 @@ def test_ausstehendes_zuruecksetzen_loescht_nichts(tmp_path):
     assert _aufraeumen(pfad, {"anlage": None})[1] == [] and pfad.exists()
 
 
+def test_ausstehendes_zuruecksetzen_gibt_die_gelesene_markierung_zurueck(tmp_path):
+    """Die Laufzeit bekommt die beim Start einmal gelesene Markierung, nur dann."""
+    pfad = tmp_path / "aufraeumen.json"
+    markierung.markieren(pfad, ALT)
+    assert prozess.aufraeumen_beim_start(
+        pfad, lambda: {"anlage": None}, lambda: True, wer="das Geraet") == markierung.Markierung("kunde1", ALT, False)
+
+
+def test_ohne_ausstehendes_zuruecksetzen_gibt_der_start_keine_markierung_zurueck(tmp_path):
+    ohne = tmp_path / "keine.json"
+    assert prozess.aufraeumen_beim_start(ohne, lambda: None, lambda: True, wer="das Geraet") is None
+    neu = tmp_path / "neu.json"
+    markierung.markieren(neu, ALT)
+    assert prozess.aufraeumen_beim_start(neu, lambda: ALT, lambda: True, wer="das Geraet") is None  # verworfen
+    fertig = tmp_path / "fertig.json"
+    markierung.markieren(fertig, ALT)
+    markierung.zurueckgesetzt(fertig, "kunde1")
+    assert prozess.aufraeumen_beim_start(fertig, lambda: {"anlage": None}, lambda: True, wer="das Geraet") is None
+
+
 def test_nach_dem_zuruecksetzen_wird_geloescht_und_die_markierung_entfernt(tmp_path):
     pfad = tmp_path / "aufraeumen.json"
     markierung.markieren(pfad, ALT)
@@ -482,7 +502,7 @@ def test_unfertiges_loeschen_behaelt_die_markierung_fuer_den_naechsten_start(tmp
 def test_eine_unlesbare_markierung_bleibt_und_es_wird_nichts_geloescht(tmp_path, monkeypatch):
     pfad = tmp_path / "aufraeumen.json"
     markierung.markieren(pfad, ALT)
-    monkeypatch.setattr(markierung, "entscheiden", lambda p, g: markierung.BEHALTEN)
+    monkeypatch.setattr(markierung, "entscheiden", lambda p, g: (markierung.BEHALTEN, None))
     assert _aufraeumen(pfad, {"anlage": None})[1] == [] and pfad.exists()
 
 
@@ -505,7 +525,7 @@ def test_eine_zwischen_entscheidung_und_loeschen_verschwundene_markierung_kippt_
 
     def verschwindet(p, gespeichert):
         p.unlink()
-        return markierung.VERWERFEN
+        return markierung.VERWERFEN, None
 
     monkeypatch.setattr(markierung, "entscheiden", verschwindet)
     assert _aufraeumen(pfad, {**ALT, "anlage": "kunde2"})[1] == [] and not pfad.exists()

@@ -1,12 +1,16 @@
-"""Plan 5b D2 Task 6: Diagnoseseite auf dem Geraetekern - Zustand statt Uebernahmestatus, Hinweise, eigene Meldungen,
-abgelehnte Konfiguration, QR-Code nur solange nicht eingerichtet. Schutz gegen DNS-Rebinding und fremde Clients wie
-bis 0.5.0 (Tests unten unveraendert portiert)."""
+"""Diagnoseseite auf dem Geraetekern - Zustand statt Uebernahmestatus, Hinweise, eigene Meldungen,
+abgelehnte Konfiguration, Code nur solange nicht eingerichtet und nach einem Knopfdruck. Schutz gegen DNS-Rebinding und
+fremde Clients. Die Seite verlangt eine Sitzung (Anmeldung: test_anmeldung.py); die Tests hier fragen mit einer
+gueltigen Sitzung (COOKIE), der Gesundheitsserver braucht keine."""
+import contextlib
 import http.client
 import json
+import re
 import socket
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,17 +20,21 @@ from smartheat_core import dateien
 from smartheat_device import wire
 from smartheat_device.host import Anzeige
 from smartheat_gateway import diagnose as diagnostics
+from smartheat_gateway import lokale_texte
+from smartheat_gateway.anmeldung import Zugang
 from smartheat_gateway.diagnose import (
-    ZUSTAND_TEXTE,
     host_allowed,
     parse_hostnames,
-    qr_url,
+    render_anmeldung,
     render_html,
     seite,
     start_server,
 )
 from smartheat_gateway.paths import Paths
 
+ZUSTAND_TEXTE = lokale_texte.gruppe("de", "zustand")
+ZUGANG = Zugang(Path("/gibt/es/nicht/werk.json"))  # ohne Werk; die Sitzung genuegt fuer die Seite
+COOKIE = f"shg_sitzung={ZUGANG.sitzungen.neu()}"
 SNAPSHOT = {
     "geraet": "shg-abcdefghijklmnop", "zustand": "nicht_uebernommen", "eingerichtet": False,
     "versionen": {"gateway": "0.6.0"}, "server_ok": True, "laufzeit": None, "zigbee_stick": True, "host": {},
@@ -60,41 +68,68 @@ def test_every_state_has_a_text():
     assert set(ZUSTAND_TEXTE) == set(wire.ZUSTAENDE)
 
 
-def test_html_shows_the_qr_only_while_not_set_up():
-    page = render_html(SNAPSHOT, "https://portal.example.test/#/claim?d=shg-abcdefghijklmnop&c=ABCDEFGHJKLM")
-    assert "<svg" in page and "ABCDEFGHJKLM" in page and "<script" not in page
-    eingerichtet = render_html({**SNAPSHOT, "eingerichtet": True, "zustand": "regelt", "code": None}, None)
-    assert "<svg" not in eingerichtet and "ABCDEFGHJKLM" not in eingerichtet
+def test_html_shows_device_id_and_code_only_while_not_set_up():
+    page = render_html(SNAPSHOT)
+    assert "ABCDEFGHJKLM" in page and "shg-abcdefghijklmnop" in page and "<script" not in page
+    eingerichtet = render_html({**SNAPSHOT, "eingerichtet": True, "zustand": "regelt", "code": None})
+    assert "ABCDEFGHJKLM" not in eingerichtet
 
 
-def test_html_without_portal_url_shows_the_code_without_qr():
-    page = render_html(SNAPSHOT, None)
-    assert "ABCDEFGHJKLM" in page and "<svg" not in page
+def test_the_page_has_no_qr_code_and_no_portal_link_with_the_code():
+    """GW 7.1: kein Portal-Link mit Code. Weder ein Link (`href`, `claim?`) noch ein QR-Bild (svg) enthaelt den Code,
+    auch nicht bei offenem Fenster."""
+    page = render_html(SNAPSHOT)
+    assert "ABCDEFGHJKLM" in page  # als Text, zum Abtippen im Portal
+    assert "claim?" not in page and "href" not in page and "<svg" not in page and "<img" not in page
+    assert page.count("ABCDEFGHJKLM") == 1
 
 
 @pytest.mark.parametrize("zustand", ["gesperrt", "update_noetig"])
 def test_blocking_states_are_explained_on_the_page(zustand):
-    page = render_html({**SNAPSHOT, "zustand": zustand, "code": None}, None)
-    assert ZUSTAND_TEXTE[zustand] in page
+    page = render_html({**SNAPSHOT, "zustand": zustand, "code": None}, "de")
+    assert ZUSTAND_TEXTE[zustand] in page and lokale_texte.gruppe("en", "zustand")[zustand] not in page
+
+
+def _hinweis(key, **felder):
+    return {"key": key, "code": f"meldung.{key}", "params": {}, "stufe": "rot", **felder}
 
 
 def test_page_lists_hints_own_messages_and_a_rejected_configuration():
     data = {**SNAPSHOT, "eingerichtet": True, "zustand": "regelt", "code": None,
-            "hinweise": [{"key": "wartung", "stufe": "warnung", "text": "Wartung <heute>"}],
+            "hinweise": [_hinweis("geraet_doppelt")],
             "meldungen": [{"key": "wunsch_begrenzt", "text": "Wunsch auf 26 °C begrenzt"}],
-            "konfiguration_abgelehnt": "Raumfühler ungültig"}
-    page = render_html(data, None)
-    assert "Wartung &lt;heute&gt;" in page and "Wunsch auf 26 °C begrenzt" in page
-    assert "Raumfühler ungültig" in page and "<heute>" not in page
+            "konfiguration_abgelehnt": {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "<heute>"},
+                                        "stufe": "rot"}}
+    page = render_html(data, "de")
+    assert lokale_texte.alle("de")["hinweis.geraet_doppelt"] in page and "Wunsch auf 26 °C begrenzt" in page
+    assert lokale_texte.alle("de")["hinweis.konfiguration_abgelehnt"] in page
+    assert "&lt;heute&gt;" in page and "<heute>" not in page
+    assert lokale_texte.alle("en")["hinweis.geraet_doppelt"] in render_html(data, "en")
+
+
+def test_page_shows_the_code_of_a_hint_without_local_text():
+    page = render_html({**SNAPSHOT, "hinweise": [_hinweis("neu<er>", code="meldung.neu<er>")]}, "de")
+    assert "meldung.neu&lt;er&gt;" in page and "<er>" not in page
+
+
+def test_every_hint_code_of_the_device_has_a_text_in_both_languages():
+    for sprache in ("de", "en"):
+        namen = set(lokale_texte.gruppe(sprache, "hinweis"))
+        assert namen == {*wire.MELDUNGEN, "konfiguration_abgelehnt"}
 
 
 def test_healthz_and_page_over_http():
-    server = start_server(0, lambda: SNAPSHOT, lambda: None)
+    server = start_server(0, lambda: SNAPSHOT, zugang=ZUGANG)
     port = server.server_address[1]
+
+    def abrufen(pfad):
+        return urllib.request.urlopen(
+            urllib.request.Request(f"http://127.0.0.1:{port}{pfad}", headers={"Cookie": COOKIE}), timeout=5)
+
     try:
-        health = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5))
+        health = json.load(abrufen("/healthz"))
         assert health == {"server_ok": True, "runtime_status": None, "zustand": "nicht_uebernommen"}
-        response = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5)
+        response = abrufen("/")
         page = response.read().decode()
         assert "shg-abcdefghijklmnop" in page and 'http-equiv="refresh"' in page
         assert response.headers["Cache-Control"] == "no-store"
@@ -104,7 +139,10 @@ def test_healthz_and_page_over_http():
 
 
 def test_the_code_is_on_the_page_only_while_not_claimed(geraet):
+    """Auch bei offenem Code-Fenster (nach einem Knopfdruck) zeigt die Seite den Code nur an einem nicht uebernommenen
+    Geraet; ohne Fenster nie (test_geraet_host_code.py)."""
     sicht = geraet.device
+    geraet.code_fenster_bis = geraet._clock() + 100.0
     for anzeige, code in (
         (None, False),  # startet: noch keine Anzeige
         (_anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False), True),
@@ -120,7 +158,18 @@ def test_the_code_is_on_the_page_only_while_not_claimed(geraet):
         data = seite(geraet, sicht)
         assert (data["code"] == sicht.identity.claim_code) is code, anzeige
         if not code:
-            assert sicht.identity.claim_code not in render_html(data, "https://portal.example.test/#/claim")
+            assert sicht.identity.claim_code not in render_html(data)
+
+
+def test_without_an_open_window_the_page_shows_neither_code_nor_device_id(geraet):
+    geraet.letzte_anzeige = _anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False)
+    geraet.code_fenster_bis = None
+    data = seite(geraet, geraet.device)
+    assert data["code"] is None and data["geraet"] is None
+    page = render_html(data)
+    assert geraet.device.identity.claim_code not in page and geraet.device.identity.device_id not in page
+    geraet.code_fenster_bis = geraet._clock() - 0.001  # abgelaufen
+    assert seite(geraet, geraet.device)["code"] is None
 
 
 def test_the_page_extract_takes_only_known_host_fields(geraet):
@@ -130,18 +179,11 @@ def test_the_page_extract_takes_only_known_host_fields(geraet):
     assert "test-wlan-secret" not in json.dumps(data)
 
 
-def test_qr_url_needs_a_portal_and_escapes_the_parts():
-    sicht = SimpleNamespace(identity=SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="AB&CD"))
-    assert qr_url("", sicht) is None
-    assert qr_url("https://portal.example.test/", sicht) == (
-        "https://portal.example.test/#/claim?d=shg-aaaaaaaaaaaaaaaa&c=AB%26CD")
-
-
 def test_without_a_device_the_page_still_renders(geraet):
     geraet.device = None
     data = seite(geraet, None)
     assert data["zustand"] == "startet" and data["code"] is None
-    assert "SmartHeat-Gateway" in render_html(data, None)
+    assert "SmartHeat-Gateway" in render_html(data)
 
 
 def _get(port: int, path: str, host: str) -> tuple[int, bytes, http.client.HTTPMessage]:
@@ -149,6 +191,7 @@ def _get(port: int, path: str, host: str) -> tuple[int, bytes, http.client.HTTPM
     try:
         connection.putrequest("GET", path, skip_host=True)
         connection.putheader("Host", host)
+        connection.putheader("Cookie", COOKIE)
         connection.endheaders()
         response = connection.getresponse()
         return response.status, response.read(), response.headers
@@ -162,7 +205,7 @@ def _get(port: int, path: str, host: str) -> tuple[int, bytes, http.client.HTTPM
     ("8.8.8.8", False), ("2a00:1450:4001::1", False), ("::ffff:8.8.8.8", False), ("kaputt", False),
 ])
 def test_only_local_clients_may_see_the_page(address, allowed):
-    # Audit 4, A4-37 (GW-10), Nutzer-Entscheidung E12; Review Focus 5
+    # Nur lokale Clients sehen die Seite (Nutzer-Entscheidung).
     assert diagnostics.client_allowed(address) is allowed
 
 
@@ -176,7 +219,7 @@ def test_docker_bridge_and_zone_scoped_clients_are_local():
 def test_foreign_client_gets_403_without_content_on_every_route(monkeypatch):
     monkeypatch.setattr(diagnostics, "client_allowed", lambda address: False)
     server = start_server(0, lambda: {"server_ok": True, "laufzeit": "regelt", "uebernommen": False, "code": "ABCDEFGHJKLM"},
-                          lambda: None)
+                          zugang=ZUGANG)
     port = server.server_address[1]
     try:
         for path in ("/", "/healthz", "/unbekannt"):
@@ -189,7 +232,7 @@ def test_foreign_client_gets_403_without_content_on_every_route(monkeypatch):
 
 @pytest.mark.parametrize("path", ["/", "/healthz"])
 def test_dns_rebinding_host_is_refused_on_every_route(path):
-    server = start_server(0, lambda: SNAPSHOT, lambda: "https://portal.example.test/#/claim", parse_hostnames("shg.lan"))
+    server = start_server(0, lambda: SNAPSHOT, parse_hostnames("shg.lan"), zugang=ZUGANG)
     port = server.server_address[1]
     try:
         status, body, headers = _get(port, path, f"evil.example:{port}")
@@ -227,7 +270,7 @@ def _lan_server_module():
         calls.append(1)
         return SNAPSHOT
 
-    server = start_server(0, snapshot, lambda: "https://portal.example.test/#/claim")
+    server = start_server(0, snapshot, zugang=ZUGANG)
     try:
         yield SimpleNamespace(port=server.server_address[1], calls=calls)
     finally:
@@ -251,7 +294,8 @@ def lan_server(_lan_server_module):
 def _anfrage(port: int, method: str, path: str, body: bytes | None = None, timeout: float = 5) -> tuple[int, bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        connection.request(method, path, body=body, headers={"Content-Type": "application/json"} if body else {})
+        kopf = {"Cookie": COOKIE, **({"Content-Type": "application/json"} if body else {})}
+        connection.request(method, path, body=body, headers=kopf)
         response = connection.getresponse()
         return response.status, response.read()
     finally:
@@ -289,7 +333,7 @@ def test_a_silent_or_half_sent_connection_does_not_block_a_second_request(lan_se
     lan_server.sockets.append(socket.create_connection(("127.0.0.1", lan_server.port), timeout=5))
     halb = socket.create_connection(("127.0.0.1", lan_server.port), timeout=5)
     lan_server.sockets.append(halb)
-    halb.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n")  # kein Zeilenende am Kopf: nie fertig
+    halb.sendall(f"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {COOKIE}\r\n".encode())  # kein Zeilenende am Kopf: nie fertig
     beginn = time.monotonic()
     status, antwort = _anfrage(lan_server.port, "GET", "/healthz", timeout=2)
     assert status == 200 and json.loads(antwort)["zustand"] == "nicht_uebernommen"
@@ -317,7 +361,7 @@ def test_fifty_simultaneous_requests_are_all_answered():
         barriere.wait()
         return SNAPSHOT
 
-    server = start_server(0, snapshot, lambda: None)
+    server = start_server(0, snapshot, zugang=ZUGANG)
     port = server.server_address[1]
     ergebnisse: list[int] = []
 
@@ -338,3 +382,421 @@ def test_fifty_simultaneous_requests_are_all_answered():
         barriere.abort()
         server.shutdown()
         server.server_close()
+
+
+# --- Obergrenzen: Verbindungsfrist und gleichzeitige Verbindungen (BR-GW-3) ---
+
+
+@pytest.fixture
+def server_mit_grenzen(monkeypatch):
+    """Fabrik: Server auf 127.0.0.1 mit eigenem Port, kleiner Verbindungsfrist und kleiner Obergrenze, damit die Tests
+    nicht Sekunden warten. `nur_health` startet den Gesundheitsserver."""
+    gestartet: list = []
+    sockets: list[socket.socket] = []
+
+    def starten(frist: float, maximum: int, *, nur_health: bool = False):
+        monkeypatch.setattr(diagnostics, "VERBINDUNG_FRIST_SECONDS", frist)
+        monkeypatch.setattr(diagnostics, "MAX_VERBINDUNGEN", maximum)
+        server = start_server(0, lambda: SNAPSHOT, nur_health=nur_health, zugang=None if nur_health else ZUGANG)
+        gestartet.append(server)
+        return SimpleNamespace(port=server.server_address[1], sockets=sockets)
+
+    try:
+        yield starten
+    finally:
+        for offen in sockets:
+            offen.close()
+        for server in gestartet:
+            server.shutdown()
+            server.server_close()
+
+
+@pytest.fixture
+def kurze_grenzen(server_mit_grenzen):
+    return server_mit_grenzen(0.5, 3)
+
+
+def _geschlossen(verbindung: socket.socket, frist: float) -> bool:
+    """Wahr, wenn der Server die Verbindung binnen `frist` schliesst (recv liefert b'')."""
+    verbindung.settimeout(frist)
+    try:
+        return verbindung.recv(1) == b""
+    except TimeoutError:
+        return False
+    except ConnectionError:
+        return True
+
+
+def test_a_silent_connection_is_closed_after_the_connection_deadline(kurze_grenzen):
+    stumm = socket.create_connection(("127.0.0.1", kurze_grenzen.port), timeout=5)
+    kurze_grenzen.sockets.append(stumm)
+    assert _geschlossen(stumm, 3)
+
+
+def test_a_connection_that_drips_the_header_is_closed_after_the_deadline_too(kurze_grenzen):
+    """Ein Byte alle 0,2 s hielte jede Leseoperation einzeln unter der Frist: sie gilt fuer die ganze Verbindung."""
+    tropf = socket.create_connection(("127.0.0.1", kurze_grenzen.port), timeout=5)
+    kurze_grenzen.sockets.append(tropf)
+    beginn = time.monotonic()
+    try:
+        for byte in b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Langsam: " + b"a" * 100:
+            tropf.sendall(bytes([byte]))
+            time.sleep(0.2)
+            if time.monotonic() - beginn > 4:
+                break
+    except OSError:
+        pass  # der Server hat geschlossen
+    assert time.monotonic() - beginn < 3
+
+
+def test_connections_over_the_limit_are_closed_at_once_and_a_freed_slot_serves_again(server_mit_grenzen):
+    server = server_mit_grenzen(2.0, 3)  # grosse Frist: der Test haengt nicht an der Geschwindigkeit des Runners
+    belegt = [socket.create_connection(("127.0.0.1", server.port), timeout=5) for _ in range(3)]
+    server.sockets.extend(belegt)
+    time.sleep(0.1)  # die drei Verbindungen sind im Server angenommen
+    zuviel = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+    server.sockets.append(zuviel)
+    assert _geschlossen(zuviel, 1.0)  # vor Ablauf der Frist von 2 s der belegten Verbindungen
+    # Gegenprobe: nach Ablauf der Frist sind die Plaetze frei, eine Anfrage wird beantwortet
+    assert all(_geschlossen(verbindung, 5) for verbindung in belegt)
+    assert _anfrage(server.port, "GET", "/healthz")[0] == 200
+
+
+def test_the_health_server_answers_while_every_place_of_the_diagnostic_page_is_taken(server_mit_grenzen):
+    """S-10: ein Gast im LAN fuellt die Plaetze der Diagnoseseite (Port 80). Compose-Healthcheck und Updater fragen den
+    Gesundheitsserver mit eigenen Plaetzen (nur auf dem Loopback des Hosts veroeffentlicht) und bekommen weiter 200."""
+    diagnose = server_mit_grenzen(5.0, 3)
+    health = server_mit_grenzen(5.0, 3, nur_health=True)
+    belegt = [socket.create_connection(("127.0.0.1", diagnose.port), timeout=5) for _ in range(3)]
+    diagnose.sockets.extend(belegt)
+    time.sleep(0.1)
+    zuviel = socket.create_connection(("127.0.0.1", diagnose.port), timeout=5)
+    diagnose.sockets.append(zuviel)
+    assert _geschlossen(zuviel, 1.0)  # die Plaetze der Diagnoseseite sind erschoepft (Gegenprobe)
+    status, antwort = _anfrage(health.port, "GET", "/healthz", timeout=2)
+    assert status == 200 and json.loads(antwort)["server_ok"] is True
+
+
+@pytest.mark.parametrize("path", ["/", "/x", "/index.html"])
+def test_the_health_server_serves_nothing_but_healthz(server_mit_grenzen, path):
+    health = server_mit_grenzen(5.0, 3, nur_health=True)
+    assert _anfrage(health.port, "GET", path) == (404, b"")
+
+
+def test_code_und_geraete_id_kommen_nie_ohne_sitzung(geraet):
+    """S-2, S-13: auch bei offenem Code-Fenster an einem nicht uebernommenen Geraet liefert der Server Code und
+    Geraete-ID nur mit Sitzung - nie auf der Anmeldeseite, nie in einer Weiterleitung, nie auf /healthz."""
+    geraet.letzte_anzeige = _anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False)
+    geraet.code_fenster_bis = geraet._clock() + 100.0
+    code, kennung = geraet.device.identity.claim_code, geraet.device.identity.device_id
+    assert seite(geraet, geraet.device)["code"] == code  # das Fenster ist offen
+    server = start_server(0, lambda: seite(geraet, geraet.device), zugang=ZUGANG)
+    port = server.server_address[1]
+    try:
+        for pfad in ("/", "/healthz", "/anmelden", "/x"):
+            status, koerper, kopf = _anfrage_ohne_sitzung(port, pfad)
+            text = koerper + str(kopf).encode()
+            assert code.encode() not in text and kennung.encode() not in text, pfad
+        assert _anfrage_ohne_sitzung(port, "/")[0] == 303
+        mit = _anfrage(port, "GET", "/")
+        assert mit[0] == 200 and code.encode() in mit[1] and kennung.encode() in mit[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _anfrage_ohne_sitzung(port: int, path: str) -> tuple[int, bytes, http.client.HTTPMessage]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        return response.status, response.read(), response.headers
+    finally:
+        connection.close()
+
+
+def test_a_client_that_resets_the_connection_leaves_no_traceback_but_a_real_error_does(capsys):
+    """Trennt oder setzt ein Client mitten in der Antwort zurueck (OSError), schreibt der Server keinen Traceback ins
+    Journal; ein anderer Fehler im Handler bleibt sichtbar (Gegenprobe)."""
+    server = start_server(0, lambda: SNAPSHOT, zugang=ZUGANG)
+    try:
+        for fehler in (ConnectionResetError("weg"), BrokenPipeError("weg"), TimeoutError("zu lang")):
+            try:
+                raise fehler
+            except OSError:
+                server.handle_error(None, ("192.168.2.5", 40000))
+        assert capsys.readouterr().err == ""
+        try:
+            raise ValueError("echter Fehler")
+        except ValueError:
+            server.handle_error(None, ("192.168.2.5", 40000))
+        fehler = capsys.readouterr().err
+        assert "Traceback" in fehler and "echter Fehler" in fehler
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# --- Lesebudget je Verbindung gegen die Kopfzeilen-Flut (A-01, S-13) ---
+
+
+def _get_mit_fuellung(fuellzeilen: int, zeilenlaenge: int = 60) -> bytes:
+    """Eine GET-Anfrage auf /healthz mit gueltiger Sitzung und `fuellzeilen` Kopfzeilen X-Fuell."""
+    zeilen = [b"GET /healthz HTTP/1.1", b"Host: 127.0.0.1", f"Cookie: {COOKIE}".encode()]
+    zeilen += [b"X-Fuell: " + b"a" * zeilenlaenge] * fuellzeilen
+    return b"\r\n".join(zeilen) + b"\r\n\r\n"
+
+
+def _gesamt_anfrage(laenge: int) -> bytes:
+    """Dieselbe Anfrage mit einer einzigen Fuellzeile, so gewaehlt, dass sie genau `laenge` Byte lang ist."""
+    leer = len(_get_mit_fuellung(1, 0))
+    anfrage = _get_mit_fuellung(1, laenge - leer)
+    assert len(anfrage) == laenge
+    return anfrage
+
+
+def _antwort_status(verbindung: socket.socket) -> int | None:
+    """Statuscode der Antwort oder None, wenn der Server ohne Antwort schliesst oder zuruecksetzt."""
+    verbindung.settimeout(5)
+    try:
+        kopf = verbindung.recv(32)
+    except ConnectionError:
+        return None
+    return int(kopf.split()[1]) if kopf.startswith(b"HTTP/") else None
+
+
+@pytest.mark.parametrize(("mehr", "angenommen"), [(0, True), (1, False)])
+def test_a_request_is_read_up_to_exactly_the_budget_per_connection(lan_server, mehr, angenommen):
+    """Randwert: eine Anfrage von genau 16384 Byte wird beantwortet, ein Byte mehr schliesst die Verbindung
+    ohne Antwort (Gegenprobe: ohne Budget bekaeme auch die laengere Anfrage 200)."""
+    anfrage = _gesamt_anfrage(16384 + mehr)  # das Budget aus der Spec, nicht aus der Konstante gelesen
+    verbindung = socket.create_connection(("127.0.0.1", lan_server.port), timeout=5)
+    lan_server.sockets.append(verbindung)
+    verbindung.sendall(anfrage)
+    assert _antwort_status(verbindung) == (200 if angenommen else None)
+
+
+def test_a_header_flood_closes_the_connection_without_traceback_and_a_login_works_afterwards(lan_server, capfd):
+    """98 Zeilen zu je 65 KB (das Maximum von http.client): der Server liest nur bis zum Budget, schliesst ohne Antwort und
+    ohne Traceback im Journal; die naechste Anfrage wird beantwortet."""
+    verbindung = socket.create_connection(("127.0.0.1", lan_server.port), timeout=5)
+    lan_server.sockets.append(verbindung)
+    with contextlib.suppress(OSError):  # der Server hat schon geschlossen
+        verbindung.sendall(_get_mit_fuellung(98, 65000))
+    assert _antwort_status(verbindung) is None
+    assert _anfrage(lan_server.port, "GET", "/healthz")[0] == 200
+    assert capfd.readouterr().err == ""
+
+
+def test_a_flood_of_connections_with_huge_headers_keeps_the_memory_of_the_process_small():
+    """32 Verbindungen gleichzeitig, je 98 Kopfzeilen zu 65 KB (rund 6,4 MB): ohne Budget haelt der Server je Verbindung die
+    ganze Anfrage (Spitze > 200 MB, im Feld ueber 3 GB bei 64 Verbindungen); mit dem Budget bleibt die Spitze der Python-
+    Allokationen unter 16 MB (gemessen rund 3 MB, ohne Budget rund 125 MB). tracemalloc statt RSS: stabil und unabhaengig vom Allokator."""
+    import tracemalloc
+    tracemalloc.start()
+    server = start_server(0, lambda: SNAPSHOT, zugang=ZUGANG)
+    port = server.server_address[1]
+    anfrage = _get_mit_fuellung(98, 65000)
+    los = threading.Barrier(32, timeout=20)
+
+    def flut() -> None:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as verbindung:
+                los.wait()
+                verbindung.sendall(anfrage)
+        except (OSError, threading.BrokenBarrierError):
+            pass  # der Server hat frueh geschlossen: gewollt
+
+    faeden = [threading.Thread(target=flut) for _ in range(32)]
+    try:
+        tracemalloc.reset_peak()
+        basis = tracemalloc.get_traced_memory()[0]
+        for faden in faeden:
+            faden.start()
+        for faden in faeden:
+            faden.join(timeout=60)
+        spitze = tracemalloc.get_traced_memory()[1] - basis
+    finally:
+        tracemalloc.stop()
+        server.shutdown()
+        server.server_close()
+    assert not any(faden.is_alive() for faden in faeden)
+    assert spitze < 16 * 1024 * 1024, spitze
+
+
+# --- Sprache der Seite: Accept-Language waehlt nur de oder en, der Kopf wird nie ausgegeben ---
+
+LANG_RE = re.compile(r'<html lang="(de|en)">')
+VOLL = {**SNAPSHOT, "eingerichtet": True, "zustand": "regelt", "code": None, "seriennummer": "SHG-0001",
+        "host": {"netz": True, "dns": False, "zeit_synchron": None}, "laufzeit": "ok",
+        "hinweise": [_hinweis("gesperrt")], "meldungen": [{"key": "b", "text": "Meldungstext"}],
+        "konfiguration_abgelehnt": {"code": "meldung.konfiguration_abgelehnt", "params": {"grund": "g"}, "stufe": "rot"}}
+
+
+@pytest.mark.parametrize(("kopf", "erwartet"), [
+    (None, "en"), ("", "en"), ("de", "de"), ("DE", "de"), ("en", "en"), ("de-AT", "de"), ("en-GB", "en"),
+    ("de-DE,de;q=0.9,en;q=0.8", "de"), ("en;q=0.4, de;q=0.9", "de"), ("de;q=0.4, en;q=0.9", "en"),
+    ("fr, en;q=0.5", "en"), ("fr, de;q=0.5", "de"), ("fr", "en"), ("*", "en"), ("de;q=0", "en"),
+    ("de;q=0, en;q=0.1", "en"), ("de;q=abc", "en"), ("de;q=1.5", "en"), ("deutsch", "en"), ("d e", "en"),
+    ("de;q=0.5, en;q=0.5", "de"), ("en;q=0.5, de;q=0.5", "en"), (" de ; q=0.7 ", "de"),
+    ("x" * 5000 + ", de", "en"), (",".join(["fr"] * 400) + ", de", "en"), ("de\x00", "en"),
+])
+def test_accept_language_waehlt_nur_de_oder_en(kopf, erwartet):
+    assert lokale_texte.sprache_waehlen(kopf) == erwartet
+
+
+@pytest.mark.parametrize(("davor", "erwartet"), [(31, "de"), (32, "en"), (40, "en")])
+def test_accept_language_zaehlt_nur_die_ersten_32_eintraege(davor, erwartet):
+    kopf = ",".join(["fr"] * davor + ["de"])
+    assert len(kopf) < lokale_texte.KOPF_MAX_ZEICHEN
+    assert lokale_texte.sprache_waehlen(kopf) == erwartet
+
+
+def test_schluessel_de_gleich_en_und_nur_einfache_platzhalter():
+    de, en = lokale_texte.alle("de"), lokale_texte.alle("en")
+    assert de.keys() == en.keys() and de
+    for sprache in (de, en):
+        for schluessel, text in sprache.items():
+            assert text.strip(), schluessel
+            assert "{" not in text and "}" not in text, schluessel  # {produkt} ist eingesetzt, sonst nichts
+            assert "<" not in text and "&" not in text, schluessel
+    assert "SmartHeat" in de["titel"] and "SmartHeat" in en["titel"]
+    rohe = json.loads((Path(lokale_texte.__file__).parent / "lokale_texte.json").read_text(encoding="utf-8"))
+    assert set(rohe) == {"de", "en"}
+    for sprache in rohe.values():
+        for text in sprache.values():
+            assert set(re.findall(r"\{[^}]*\}", text)) <= {"{produkt}"}
+
+
+def test_jeder_zustand_und_jedes_anmeldeergebnis_hat_einen_text_in_beiden_sprachen():
+    for sprache in ("de", "en"):
+        assert set(lokale_texte.gruppe(sprache, "zustand")) == set(wire.ZUSTAENDE)
+        assert set(lokale_texte.gruppe(sprache, "anmeldung")) == {"falsch", "gesperrt", "belegt", "kein_werk"}
+        assert set(lokale_texte.gruppe(sprache, "code_hinweis")) == {"keine_verbindung", "uebernommen"}
+
+
+def _gerippe(page: str) -> list[str]:
+    """Nur die Tags in Reihenfolge, ohne Text und ohne den Wert von lang."""
+    return [re.sub(r' lang="(de|en)"', "", tag) for tag in re.findall(r"<[^>]+>", page)]
+
+
+def test_de_und_en_zeigen_dieselben_angaben_in_derselben_Gestalt():
+    """Keine neue Angabe auf der Seite: gleiche Tags, gleiche Werte (Seriennummer, Code, Geraete-ID), nur die Sprache."""
+    for data in (VOLL, SNAPSHOT, {**SNAPSHOT, "code": None, "code_hinweis": "uebernommen"},
+                 {**SNAPSHOT, "code": None, "code_hinweis": "keine_verbindung", "zustand": "keine_verbindung"}):
+        de, en = render_html(data, "de"), render_html(data, "en")
+        assert _gerippe(de) == _gerippe(en)
+        assert LANG_RE.search(de).group(1) == "de" and LANG_RE.search(en).group(1) == "en"
+        assert de != en
+        for wert in ("ABCDEFGHJKLM", "shg-abcdefghijklmnop", "SHG-0001"):
+            assert (wert in de) == (wert in en) and de.count(wert) == en.count(wert)
+        for text in ("Hinweistext", "Meldungstext", "Ablehnungstext"):
+            assert (text in de) == (text in en)
+        assert "{produkt}" not in de and "{produkt}" not in en
+
+
+def test_die_seite_ohne_sprache_ist_englisch_und_mit_de_deutsch():
+    assert LANG_RE.search(render_html(VOLL)).group(1) == "en"
+    assert "Eingerichtet" not in render_html(VOLL) and "Set up" in render_html(VOLL)
+    de = render_html(VOLL, "de")
+    assert "Eingerichtet" in de and ">ja<" in de and ">nein<" in de and ">unbekannt<" in de
+    en = render_html(VOLL, "en")
+    assert ">yes<" in en and ">no<" in en and ">unknown<" in en and "ja" not in re.sub(r"<[^>]+>", " ", en).split()
+
+
+def test_die_anmeldeseite_gibt_es_in_beiden_sprachen():
+    for ergebnis in (None, "falsch", "gesperrt", "belegt", "kein_werk"):
+        de, en = render_anmeldung(ergebnis, "de"), render_anmeldung(ergebnis, "en")
+        assert _gerippe(de) == _gerippe(en) and de != en
+        assert LANG_RE.search(de).group(1) == "de" and LANG_RE.search(en).group(1) == "en"
+    assert "Passwort" in render_anmeldung(None, "de") and "Password" in render_anmeldung(None, "en")
+    assert LANG_RE.search(render_anmeldung()).group(1) == "en"
+
+
+def _mit_sprache(port: int, pfad: str, accept: str | None, method: str = "GET", body: bytes | None = None):
+    kopf = {"Cookie": COOKIE}
+    if accept is not None:
+        kopf["Accept-Language"] = accept
+    if body is not None:
+        kopf["Content-Type"] = "application/x-www-form-urlencoded"
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request(method, pfad, body=body, headers=kopf)
+        antwort = connection.getresponse()
+        return antwort.status, antwort.read().decode()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(("accept", "erwartet"), [
+    (None, "en"), ("de", "de"), ("de-DE,de;q=0.9,en;q=0.8", "de"), ("fr, en;q=0.5", "en"), ("fr", "en"),
+    ("en, de;q=0.1", "en"),
+])
+def test_die_seite_folgt_dem_kopf_ueber_http(lan_server, accept, erwartet):
+    for pfad in ("/", "/anmelden"):
+        status, page = _mit_sprache(lan_server.port, pfad, accept)
+        assert status == 200 and LANG_RE.search(page).group(1) == erwartet
+    status, page = _mit_sprache(lan_server.port, "/anmelden", accept, "POST", b"passwort=x")
+    assert LANG_RE.search(page).group(1) == erwartet  # auch die Antwort auf eine Anmeldung (hier ohne Werk: 503)
+
+
+@pytest.mark.parametrize("fremd", [
+    '"><script>alert(1)</script>', "xx-ZZ-evil", "de\"; onload=\"x", "FR-ch;q=0.9, <b>fett</b>", "../../etc/passwd",
+])
+def test_der_sprachkopf_wird_nie_ausgegeben(lan_server, fremd):
+    for pfad in ("/", "/anmelden"):
+        status, page = _mit_sprache(lan_server.port, pfad, fremd)
+        assert status == 200 and LANG_RE.search(page).group(1) == "en"
+        assert fremd not in page and "evil" not in page and "<script" not in page and "fett" not in page
+    assert "Accept-Language" not in page
+
+
+# --- Hinweis auf das uebernehmende Konto: dauerhaft, nicht nur im Fenster des Knopfs ---
+
+def test_die_seite_zeigt_uebernommen_und_die_maske_dauerhaft_ohne_offenes_fenster(geraet):
+    geraet.code_fenster_bis = None
+    stande = (
+        (_anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False), False),
+        (_anzeige("wartet_auf_einrichtung", eingerichtet=False, konto_hinweis="a***@e***.com"), True),
+        (_anzeige("regelt", konto_hinweis="a***@e***.com"), True),
+        (_anzeige("keine_verbindung", server_ok=False, konto_hinweis="a***@e***.com"), True),
+    )
+    for anzeige, uebernommen in stande:
+        geraet.letzte_anzeige = anzeige
+        seite_de = render_html(seite(geraet, geraet.device), "de")
+        assert ("übernommen · a***@e***.com" in seite_de) is uebernommen, anzeige.zustand
+        assert ("claimed · a***@e***.com" in render_html(seite(geraet, geraet.device), "en")) is uebernommen
+
+
+def test_die_seite_vor_der_uebernahme_und_ohne_anzeige_zeigt_keine_uebernahme(geraet):
+    geraet.letzte_anzeige = None
+    assert "übernommen" not in render_html(seite(geraet, geraet.device), "de")
+    geraet.letzte_anzeige = _anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False)
+    data = seite(geraet, geraet.device)
+    assert data["konto_hinweis"] is None and data["device_state"] == "nicht_uebernommen"
+    assert "übernommen" not in render_html(data, "de").replace(ZUSTAND_TEXTE["nicht_uebernommen"], "")
+
+
+def test_uebernommen_ohne_hinweis_zeigt_nur_uebernommen(geraet):
+    geraet.letzte_anzeige = _anzeige("regelt")
+    seite_de = render_html(seite(geraet, geraet.device), "de")
+    assert "<td>übernommen</td>" in seite_de and "·" not in seite_de
+    assert "<td>claimed</td>" in render_html(seite(geraet, geraet.device), "en")
+
+
+def test_nach_der_freigabe_zeigt_die_seite_keinen_hinweis_mehr(geraet):
+    geraet.letzte_anzeige = _anzeige("regelt", konto_hinweis="a***@e***.com")
+    assert "a***@e***.com" in render_html(seite(geraet, geraet.device), "de")
+    geraet.letzte_anzeige = _anzeige("nicht_uebernommen", device_state="nicht_uebernommen", eingerichtet=False)
+    assert "a***@e***.com" not in render_html(seite(geraet, geraet.device), "de")
+
+
+def test_der_hinweis_wird_wie_jedes_feld_maskiert_und_ist_nicht_im_diagnostics_auszug(geraet):
+    geraet.letzte_anzeige = _anzeige("regelt", konto_hinweis='a***@<b onload="x">***.com')
+    page = render_html(seite(geraet, geraet.device), "de")
+    assert "<b onload" not in page and "&lt;b onload=&quot;x&quot;&gt;" in page
+    assert "konto_hinweis" not in geraet.snapshot()
+
+
+def test_render_html_kennt_einen_auszug_ohne_die_neuen_felder():
+    assert "übernommen" not in render_html(SNAPSHOT, "de").replace(ZUSTAND_TEXTE["nicht_uebernommen"], "")

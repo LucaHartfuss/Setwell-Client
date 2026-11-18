@@ -1,4 +1,4 @@
-"""Software-Ergebnisse und LED-Datei des GatewayDeviceHost (Testoffensive T5', Task 8, Teil A): was die Software-Bruecke
+"""Software-Ergebnisse und LED-Datei des GatewayDeviceHost: was die Software-Bruecke
 aus software_meldungen.json macht (Grund, uebergangene Eintraege) und wann die LED-Datei neu geschrieben wird. Eigene
 Datei, weil test_geraet_host.py mit dem Umbau von T4' wechselt. Die Ergebnisse gehen ueber das echte Geraet (Device,
 eigener Client-Kern, keine Grenze) auf einen Fake-Link und werden als up/result gelesen: das Geraet lehnt einen Grund
@@ -126,7 +126,8 @@ class LedWelt:
         self.clock = clock
         self.wall = {"t": WALL}
         self.host = gh.GatewayDeviceHost(self.paths, ZigbeeMirror(FakeBus(), clock), host_dir=tmp_path / "host",
-                                         clock=clock, wall=lambda: self.wall["t"])
+                                         clock=clock, wall=lambda: self.wall["t"],
+                                         echt=lambda: self.wall["t"])
 
     def led(self) -> dict:
         return json.loads(self.paths.agent_state.read_text())
@@ -157,13 +158,14 @@ def _iso(wall: float) -> str:
 def test_an_unchanged_state_rewrites_the_led_file_after_sixty_seconds_not_before(led):
     led.host.anzeigen(_anzeige("regelt"))
     erste = led.led()
-    assert erste == {"zustand": "regelt", "seit": _iso(WALL), "ts": _iso(WALL)}
+    assert erste == {"zustand": "regelt", "seit": _iso(WALL), "ts": _iso(WALL), "code_fenster": False}
     _weiter(led, 59)
     led.host.anzeigen(_anzeige("regelt"))
     assert led.led() == erste  # 59 s: unveraendert, auch ts
     _weiter(led, 1)
     led.host.anzeigen(_anzeige("regelt"))
-    assert led.led() == {"zustand": "regelt", "seit": _iso(WALL), "ts": _iso(WALL + 60)}  # 60 s: neu, seit bleibt
+    assert led.led() == {"zustand": "regelt", "seit": _iso(WALL), "ts": _iso(WALL + 60),
+                         "code_fenster": False}  # 60 s: neu, seit bleibt
 
 
 def test_the_led_minute_counts_from_the_last_write_not_from_the_first(led):

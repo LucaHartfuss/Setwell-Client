@@ -4,18 +4,18 @@ ausdrueckliche Freigabe des Nutzers; danach Tabelle und module/client-kern.md ("
 Die Verhaltenstabelle rechnet aus derselben Tabelle und laeuft durch die Hebel-Pipeline mit einer Attrappe nur an der
 V2-Grenze (PlantBinding)."""
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from bindung_beispiele import BINDINGS
 
 from heizungsbruecke import ha_binding
-from smartheat_core import boost, emergency_boost, write_budget
+from smartheat_core import boost, emergency_boost, safety, write_budget
 from smartheat_core.clamping import round_to_step
 from smartheat_core.pipeline import LeverPipeline
 from smartheat_core.safety import LOCAL_SAFETY
 from smartheat_device import wire
-from smartheat_runtime import delivery, entitlement, plausibility
+from smartheat_runtime import delivery, entitlement, karenz, plausibility
 
 R4 = "Regel 4: Änderung braucht die Freigabe des Nutzers"
 HK, FBH = "Heizkoerper", "Fussbodenheizung"
@@ -23,10 +23,10 @@ HK, FBH = "Heizkoerper", "Fussbodenheizung"
 #: (Hebelsatz, Verteilsystem) -> (Bereiche, Comfort-Boost, Notfall-Hebel, Ankunftsschwelle)
 TABELLE = {
     ("vaillant_vrc720", HK): (
-        {"curve": (0.4, 1.5), "room_setpoint": (15.0, 25.0), "heat_limit": (5.0, 23.0), "min_flow": (20.0, 30.0)},
+        {"curve": (0.4, 1.5), "room_setpoint": (15.0, 25.0), "heat_limit": (10.0, 23.0), "min_flow": (20.0, 30.0)},
         {"curve": 1.5, "room_setpoint": 25.0, "heat_limit": 23.0}, ("curve", "room_setpoint", "heat_limit"), 0.5),
     ("weishaupt_wwp", HK): (
-        {"curve": (0.30, 1.00), "room_setpoint": (16.0, 25.0), "heat_limit": (5.0, 23.0)},
+        {"curve": (0.30, 1.00), "room_setpoint": (16.0, 25.0), "heat_limit": (10.0, 23.0)},
         {"curve": 1.00, "room_setpoint": 25.0, "heat_limit": 23.0}, ("curve", "room_setpoint", "heat_limit"), 0.5),
     ("weishaupt_wwp_basis", HK): (
         {"room_setpoint": (16.0, 25.0)}, {"room_setpoint": 25.0}, ("room_setpoint",), 0.5),
@@ -34,10 +34,10 @@ TABELLE = {
         {"curve": (0.4, 1.4), "level": (-13.0, 3.0), "room_setpoint": (15.0, 25.0)},
         {"curve": 1.4, "level": 3.0, "room_setpoint": 25.0}, ("curve", "level", "room_setpoint"), 0.5),
     ("vaillant_vrc720", FBH): (
-        {"curve": (0.10, 0.35), "room_setpoint": (15.0, 24.0), "heat_limit": (5.0, 20.0), "min_flow": (20.0, 30.0)},
+        {"curve": (0.10, 0.35), "room_setpoint": (15.0, 24.0), "heat_limit": (10.0, 20.0), "min_flow": (20.0, 30.0)},
         {}, ("curve", "room_setpoint", "heat_limit"), 0.5),
     ("weishaupt_wwp", FBH): (
-        {"curve": (0.10, 0.50), "room_setpoint": (16.0, 24.0), "heat_limit": (5.0, 20.0)},
+        {"curve": (0.10, 0.50), "room_setpoint": (16.0, 24.0), "heat_limit": (10.0, 20.0)},
         {}, ("curve", "room_setpoint", "heat_limit"), 0.5),
     ("weishaupt_wwp_basis", FBH): ({"room_setpoint": (16.0, 24.0)}, {}, ("room_setpoint",), 0.5),
     ("viessmann_vicare", FBH): (
@@ -47,15 +47,38 @@ TABELLE = {
 
 KONSTANTEN = {
     "Plausibilitaet Raum": (plausibility.ROOM_TEMP_RANGE, (5.0, 35.0)),
+    "Plausibilitaet Raum Ist": (plausibility.ROOM_ACTUAL_RANGE, (-10.0, 35.0)),
     "Plausibilitaet aussen": (plausibility.OUTDOOR_TEMP_RANGE, (-40.0, 45.0)),
     "Bedienwunsch": ((wire.RAUM_SOLL_MIN, wire.RAUM_SOLL_MAX, wire.RAUM_SOLL_STEP), (15.0, 25.0, 0.5)),
     "Lesebereich Raum-Soll": ((ha_binding.ROOM_SETPOINT_READ_MIN, ha_binding.ROOM_SETPOINT_READ_MAX), (5.0, 35.0)),
     "Comfort-Boost Ausloeser": (boost._TARGET_RISE_EPSILON_K, 0.01),
     "Comfort-Boost hoechstens": (boost.COMFORT_BOOST_MAX_SECONDS, 4 * 3600),
     "Comfort-Boost unlesbar": (boost.UNREADABLE_ROOM_CHECKS, 3),
+    "Comfort-Boost bei Plananstieg nur bei Aufheizen": (boost.AUFHEIZEN_BOOST, "boost"),
     "Notfall-Boost ab": (emergency_boost.EMERGENCY_TRIGGER_K, 1.0),
+    "Kaelteschutz Soll-Ausloeser": (
+        (emergency_boost.KAELTESCHUTZ_SOLL_DELTA_K, emergency_boost.KAELTESCHUTZ_SOLL_DAUER),
+        (2.0, timedelta(hours=3))),
+    "Kaelteschutz Frostnaehe-Ausloeser": (
+        (emergency_boost.KAELTESCHUTZ_FROST_C, emergency_boost.KAELTESCHUTZ_FROST_DAUER),
+        (5.0, timedelta(minutes=15))),
+    "Kaelteschutz Ende ohne Soll": (emergency_boost.KAELTESCHUTZ_ENDE_OHNE_SOLL_C, 7.0),
+    "Kaelteschutz gueltiges Ist": (emergency_boost.KAELTESCHUTZ_IST_BEREICH, (-10.0, 35.0)),
+    "Kaelteschutz Luecke": (emergency_boost.KAELTESCHUTZ_LUECKE_MAX, timedelta(minutes=15)),
+    "Kaelteschutz hoechstens": (emergency_boost.KAELTESCHUTZ_HOECHSTDAUER, timedelta(hours=4)),
+    "Kaelteschutz Ist gleich Plausibilitaet": (emergency_boost.KAELTESCHUTZ_IST_BEREICH, plausibility.ROOM_ACTUAL_RANGE),
     "Notbetrieb": ((delivery.NOTBETRIEB_AFTER_SERVER_FAILURES, delivery.ACK_TIMEOUT_SECONDS), (2, 30)),
     "Abo-Frist": (entitlement.GRACE_PERIOD, timedelta(days=30)),
+    "Karenz der Meldung nach Softwarewechsel": (karenz.KARENZ_NACH_UPDATE_S, 900),
+    "Betriebsarten Absenk-Untergrenze": (safety.ABSENK_UNTERGRENZE_C, 16.0),
+    "Betriebsarten Leerstand-Untergrenze": (safety.LEERSTAND_UNTERGRENZE_C, 15.0),
+    "Betriebsarten Leerstand-Voreinstellung": (safety.LEERSTAND_VORGABE_C, 16.0),
+    "Betriebsarten Temperatur hoechstens (Bedienbereich)": (safety.BEDIENBEREICH_MAX_C, 25.0),
+    "Betriebsarten Bedienbereich gleich Wunsch-Eingang": (safety.BEDIENBEREICH_MAX_C, wire.RAUM_SOLL_MAX),
+    "Betriebsarten Mindestdauer der Phase": (safety.PHASE_MINDESTDAUER, timedelta(minutes=60)),
+    "Betriebsarten Leerstand hoechstens": (safety.LEERSTAND_HOECHSTDAUER, timedelta(days=365)),
+    "Betriebsarten Abwesenheits-Vorschlag": (
+        dict(safety.ABWESENHEIT_VORSCHLAG_C), {"Heizkoerper": 17.0, "Fussbodenheizung": 19.0}),
 }
 
 
@@ -75,6 +98,24 @@ def test_keine_weiteren_saetze():
 def test_konstanten(name):
     ist, soll = KONSTANTEN[name]
     assert ist == soll, f"{R4}: {name}"
+
+
+@pytest.mark.parametrize(("pruefung", "grenze", "rand"), [
+    (safety.abwesend_temperatur_gueltig, 15.0, "unten"), (safety.abwesend_temperatur_gueltig, 25.0, "oben"),
+    (safety.leerstand_temperatur_gueltig, 15.0, "unten"), (safety.leerstand_temperatur_gueltig, 25.0, "oben"),
+    (safety.uebersteuerung_temperatur_gueltig, 16.0, "unten"),
+    (safety.uebersteuerung_temperatur_gueltig, 25.0, "oben"),
+], ids=lambda wert: getattr(wert, "__name__", str(wert)))
+def test_temperaturgrenzen_der_betriebsarten(pruefung, grenze, rand):
+    """Die Grenze gilt, ein halbes Grad dahinter nicht."""
+    assert pruefung(grenze), R4
+    assert not pruefung(grenze - 0.5 if rand == "unten" else grenze + 0.5), R4
+
+
+def test_abwesend_bis_hoechstens_365_tage_voraus():
+    jetzt = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
+    assert safety.abwesend_bis_gueltig(jetzt + timedelta(days=365), jetzt), R4
+    assert not safety.abwesend_bis_gueltig(jetzt + timedelta(days=365, minutes=1), jetzt), R4
 
 
 # --- Verhaltenstabelle ---
@@ -196,6 +237,22 @@ def test_fussbodenheizung_hat_keine_comfort_zeile(make_store, clock, key):
     assert anlage.writes == []
 
 
+#: Die Zeilen der lokalen Verfahrenstabelle je Hebelsatz: auf welchen Wegen er vorkommt. Die Werte einer Zeile sind die
+#: Werte seines Hebelsatzes aus den Tabellen unten, auf jedem Weg gleich (die Simulation traegt jeden Hebelsatz).
+WEGE_JE_HEBELSATZ = {
+    "vaillant_vrc720": ("vaillant_myvaillant", "simulation"),
+    "weishaupt_wwp": ("weishaupt_modbus", "simulation"),
+    "weishaupt_wwp_basis": ("weishaupt_modbus", "simulation"),
+    "viessmann_vicare": ("viessmann_vicare", "simulation"),
+}
+KOMBINATIONEN = [(weg, hebelsatz) for hebelsatz, wege in WEGE_JE_HEBELSATZ.items() for weg in wege]
+
+
+def je_kombination(tabelle):
+    """Die woertliche Tabelle je Hebelsatz auf alle (Weg, Hebelsatz)-Kombinationen ausgerollt."""
+    return {(weg, hebelsatz): tabelle[hebelsatz] for weg, hebelsatz in KOMBINATIONEN}
+
+
 #: Spec Stufe 3 S4b 4.2: Obergrenzen des Schreibschutzes (Hebelsatz -> (durchsetzen_tag, tag, lebensdauer_hinweis)).
 #: Der Server darf nur gleich oder strenger senden. Werte unveraendert aus smartheat_core/binding.py bis 1.0.0.
 SCHREIBSCHUTZ = {
@@ -212,7 +269,7 @@ def test_schreibschutz_obergrenzen():
     assert {
         k: (v.obergrenze.durchsetzen_tag, v.obergrenze.tag, v.obergrenze.lebensdauer_hinweis)
         for k, v in VERFAHREN.items()
-    } == SCHREIBSCHUTZ, R4
+    } == je_kombination(SCHREIBSCHUTZ), R4
 
 
 #: Lokale Positivliste der Weishaupt-Optionsschema-Praefixe (weishaupt_modbus 1.x und 2.0). Der Server darf nur eine
@@ -228,7 +285,7 @@ PRAEFIXE_ERLAUBT = {
 def test_weishaupt_praefixe_lokale_positivliste():
     from smartheat_core.verfahren import VERFAHREN
 
-    assert {k: v.praefixe_erlaubt for k, v in VERFAHREN.items()} == PRAEFIXE_ERLAUBT, R4
+    assert {k: v.praefixe_erlaubt for k, v in VERFAHREN.items()} == je_kombination(PRAEFIXE_ERLAUBT), R4
 
 
 #: Lokale Positivliste der Schreibgruppen (A6-09, Spec Fixrunde A 3.5): der Server darf nur Gruppen senden, die als
@@ -244,7 +301,41 @@ SCHREIBGRUPPEN_ERLAUBT = {
 def test_schreibgruppen_lokale_positivliste():
     from smartheat_core.verfahren import VERFAHREN
 
-    assert {k: v.schreibgruppen_erlaubt for k, v in VERFAHREN.items()} == SCHREIBGRUPPEN_ERLAUBT, R4
+    assert {k: v.schreibgruppen_erlaubt for k, v in VERFAHREN.items()} == je_kombination(SCHREIBGRUPPEN_ERLAUBT), R4
+
+
+#: Lokale Mindestliste der Rueckstellung je Hebelsatz: diese Hebel stellt der Client beim Abmelden und Abo-Ende immer
+#: zurueck; eine Konfiguration, deren `zurueck` einen davon auslaesst, weist er ab (Gefaehrdung G-9).
+#: Vaillant (Nutzer-Entscheidung 2026-10-23, Rueckstellung "alles wie vor SmartHeat"): alle vier Hebel kehren auf ihren
+#: Ursprungswert zurueck, nicht mehr nur die Heizgrenze.
+RUECKSTELLUNG_PFLICHT = {
+    "vaillant_vrc720": ("curve", "room_setpoint", "heat_limit", "min_flow"),
+    "weishaupt_wwp": ("curve", "room_setpoint", "heat_limit"),
+    "weishaupt_wwp_basis": ("room_setpoint",),
+    "viessmann_vicare": ("curve", "level", "room_setpoint"),
+}
+
+
+def test_rueckstellung_pflicht_lokale_mindestliste():
+    from smartheat_core.verfahren import VERFAHREN
+
+    assert {k: v.rueckstellung_pflicht for k, v in VERFAHREN.items()} == je_kombination(RUECKSTELLUNG_PFLICHT), R4
+
+
+#: Hilfs-Ursprungswerte je Hebelsatz, die vor dem ersten Schreiben gemerkt und beim Zurueckstellen wiederhergestellt
+#: werden. Vaillant: die Betriebsart der Zone, die danach auf das Zeitprogramm zurueckgeht.
+AUX_URSPRUENGE = {
+    "vaillant_vrc720": ("mode_select",),
+    "weishaupt_wwp": ("mode_select", "setpoint_comfort", "setpoint_setback"),
+    "weishaupt_wwp_basis": ("mode_select", "setpoint_comfort", "setpoint_setback"),
+    "viessmann_vicare": ("mode_select",),
+}
+
+
+def test_aux_ursprungswerte_lokale_tabelle():
+    from smartheat_core.verfahren import VERFAHREN
+
+    assert {k: v.aux_originals for k, v in VERFAHREN.items()} == je_kombination(AUX_URSPRUENGE), R4
 
 
 #: Spec Fixrunde A Schreibschutz 3.1/3.2 (A6-01, A6-34): Boost-Starts je Art (Schluessel -> (jeder Versuch zaehlt,

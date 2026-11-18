@@ -1,4 +1,4 @@
-"""Stufe 3 S8a-2 (A5-16, Audit 5 p5-ci): Vertragspruefungen, die nur Module des Gateways und des Geraetekerns lesen.
+"""Vertragspruefungen, die nur Module des Gateways und des Geraetekerns lesen.
 Frueher Teile der Checks 52 und 53 des Contract-Checks im Dev-Root (tools/contract_check.py); was dort ueber
 Repo-Grenzen geht (Einstellschritte der Simulation gegen den Rundweg des Servers, Entdeckung und Kennung gegen die
 Erkennung des Servers), bleibt im Contract-Check. Je Pruefung eine Funktion `_probleme_<nr>`, ein Test auf den echten
@@ -13,6 +13,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from befehle_sicht import registrierte_befehle
 from world import GatewayWorld
 
 from smartheat_device import wire
@@ -20,7 +21,7 @@ from smartheat_gateway import befehle
 from smartheat_gateway.drivers import registry
 
 # Befehle, die der Geraetekern selbst eintraegt (smartheat_device.device.Device), nicht das Gateway.
-GERAETEKERN_BEFEHLE = ("hinweis", "new_claim_code", "claim_state")
+GERAETEKERN_BEFEHLE = ("hinweis", "new_claim_code", "claim_state", "weg_pruefen")
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ def world(data_dir, monkeypatch, clock):
 
 
 def _probleme_52(handlers, kern, commands) -> list[str]:
-    """Spec 5b 5.3/9: Jeder Befehl des Vertrags (wire.COMMANDS) hat im Gateway genau einen Handler, im Gateway
+    """Jeder Befehl des Vertrags (wire.COMMANDS) hat im Gateway genau einen Handler, im Gateway
     (befehle.HANDLERS) oder im Geraetekern; keiner ist doppelt, keiner unbekannt."""
     handled = [*handlers, *kern]
     problems = []
@@ -57,7 +58,7 @@ def test_check_52_das_laufende_gateway_traegt_jeden_befehl_ein(world):
     """Die Liste GERAETEKERN_BEFEHLE stimmt: Geraetekern und Gateway zusammen tragen genau die Befehle des Vertrags
     ein."""
     world.start_runtime()
-    assert world.device.befehle.kinds == set(wire.COMMANDS)
+    assert registrierte_befehle(world.device.befehle) == set(wire.COMMANDS)
 
 
 def test_check_52_meldet_einen_befehl_ohne_handler():
@@ -97,7 +98,7 @@ def driver_parameter_names(drivers) -> dict[str, tuple[str, ...]]:
 
 
 def _probleme_53(drivers) -> list[str]:
-    """Spec 5b 7, 5b-S1-15: Geraetedokumente tragen keine Geheimnisse. Die Parameternamen der Gateway-Treiber
+    """Geraetedokumente tragen keine Geheimnisse. Die Parameternamen der Gateway-Treiber
     (driver_parameter_names) klingen nicht nach Token, Secret, Passwort, Zugangsdaten oder Schluessel."""
     return [f"{source}: Parametername {name!r} klingt nach einem Geheimnis (Geraetedokumente bleiben frei davon)"
             for source, names in driver_parameter_names(drivers).items() for name in names if looks_secret(name)]

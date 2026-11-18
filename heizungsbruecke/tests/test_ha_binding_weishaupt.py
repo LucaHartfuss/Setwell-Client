@@ -1,4 +1,4 @@
-"""HA-Binding Weishaupt (Plan 3b, weishaupt_modbus): Betriebsart "Normal" (Uebersetzungsschluessel) als Vorbereitung,
+"""HA-Binding Weishaupt (weishaupt_modbus): Betriebsart "Normal" (Uebersetzungsschluessel) als Vorbereitung,
 Reihenfolge Komfort/Normal/Absenk, Hilfs-Ursprungswerte, physische Schreibvorgaenge; mit der Pipeline: Fehlschlag mitten in der
 Reihenfolge und Wiederherstellung."""
 import pytest
@@ -91,7 +91,7 @@ def test_a_failing_comfort_write_leaves_the_normal_setpoint_untouched():
 
 def test_an_unreadable_comfort_setpoint_is_a_write_error():
     ha = FakeHa(**{"number.komfort": float("nan")})
-    with pytest.raises(SignalUngueltig, match="setpoint_comfort"):  # erwartet ungueltig, kein Programmfehler (L4-17)
+    with pytest.raises(SignalUngueltig, match="setpoint_comfort"):  # erwartet ungueltig, kein Programmfehler
         _binding(ha).write("room_setpoint", 23.0)
     assert ha.calls == []
 
@@ -248,7 +248,7 @@ def test_a_comfort_boost_below_the_daily_limit_is_written_completely(make_store,
 
 @pytest.mark.parametrize(("comfort", "emergency"), [(True, False), (False, True)])
 def test_unreadable_auxiliary_values_block_a_boost_that_writes_the_room_setpoint(make_store, clock, comfort, emergency):
-    # Plan-Praezisierung 10: ohne gemerkte Hilfs-Ursprungswerte kein Schreiben des Normal-Solls und keine Umstellung der
+    # Ohne gemerkte Hilfs-Ursprungswerte kein Schreiben des Normal-Solls und keine Umstellung der
     # Betriebsart; weil die Vorbereitung vor dem ersten Hebel kommt, schreibt der Boost gar nichts.
     ha = FakeHa(**{"number.komfort": float("nan")})
     pipeline, store = _pipeline(make_store, clock, ha)
@@ -266,7 +266,7 @@ def test_unreadable_auxiliary_values_block_a_boost_that_writes_the_room_setpoint
     assert ha.calls[0] == ("select", "select.betriebsart", "hz_operationmode_normal")
 
 
-# --- Wiederherstellung ohne gemerkte Hilfswerte stellt die Betriebsart nicht um (Review Task 8) ---
+# --- Wiederherstellung ohne gemerkte Hilfswerte stellt die Betriebsart nicht um ---
 
 def test_a_second_restore_after_a_successful_one_neither_switches_nor_writes(make_store, clock):
     ha = FakeHa()
@@ -279,6 +279,61 @@ def test_a_second_restore_after_a_successful_one_neither_switches_nor_writes(mak
     assert pipeline.restore_and_clear(always_restore=True) is True  # z. B. Fristende nach dem Abmelden
     assert ha.calls == []
     assert ha.states["select.betriebsart"] == "hz_operationmode_automatic"
+
+
+def test_a_pause_restores_levers_and_auxiliary_values_without_clearing_anything(make_store, clock):
+    ha = FakeHa()
+    pipeline, store = _pipeline(make_store, clock, ha)
+    pipeline.apply_server_values({"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+    gemerkt = (dict(store.state.originals), dict(store.state.aux_originals))
+    assert gemerkt[1]["mode_select"] == "hz_operationmode_automatic"
+    ha.calls.clear()
+    assert pipeline.restore_for_pause() is True
+    assert ("select", "select.betriebsart", "hz_operationmode_automatic") in ha.calls  # Betriebsart geht zurueck
+    assert ha.states["select.betriebsart"] == "hz_operationmode_automatic"
+    assert (dict(store.state.originals), dict(store.state.aux_originals)) == gemerkt  # nichts geleert
+    assert store.state.abo_finished is False
+    assert store.state.boost_active is False and store.state.emergency_boost_active is False
+
+
+def test_a_second_pause_restores_again_with_the_originals_of_the_first(make_store, clock):
+    ha = FakeHa()
+    pipeline, store = _pipeline(make_store, clock, ha)
+    pipeline.apply_server_values({"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+    gemerkt = (dict(store.state.originals), dict(store.state.aux_originals))
+    assert pipeline.restore_for_pause() is True
+    # Rueckkehr in den Betrieb: die Serverwerte stehen wieder auf der Anlage (hier direkt gesetzt).
+    ha.states.update({"select.betriebsart": "hz_operationmode_normal", "number.hk": 0.85, "number.normal": 22.0})
+    clock.advance(WEISHAUPT_MODBUS.settle_seconds + 1)
+    ha.calls.clear()
+    assert pipeline.restore_for_pause() is True
+    assert ha.states["select.betriebsart"] == "hz_operationmode_automatic"
+    assert ha.states["number.hk"] == 0.75 and ha.states["number.normal"] == 20.0
+    assert (dict(store.state.originals), dict(store.state.aux_originals)) == gemerkt  # nicht neu gemerkt
+
+
+def test_a_pause_waits_for_a_running_emergency_boost_and_writes_nothing(make_store, clock):
+    ha = FakeHa()
+    pipeline, store = _pipeline(make_store, clock, ha)
+    pipeline.apply_server_values({"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+    assert pipeline.set_boosts(comfort=False, emergency=True, kaelteschutz=True) == (False, True)
+    ha.calls.clear()
+    assert pipeline.restore_for_pause() is False
+    assert ha.calls == [] and store.state.emergency_boost_active is True
+
+
+def test_a_failing_pause_keeps_the_boost_flags_and_reports_failure(make_store, clock):
+    ha = FakeHa()
+    pipeline, store = _pipeline(make_store, clock, ha)
+    pipeline.apply_server_values({"curve": 0.8, "room_setpoint": 23.0, "heat_limit": 17.0})
+    assert pipeline.set_boosts(comfort=True, emergency=False) == (True, False)
+    ha.failing.add("number.hk")
+    assert pipeline.restore_for_pause() is False
+    assert store.state.boost_active is True
+    ha.failing.clear()
+    clock.advance(10000)
+    assert pipeline.restore_for_pause() is True
+    assert store.state.boost_active is False
 
 
 def test_a_restore_without_auxiliary_originals_does_not_switch_the_mode(make_store, clock):
@@ -303,7 +358,7 @@ def test_regular_writes_still_prepare_the_operating_mode(make_store, clock):
     assert ha.calls == [("select", "select.betriebsart", "hz_operationmode_normal"), ("number", "number.normal", 21.0)]
 
 
-# --- Wiederherstellung mit Abfrageverzug: Komfort/Absenk gegen das Ziel des Normal-Solls begrenzen (Final-Review) ---
+# --- Wiederherstellung mit Abfrageverzug: Komfort/Absenk gegen das Ziel des Normal-Solls begrenzen ---
 
 class LaggingHa(FakeHa):
     """weishaupt_modbus fragt zyklisch ab: ein geschriebener Zahlenwert ist erst nach `poll()` in HA lesbar."""
@@ -447,7 +502,7 @@ def test_aux_zulaessig_accepts_only_known_modes_of_the_known_schemes(name, wert,
     assert _binding(FakeHa()).aux_zulaessig(name, wert) is ok
 
 
-# --- Mutationsprobe Stufe 3 S4b (A5-22 Rest): Vorbereitung verlangt die Hilfswerte und zaehlt einmal ---
+# --- Vorbereitung verlangt die Hilfswerte und zaehlt einmal ---
 
 def test_preparation_without_readable_auxiliary_values_does_not_switch_the_mode(make_store, clock):
     # Durchsetzen (ensure_prepared) und der Start (prepare_start) rufen die Vorbereitung mit den Voreinstellungen auf:
@@ -466,14 +521,14 @@ def test_a_preparation_after_an_earlier_write_counts_once(make_store, clock, mon
     monkeypatch.setattr(write_budget, "today", lambda: DAY)
     ha = FakeHa()
     pipeline, store = _pipeline(make_store, clock, ha)
-    pipeline.write_lever("curve", 0.8)
+    pipeline._write_lever("curve", 0.8)
     assert _total(store) == 1
     assert pipeline.ensure_prepared() is True
     assert _total(store) == 2 and store.state.lifetime_writes == 2
 
 
 def test_restore_aux_does_not_check_the_mode_against_the_known_modes():
-    """Heutiges Verhalten, Restpunkt S3S4b-2: der lokal gelesene Ursprungswert der Betriebsart wird beim Zurueckstellen
+    """Heutiges Verhalten: der lokal gelesene Ursprungswert der Betriebsart wird beim Zurueckstellen
     nicht gegen WEISHAUPT_MODES geprueft; ein unbekannter Modus im bekannten Schema geht an HA (HA lehnt eine unbekannte
     Option ab). Gegenprobe: dieselbe Option gilt als Hilfswert vom Server nicht als zulaessig."""
     ha = FakeHa(**{"select.betriebsart": "hz_operationmode_normal"})

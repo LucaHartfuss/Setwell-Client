@@ -1,22 +1,22 @@
 """Bindungsparameter aus der Konfiguration pruefen und mit dem lokalen Verfahrensteil zur wirksamen
-BindingDescription verbinden (G-7; Spec Stufe 3 S4b Abschnitte 3 und 4.2). Rein: nur Standardbibliothek und
+BindingDescription verbinden (G-7). Rein: nur Standardbibliothek und
 smartheat_core. Feldnamen = smartheat_device.wire (BINDUNGSPARAMETER_FIELDS, SCHREIBSCHUTZ_FIELDS, ZAEHLER,
 ENERGIE_EINHEITEN); ein Test haelt sie gleich, der Kern importiert den Geraetekern nicht. Jeder Fehler ist ein
-`Fehler` (ValueError) mit lokalem Text und details fuer den Server (Spec Stufe 3 S5 6.1); es gibt keine Ersatztabelle
+`Fehler` (ValueError) mit lokalem Text und details fuer den Server; es gibt keine Ersatztabelle
 (Nutzer-Entscheidung 2026-10-15)."""
-import math
 from collections.abc import Mapping
 from typing import TypeGuard
 
 from smartheat_core.binding import ENERGY_DAILY, ENERGY_TOTAL, BindingDescription
 from smartheat_core.levers import LEVERS
-from smartheat_core.verfahren import VERFAHREN, Schreibschutz, Verfahren
+from smartheat_core.verfahren import Schreibschutz, Verfahren, WegUnbekannt, verfahren_fuer
+from smartheat_core.zahlen import ist_endliche_zahl
 
 FELDER = ("schritte", "toleranzen", "wartezeit_s", "schreibgruppen", "zurueck", "zurueck_optional", "nur_lesen",
           "zaehler", "schreibschutz", "schemata", "energie")
 SCHREIBSCHUTZ_FELDER = ("tag", "lebensdauer_hinweis", "durchsetzen_tag")
 ZAEHLER = (ENERGY_TOTAL, ENERGY_DAILY)
-#: Einheit -> (Zieleinheit, Faktor): gesendet wird in kWh bzw. m³ (Spec 5).
+#: Einheit -> (Zieleinheit, Faktor): gesendet wird in kWh bzw. m³.
 EINHEITEN = {"Wh": ("kWh", 0.001), "kWh": ("kWh", 1.0), "m³": ("m³", 1.0)}
 #: Energiekanaele = Energierollen ohne "energy_" (Telemetrie, Server generic_energy_log).
 ENERGIE_KANAELE = ("electrical_heating", "electrical_dhw", "primary_heating", "primary_dhw", "thermal_heating",
@@ -27,20 +27,11 @@ WARTEZEIT_S = (60, 7200)
 
 class Fehler(ValueError):
     """Verstoss gegen die lokalen Grenzen der Bindungsparameter: der Text ist lokal (Start, Log), details gehen an den
-    Server (Spec Stufe 3 S5 6.1; Feldnamen aus wire.PRUEF_FELDER)."""
+    Server (Feldnamen aus wire.PRUEF_FELDER)."""
 
     def __init__(self, text: str, feld: str, regel: str, **zahlen: float) -> None:
         super().__init__(text)
         self.details = {"feld": feld, "regel": regel, **zahlen}
-
-
-def _zahl(value) -> bool:
-    if not isinstance(value, int | float) or isinstance(value, bool):
-        return False
-    try:
-        return math.isfinite(value)
-    except OverflowError:  # JSON liefert beliebig grosse Ganzzahlen
-        return False
 
 
 def _ganz(value) -> TypeGuard[int]:
@@ -55,7 +46,7 @@ def _hebel(value, erlaubt, feld: str) -> tuple[str, ...]:
 
 
 def _zahlen_je_hebel(value, hebel, feld: str) -> dict[str, float]:
-    if not isinstance(value, Mapping) or set(value) != set(hebel) or not all(_zahl(v) for v in value.values()):
+    if not isinstance(value, Mapping) or set(value) != set(hebel) or not all(ist_endliche_zahl(v) for v in value.values()):
         raise Fehler(f"Das Feld {feld} der Bindungsparameter passt nicht zum Hebelsatz.", feld, "ungueltig")
     return {lever: float(v) for lever, v in value.items()}
 
@@ -98,7 +89,7 @@ def _schemata(value, verfahren: Verfahren) -> dict:
         raise Fehler("Das Feld schemata.praefixe der Bindungsparameter nennt ein Schema, das dieses Gerät "
                      "nicht kennt.", "schemata", "ungueltig")
     if not isinstance(bereiche, Mapping) or set(bereiche) != set(praefixe) or not all(
-            isinstance(b, list) and len(b) == 2 and all(_zahl(x) for x in b) and b[0] <= b[1] for b in bereiche.values()):
+            isinstance(b, list) and len(b) == 2 and all(ist_endliche_zahl(x) for x in b) and b[0] <= b[1] for b in bereiche.values()):
         raise Fehler("Das Feld schemata.normal_bereich der Bindungsparameter ist ungültig.", "schemata", "ungueltig")
     return {"praefixe": tuple(praefixe), "normal_bereich": {p: (float(b[0]), float(b[1])) for p, b in bereiche.items()}}
 
@@ -110,10 +101,15 @@ def _energie(value) -> dict[str, str]:
     return dict(value)
 
 
-def beschreibung(hebelsatz: str, parameter) -> BindingDescription:
-    """Wirksame Beschreibung fuer den Hebelsatz aus den Parametern der Konfiguration; Fehler (ValueError) bei jedem
-    Verstoss."""
-    verfahren = VERFAHREN.get(hebelsatz)
+def beschreibung(weg: object, hebelsatz: str, parameter) -> BindingDescription:
+    """Wirksame Beschreibung fuer den Hebelsatz auf dem Weg aus den Parametern der Konfiguration; Fehler (ValueError)
+    bei jedem Verstoss. Ein unbekannter Weg wird vor dem Hebelsatz gemeldet; ein Hebelsatz, den der Weg nicht traegt,
+    hat kein lokales Schreibverfahren."""
+    try:
+        verfahren = verfahren_fuer(weg, hebelsatz)
+    except WegUnbekannt:
+        raise Fehler("Der Weg der Anlage ist unbekannt; die Bindungsparameter lassen sich nicht prüfen.", "weg",
+                     "unbekannt") from None
     if verfahren is None:
         raise Fehler(f"Für den Hebelsatz {hebelsatz} gibt es kein lokales Schreibverfahren; die Bindungsparameter "
                      "lassen sich nicht prüfen.", "hebelsatz", "unbekannt")
@@ -123,7 +119,7 @@ def beschreibung(hebelsatz: str, parameter) -> BindingDescription:
         raise Fehler("Die Bindungsparameter sind unvollständig oder enthalten fremde Felder.", "bindungsparameter",
                      "ungueltig")
     lever_set = verfahren.lever_set
-    hebel = lever_set.levers + lever_set.client_derived
+    hebel = lever_set.levers
     schritte = _zahlen_je_hebel(parameter["schritte"], hebel, "schritte")
     toleranzen = _zahlen_je_hebel(parameter["toleranzen"], hebel, "toleranzen")
     for lever in hebel:
@@ -134,7 +130,7 @@ def beschreibung(hebelsatz: str, parameter) -> BindingDescription:
             raise Fehler(f"Die Toleranz für {lever} in den Bindungsparametern muss größer 0 und höchstens die "
                          "Schrittweite sein.", "toleranzen", "bereich", max=schritte[lever])
     wartezeit = parameter["wartezeit_s"]
-    if not (_zahl(wartezeit) and WARTEZEIT_S[0] <= wartezeit <= WARTEZEIT_S[1]):
+    if not (ist_endliche_zahl(wartezeit) and WARTEZEIT_S[0] <= wartezeit <= WARTEZEIT_S[1]):
         raise Fehler(f"Die Wartezeit in den Bindungsparametern muss zwischen {WARTEZEIT_S[0]} und {WARTEZEIT_S[1]} "
                      "Sekunden liegen.", "wartezeit_s", "bereich", min=WARTEZEIT_S[0], max=WARTEZEIT_S[1])
     gruppen = parameter["schreibgruppen"]
@@ -146,7 +142,7 @@ def beschreibung(hebelsatz: str, parameter) -> BindingDescription:
     ):
         raise Fehler("Jede Schreibgruppe der Bindungsparameter braucht mindestens zwei Hebel, und kein Hebel "
                      "steht in zwei Gruppen.", "schreibgruppen", "ungueltig")
-    erlaubt = {frozenset(g) for g in verfahren.schreibgruppen_erlaubt}  # A6-09: lokale Positivliste
+    erlaubt = {frozenset(g) for g in verfahren.schreibgruppen_erlaubt}  # Lokale Positivliste
     if any(frozenset(g) not in erlaubt for g in schreibgruppen):
         raise Fehler("Die Schreibgruppen der Bindungsparameter sind für diesen Hebelsatz nicht erlaubt.",
                      "schreibgruppen", "nicht_erlaubt")
@@ -157,6 +153,9 @@ def beschreibung(hebelsatz: str, parameter) -> BindingDescription:
     if not set(zurueck_optional) <= set(zurueck):
         raise Fehler("Ein optionaler Rückstell-Hebel der Bindungsparameter muss auch unter den zurückzustellenden "
                      "Hebeln stehen.", "zurueck_optional", "ungueltig")
+    if not set(verfahren.rueckstellung_pflicht) <= set(zurueck):  # Lokale Mindestliste, nie vom Server
+        raise Fehler("Die zurückzustellenden Hebel der Bindungsparameter enthalten nicht alle Hebel, die dieser "
+                     "Hebelsatz mindestens zurückstellen muss.", "zurueck", "ungueltig")
     nur_lesen = _hebel(parameter["nur_lesen"], tuple(h for h in LEVERS if h not in hebel), "nur_lesen")
     schemata = _schemata(parameter["schemata"], verfahren)
     energie = _energie(parameter["energie"])

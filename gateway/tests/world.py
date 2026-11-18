@@ -1,4 +1,4 @@
-"""Bausteine fuer Laufzeit- und Szenariotests des Gateways ab 0.6.0 (Plan 5b D2): Geraetekern mit Fake-Link (der Zugang
+"""Bausteine fuer Laufzeit- und Szenariotests des Gateways: Geraetekern mit Fake-Link (der Zugang
 liegt schon vor, kein Bootstrap), Gateway-Host, Laufzeit. Ein gewollter Neustart (prozess.Neustart) baut wie Compose
 einen neuen Prozess (neuer Zigbee-Spiegel, Geraetekern, Link und Laufzeit) auf denselben Dateien; der neue Link ist erst
 nach connect() verbunden. start_runtime folgt runtime_main.main(): erst das Aufraeumen, dann der Geraetekern."""
@@ -11,6 +11,7 @@ from fake_z2m import FakeZigbee2Mqtt
 from fakes import FakeBus
 from geraet_fakes import FakeLink, KeinBootstrap, zugang_ablegen
 
+from smartheat_core import dateien
 from smartheat_device import prozess
 from smartheat_device.device import Device
 from smartheat_gateway import befehle, runtime_main
@@ -49,10 +50,26 @@ class GatewayWorld:
         self.zugang = zugang_ablegen(self.paths.device_dir, self.ca)
         self.links: list[FakeLink] = []
         self.restarts = 0
-        self.result = self.host = self.geraet = self.device = None
+        self.zeit_synchron = True  # was der Zeitdienst des Hosts in host/status.json meldet
+        self.laufzeit = self.anlage = self.geraet = self.device = None
         self._geraete: list = []  # jeder Prozessstart baut einen neuen Geraete-Host samt Hintergrund-Thread
         monkeypatch.setenv("SHG_ALIVE_FILE", str(data_dir / "alive"))
         monkeypatch.setattr("smartheat_core.wallclock._now", self.wall.now)
+
+    @property
+    def result(self):
+        """Das Ergebnis des ersten Kreises (Runtime oder IdleBridge)."""
+        kreise = self.laufzeit.kreise()
+        return kreise[min(kreise)]
+
+    @property
+    def host(self):
+        """Der Host des ersten Kreises."""
+        return self.anlage.erster
+
+    def kreis(self, nummer: int):
+        """Das Ergebnis des Kreises `nummer`."""
+        return self.laufzeit.kreise()[nummer]
 
     def _link(self, *args):
         self.links.append(FakeLink(*args))
@@ -65,11 +82,21 @@ class GatewayWorld:
     def _wall(self) -> float:
         return self.wall.now().timestamp()
 
+    def zeitdienst(self, synchron: bool) -> None:
+        """Der Zeitdienst des Hosts meldet die Uhr als (nicht) abgeglichen: der Dienst hoststatus schreibt
+        host/status.json mit der Wanduhrzeit, die der Geraete-Host dort liest (Produktionspfad)."""
+        self.zeit_synchron = synchron
+        status = {"netz": True, "dns": True, "zeit_synchron": synchron, "ts": self.wall.now().isoformat()}
+        dateien.schreiben_json(self.host_dir / "status.json", status, modus=dateien.LESBAR)
+
     def start_runtime(self):
-        runtime_main.aufraeumen(self.paths)  # wie main(): bevor der Geraetekern startet
+        ausstehend = runtime_main.aufraeumen(self.paths)  # wie main(): bevor der Geraetekern startet
+        self.zeitdienst(self.zeit_synchron)
         mirror = ZigbeeMirror(self.bus, self.clock)
         mirror.start()
-        self.geraet = GatewayDeviceHost(self.paths, mirror, host_dir=self.host_dir, clock=self.clock, wall=self._wall)
+        self.geraet = GatewayDeviceHost(self.paths, mirror, host_dir=self.host_dir, clock=self.clock, wall=self._wall,
+                                        echt=self._wall)
+        self.geraet.start_markierung = ausstehend
         self._geraete.append(self.geraet)
         self.device = Device(self.geraet, self.paths.data, "https://accounts.example.test", clock=self.clock,
                              wall=self._wall, bootstrap_client=lambda ident: KeinBootstrap(), link_factory=self._link,
@@ -77,10 +104,10 @@ class GatewayWorld:
         self.geraet.verbinden(self.device)
         runtime_main.software_soll_nachholen(self.geraet, self.device)  # wie main(): bevor der Geraete-Thread laeuft
         self.device.schritt()  # baut den Link (Zugang liegt vor)
-        self.result, self.host = runtime_main.start(self.paths, self.bus, mirror, self.geraet, self.device,
-                                                    clock=self.clock, driver_threads=False)
+        self.laufzeit, self.anlage = runtime_main.start(self.paths, self.bus, mirror, self.geraet, self.device,
+                                                        clock=self.clock, driver_threads=False)
         self.restarts += 1
-        # Der Fuehler meldet live (retained Werte aus dem Broker-Replay gelten nicht als frisch, Plan G2b-1).
+        # Der Fuehler meldet live (retained Werte aus dem Broker-Replay gelten nicht als frisch).
         self.z2m.report(SENSOR, temperature=20.0, battery=90)
         return self.result
 
@@ -94,8 +121,9 @@ class GatewayWorld:
         """Geraetekern und Worker abarbeiten; ein gewollter Neustart startet einen neuen Prozess wie Compose."""
         for _ in range(5):
             try:
+                self.zeitdienst(self.zeit_synchron)  # der Dienst schreibt den Status laufend neu
                 self.device.schritt()
-                self.result.worker.run_pending()
+                self.laufzeit.worker.run_pending()
                 self.device.schritt()
                 return
             except prozess.Neustart:
@@ -106,8 +134,9 @@ class GatewayWorld:
     def advance(self, seconds: float) -> None:
         self.clock.advance(seconds)
         self.wall.advance(seconds)
-        if self.host is not None and self.host.driver is not None:
-            self.host.driver.poll_once()
+        for host in (self.anlage.hosts.values() if self.anlage is not None else ()):
+            if host.driver is not None:
+                host.driver.poll_once()
         self.run()
 
     def connect(self) -> None:
@@ -119,15 +148,17 @@ class GatewayWorld:
         self.run()
 
     def konfiguration_senden(self, inhalt: dict, version: int) -> None:
-        self.server("down/config", {"schema": 1, "version": version, **inhalt})
+        self.server("down/config", {"schema": 2, "version": version, **inhalt})
 
     def bedienung_senden(self, inhalt: dict, version: int) -> None:
-        self.server("down/operation", {"schema": 1, "version": version, **inhalt})
+        self.server("down/operation", {"schema": 2, "version": version, **inhalt})
 
-    def answer(self, levers: dict, status: str = "ok", reason=None) -> None:
+    def answer(self, levers: dict, status: str = "ok", code=None) -> None:
         seq = self.link.of("up/snapshot")[-1]["seq"]
-        self.server("down/setpoints", {"schema": 4, "seq": seq, "ts": "2026-01-15T00:00:00+01:00", "status": status,
-                                       "reason": reason, "levers": levers, "learned": {}})
+        self.server("down/setpoints", {"schema": 5, "kreis": 1, "seq": seq,
+                                       "ts": "2026-01-15T00:00:00+01:00", "status": status, "code": code,
+                                       "params": None if code is None else {},
+                                       "levers": levers, "learned": {}})
 
     def status(self) -> dict | None:
         return self.geraet.zustand.status if self.geraet is not None else None

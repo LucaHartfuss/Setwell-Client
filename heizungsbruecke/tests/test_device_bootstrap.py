@@ -1,4 +1,4 @@
-"""Spec 5b 1: HTTPS-Bootstrap mit CSR, Rettungsweg, "gesperrt" nur bei 401 auf beides und synchroner Uhr."""
+"""HTTPS-Bootstrap mit CSR, Rettungsweg, "gesperrt" nur bei 401 auf beides und synchroner Uhr."""
 import base64
 import json
 
@@ -6,37 +6,14 @@ import pytest
 import requests
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
-from device_helpers import GeraeteCa, csr_passt, zertifikat_fuer
+from device_helpers import FakeResponse, FakeSession, GeraeteCa, csr_passt, zertifikat_fuer
 
-from smartheat_device import bootstrap, identity, nachrichten, wire
+from smartheat_device import anker, bootstrap, identity, nachrichten, wire
 
 NOW = 1_800_000_000
 BASE = "https://accounts.example.test"
 CAPS = {"drivers": ["simulation"], "zigbee": True}
 ARGS = {"version": "0.6.0", "host": "gateway", "capabilities": CAPS}
-
-
-class FakeResponse:
-    def __init__(self, status: int, body=None) -> None:
-        self.status_code = status
-        self._body = body
-
-    def json(self):
-        if self._body is None:
-            raise ValueError("kein JSON")
-        return self._body
-
-
-class FakeSession:
-    def __init__(self, *answers) -> None:
-        self.answers, self.calls = list(answers), []
-
-    def request(self, method, url, data=None, headers=None, timeout=None):
-        self.calls.append((method, url, data, headers, timeout))
-        answer = self.answers.pop(0)
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
 
 
 @pytest.fixture
@@ -79,7 +56,7 @@ def test_register_sends_a_signed_body_with_csr(ident, ca):
 
 @pytest.mark.parametrize("wert", [float("nan"), float("inf"), float("-inf")])
 def test_der_bootstrap_sendet_nie_eine_nicht_endliche_zahl(ident, ca, wert):
-    """Testoffensive T2, Nr. 17: allow_nan=False; Bootstrap.holen faengt die Ausnahme (Backoff), die Anfrage geht nie raus."""
+    """allow_nan=False; Bootstrap.holen faengt die Ausnahme (Backoff), die Anfrage geht nie raus."""
     session = FakeSession(FakeResponse(200, _body(ident, ca)))
     with pytest.raises(ValueError):
         _client(ident, session).register(**{**ARGS, "capabilities": {"drivers": [], "zigbee": wert}})
@@ -361,7 +338,7 @@ def test_a_failing_host_callback_in_the_rescue_after_401_is_retried_later_too(tm
     assert "geheimer Parameter" not in caplog.text
 
 
-@pytest.mark.parametrize("feld", wire.BOOTSTRAP_RESPONSE)
+@pytest.mark.parametrize("feld", [f for f in wire.BOOTSTRAP_RESPONSE if f not in anker.ANKER_FELDER])
 def test_an_answer_without_a_required_field_is_unavailable(ident, ca, feld):
     body = _body(ident, ca)
     del body[feld]
@@ -383,7 +360,7 @@ def test_a_certificate_for_another_key_is_not_stored(tmp_path, ident, ca):
 
 
 def test_broker_host_und_vertrauensanker_kommen_ohne_pinning_aus_der_bootstrap_antwort(tmp_path, ident, ca):
-    """Heutiges Verhalten, Restpunkt A5-61 (vor dem ersten fremden Kunden): das Geraet hat keinen eigenen Anker. Ein
+    """Heutiges Verhalten (offene Grenze, offene-punkte.md A5-61, vor dem ersten fremden Kunden): das Geraet hat keinen eigenen Anker. Ein
     beliebiger Broker-Host und eine fremde CA aus der Bootstrap-Antwort werden uebernommen und gespeichert. Kommt das
     Pinning, kehrt sich diese Zusicherung um."""
     fremde_ca = GeraeteCa("fremde-ca")
@@ -431,7 +408,7 @@ def test_an_unusable_access_counts_as_a_failure_with_backoff(tmp_path, ident, ca
 ])
 def test_a_response_with_a_lone_surrogate_is_unusable_and_backs_off(tmp_path, ident, ca, feld, wert):
     """speichern() koennte ein einzelnes Surrogat (json.loads aus "\\ud800") nicht schreiben: UnicodeEncodeError
-    ausserhalb des try in holen, kein Backoff, register in jedem Takt (Testoffensive T2, Task 13, Fix-Runde 1)."""
+    ausserhalb des try in holen, kein Backoff, register in jedem Takt."""
     antwort = {**_body(ident, ca), feld: wert}
     with pytest.raises(bootstrap.Unavailable):
         _client(ident, FakeSession(FakeResponse(200, antwort))).register(**ARGS)

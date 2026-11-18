@@ -1,6 +1,4 @@
-"""Stufe 3 S8a-2 (A5-16, Audit 5 p5-ci): Vertragspruefung der Host-Dienste des Gateways, frueher Check 47 des
-Contract-Checks im Dev-Root (tools/contract_check.py). Der Check las updater.py als Text gegen SOFTWARE_ERRORS des
-Servers; hier gegen die Kopie im Geraetekern (smartheat_device.wire), die zeichengleich zum Server bleibt
+"""Vertragspruefung der Host-Dienste des Gateways gegen die Kopie im Geraetekern (smartheat_device.wire), die zeichengleich zum Server bleibt
 (test_device_wire.py::test_the_copy_is_literal und Contract-Check 49). Der Test importiert den Updater, und der
 importiert smartheat_core, smartheat_gateway und smartheat_host; er braucht also den Quellbaum des Gateways, nicht nur
 die Standardbibliothek."""
@@ -12,7 +10,7 @@ from smartheat_host import updater
 
 
 def _probleme_47(updater, software_errors) -> list[str]:
-    """G3-Restpunkt, Spec 5b 5.3: Die Gruende des Gateway-Updaters (REASONS und der Rueckweg ohne Ablehnung
+    """Die Gruende des Gateway-Updaters (REASONS und der Rueckweg ohne Ablehnung
     RETRY_REASON) sind Gruende des Vertrags (SOFTWARE_ERRORS); die Laufzeit meldet sie als up/result (dokument
     software)."""
     allowed = set(software_errors)
@@ -36,6 +34,14 @@ def test_check_47_gruende_des_updaters_sind_gruende_des_vertrags():
     assert _probleme_47(updater, wire.SOFTWARE_ERRORS) == []
 
 
+def test_die_werte_der_einstellung_updates_sind_die_des_vertrags():
+    from smartheat_host import kanal
+
+    assert kanal.UPDATES_FUNKTIONEN == wire.UPDATES_FUNKTIONEN
+    assert kanal.UPDATES_SICHERHEIT == wire.UPDATES_SICHERHEIT
+    assert updater.EINSTELLUNG_AUS in wire.SOFTWARE_ERRORS
+
+
 def test_check_47_meldet_gruende_ausserhalb_des_vertrags():
     problems = _probleme_47(updater, ("manifest_ungueltig",))
     assert "RETRY_REASON 'server_unerreichbar' steht nicht in SOFTWARE_ERRORS" in problems
@@ -46,3 +52,24 @@ def test_check_47_meldet_gruende_ausserhalb_des_vertrags():
 def test_check_47_meldet_fehlende_konstanten():
     assert _probleme_47(SimpleNamespace(), wire.SOFTWARE_ERRORS) == [
         "RETRY_REASON fehlt im Gateway-Updater", "REASONS fehlt im Gateway-Updater"]
+
+
+def test_led_liest_das_code_fenster_so_wie_die_laufzeit_es_schreibt(tmp_path):
+    """Schreiber (smartheat_gateway.geraet_host.ZustandsDatei, Container) und Leser (led.state_from_file, Host) der
+    Datei agent_state.json: `code_fenster` als echtes bool neben `zustand`; ein offenes Fenster zeigt code_sichtbar,
+    ein geschlossenes den Zustand."""
+    import json
+
+    from smartheat_gateway.geraet_host import ZustandsDatei
+    from smartheat_host import led
+
+    pfad = tmp_path / "agent_state.json"
+    datei = ZustandsDatei(pfad, lambda: "2027-01-15T07:00:00+00:00", lambda: 0.0)
+    datei.update("nicht_uebernommen", True)
+    assert json.loads(pfad.read_text())["code_fenster"] is True
+    assert led.state_from_file(pfad) == "code_sichtbar"
+    datei.update("nicht_uebernommen", False)
+    assert json.loads(pfad.read_text())["code_fenster"] is False
+    assert led.state_from_file(pfad) == "nicht_uebernommen"
+    datei.update("nicht_uebernommen")  # ohne Angabe: kein Fenster
+    assert led.state_from_file(pfad) == "nicht_uebernommen"

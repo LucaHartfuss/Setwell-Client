@@ -1,7 +1,10 @@
-"""Ports des hostneutralen Kerns (Spec SHG 3.2): die einzigen Stellen, an denen die Laufzeit die Aussenwelt beruehrt.
+"""Ports des hostneutralen Kerns: die einzigen Stellen, an denen die Laufzeit die Aussenwelt beruehrt.
 Die Anlage ist smartheat_core.binding.PlantBinding, die Wanduhr smartheat_core.wallclock; die monotone Uhr wird als
 Callable[[], float] uebergeben."""
+from dataclasses import dataclass
 from typing import Protocol
+
+from smartheat_core.meldungen import Meldung
 
 
 class SignalNotFound(LookupError):
@@ -18,6 +21,20 @@ class SignalUngueltig(ValueError):
 class SourceUnavailable(OSError):
     """Die Quelle antwortet nicht (HA nicht erreichbar, Zeitueberschreitung, andere HTTP-Fehler). Ueberwachungen beenden
     die Runde ohne Meldung."""
+
+
+class QuelleErschoepft(SourceUnavailable):
+    """Das Abfragekontingent der Quelle ist aufgebraucht (Gateway: Cloud-Treiber), die Daten sind veraltet. Der Text ist
+    der Kundentext zum Kontingent; die Meldung dazu gibt kontingent.check, die Ueberwachungen beenden die Runde still."""
+
+
+@dataclass(frozen=True)
+class Stoerung:
+    """Eine anstehende Meldung des Wärmeerzeugers: Herstellerschlüssel der Quelle (HA: `mypyllant`), die Kennung wie
+    geliefert (die Laufzeit normalisiert sie) und ob es nur ein Hinweis ist (Wartung). Nie ein Text des Herstellers."""
+    quelle: str
+    kennung: str
+    hinweis: bool = False
 
 
 class SignalSource(Protocol):
@@ -37,6 +54,11 @@ class SignalSource(Protocol):
         Gateway: IEEE-Adresse bzw. treiber:<rolle>)."""
         ...
 
+    def get_stoerungen(self, ref: str) -> tuple[Stoerung, ...]:
+        """Anstehende Stoerungen und Hinweise des Waermeerzeugers hinter der Referenz (HA: Attribut der Entity); leer,
+        wenn die Quelle keine kennt oder keine ansteht. Fehler der Quelle wie bei get_raw_state."""
+        ...
+
 
 class StatusSink(Protocol):
     def publish(self, event: dict) -> None:
@@ -47,11 +69,13 @@ class StatusSink(Protocol):
 class NotifySink(Protocol):
     """Meldungen an den Kunden. Entprellung, Hinweis-Schalter und offene Meldungen fuehrt der Notifier."""
 
-    def push(self, key: str, message: str) -> None:
-        """Einmalige Nachricht (HA: alle Notify-Dienste). Fehler einzelner Kanaele behandelt der Sink selbst."""
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
+        """Einmalige Nachricht (HA: alle Notify-Dienste). Fehler einzelner Kanaele behandelt der Sink selbst.
+        `begleitet`: auf den Push folgt im selben Uebergang `show` bzw. `withdraw`; ein Sink, der je Uebergang ein
+        Ereignis meldet, laesst es dann dem Aufruf danach."""
         ...
 
-    def show(self, key: str, message: str) -> None:
+    def show(self, key: str, meldung: Meldung) -> None:
         """Offene kritische Meldung anlegen oder ersetzen (HA: persistent_notification). Darf werfen."""
         ...
 
@@ -61,7 +85,7 @@ class NotifySink(Protocol):
 
 
 class TriggerSource(Protocol):
-    """Trigger-Eingang (Spec SHG G2 2.4), Ereignisvertrag fuer jeden Host:
+    """Trigger-Eingang, Ereignisvertrag fuer jeden Host:
     - Aenderung der Wunschtemperatur: erst nach ROOM_TARGET_DEBOUNCE_SECONDS (debounce.py) Stabilitaet
       EV_LOCAL_CHECK(room_target_fired=True);
     - jede andere zugeordnete Signalaenderung: EV_LOCAL_CHECK(room_target_fired=False) (post_coalesced);
@@ -80,7 +104,7 @@ class TriggerSource(Protocol):
 class MqttChannel(Protocol):
     """MQTT-Verbindung der Laufzeit: Snapshot und Telemetrie hoch, Setpoints herunter. Die Laufzeit haelt keine eigene
     Verbindung; app.start bekommt sie vom Host (mqtt_factory): smartheat_device.laufzeit.RuntimeChannel auf dem Link des
-    Geraets (Spec 5b 5.2)."""
+    Geraets."""
 
     @property
     def connect_failures(self) -> int: ...

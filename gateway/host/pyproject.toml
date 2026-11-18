@@ -1,8 +1,13 @@
-# Host-Dienste des Gateways (Spec SHG G2b-1 2.1): laufen auf dem System-Python des Pi (Debian 13 trixie, 3.13) mit
+# Host-Dienste des Gateways: laufen auf dem System-Python des Pi (Debian 13 trixie, 3.13) mit
 # Standardbibliothek und python3-cryptography; kein eigenes Paket-Build, install.sh kopiert die Dateien.
 [tool.pytest.ini_options]
 pythonpath = [".", "tests", "../src", "../tests", "../../heizungsbruecke/src", "../../heizungsbruecke/testhilfen"]
 testpaths = ["tests"]
+# tmp_path nur fehlgeschlagener Tests des letzten Laufs behalten: /tmp ist lokal ein tmpfs im RAM
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
+# die Akzeptanzsuite laeuft nur allein (scripts/check.sh, Schritt akzeptanz): ihre conftest.py verlangt --confcutdir
+addopts = "--ignore=tests/akzeptanz"
 
 [tool.ruff]
 line-length = 120

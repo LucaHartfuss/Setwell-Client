@@ -10,11 +10,13 @@ from zoneinfo import ZoneInfo
 import requests
 import websocket
 
+from smartheat_core import meldungen
+from smartheat_core.meldungen import Meldung
 from smartheat_core.safety import resolve_local_safety
 from smartheat_runtime import entitlement
 from smartheat_runtime.runtime_config import RuntimeConfig
 
-# Text fremder Herkunft fuer die Logzeilen-Tests (T6-Rest, R-c: Fehlertext aus HA, Einheit, Meldeschluessel mit Text des
+# Text fremder Herkunft fuer die Logzeilen-Tests (Fehlertext aus HA, Einheit, Meldeschluessel mit Text des
 # Servers): ein Zeilenumbruch mit Logkopf, das Bidi-Steuerzeichen U+202E und die ARABIC LETTER MARK U+061C. In der
 # Logzeile steht er nur als Escape (smartheat_core.logtext.lesbar).
 FREMDTEXT = "HA\nWARNING  gefaelscht ‮؜"
@@ -29,9 +31,9 @@ def logzeilen(caplog) -> list[str]:
 
 
 def runtime_config(**overrides) -> RuntimeConfig:
-    """Gueltige RuntimeConfig fuer Tests, die einen Laufzeit-Kontext von Hand bauen (Plan SHG G1)."""
+    """Gueltige RuntimeConfig fuer Tests, die einen Laufzeit-Kontext von Hand bauen."""
     values = {
-        "tenant_id": "test_tenant", "lever_set_id": "vaillant_vrc720",
+        "tenant_id": "test_tenant", "kreis": 1, "lever_set_id": "vaillant_vrc720",
         "local_safety": resolve_local_safety("vaillant_vrc720", "Heizkoerper"),
         "daily_trigger_time": "12:00", "local_check_interval": 300, "telemetry_interval": 300,
         "notify_hints_off": (), "room_sensor_refs": ("sensor.room_actual",), "battery_refs": (),
@@ -42,7 +44,7 @@ def runtime_config(**overrides) -> RuntimeConfig:
 
 
 # Hebelsatz mit `level` (Viessmann) fuer die Laufzeit-Tests: Optionen des Add-ons und Ausgangszustand der Fake-HA
-# (Eingaben; test_runtime.py und test_runtime_plan3b.py)
+# (Eingaben; test_runtime.py und test_runtime_hebelsaetze.py)
 VIESSMANN_OPTIONEN = {
     "lever_set": "viessmann_vicare", "entity_curve_current": "number.slope", "entity_level_current": "number.shift",
     "entity_shift_current": "number.normal_temperature", "entity_mode_select": "climate.heizkreis",
@@ -55,7 +57,7 @@ VIESSMANN_ZUSTAND = {
 
 class HaEventSink:
     """StatusSink der Laufzeit-Tests (StatusReporter): das Ereignis unveraendert an fire_event. Produktiv sendet
-    geraet_status.GeraetStatus (Schema 3); dies ist der Ersatz fuer den entfallenen HaStatusSink."""
+    geraet_status.GeraetStatus (Schema 4); dies ist der Ersatz fuer den entfallenen HaStatusSink."""
 
     def __init__(self, ha_api) -> None:
         self._ha_api = ha_api
@@ -64,23 +66,44 @@ class HaEventSink:
         self._ha_api.fire_event("smartheat_status", event)
 
 
+def meldungs_text(code: str, **params) -> str:
+    """Kundentext einer Meldung des Katalogs fuer den Standard-Host (HA)."""
+    return meldungen.text(meldungen.neu(code, **params))
+
+
+def meldungs_ablage(code: str, **params) -> dict:
+    """Ablage einer Meldung in `backup.json` (notify_meldungen)."""
+    return meldungen.zu_dict(meldungen.neu(code, **params))
+
+
 class FakeNotifySink:
-    """NotifySink der Laufzeit-Tests (Grenze zum Kunden, A5-25): der echte Notifier entscheidet ueber Entprellung,
-    Hinweis-Schalter und offene Meldungen; der Sink haelt nur fest, was beim Kunden ankommt."""
+    """NotifySink der Laufzeit-Tests (Grenze zum Kunden): der echte Notifier entscheidet ueber Entprellung,
+    Hinweis-Schalter und offene Meldungen; der Sink haelt nur fest, was beim Kunden ankommt. `pushes` und `shown`
+    tragen den gerenderten Text (Standard-Host), `codes` und `offen` die Codes."""
 
     def __init__(self) -> None:
         self.pushes: list[tuple[str, str]] = []  # (Schluessel, Text) je Push
+        self.push_meldungen: list[tuple[str, Meldung]] = []  # (Schluessel, Meldung) je Push
         self.shown: dict[str, str] = {}  # offene kritische Meldungen je Schluessel
+        self.offen: dict[str, Meldung] = {}
         self.withdrawn: list[str] = []
 
-    def push(self, key: str, message: str) -> None:
-        self.pushes.append((key, message))
+    @property
+    def codes(self) -> list[tuple[str, str]]:
+        """(Schluessel, Code) je Push."""
+        return [(key, meldung.code) for key, meldung in self.push_meldungen]
 
-    def show(self, key: str, message: str) -> None:
-        self.shown[key] = message
+    def push(self, key: str, meldung: Meldung, *, begleitet: bool = False) -> None:
+        self.pushes.append((key, meldungen.text(meldung)))
+        self.push_meldungen.append((key, meldung))
+
+    def show(self, key: str, meldung: Meldung) -> None:
+        self.shown[key] = meldungen.text(meldung)
+        self.offen[key] = meldung
 
     def withdraw(self, key: str) -> None:
         self.shown.pop(key, None)
+        self.offen.pop(key, None)
         self.withdrawn.append(key)
 
 
@@ -113,8 +136,8 @@ class FakeMqttChannel:
 
 
 class FakeTriggerClient:
-    """Fake des Grenz-Adapters zum HA-WebSocket (`heizungsbruecke.geraet_trigger.HaTriggerClient`, Controller-Ruling
-    Task 10): verbindet nichts, haelt die Konstruktor-Argumente in `kwargs` fest (die Tests rufen daraus
+    """Fake des Grenz-Adapters zum HA-WebSocket (`heizungsbruecke.geraet_trigger.HaTriggerClient`):
+    verbindet nichts, haelt die Konstruktor-Argumente in `kwargs` fest (die Tests rufen daraus
     `on_trigger_event`/`on_connected`). Konstruktor, `start` und `stop` haben die Signatur des echten Clients
     (test_fake_gleichlauf.py). Einsetzen per `monkeypatch.setattr(..., trigger_klasse(ablage))`: jede Umgebung bekommt
     eine eigene Unterklasse, deren Instanzen in `ablage` landen."""
@@ -145,13 +168,33 @@ def datei_stand(path: Path) -> tuple[int, int, bytes] | None:
     """Stand einer Datei auf dem Datentraeger (Inode, Aenderungszeit in ns, Inhalt), None ohne Datei. Jedes Schreiben
     geht atomar ueber eine neue Datei (dateien.schreiben, os.replace) und aendert die Inode; der Inhalt ist mit dabei,
     damit eine wiederverwendete Inode bei gleicher Aenderungszeit kein "ungeschrieben" vortaeuscht. Gleicher Stand
-    heisst: die Datei wurde nicht geschrieben (Wirkung auf dem Datentraeger statt eines Spions auf dem Store, A5-25)."""
+    heisst: die Datei wurde nicht geschrieben (Wirkung auf dem Datentraeger statt eines Spions auf dem Store)."""
     try:
         stat = path.stat()
         inhalt = path.read_bytes()
     except FileNotFoundError:
         return None
     return stat.st_ino, stat.st_mtime_ns, inhalt
+
+
+#: Registry der Schreibziele, die die Tests binden (Schreibziele nur von der Plattform des Hebelsatzes,
+#: alle aus einem Config-Entry): je Plattform (dokument.SCHREIB_PLATTFORM) die Entities der Test-Optionen (Vaillant
+#: runtime_helpers.OPTIONS und climate.zone, Weishaupt WEISHAUPT, Viessmann VIESSMANN_OPTIONEN). KONFIG_EINTRAG ist das
+#: Config-Entry je Plattform, das auch der Kreis der Test-Dokumente nennt (geraet_helpers.konfiguration_aus_optionen).
+SCHREIBZIELE = {
+    "mypyllant": ("number.curve_current", "number.shift_current", "number.heat_limit", "number.min_flow",
+                  "climate.zone"),
+    "weishaupt_modbus": ("number.hk", "number.normal", "number.swu", "select.betriebsart", "number.komfort",
+                         "number.absenk"),
+    "vicare": ("number.slope", "number.shift", "number.normal_temperature", "climate.heizkreis"),
+}
+KONFIG_EINTRAG = {"mypyllant": "e1", "weishaupt_modbus": "e-weishaupt", "vicare": "e-vicare"}
+
+
+def schreibziel_eintrag(entity_id: str, plattform: str) -> dict:
+    """Registry-Eintrag eines Schreibziels wie im echten HA (Plattform, Config-Entry, Geraet des Waermeerzeugers)."""
+    return {"entity_id": entity_id, "platform": plattform, "config_entry_id": KONFIG_EINTRAG[plattform],
+            "device_id": f"d-{plattform}"}
 
 
 class FakeHa:
@@ -166,7 +209,7 @@ class FakeHa:
             "number.min_flow": 21.0,
         }
         # echtes HA: die Registry liefert keine device_class, sie steht im Zustand; die lokale Positivliste der Rollen
-        # (A6-02) liest sie dort
+        # liest sie dort
         self.states.update({f"sensor.{name}::device_class": "temperature"
                             for name in ("room_actual", "room_target", "outdoor_temp")})
         self.writes = []
@@ -175,8 +218,12 @@ class FakeHa:
         self.dismissed = []
         self.events = []
         self.write_error = None
-        # Zuordnungspruefung (Spec 5c 1.3): Entity-/Geraete-Registry, Dienste, in HA unbekannte Entities, HA nicht erreichbar
-        self.registry: list[dict] = []
+        # Zuordnungspruefung: Entity-/Geraete-Registry, Dienste, in HA unbekannte Entities, HA nicht
+        # erreichbar. Die Schreibziele der Tests stehen in der Registry (SCHREIBZIELE); ohne Eintrag waere ein
+        # Schreibziel beim Start nicht pruefbar. Ein Eintrag ohne Zustand zaehlt fuer die Positivliste nicht
+        # (einstellbare_plattformen).
+        self.registry: list[dict] = [schreibziel_eintrag(entity_id, plattform)
+                                     for plattform, entity_ids in SCHREIBZIELE.items() for entity_id in entity_ids]
         self.devices: list[dict] = []
         self.services: list[dict] = []
         self.missing: set[str] = set()
@@ -261,7 +308,7 @@ class FakeHa:
     def get_states(self):
         self._online()
         # wie das echte HA: jede Entity mit Wert oder Attributen hat einen Zustand; eine nicht lesbare (Exception als
-        # Wert) steht als "unavailable" da, eine nur ueber Attribute bekannte als "unknown" (A6-02: die Positivliste
+        # Wert) steht als "unavailable" da, eine nur ueber Attribute bekannte als "unknown" (die Positivliste
         # der Rollen verlangt einen Zustand je gebundener Entity)
         result = []
         for entity_id in dict.fromkeys(key.partition("::")[0] for key in self.states):
@@ -286,7 +333,7 @@ class FakeHa:
 
 
 class FailingServiceHa(FakeHa):
-    """Der Notify-Dienst `notify.kaputt` wirft, alle anderen gehen durch (Plan SHG G1, Review-Fokus 5)."""
+    """Der Notify-Dienst `notify.kaputt` wirft, alle anderen gehen durch (Review-Fokus 5)."""
 
     def send_notification(self, service, message):
         if service == "notify.kaputt":
@@ -295,12 +342,12 @@ class FailingServiceHa(FakeHa):
 
 
 class LaggingFakeHa(FakeHa):
-    """HA/mypyllant-Modell (TP12e, AU-023): ein geschriebener Wert ist erst nach `lag_seconds` lesbar
+    """HA/mypyllant-Modell: ein geschriebener Wert ist erst nach `lag_seconds` lesbar
     (mypyllant pollt die Hersteller-Cloud bis ca. 30 min spaeter), ein Moduswechsel wirkt nach
     `mode_lag_seconds`; ein Service-Aufruf an eine nicht verfuegbare Entity ist ein wirkungsloses 200
-    (HA ueberspringt sie still, AU-016); waehrend einer Quota-Sperre scheitert jeder Aufruf mit 403
-    und zaehlt in `quota_attempts` (AU-015). `set_hvac_mode` respektiert `write_error` wie die
-    Schreibaufrufe. `clock` ist die monotone Test-Uhr (conftest.FakeClock)."""
+    (HA ueberspringt sie still); waehrend einer Quota-Sperre scheitert jeder Aufruf mit 403
+    und zaehlt in `quota_attempts`. `set_hvac_mode` respektiert `write_error` wie die
+    Schreibaufrufe. `clock` ist die monotone Test-Uhr (FakeClock)."""
 
     def __init__(self, clock, *, lag_seconds: float = 1800.0, mode_lag_seconds: float = 600.0) -> None:
         super().__init__()
@@ -356,6 +403,19 @@ class LaggingFakeHa(FakeHa):
     def get_attribute(self, entity_id, attribute):
         self._settle()
         return super().get_attribute(entity_id, attribute)
+
+
+class FakeClock:
+    """Monotone Test-Uhr fuer RegulationWorker: steht still, bis ein Test sie vorstellt."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class WallClock:

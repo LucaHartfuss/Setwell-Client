@@ -1,4 +1,4 @@
-# Ausnahmen fuer vulture (scripts/check.sh, Schritt lint; Stufe 3 S8b, A5-87, K4), Whitelist-Format von vulture.
+# Ausnahmen fuer vulture (scripts/check.sh, Schritt lint, K4), Whitelist-Format von vulture.
 # vulture zaehlt jeden Namen hier als benutzt. Jede Zeile nennt den Grund; keine Zeile ohne Grund. Der Lauf nimmt
 # heizungsbruecke/src mit (der Kern ruft die Treiber- und Host-Methoden des Gateways ueber seine Protocols) und deren
 # Ausnahmen (heizungsbruecke/vulture_ausnahmen.py).
@@ -17,15 +17,28 @@ _.userdata  # smartheat_gateway/bus.py: Parameter der paho-Callback-Signatur
 
 # --- http.server: BaseHTTPRequestHandler ruft die Methoden ueber ihren Namen ---
 _.do_GET  # smartheat_gateway/diagnose.py: Antwort auf GET
+_.do_POST  # smartheat_gateway/diagnose.py: Antwort auf POST (nur /anmelden)
 _.log_message  # smartheat_gateway/diagnose.py: ueberschreibt das Zugriffslog (still)
+_.send_response  # smartheat_gateway/diagnose.py: ueberschreibt die Antwort ohne Server-Kopf (kein Banner, S-13)
+_.send_error  # smartheat_gateway/diagnose.py: ueberschreibt die Fehlerseite der Basisklasse (nennt Methode und Version)
+_.explain  # smartheat_gateway/diagnose.py: Parameter der send_error-Signatur der Basisklasse
+_.server_version  # smartheat_gateway/diagnose.py: leer, die Basisklasse liest es fuer den Server-Kopf (S-13)
+_.sys_version  # smartheat_gateway/diagnose.py: leer, wie server_version
+_.close_connection  # smartheat_gateway/diagnose.py: Attribut der Basisklasse (keine Weiterverwendung der Verbindung)
+_.request_queue_size  # smartheat_gateway/diagnose.py: Attribut von socketserver.TCPServer (Rueckstau des Listen-Sockets)
+
+# --- Bespiel-Station (AP-05b) und Tests: erzeugt das Feld passwort von werk.json ---
+_.passwort_eintrag  # smartheat_gateway/anmeldung.py: Aufrufer sind die Station (AP-05b) und gateway/tests/test_anmeldung.py
+
+# --- Pfad der Frische-Meldung: der Host-Updater schreibt die Datei, die Laufzeit liest sie erst mit der Anzeige ---
+_.updates_veraltet  # smartheat_gateway/paths.py: Pfad von data/updates_veraltet.json, Leser (Laufzeit) folgt
 
 # --- Signalhandler: signal.signal ruft handler(signum, frame) ---
 _.signum  # smartheat_gateway/runtime_main.py _terminate
 _.frame  # smartheat_gateway/runtime_main.py _terminate
 
-# --- Testeinstiege mit Namen ---
-_.used  # smartheat_gateway/quota.py QuotaGuard.used: Zahl der Aufrufe im Fenster, nur Tests lesen sie (die
-#         Variable used in heizungsbruecke/host.py ist ein anderer Name, gleich geschrieben)
-
 # --- Objekt mit Wirkung im Konstruktor ---
 _._eingang  # smartheat_gateway/triggers.py: der SollEingang registriert sich beim Worker; das Attribut haelt ihn
+
+# --- Kennung der Anlage: die Namen stehen im Geraetekern (kennung.TREIBER), die Treiber nennen sie noch einmal ---
+_.IDENTITY_PARAMETERS  # smartheat_gateway/drivers: gelesen vom Contract-Check (45, 53) und gateway/tests/test_kennung_registry.py

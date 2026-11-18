@@ -1,4 +1,4 @@
-"""P4 (Spec Stufe 3 S8a-1): der Kern (smartheat_core) importiert nichts, auch nicht den Vertrag smartheat_device.wire.
+"""P4: der Kern (smartheat_core) importiert nichts, auch nicht den Vertrag smartheat_device.wire.
 Seine Kopien der Vertragslisten sind deshalb hier gepinnt, jede gleich ihrem Gegenstueck in wire.py. Die Pins stehen als
 `_VERTRAG_GEPINNT_<NAME> = (wire.<NAME>, <Kopie>)` auf Modulebene (der Leser-Test in test_device_wire.py erkennt sie
 daran als gepinnt, nicht als gelesen) und werden danach verglichen. Eine neue Kopie im Kern braucht hier einen Pin.
@@ -12,6 +12,7 @@ from smartheat_device import wire
 from smartheat_runtime import dokument_config
 
 _VERTRAG_GEPINNT_ABO = (wire.ABO, config_check.ABO_WERTE)
+_VERTRAG_GEPINNT_KREIS_ZUSTAENDE = (wire.KREIS_ZUSTAENDE, config_check.KREIS_ZUSTAENDE)
 _VERTRAG_GEPINNT_BINDUNG_GATEWAY_FIELDS = (wire.BINDUNG_GATEWAY_FIELDS, config_check.GATEWAY_BINDUNG_FELDER)
 _VERTRAG_GEPINNT_BINDUNG_HA_FIELDS = (wire.BINDUNG_HA_FIELDS, config_check.HA_BINDUNG_FELDER)
 _VERTRAG_GEPINNT_BINDUNG_HA_OPTIONAL = (wire.BINDUNG_HA_OPTIONAL, config_check.HA_BINDUNG_OPTIONAL)
@@ -26,7 +27,27 @@ _VERTRAG_GEPINNT_SCHREIBSCHUTZ_FIELDS = (wire.SCHREIBSCHUTZ_FIELDS, bindungspara
 _VERTRAG_GEPINNT_ZAEHLER = (wire.ZAEHLER, bindungsparameter.ZAEHLER)
 _VERTRAG_GEPINNT_ENERGIE_EINHEITEN = (wire.ENERGIE_EINHEITEN, tuple(bindungsparameter.EINHEITEN))
 
-_VERTRAG_GEPINNT_ABO_LAUFZEIT = (wire.ABO, tuple(dokument_config.ABO))  # Schluessel der Abbildung auf entitlement
+_VERTRAG_GEPINNT_KONFIGURATION_KREIS_FIELDS = (wire.KONFIGURATION_KREIS_FIELDS, config_check.KONFIG_KREIS_FELDER)
+_VERTRAG_GEPINNT_KONFIGURATION_KREIS_OPTIONAL = (wire.KONFIGURATION_KREIS_OPTIONAL, config_check.KONFIG_KREIS_OPTIONAL)
+_VERTRAG_GEPINNT_KONFIGURATION_RAUM_FIELDS = (wire.KONFIGURATION_RAUM_FIELDS, config_check.RAUM_FELDER)
+_VERTRAG_GEPINNT_RAUM_ROLLEN = (wire.RAUM_ROLLEN, config_check.RAUM_ROLLEN)
+_VERTRAG_GEPINNT_KREISE_MAX = (wire.KREISE_MAX, config_check.KREISE_MAX)
+_VERTRAG_GEPINNT_RAEUME_MAX = (wire.RAEUME_MAX, config_check.RAEUME_MAX)
+_VERTRAG_GEPINNT_RAUM_FUEHLER_MAX = (wire.RAUM_FUEHLER_MAX, config_check.RAUM_FUEHLER_MAX)
+_VERTRAG_GEPINNT_RAUM_SOLL_MIN = (wire.RAUM_SOLL_MIN, config_check.RAUM_ZIEL_MIN)
+_VERTRAG_GEPINNT_RAUM_SOLL_MAX = (wire.RAUM_SOLL_MAX, config_check.RAUM_ZIEL_MAX)
+_VERTRAG_GEPINNT_RAUM_VERSATZ_MAX = (wire.RAUM_VERSATZ_MAX, config_check.RAUM_VERSATZ_MAX)
+_VERTRAG_GEPINNT_KREIS_MAX = (wire.KREIS_MAX, config_check.KREIS_NUMMER_MAX)
+_VERTRAG_GEPINNT_WEGE = (wire.WEGE, config_check.WEGE)
+_VERTRAG_GEPINNT_WEG_DER_PLATTFORM = (wire.WEG_DER_PLATTFORM, config_check.WEG_DER_PLATTFORM)
+_VERTRAG_GEPINNT_WEG_DES_TREIBERS = (wire.WEG_DES_TREIBERS, config_check.WEG_DES_TREIBERS)
+_VERTRAG_GEPINNT_PUSH_REGELN_FIELDS = (wire.PUSH_REGELN_FIELDS, config_check.PUSH_REGELN_FELDER)
+_VERTRAG_GEPINNT_PUSH_STUNDEN = (wire.PUSH_STUNDEN, config_check.PUSH_STUNDEN)
+_VERTRAG_GEPINNT_PUSH_TAGESLIMIT = (wire.PUSH_TAGESLIMIT, config_check.PUSH_TAGESLIMIT)
+_VERTRAG_GEPINNT_URSPRUNG_MAX_HEBEL = (wire.URSPRUNG_MAX_HEBEL, config_check.URSPRUNG_MAX_HEBEL)
+_VERTRAG_GEPINNT_URSPRUNG_HEBEL_MAX_CHARS = (wire.URSPRUNG_HEBEL_MAX_CHARS, config_check.URSPRUNG_HEBEL_MAX_CHARS)
+_VERTRAG_GEPINNT_URSPRUNG_WERT_MAX = (wire.URSPRUNG_WERT_MAX, config_check.URSPRUNG_WERT_MAX)
+_VERTRAG_GEPINNT_ABO_LAUFZEIT =(wire.ABO, tuple(dokument_config.ABO))  # Schluessel der Abbildung auf entitlement
 
 PINS = {name: wert for name, wert in sorted(globals().items()) if name.startswith("_VERTRAG_GEPINNT_")}
 
@@ -35,7 +56,8 @@ PINS = {name: wert for name, wert in sorted(globals().items()) if name.startswit
 def test_die_kopie_im_kern_gleicht_dem_vertrag(name):
     vertrag, kopie = PINS[name]
     assert kopie == vertrag, name
-    assert kopie is not vertrag, name  # eine Kopie, kein Verweis auf den Vertrag
+    if not isinstance(vertrag, int):  # kleine Zahlen sind in Python ohnehin dasselbe Objekt
+        assert kopie is not vertrag, name  # eine Kopie, kein Verweis auf den Vertrag
 
 
 def test_es_gibt_pins():

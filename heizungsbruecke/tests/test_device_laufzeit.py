@@ -1,4 +1,4 @@
-"""Spec 5b 5.1/5.2: Tick und Telemetrie der Laufzeit ueber den Link des Geraets (RuntimeChannel)."""
+"""Tick und Telemetrie der Laufzeit ueber den Link des Geraets (RuntimeChannel)."""
 from smartheat_device.laufzeit import RuntimeChannel
 from smartheat_runtime.runtime import EV_MQTT_CONNECTED, EV_SETPOINTS
 from smartheat_runtime.worker import RegulationWorker
@@ -19,8 +19,8 @@ def _channel(link):
 
 def test_snapshot_carries_the_effective_room_target():
     link = Link()
-    _channel(link).publish_snapshot({"schema": 4, "seq": "s", "room_target": 21.5, "levers": {}})
-    assert link.sent == [("up/snapshot", {"schema": 4, "seq": "s", "room_target": 21.5, "levers": {}})]
+    _channel(link).publish_snapshot({"schema": 5, "kreis": 1, "seq": "s", "room_target": 21.5, "levers": {}})
+    assert link.sent == [("up/snapshot", {"schema": 5, "kreis": 1, "seq": "s", "room_target": 21.5, "levers": {}})]
 
 
 def test_telemetry_goes_to_the_telemetry_topic():

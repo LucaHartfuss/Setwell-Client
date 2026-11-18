@@ -1,4 +1,4 @@
-"""Plan 5b D2 Task 7: lokaler Kanal des Updaters (Soll-Software aus der Laufzeit, Ergebnisse an die Laufzeit,
+"""Lokaler Kanal des Updaters (Soll-Software aus der Laufzeit, Ergebnisse an die Laufzeit,
 Erreichbarkeit des Brokers)."""
 import json
 import os
@@ -87,7 +87,7 @@ def test_reachable_means_a_tcp_connection_to_the_broker(tmp_path):
 
 
 def test_reachable_uses_a_real_tcp_connection_by_default(tmp_path):
-    """Ohne Attrappe: ein lauschender Port ist erreichbar, ein geschlossener nicht (Review Focus 5)."""
+    """Ohne Attrappe: ein lauschender Port ist erreichbar, ein geschlossener nicht."""
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -116,6 +116,101 @@ def test_file_names_match_the_device_core_and_the_gateway_paths():
     assert paths.software_soll.name == kanal.SOLL_FILE
     assert paths.software_meldungen.name == kanal.MELDUNGEN_FILE
     assert paths.software_quittung.name == kanal.QUITTUNG_FILE
+    assert paths.updates_soll.name == kanal.UPDATES_FILE
+    assert paths.updates_veraltet.name == kanal.FRISCHE_FILE
+
+
+# --- Einstellung updates und Frische-Meldung ---
+
+EINSTELLUNG = {"funktion": "aufschub", "sicherheit": "automatisch"}
+WARNUNG = {"code": "meldung.updates_veraltet", "params": {"grund": "ablauf"}, "stufe": "orange"}
+
+
+def test_die_einstellung_updates_ist_die_der_laufzeit(tmp_path):
+    _write(tmp_path / "updates_soll.json", EINSTELLUNG)
+    assert kanal.LokalerKanal(tmp_path).updates() == EINSTELLUNG
+
+
+@pytest.mark.parametrize("inhalt", [None, "null"])
+def test_ohne_einstellung_gilt_keine_einschraenkung(tmp_path, inhalt):
+    if inhalt is not None:
+        (tmp_path / "updates_soll.json").write_text(inhalt)
+    assert kanal.LokalerKanal(tmp_path).updates() is None
+
+
+@pytest.mark.parametrize("inhalt", ["{kaputt", "[1]", '"aus"', '{"funktion": "aus"}',
+                                    '{"funktion": "aus", "sicherheit": "aufschub"}',
+                                    '{"funktion": "morgen", "sicherheit": "aus"}',
+                                    '{"funktion": "aus", "sicherheit": "aus", "x": 1}'])
+def test_eine_unlesbare_einstellung_ist_ein_kanalfehler(tmp_path, inhalt):
+    (tmp_path / "updates_soll.json").write_text(inhalt)
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).updates()
+
+
+TIEF = [pytest.param("[" * 60000, id="listen"), pytest.param('{"a":' * 12000, id="objekte"),
+        pytest.param('[{"a":' * 8000, id="gemischt")]  # unter der Lesegrenze, aber weit tiefer als der Parser erlaubt
+
+
+@pytest.mark.parametrize("inhalt", TIEF)
+def test_eine_tief_geschachtelte_datei_gilt_als_unlesbar_statt_den_dienst_abzubrechen(tmp_path, inhalt):
+    assert len(inhalt) < lesen.MAX_BYTES
+    (tmp_path / "x.json").write_text(inhalt)
+    assert lesen.read_json(tmp_path / "x.json") is None
+
+
+@pytest.mark.parametrize("inhalt", TIEF)
+def test_eine_tief_geschachtelte_soll_oder_einstellung_ist_ein_kanalfehler(tmp_path, inhalt):
+    (tmp_path / "software_soll.json").write_text(inhalt)
+    (tmp_path / "updates_soll.json").write_text(inhalt)
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).desired()
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).updates()
+
+
+@pytest.mark.parametrize("inhalt", TIEF)
+def test_tief_geschachtelte_meldungen_quittung_und_endpunkt_gelten_als_verloren(tmp_path, inhalt):
+    for name in ("software_meldungen.json", "software_quittung.json", "updates_veraltet.json"):
+        (tmp_path / name).write_text(inhalt)
+    (tmp_path / "device").mkdir()
+    (tmp_path / "device" / "endpoint.json").write_text(inhalt)
+    k = kanal.LokalerKanal(tmp_path)
+    assert k.erreichbar() is False
+    k.update_result("0.6.1", "ok", "")  # liest Meldungen und Quittung: ohne Abbruch
+    k.updates_veraltet(None)  # liest die Frische-Meldung: ohne Abbruch
+    assert json.loads((tmp_path / "software_meldungen.json").read_text())["meldungen"][0]["seq"] == 1
+
+
+def test_die_frische_meldung_liegt_fuer_die_laufzeit_lesbar_bereit(tmp_path):
+    kanal.LokalerKanal(tmp_path).updates_veraltet(WARNUNG)
+    datei = tmp_path / "updates_veraltet.json"
+    assert json.loads(datei.read_text()) == {"meldung": WARNUNG}
+    assert datei.stat().st_mode & 0o777 == 0o644
+
+
+def test_keine_warnung_loescht_die_meldung_und_schreibt_ohne_anlass_nichts(tmp_path):
+    k = kanal.LokalerKanal(tmp_path)
+    k.updates_veraltet(None)
+    assert not (tmp_path / "updates_veraltet.json").exists()
+    k.updates_veraltet(WARNUNG)
+    k.updates_veraltet(None)
+    assert json.loads((tmp_path / "updates_veraltet.json").read_text()) == {"meldung": None}
+
+
+def test_eine_unveraenderte_frische_meldung_wird_nicht_neu_geschrieben(tmp_path):
+    k = kanal.LokalerKanal(tmp_path)
+    k.updates_veraltet(WARNUNG)
+    datei = tmp_path / "updates_veraltet.json"
+    os.utime(datei, (1, 1))
+    k.updates_veraltet(WARNUNG)
+    assert datei.stat().st_mtime == 1
+
+
+def test_eine_nicht_schreibbare_frische_meldung_ist_ein_kanalfehler(tmp_path):
+    (tmp_path / "datei").write_text("kein Ordner")
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path / "datei").updates_veraltet(WARNUNG)
 
 
 # --- Container-schreibbarer Datenordner: Symlinks, FIFOs, riesige Dateien (Root liest und schreibt dort) ---
@@ -150,6 +245,13 @@ def _symlink(path: Path) -> None:
 
 def _huge(path: Path) -> None:
     path.write_text(json.dumps({"version": "0.6.1", "fuell": "x" * 200_000}))
+
+
+@pytest.mark.parametrize("plant", [_fifo, _symlink, _huge])
+def test_eine_unsichere_einstellungsdatei_ist_ein_kanalfehler(tmp_path, plant):
+    plant(tmp_path / "updates_soll.json")
+    with pytest.raises(kanal.KanalFehler):
+        kanal.LokalerKanal(tmp_path).updates()
 
 
 @pytest.mark.parametrize(("groesse", "erlaubt"), [(65535, True), (65536, True), (65537, False)])
@@ -243,7 +345,7 @@ def test_a_symlinked_device_dir_is_unreachable_without_connecting(tmp_path):
 
 def test_results_are_read_by_the_device_host_exactly_as_written(tmp_path):
     """Vertrag Updater -> Laufzeit: GatewayDeviceHost liest, was LokalerKanal schreibt (seq, version, result, reason)."""
-    from test_geraet_host import Welt
+    from geraet_welt import Welt
 
     clock = [1000.0]
     welt = Welt(tmp_path, lambda: clock[0])

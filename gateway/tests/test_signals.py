@@ -9,12 +9,13 @@ from fakes import FakeBus
 
 from smartheat_gateway.drivers.registry import create
 from smartheat_gateway.paths import Paths
+from smartheat_gateway.quota import QuotaExhausted
 from smartheat_gateway.signals import REF_ROOM_MEAN, REF_ROOM_TARGET, GatewaySignalSource
 from smartheat_gateway.texts import SHG_TEXTS
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime import battery
 from smartheat_runtime.notifier import Notifier
-from smartheat_runtime.ports import SignalNotFound, SignalUngueltig, SourceUnavailable
+from smartheat_runtime.ports import QuelleErschoepft, SignalNotFound, SignalUngueltig, SourceUnavailable
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BatteryRef
 from smartheat_runtime.soll_speicher import TargetStore
 from smartheat_runtime.state import StateStore
@@ -37,7 +38,9 @@ def world(data_dir, clock):
     driver.poll_once()
     store = TargetStore(data_dir / "runtime" / "room_target.json", 21.0, clock, lambda: "ts")
     source = GatewaySignalSource(bus, mirror)
-    source.bind(driver, store, (f"zigbee:{SENSOR}:temperature", f"zigbee:{SECOND}:temperature"))
+    source.bind(driver, store, (f"zigbee:{SENSOR}:temperature", f"zigbee:{SECOND}:temperature"),
+                ((1, (f"zigbee:{SENSOR}:temperature",)), (2, (f"zigbee:{SECOND}:temperature",)),
+                 (3, (f"zigbee:{SENSOR}:temperature", f"zigbee:{SECOND}:temperature"))))
     return bus, z2m, source
 
 
@@ -50,13 +53,55 @@ def test_room_mean_target_and_driver(world):
     assert isinstance(source.get_state("treiber:outdoor_temp"), float)
 
 
+def test_an_exhausted_driver_quota_is_an_unavailable_source_with_the_driver_text(world):
+    """Die Laufzeit kennt kein Kontingent: sie bekommt eine nicht verfuegbare Quelle (kein Programmfehler im Log)."""
+    _, _, source = world
+
+    def erschoepft(role):
+        raise QuotaExhausted("Kontingent weg")
+
+    source._driver.read_signal = erschoepft
+    with pytest.raises(QuelleErschoepft, match="Kontingent weg") as caught:
+        source.get_state("treiber:outdoor_temp")
+    assert isinstance(caught.value, SourceUnavailable)
+
+
+def test_the_quota_notice_of_the_driver_reaches_the_runtime(world):
+    _, _, source = world
+    assert source.kontingent_erschoepft() is False
+    source._driver.kontingent_erschoepft = lambda: True
+    assert source.kontingent_erschoepft() is True
+    source._driver = None
+    assert source.kontingent_erschoepft() is False  # Treiber noch nicht geladen
+
+
 def test_one_dead_sensor_keeps_the_mean_none_is_invalid(world):
     _, z2m, source = world
     z2m.report(SENSOR, temperature=20.0)
     assert source.get_state(REF_ROOM_MEAN) == 20.0
     z2m.bridge(online=False)
-    with pytest.raises(SignalUngueltig):  # erwartet ungueltig (L4-17), kein Programmfehler
+    with pytest.raises(SignalUngueltig):  # erwartet ungueltig, kein Programmfehler
         source.get_state(REF_ROOM_MEAN)
+
+
+def test_je_raum_liest_ein_eigenes_mittel_seiner_fuehler(world):
+    _, z2m, source = world
+    z2m.report(SENSOR, temperature=20.0)
+    z2m.report(SECOND, temperature=22.0)
+    assert source.get_state("raum:1") == 20.0
+    assert source.get_state("raum:2") == 22.0
+    assert source.get_state("raum:3") == 21.0  # zwei Fuehler im Raum: Mittel
+    assert source.get_state(REF_ROOM_MEAN) == 21.0  # der Kreismittelwert bleibt unberuehrt
+
+
+def test_ein_raum_ohne_gueltigen_fuehler_ist_ungueltig_und_ein_fremder_raum_unbekannt(world):
+    _, z2m, source = world
+    z2m.report(SENSOR, temperature=20.0)
+    z2m.bridge(online=False)
+    with pytest.raises(SignalUngueltig):
+        source.get_state("raum:1")
+    with pytest.raises(SignalNotFound):
+        source.get_state("raum:9")  # kein Raum dieser Nummer gebunden
 
 
 @pytest.mark.parametrize("wert", ["abc", True, None, [1]], ids=["text", "bool", "null", "liste"])
@@ -107,6 +152,12 @@ def test_the_gateway_has_no_unit(world):
     assert not isinstance(caught.value, SignalUngueltig)  # Programmfehler, kein ungueltiger Wert
 
 
+def test_das_gateway_hat_keine_quelle_fuer_erzeugerstoerungen_und_meldet_nichts(world):
+    _, _, source = world
+    assert source.get_stoerungen("treiber:fault_codes") == ()
+    assert source.get_stoerungen("zigbee:0x0000000000000001:state") == ()
+
+
 def test_bool_battery_flag_reads_like_ha(world):
     _, z2m, source = world
     z2m.report(SECOND, battery_low=True)
@@ -136,10 +187,10 @@ class RecordingSink:
     def __init__(self) -> None:
         self.pushed: list[tuple[str, str]] = []
 
-    def push(self, key: str, message: str) -> None:
-        self.pushed.append((key, message))
+    def push(self, key: str, meldung, *, begleitet: bool = False) -> None:
+        self.pushed.append((key, SHG_TEXTS.text(meldung)))
 
-    def show(self, key: str, message: str) -> None:
+    def show(self, key: str, meldung) -> None:
         pass
 
     def withdraw(self, key: str) -> None:

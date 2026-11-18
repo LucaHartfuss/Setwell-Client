@@ -1,23 +1,137 @@
+import hashlib
 import json
+import subprocess
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from smartheat_host import bundles
 
-GOOD_COMPOSE = "services:\n  runtime:\n    image: ghcr.io/x/gw@sha256:" + "a" * 64 + "\n"
+DIGEST = "sha256:" + "d" * 64
+IMAGE = "smartheat-gateway@" + DIGEST
+ARCHIV = {"datei": "gateway-image.oci.tar", "sha256": "e" * 64, "bytes": 1000, "name": "smartheat-gateway",
+          "digest": DIGEST}
+GOOD_COMPOSE = "services:\n  runtime:\n    image: " + IMAGE + "\n    pull_policy: never\n"
+
+
+SYSTEM = {"datei": "system.raucb", "sha256": "f" * 64, "groesse": 1000, "compatible": "smartheat-gateway-pi5"}
+
+
+def _system(**over) -> bytes:
+    return _manifest(system={**SYSTEM, **over})
 
 
 def _manifest(**over):
     data = {"version": "0.3.0", "min_updater_version": "0.2.0",
             "files": {"docker-compose.yml": "b" * 64, "mosquitto.conf": "c" * 64},
-            "images": {"gateway": "ghcr.io/x/gw@sha256:" + "a" * 64}}
+            "images": {"gateway": IMAGE}, "archiv": dict(ARCHIV), "art": "funktion", "ablauf": "2027-11-12T08:30:00Z"}
     data.update(over)
     return json.dumps(data).encode()
+
+
+def _archiv(**over) -> bytes:
+    return _manifest(archiv={**ARCHIV, **over})
+
+
+def _ohne(*keys) -> bytes:
+    data = json.loads(_manifest())
+    for key in keys:
+        del data[key]
+    return json.dumps(data).encode()
+
+
+def _archiv_ohne(key) -> bytes:
+    archiv = dict(ARCHIV)
+    del archiv[key]
+    return _manifest(archiv=archiv)
 
 
 def test_parse_manifest():
     manifest = bundles.parse_manifest(_manifest())
     assert manifest.version == "0.3.0" and set(manifest.files) == set(bundles.MANIFEST_FILES)
+    assert manifest.archiv == bundles.Archiv(**ARCHIV)
+    assert manifest.archiv.ref == IMAGE
+
+
+@pytest.mark.parametrize("art", bundles.ARTEN)
+def test_jede_bekannte_art_wird_gelesen(art):
+    assert bundles.parse_manifest(_manifest(art=art)).art == art
+
+
+def test_die_bekannten_arten_sind_sicherheit_funktion_und_treiberfix():
+    assert set(bundles.ARTEN) == {"sicherheit", "funktion", "treiberfix"}
+
+
+def test_der_ablauf_wird_als_utc_gelesen():
+    manifest = bundles.parse_manifest(_manifest(ablauf="2027-11-12T08:30:15Z"))
+    assert manifest.ablauf == datetime(2027, 11, 12, 8, 30, 15, tzinfo=UTC)
+    assert manifest.ablauf.utcoffset() == timedelta(0)
+
+
+def test_ein_manifest_ohne_system_hat_kein_system():
+    assert bundles.parse_manifest(_manifest()).system is None
+
+
+def test_system_gueltig():
+    manifest = bundles.parse_manifest(_manifest(system=dict(SYSTEM)))
+    assert manifest.system == bundles.SystemBundle("system.raucb", "f" * 64, 1000, "smartheat-gateway-pi5")
+    assert manifest.archiv == bundles.Archiv(**ARCHIV)  # das Archiv bleibt daneben
+
+
+def test_system_darf_genau_so_gross_sein_wie_die_grenze():
+    assert bundles.MAX_SYSTEM_BYTES == 2147483648
+    assert bundles.parse_manifest(_system(groesse=bundles.MAX_SYSTEM_BYTES)).system.groesse == 2147483648
+    assert bundles.parse_manifest(_system(groesse=1)).system.groesse == 1
+
+
+@pytest.mark.parametrize("raw", [
+    # system: kein Objekt (auch null: ein fehlendes Feld heisst fehlen, nicht null)
+    _manifest(system=None), _manifest(system="system.raucb"), _manifest(system=[]),
+    # falsche Schluessel: einer fehlt, einer zuviel, ein Archiv-Schluessel
+    *[_manifest(system={key: value for key, value in SYSTEM.items() if key != fehlt}) for fehlt in SYSTEM],
+    _system(extra="x"), _manifest(system={**SYSTEM, "bytes": 1000}),
+    # groesse: ueber der Grenze, null, negativ, Wahrheitswert, Text, Kommazahl
+    _system(groesse=bundles.MAX_SYSTEM_BYTES + 1), _system(groesse=0), _system(groesse=-1), _system(groesse=True),
+    _system(groesse="1000"), _system(groesse=1000.5), _system(groesse=None),
+    # sha256, Dateiname, compatible
+    _system(sha256="zz"), _system(sha256="F" * 64), _system(sha256="f" * 63), _system(sha256=None),
+    _system(datei="../system.raucb"), _system(datei="andere.raucb"), _system(datei=None),
+    _system(compatible=""), _system(compatible="a" * 65), _system(compatible="mit leerzeichen"), _system(compatible=None),
+    _system(compatible="x\n"),
+])
+def test_bad_system_manifests(raw):
+    with pytest.raises(bundles.ManifestError):
+        bundles.parse_manifest(raw)
+
+
+def test_system_pfad_liegt_ausserhalb_von_bundles_und_archive(tmp_path):
+    store = bundles.BundleStore(tmp_path)
+    assert store.system_path("0.3.0") == tmp_path / "updater" / "system" / "0.3.0.raucb"
+    store.install("0.3.0", {"docker-compose.yml": b"x", "mosquitto.conf": b"y"})
+    assert store.system_path("0.3.0").parent not in (store.dir("0.3.0"), store.archive_path("0.3.0").parent)
+
+
+def test_clean_system_behaelt_nur_die_datei_und_das_part_der_einen_version(tmp_path):
+    store = bundles.BundleStore(tmp_path)
+    ordner = store.system_path("0.3.0").parent
+    ordner.mkdir(parents=True)
+    namen = ("0.3.0.raucb", "0.3.0.raucb.part", "0.2.0.raucb", "0.4.0.raucb.part", "rest")
+    for name in namen:
+        (ordner / name).write_bytes(b"x")
+    store.clean_system("0.3.0")
+    assert sorted(p.name for p in ordner.iterdir()) == ["0.3.0.raucb", "0.3.0.raucb.part"]
+    store.clean_system(None)
+    assert list(ordner.iterdir()) == []
+    store.clean_system(None)  # ohne Ordner kein Fehler
+    (tmp_path / "x").mkdir()
+    bundles.BundleStore(tmp_path / "x").clean_system("0.3.0")
+
+
+def test_the_archive_may_be_exactly_as_large_as_the_limit():
+    assert bundles.MAX_ARCHIVE_BYTES == 536870912
+    assert bundles.parse_manifest(_archiv(bytes=bundles.MAX_ARCHIVE_BYTES)).archiv.bytes == 536870912
+    assert bundles.parse_manifest(_archiv(bytes=1)).archiv.bytes == 1
 
 
 @pytest.mark.parametrize("raw", [
@@ -26,6 +140,28 @@ def test_parse_manifest():
     _manifest(files={"docker-compose.yml": "zz", "mosquitto.conf": "c" * 64}),
     _manifest(images={"gateway": "ghcr.io/x/gw:latest"}),
     b"[1, 2]",
+    # archiv: fehlt, kein Objekt, unvollstaendig oder mit Fremdfeld
+    _ohne("archiv"), _manifest(archiv=None), _manifest(archiv="gateway-image.oci.tar"), _manifest(archiv=[]),
+    *[_archiv_ohne(key) for key in ARCHIV], _archiv(extra="x"),
+    # bytes: ueber der Grenze, null, negativ, Wahrheitswert, Text, Kommazahl
+    _archiv(bytes=bundles.MAX_ARCHIVE_BYTES + 1), _archiv(bytes=0), _archiv(bytes=-5), _archiv(bytes=True),
+    _archiv(bytes="1000"), _archiv(bytes=1000.5), _archiv(bytes=None),
+    # digest: ohne sha256:, falsche Laenge, Grossbuchstaben, kein Text
+    _archiv(digest="d" * 64), _archiv(digest="sha256:" + "d" * 63), _archiv(digest="sha256:" + "D" * 64),
+    _archiv(digest="sha512:" + "d" * 64), _archiv(digest=None), _archiv(digest=DIGEST + "\n"),
+    # sha256 der Datei, Name und Dateiname
+    _archiv(sha256="zz"), _archiv(sha256="E" * 64), _archiv(sha256=None),
+    _archiv(name="ghcr.io/x/gw"), _archiv(name="andere"), _archiv(name=None),
+    _archiv(datei="../gateway-image.oci.tar"), _archiv(datei="andere.tar"), _archiv(datei=None),
+    # art: fehlt, unbekannt, andere Schreibweise, kein Text
+    _ohne("art"), _manifest(art="kritisch"), _manifest(art="Sicherheit"), _manifest(art=" funktion"),
+    _manifest(art=""), _manifest(art=None), _manifest(art=1), _manifest(art=["funktion"]),
+    # ablauf: fehlt, ohne Uhrzeit, ohne Z, mit Versatz, mit Bruchteil, unmoeglich, kein Text
+    _ohne("ablauf"), _manifest(ablauf="2027-11-12"), _manifest(ablauf="2027-11-12T08:30:00"),
+    _manifest(ablauf="2027-11-12T08:30:00+00:00"), _manifest(ablauf="2027-11-12T09:30:00+01:00"),
+    _manifest(ablauf="2027-11-12T08:30:00.5Z"), _manifest(ablauf="2027-13-12T08:30:00Z"),
+    _manifest(ablauf="2027-11-12T25:30:00Z"), _manifest(ablauf="2027-11-12T08:30:00Z\n"),
+    _manifest(ablauf=""), _manifest(ablauf=None), _manifest(ablauf=1800000000),
 ])
 def test_bad_manifests(raw):
     with pytest.raises(bundles.ManifestError):
@@ -41,22 +177,67 @@ def test_parse_version():
 
 @pytest.mark.parametrize("text", [
     "services:\n  runtime:\n    image: ghcr.io/x/gw:latest\n",
-    "services:\n  runtime:\n    build: .\n    image: ghcr.io/x/gw@sha256:" + "a" * 64 + "\n",
+    "services:\n  runtime:\n    build: .\n    image: " + IMAGE + "\n    pull_policy: never\n",
     "services:\n  runtime:\n    image: ghcr.io/x/gw:latest # @sha256:" + "a" * 64 + "\n",  # Kommentar versteckt kein Tag
-    "services:\n  runtime:\n    image: ghcr.io/x/gw@sha256:" + "a" * 64 + "\n  b:\n    image: ghcr.io/x/b:1\n",
+    GOOD_COMPOSE + "  b:\n    image: ghcr.io/x/b:1\n",
     "services:\n  runtime:\n    image: ghcr.io/x/gw@sha256:abc\n",
     "services: {}\n",
 ])
 def test_compose_without_digest_or_with_build_is_refused(text):
     with pytest.raises(bundles.ManifestError):
-        bundles.check_compose(text)
+        bundles.check_compose(text, bundles.Archiv(**ARCHIV))
 
 
 def test_good_compose_passes_and_lists_images():
-    bundles.check_compose(GOOD_COMPOSE)
-    quoted = 'services:\n  runtime:\n    image: "ghcr.io/x/gw@sha256:' + "a" * 64 + '"\n'
-    bundles.check_compose(quoted)
-    assert bundles.compose_images(quoted) == ["ghcr.io/x/gw@sha256:" + "a" * 64]
+    archiv = bundles.Archiv(**ARCHIV)
+    bundles.check_compose(GOOD_COMPOSE, archiv)
+    quoted = 'services:\n  runtime:\n    image: "' + IMAGE + '"\n    pull_policy: "never"\n'
+    bundles.check_compose(quoted, archiv)
+    assert bundles.compose_images(quoted) == [IMAGE]
+    registry = "services:\n  runtime:\n    image: ghcr.io/x/gw@sha256:" + "a" * 64 + "\n"
+    bundles.check_compose(registry, archiv)  # Images aus Registries brauchen kein never und kein Archiv
+
+
+def _service(image, policy=None, name="runtime") -> str:
+    return f"services:\n  {name}:\n    image: {image}\n" + (f"    pull_policy: {policy}\n" if policy else "")
+
+
+@pytest.mark.parametrize("text", [
+    _service("ghcr.io/x/gw@sha256:" + "a" * 64, "never"),  # never nur fuer das Archiv, sonst kein Image da
+    _service("eclipse-mosquitto:2@sha256:" + "e" * 64, "never"),
+    _service("smartheat-gateway@sha256:" + "f" * 64, "never"),  # eigener Name, aber nicht der Digest des Archivs
+    _service("localhost:5000/smartheat-gateway@" + DIGEST, "never"),  # anderer Name (Registry)
+    _service(IMAGE),  # Archiv-Image ohne never: compose pull fragte docker.io
+    _service(IMAGE, "always"), _service(IMAGE, "missing"), _service(IMAGE, "if_not_present"),
+    _service("smartheat-gateway@sha256:" + "f" * 64),  # eigener Name ohne never und mit fremdem Digest
+    _service(IMAGE, "never") + "  zweiter:\n    image: ghcr.io/x/gw@sha256:" + "a" * 64 + "\n    pull_policy: never\n",
+])
+def test_compose_never_nur_mit_archiv_digest(text):
+    with pytest.raises(bundles.ManifestError):
+        bundles.check_compose(text, bundles.Archiv(**ARCHIV))
+
+
+def test_compose_never_with_the_archive_digest_passes_for_every_service():
+    two = _service(IMAGE, "never", "init") + "  runtime:\n    image: " + IMAGE + "\n    pull_policy: never\n"
+    bundles.check_compose(two, bundles.Archiv(**ARCHIV))
+    # ein anderer Archiv-Digest im Manifest macht dieselbe Datei ungueltig
+    other = bundles.Archiv(**{**ARCHIV, "digest": "sha256:" + "9" * 64})
+    with pytest.raises(bundles.ManifestError):
+        bundles.check_compose(two, other)
+
+
+def test_compose_services_reads_image_and_pull_policy_of_the_first_level_only():
+    text = ("x-ignoriert: 1\nservices:\n  init:\n    image: a@sha256:" + "1" * 64 + "\n    pull_policy: never\n"
+            "    healthcheck:\n      image: nicht-ein-image\n  runtime:\n    # Kommentar\n\n"
+            "    image: \"b@sha256:" + "2" * 64 + "\" # mit Kommentar\n    pull_policy: 'never'\n"
+            "  leer:\n    restart: no\nnetworks:\n  image: kein-dienst\n")
+    assert bundles.compose_services(text) == {
+        "init": {"image": "a@sha256:" + "1" * 64, "pull_policy": "never"},
+        "runtime": {"image": "b@sha256:" + "2" * 64, "pull_policy": "never"},
+        "leer": {},
+    }
+    assert bundles.compose_services("services: {}\n") == {}
+    assert bundles.compose_services("nichts: 1\n") == {}
 
 
 def test_store_installs_atomically_and_replaces(tmp_path):
@@ -69,15 +250,99 @@ def test_store_installs_atomically_and_replaces(tmp_path):
     assert store.exists("0.3.0")
 
 
+def test_the_archive_lies_outside_the_bundle_folder_that_install_deletes(tmp_path):
+    store = bundles.BundleStore(tmp_path)
+    assert store.archive_path("0.3.0") == tmp_path / "archive" / "0.3.0.oci.tar"
+    store.archive_path("0.3.0").parent.mkdir()
+    store.archive_path("0.3.0").write_bytes(b"x")
+    store.install("0.3.0", {"docker-compose.yml": GOOD_COMPOSE.encode(), "mosquitto.conf": b"x"})
+    assert store.archive_path("0.3.0").read_bytes() == b"x"  # install loescht bundles/<version>, nicht archive/
+
+
+def test_clean_archives_keeps_only_the_archive_and_the_part_file_of_one_version(tmp_path):
+    store = bundles.BundleStore(tmp_path)
+    folder = tmp_path / "archive"
+    folder.mkdir()
+    for name in ("0.2.0.oci.tar", "0.2.0.oci.tar.part", "0.3.0.oci.tar", "0.3.0.oci.tar.part", "rest", "0.3.0.oci.tar2"):
+        (folder / name).write_bytes(b"x")
+    (folder / "ordner").mkdir()
+    store.clean_archives("0.3.0")
+    assert sorted(path.name for path in folder.iterdir()) == ["0.3.0.oci.tar", "0.3.0.oci.tar.part", "ordner"]
+    bundles.BundleStore(tmp_path / "leer").clean_archives("0.3.0")  # ohne Ordner kein Fehler
+    store.clean_archives(None)  # None: alle Dateien
+    assert sorted(path.name for path in folder.iterdir()) == ["ordner"]
+
+
 def test_compose_runner_commands(tmp_path):
     calls = []
     runner = bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: calls.append(cmd) or _Done(0, ""))
     runner.pull("0.3.0")
     runner.up("0.3.0")
     compose = str(tmp_path / "bundles" / "0.3.0" / "docker-compose.yml")
-    env = str(tmp_path / "host" / "gateway.env")
-    base = ["docker", "compose", "-p", "smartheat", "--env-file", env, "-f", compose]
+    base = ["docker", "compose", "-p", "smartheat", "--env-file", "/opt/smartheat/gateway.env", "-f", compose]
     assert calls == [base + ["pull"], base + ["up", "-d", "--remove-orphans"]]
+
+
+def test_compose_runner_restart_nutzt_dieselben_optionen_und_eine_frist_von_120_s(tmp_path):
+    """Der Waechter startet einen Dienst des laufenden Bundles neu: Projekt, env-Datei und Compose-Datei wie bei `up`."""
+    seen = []
+    runner = bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: seen.append((cmd, kw.get("timeout"))) or _Done(0, ""))
+    runner.restart("0.3.0", "runtime")
+    compose = str(tmp_path / "bundles" / "0.3.0" / "docker-compose.yml")
+    assert seen == [(["docker", "compose", "-p", "smartheat", "--env-file", "/opt/smartheat/gateway.env", "-f", compose,
+                      "restart", "runtime"], 120)]
+    with pytest.raises(bundles.ComposeError, match="restart"):
+        bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: _Done(1, "boom")).restart("0.3.0", "runtime")
+    with pytest.raises(bundles.ComposeError, match="Frist von 120 s"):
+        def hanging(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        bundles.ComposeRunner(tmp_path, run=hanging).restart("0.3.0", "runtime")
+
+
+def test_compose_runner_down_haelt_den_ganzen_stapel_an_mit_einer_frist_von_120_s(tmp_path):
+    """Werksreset (GPC9): `down --remove-orphans` mit denselben Optionen wie `up`; ohne Volumes (`-v`), Images bleiben."""
+    seen = []
+    runner = bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: seen.append((cmd, kw.get("timeout"))) or _Done(0, ""))
+    runner.down("0.3.0")
+    compose = str(tmp_path / "bundles" / "0.3.0" / "docker-compose.yml")
+    assert seen == [(["docker", "compose", "-p", "smartheat", "--env-file", "/opt/smartheat/gateway.env", "-f", compose,
+                      "down", "--remove-orphans"], 120)]
+    with pytest.raises(bundles.ComposeError, match="down"):
+        bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: _Done(1, "boom")).down("0.3.0")
+    with pytest.raises(bundles.ComposeError, match="Frist von 120 s"):
+        def hanging(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        bundles.ComposeRunner(tmp_path, run=hanging).down("0.3.0")
+
+
+def test_die_sperre_ohne_warten_meldet_belegt_statt_zu_blockieren(tmp_path):
+    """`sperre(blockieren=False)` (der Waechter): frei -> True und gehalten; belegt durch einen anderen Runner -> False sofort,
+    ohne die Sperre des Halters anzutasten oder selbst zu halten."""
+    halter, anderer = bundles.ComposeRunner(tmp_path), bundles.ComposeRunner(tmp_path)
+    with halter.sperre():
+        with anderer.sperre(blockieren=False) as frei:
+            assert frei is False
+        with anderer.sperre(blockieren=False) as frei:  # und wieder: der Fehlversuch hat nichts hinterlassen
+            assert frei is False
+    with anderer.sperre(blockieren=False) as frei:
+        assert frei is True
+        with halter.sperre(blockieren=False) as belegt:
+            assert belegt is False
+    with halter.sperre() as frei:
+        assert frei is True
+
+
+def test_compose_runner_nimmt_die_env_datei_aus_dem_system_nicht_aus_shg_root(tmp_path):
+    """gateway.env unter /opt/smartheat ist die einzige Quelle; `host/gateway.env` unter SHG_ROOT gibt es nicht mehr."""
+    assert str(bundles.GATEWAY_ENV) == "/opt/smartheat/gateway.env"
+    calls = []
+    runner = bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: calls.append(cmd) or _Done(0, ""))
+    runner.up("0.3.0")
+    assert calls[0][calls[0].index("--env-file") + 1] == "/opt/smartheat/gateway.env"
+    anders = bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: calls.append(cmd) or _Done(0, ""),
+                                   env_datei=tmp_path / "test.env")
+    anders.up("0.3.0")
+    assert calls[1][calls[1].index("--env-file") + 1] == str(tmp_path / "test.env")
 
 
 def test_compose_health_reads_both_output_formats(tmp_path):
@@ -134,7 +399,7 @@ def test_prune_removes_only_unreferenced_images_of_the_bundle_repositories(tmp_p
 def test_prune_matches_tagged_refs_and_registries_with_a_port(tmp_path):
     """Compose nennt Images mit Tag (eclipse-mosquitto:2@sha256:...), `docker image ls` zeigt das Repository ohne Tag;
     ein Registry-Port (localhost:5000/...) ist kein Tag."""
-    keep = {"eclipse-mosquitto:2@sha256:" + "e" * 64, "koenkk/zigbee2mqtt:2.14.2@sha256:" + "d" * 64,
+    keep = {"eclipse-mosquitto:2@sha256:" + "e" * 64, "koenkk/zigbee2mqtt:2.14.3@sha256:" + "d" * 64,
             "localhost:5000/smartheat-gateway@sha256:" + "a" * 64}
     listed = "\n".join([
         "eclipse-mosquitto@sha256:" + "e" * 64, "eclipse-mosquitto@sha256:" + "1" * 64,
@@ -153,6 +418,22 @@ def test_prune_matches_tagged_refs_and_registries_with_a_port(tmp_path):
     assert removed == sorted([
         "eclipse-mosquitto@sha256:" + "1" * 64, "koenkk/zigbee2mqtt@sha256:" + "2" * 64,
         "localhost:5000/smartheat-gateway@sha256:" + "3" * 64])
+
+
+def test_prune_behaelt_eigenes_image_der_vorigen_version(tmp_path):
+    """Der Rueckweg startet die vorige Version ohne Netz: ihr Archiv-Image (smartheat-gateway@<Digest>) bleibt, ein
+    aelteres verschwindet. `docker image ls` zeigt es mit Repository smartheat-gateway und seinem Index-Digest."""
+    jetzt, vorige, aelter = (f"smartheat-gateway@sha256:{ziffer * 64}" for ziffer in "abc")
+    listed = "\n".join([jetzt, vorige, aelter, "eclipse-mosquitto@sha256:" + "e" * 64])
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return _Done(0, listed if cmd[:3] == ["docker", "image", "ls"] else "")
+
+    keep = {jetzt, vorige, "eclipse-mosquitto:2@sha256:" + "e" * 64}
+    bundles.ComposeRunner(tmp_path, run=run).prune(keep)
+    assert [cmd for cmd in calls if cmd[:3] == ["docker", "image", "rm"]] == [["docker", "image", "rm", aelter]]
 
 
 @pytest.mark.parametrize(("ref", "repository"), [
@@ -192,7 +473,7 @@ def test_store_keeps_manifest_and_signature(tmp_path):
     store = bundles.BundleStore(tmp_path)
     store.install("0.3.0", {"docker-compose.yml": GOOD_COMPOSE.encode(), "mosquitto.conf": b"x",
                             bundles.MANIFEST_NAME: b"{}", bundles.SIGNATURE_NAME: b"sig"})
-    assert (tmp_path / "bundles" / "0.3.0" / "manifest.json.minisig").read_bytes() == b"sig"
+    assert (tmp_path / "bundles" / "0.3.0" / "manifest.json.sig").read_bytes() == b"sig"
     assert (tmp_path / "bundles" / "0.3.0" / "manifest.json").read_bytes() == b"{}"
     assert store.exists("0.3.0")
 
@@ -200,3 +481,141 @@ def test_store_keeps_manifest_and_signature(tmp_path):
 class _Done:
     def __init__(self, returncode, stdout):
         self.returncode, self.stdout, self.stderr = returncode, stdout, ""
+
+
+def test_compose_calls_have_a_timeout_and_a_timeout_is_a_compose_error(tmp_path):
+    """Ein haengender `docker`-Aufruf (Netz weg mitten im `pull`, Daemon blockiert) hielt den Updater endlos fest.
+    Jeder Aufruf traegt eine Frist; laeuft sie ab (Attrappe `run` wirft TimeoutExpired, wie `subprocess.run`), ist es ein
+    ComposeError, bei `ps` eine leere Antwort."""
+    seen = []
+
+    def hanging(cmd, **kw):
+        seen.append((cmd[cmd.index("-f") + 2:], kw.get("timeout")))  # Teil nach der Compose-Datei
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    runner = bundles.ComposeRunner(tmp_path, run=hanging)
+    with pytest.raises(bundles.ComposeError, match="pull"):
+        runner.pull("0.3.0")
+    with pytest.raises(bundles.ComposeError, match="up"):
+        runner.up("0.3.0")
+    assert runner.health("0.3.0") == {}
+    assert seen == [(["pull"], 900), (["up", "-d", "--remove-orphans"], 300), (["ps", "--format", "json"], 60)]
+
+
+def test_a_successful_compose_call_passes_its_timeout_to_run_too(tmp_path):
+    """Gegenprobe: auch ohne Ablauf geht die Frist an `run` (sonst waere sie ohne Wirkung)."""
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(kw.get("timeout"))
+        return _Done(0, "[]")
+
+    runner = bundles.ComposeRunner(tmp_path, run=run)
+    runner.pull("0.3.0")
+    runner.up("0.3.0")
+    runner.health("0.3.0")
+    assert seen == [900, 300, 60]
+
+
+def test_prune_calls_have_a_timeout_and_a_timeout_stops_the_clean_up_quietly(tmp_path):
+    """`image ls` und `image rm` tragen je 120 s; ein Ablauf bricht das Aufraeumen ab wie ein fehlendes docker
+    (OSError): kein Fehler, nichts weiter geloescht. Aufraeumen ist Beiwerk, das Update ist dann schon gesund."""
+    keep = {"ghcr.io/x/gw@sha256:" + "a" * 64}
+    listed = "\n".join(["ghcr.io/x/gw@sha256:" + "f" * 64, "ghcr.io/x/gw@sha256:" + "e" * 64])
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd[:3], kw.get("timeout")))
+        return _Done(0, listed if cmd[:3] == ["docker", "image", "ls"] else "")
+
+    bundles.ComposeRunner(tmp_path, run=run).prune(keep)
+    assert calls == [(["docker", "image", "ls"], 120), (["docker", "image", "rm"], 120), (["docker", "image", "rm"], 120)]
+
+    for hanging_command in (["docker", "image", "ls"], ["docker", "image", "rm"]):
+        seen = []
+
+        def hanging(cmd, hanging_command=hanging_command, seen=seen, **kw):
+            seen.append(cmd[:3])
+            if cmd[:3] == hanging_command:
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+            return _Done(0, listed)
+
+        bundles.ComposeRunner(tmp_path, run=hanging).prune(keep)  # wirft nicht
+        # beim haengenden `rm` endet das Aufraeumen nach dem ersten Versuch, das zweite Image bleibt
+        assert seen == ([["docker", "image", "ls"]] if hanging_command[2] == "ls"
+                        else [["docker", "image", "ls"], ["docker", "image", "rm"]])
+
+
+def test_has_image_asks_docker_for_the_exact_reference(tmp_path):
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append((cmd, kw.get("timeout")))
+        return _Done(0, "[]")
+
+    assert bundles.ComposeRunner(tmp_path, run=run).has_image(IMAGE) is True
+    assert seen == [(["docker", "image", "inspect", IMAGE], 120)]
+
+
+def test_has_image_is_false_without_the_image_or_without_a_working_docker(tmp_path):
+    assert bundles.ComposeRunner(tmp_path, run=lambda cmd, **kw: _Done(1, "")).has_image(IMAGE) is False
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError("docker")
+
+    def hanging(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    assert bundles.ComposeRunner(tmp_path, run=missing).has_image(IMAGE) is False
+    assert bundles.ComposeRunner(tmp_path, run=hanging).has_image(IMAGE) is False
+
+
+def test_docker_load_hat_eine_frist(monkeypatch):
+    """Ein haengender `docker load` (Datentraeger, Daemon) hielte den Updater und den Erststart endlos fest: Standard
+    600 s, die Frist geht an subprocess.run, ihr Ablauf ist ein LoadError."""
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append((cmd, kw.get("timeout")))
+        return _Done(0, "Loaded image")
+
+    monkeypatch.setattr(bundles.subprocess, "run", run)
+    bundles.docker_load(Path("/x/y.tar"))
+    bundles.docker_load(Path("/x/y.tar"), timeout=5)
+    assert seen == [(["docker", "load", "-i", "/x/y.tar"], 600), (["docker", "load", "-i", "/x/y.tar"], 5)]
+
+    def hanging(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(bundles.subprocess, "run", hanging)
+    with pytest.raises(bundles.LoadError, match="Frist von 600 s"):
+        bundles.docker_load(Path("/x/y.tar"))
+    with pytest.raises(bundles.LoadError, match="Frist von 5 s"):
+        bundles.docker_load(Path("/x/y.tar"), timeout=5)
+
+
+def test_docker_load_failures_are_load_errors_with_the_file_name_only(monkeypatch):
+    failed = _Done(1, "")
+    failed.stderr = "no space left on device"
+    monkeypatch.setattr(bundles.subprocess, "run", lambda cmd, **kw: failed)
+    with pytest.raises(bundles.LoadError, match=r"y\.tar: no space left"):
+        bundles.docker_load(Path("/geheim/pfad/y.tar"))
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(bundles.subprocess, "run", missing)
+    with pytest.raises(bundles.LoadError, match=r"y\.tar: FileNotFoundError") as error:
+        bundles.docker_load(Path("/geheim/pfad/y.tar"))
+    assert "geheim" not in str(error.value)
+
+
+def test_the_bundle_fixture_of_the_installer_tests_is_a_bundle_the_device_accepts():
+    """tests/fixtures/bundle (install_checks.sh, test_image_scripts.py) folgt dem Format des Geraets: Manifest mit archiv,
+    Compose-Datei mit dem Archiv-Image und pull_policy: never, Pruefsummen der Dateien stimmen."""
+    ordner = Path(__file__).parent / "fixtures" / "bundle"
+    manifest = bundles.parse_manifest((ordner / "manifest.json").read_bytes())
+    bundles.check_compose((ordner / "docker-compose.yml").read_text(), manifest.archiv)
+    for name, sha in manifest.files.items():
+        assert hashlib.sha256((ordner / name).read_bytes()).hexdigest() == sha, name
+    assert manifest.images["gateway"] == manifest.archiv.ref

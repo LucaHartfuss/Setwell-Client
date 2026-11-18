@@ -1,4 +1,4 @@
-"""Hebel-Pipeline, Plan 3b: physische Schreibvorgaenge, globales Tagesbudget (Weishaupt), Lebensdauerzaehler,
+"""Hebel-Pipeline: physische Schreibvorgaenge, globales Tagesbudget (Weishaupt), Lebensdauerzaehler,
 Schreibgruppen (Viessmann), zurueckgestellte Serverwerte. Vaillant bleibt unberuehrt (test_core_pipeline.py)."""
 import dataclasses
 import logging
@@ -7,11 +7,10 @@ import pytest
 from bindung_beispiele import VAILLANT_MYPYLLANT, VIESSMANN_VICARE_BINDING, WEISHAUPT_MODBUS
 
 from heizungsbruecke.ha_binding import HaPlantBinding
-from smartheat_core import write_budget
+from smartheat_core import meldungen, write_budget
 from smartheat_core.pipeline import (
     BUDGET_KEY,
     LIFETIME_KEY,
-    START_LIMIT_MESSAGE,
     DeviceWriteError,
     LeverPipeline,
     WriteBudgetExhausted,
@@ -105,6 +104,7 @@ def test_server_values_stop_at_the_daily_limit_but_the_restore_point_is_saved(ma
     assert store.state.restore_point == {"curve": 0.8, "room_setpoint": 21.0, "heat_limit": 17.0}
     assert store.state.deferred_levers == ("curve", "room_setpoint", "heat_limit")
     assert [note[:2] for note in notes] == [("schreibbudget", DAY)]
+    assert [note[2] for note in notes] == [meldungen.neu("meldung.schreibbudget", limit=10)]
 
 
 def test_the_limit_can_be_reached_in_the_middle_of_an_answer(make_store, clock):
@@ -154,18 +154,18 @@ def test_a_boost_does_not_start_at_the_daily_limit(make_store, clock, comfort, e
     assert write_budget.get(store, write_budget.BOOST_START) is None
     assert write_budget.get(store, write_budget.EMERGENCY_START) is None
     assert _total(store) == 10
-    assert {note[:3] for note in notes} == {(BUDGET_KEY, DAY, START_LIMIT_MESSAGE.format(limit=10))}
+    assert {note[:3] for note in notes} == {(BUDGET_KEY, DAY, meldungen.neu("meldung.schreibbudget_boost", limit=10))}
     assert pipeline.comfort_start_heute_gesperrt is comfort
 
 
 def test_the_start_refusal_text_covers_both_facts_of_the_shared_daily_notice(make_store, clock):
-    # Gleicher Schluessel und Tag wie BUDGET_MESSAGE: kommt der Boost-Hinweis zuerst, darf der Hinweis auf die
+    # Gleicher Schluessel und Tag wie die Meldung `schreibbudget`: kommt der Boost-Hinweis zuerst, darf der Hinweis auf die
     # verschobenen Werte nicht fehlen (und der Text hat wie alle Hinweise das Praefix).
     notes = []
     pipeline, _, _ = _weishaupt(
         make_store, clock, backup={"restore_point": POINT, "write_budget": AT_LIMIT}, notify=lambda *args: notes.append(args))
     pipeline.set_boosts(comfort=True, emergency=False)
-    text = notes[0][2]
+    text = meldungen.text(notes[0][2])
     assert text.startswith("SmartHeat: Das Tageslimit von 10 Schreibvorgängen")
     assert "morgen geschrieben" in text and text.endswith("Ein Boost startet erst morgen wieder.")
 
@@ -201,7 +201,7 @@ def test_a_boost_starts_below_the_limit_and_can_cross_it(make_store, clock):
 
 
 def test_flapping_operations_are_bounded_weishaupt(make_store, clock):
-    # FK-1: Tageslimit 10, ein Boost schreibt 3 und sein Ende 3 Werte; nach zwei Starts ist das Limit erreicht.
+    # Tageslimit 10, ein Boost schreibt 3 und sein Ende 3 Werte; nach zwei Starts ist das Limit erreicht.
     pipeline, store, ha = _weishaupt(make_store, clock, backup={"restore_point": POINT})
     for _ in range(50):
         pipeline.set_boosts(comfort=True, emergency=False)
@@ -278,7 +278,8 @@ def test_lifetime_hint_at_the_threshold_and_every_further_10000(make_store, cloc
     pipeline.apply_server_values({"curve": 0.8, "room_setpoint": 20.0, "heat_limit": 18.0})
     assert store.state.lifetime_writes == 50000
     assert [(key, state) for key, state, _ in notes] == [(LIFETIME_KEY, "50000")]
-    assert "50.000" in notes[0][2]
+    assert notes[0][2] == meldungen.neu("meldung.schreibzaehler", anzahl=50000)
+    assert "50.000" in meldungen.text(notes[0][2])
     store.update(lifetime_writes=59999)
     pipeline.apply_server_values({"curve": 0.85, "room_setpoint": 20.0, "heat_limit": 18.0})
     assert notes[-1][:2] == (LIFETIME_KEY, "60000")
@@ -321,7 +322,7 @@ def test_an_unchanged_group_is_not_written(make_store, clock):
 
 
 def test_a_group_without_write_group_counts_each_physical_write(make_store, clock):
-    # A6-09: ohne write_group sind es zwei physische Schreibvorgaenge, und beide zaehlen (nicht min(diff, 1))
+    # Ohne write_group sind es zwei physische Schreibvorgaenge, und beide zaehlen (nicht min(diff, 1))
     counted = dataclasses.replace(VIESSMANN, daily_write_limit=10, lifetime_hint_at=50000)
     pipeline, store, ha = _viessmann(make_store, clock, description=counted)
     pipeline.apply_server_values({"curve": 1.2, "level": -2.0, "room_setpoint": 20.0})
@@ -359,7 +360,7 @@ def test_vaillant_binding_counts_physical_writes_too():
 
 
 class GroupBinding(HaPlantBinding):
-    """Binding mit optionaler Gruppenschreibung (Audit 4, A4-31): ein physischer Aufruf fuer alle Mitglieder."""
+    """Binding mit optionaler Gruppenschreibung: ein physischer Aufruf fuer alle Mitglieder."""
 
     def __init__(self, ha, manifest, description):
         super().__init__(ha, manifest, description)
@@ -388,7 +389,7 @@ def _group_pipeline(make_store, clock, description=VIESSMANN):
 
 
 def test_a_binding_with_write_group_gets_one_call_with_all_targets(make_store, clock):
-    # Audit 4, A4-31: Gruppenschreibung statt zwei Einzelschreibvorgaengen
+    # Gruppenschreibung statt zwei Einzelschreibvorgaengen
     counted = dataclasses.replace(VIESSMANN, daily_write_limit=10, lifetime_hint_at=50000)
     pipeline, binding, store = _group_pipeline(make_store, clock, counted)
     pipeline.apply_server_values({"curve": 1.2, "level": -2.0, "room_setpoint": 20.0})
@@ -409,7 +410,7 @@ def test_a_failing_group_write_names_the_first_member_and_counts_nothing(make_st
     assert _total(store) == 0
 
 
-# --- Mutationsprobe Stufe 3 S4b (A5-22 Rest): Tagesbudget, Zaehlung, Lebensdauer-Hinweis ---
+# --- Mutationsprobe: Tagesbudget, Zaehlung, Lebensdauer-Hinweis ---
 
 AT_LIMIT = {write_budget.TOTAL: {"day": DAY, "count": 10}}
 
@@ -487,14 +488,71 @@ def test_no_lifetime_hint_below_the_threshold(make_store, clock):
 
 
 def test_write_lever_is_not_exempt_from_the_daily_limit(make_store, clock):
-    # Mindestvorlauf (write_lever) und der Startwert in prepare_start zaehlen gegen das Tagesbudget.
+    # Mindestvorlauf (_write_lever) und der Startwert in prepare_start zaehlen gegen das Tagesbudget.
     store = make_store()
     ha = Ha({"number.curve": 0.7, "number.min_flow": 20.0})
     manifest = ChannelManifest(refs={"curve_current": "number.curve", "min_flow": "number.min_flow"})
     limited = dataclasses.replace(VAILLANT_MYPYLLANT, daily_write_limit=1)
     pipeline = LeverPipeline(store, HaPlantBinding(ha, manifest, limited),
                              resolve_local_safety("vaillant_vrc720", "Heizkoerper"), clock=clock)
-    assert pipeline.write_lever("min_flow", 22.0) == 22.0
+    assert pipeline._write_lever("min_flow", 22.0) == 22.0
     with pytest.raises(WriteBudgetExhausted):
-        pipeline.write_lever("min_flow", 25.0)
+        pipeline._write_lever("min_flow", 25.0)
     assert ha.writes == [("number.min_flow", 22.0)]
+
+
+def test_a_new_pipeline_has_no_refused_comfort_start(make_store, clock):
+    pipeline, _, _ = _weishaupt(make_store, clock)
+    assert pipeline.comfort_start_heute_gesperrt is False
+
+
+def test_a_refused_start_without_a_notifier_is_not_an_error(make_store, clock, caplog):
+    pipeline, _, ha = _weishaupt(make_store, clock, backup={"restore_point": POINT, "write_budget": AT_LIMIT})
+    with caplog.at_level(logging.ERROR):
+        assert pipeline.set_boosts(comfort=True, emergency=False) == (False, False)
+    assert caplog.records == []
+    assert ha.writes == []
+
+
+def _offene_transaktionen(monkeypatch):
+    """Zaehlt je physischem Schreiben, wie viele Transaktionen des Speichers gerade offen sind."""
+    from contextlib import contextmanager
+
+    from smartheat_runtime.state import StateStore
+    offen = {"jetzt": 0, "beim_schreiben": []}
+
+    @contextmanager
+    def spur(self):
+        offen["jetzt"] += 1
+        try:
+            yield
+        finally:
+            offen["jetzt"] -= 1
+
+    schreiben = Ha.set_number_value
+
+    def mit_spur(self, entity_id, value):
+        offen["beim_schreiben"].append(offen["jetzt"])
+        schreiben(self, entity_id, value)
+
+    monkeypatch.setattr(StateStore, "transaktion", spur)
+    monkeypatch.setattr(Ha, "set_number_value", mit_spur)
+    return offen["beim_schreiben"]
+
+
+def test_with_a_daily_limit_the_check_and_the_write_run_in_one_transaction(make_store, clock, monkeypatch):
+    beim_schreiben = _offene_transaktionen(monkeypatch)
+    pipeline, _, ha = _weishaupt(make_store, clock)
+    pipeline.apply_server_values({"curve": 0.9, "room_setpoint": 22.0, "heat_limit": 16.0})
+    assert ha.writes and set(beim_schreiben) == {1}
+
+
+def test_without_a_daily_limit_the_write_needs_no_transaction(make_store, clock, monkeypatch):
+    beim_schreiben = _offene_transaktionen(monkeypatch)
+    store = make_store()
+    ha = Ha({"number.curve": 0.7, "number.min_flow": 20.0})
+    manifest = ChannelManifest(refs={"curve_current": "number.curve", "min_flow": "number.min_flow"})
+    pipeline = LeverPipeline(store, HaPlantBinding(ha, manifest, VAILLANT_MYPYLLANT),
+                             resolve_local_safety("vaillant_vrc720", "Heizkoerper"), clock=clock)
+    assert pipeline._write_lever("min_flow", 22.0) == 22.0
+    assert ha.writes and set(beim_schreiben) == {0}

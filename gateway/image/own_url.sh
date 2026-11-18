@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Regel fuer Geraete-API- und Portal-Adresse im Gateway-Image (Plan G2b-2 Task 9, Nutzer-Vorgabe 2026-10-07): nur
+# Regel fuer Geraete-API- und Portal-Adresse im Gateway-Image (Nutzer-Vorgabe 2026-10-07): nur
 # https://<eigener DNS-Name>[/] in einer eigenen Zone (SHG_OWN_ZONES: der Zonenname selbst oder ein Name darunter;
 # Allowlist, Nutzer-Vorgabe 2026-10-07) - nur ASCII, keine IP-Adresse (v4/v6), kein Name ohne Punkt, keine AWS-Adresse
 # (amazonaws.com/.cn, awsapprunner.com, amazonlightsail.com, amazoncognito.com, awsapps.com, cloudfront.net, .aws, ...),
@@ -7,12 +7,12 @@
 # .lan, localhost, Reverse-DNS), keine Zugangsdaten (@), kein Port, kein Pfad, keine Query. So zeigt jedes Geraet auf
 # einen Namen, den wir selbst umziehen koennen (AWS-Umzug ohne neues Image). Die Denylist bleibt neben der Allowlist
 # bestehen (Tiefenverteidigung, z. B. x.amazonaws.com.<eigene Zone>). Einzige Quelle der Regel: per source eingebunden
-# von prepare.sh, make_image.sh, rootfs_checks.sh und den Fail-fast-Schritten von image-gateway.yml und
-# release-gateway.yml. Unabhaengig von der Locale des Aufrufers (LC_ALL=C nur in der Funktion): unter UTF-8-Locales
+# von prepare.sh, make_image.sh, rootfs_checks.sh und den Fail-fast-Schritten der Image-Werkzeuge (AP-05a) und
+# der Release-Pruefung. Unabhaengig von der Locale des Aufrufers (LC_ALL=C nur in der Funktion): unter UTF-8-Locales
 # traefen Bereiche wie [a-z] sonst auch Nicht-ASCII (Vollbreite, Umlaute).
 
 # Eigene DNS-Zonen (klein geschrieben, ohne Punkt am Ende). Einzige Stelle fuer die Allowlist.
-SHG_OWN_ZONES=(hartfussha.org)
+SHG_OWN_ZONES=(setwell.de)
 
 # shg_own_url_hint: Hinweistext "was ist erlaubt" fuer Fehlermeldungen (Skripte und Workflows).
 shg_own_url_hint() {

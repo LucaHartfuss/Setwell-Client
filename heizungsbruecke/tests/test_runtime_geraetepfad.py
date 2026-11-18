@@ -1,7 +1,8 @@
-"""Spec 5b 5.2 / 5c 1.3: die Laufzeit im Geraete-Pfad mit dem HA-Testaufbau (Fake-HA): Konfiguration ohne Transport,
+"""Die Laufzeit im Geraete-Pfad mit dem HA-Testaufbau (Fake-HA): Konfiguration ohne Transport,
 Abo aus dem Konfigurationsdokument, Tick und Antwort ueber den Link des Geraets (RuntimeChannel) statt ueber einen
 eigenen MQTT-Client."""
-from test_runtime import _failsafe_file, _links, _set_room_target, _start_bridge, env  # noqa: F401 - env: Fixture
+
+from runtime_helpers import _failsafe_file, _links, _set_room_target, _start_bridge
 
 from smartheat_runtime import entitlement
 from smartheat_runtime.runtime import Runtime
@@ -13,10 +14,10 @@ def test_tick_and_answer_go_over_the_device_link(env):
     bridge.worker.run_pending()
     _set_room_target(env, bridge, 20.5)
     (snapshot,) = env.geraet.sent.of("up/snapshot")
-    assert snapshot["room_target"] == 20.5 and "raum_soll_wirksam" not in snapshot  # Plan S8a-1: Feld ohne Wirkung
+    assert snapshot["room_target"] == 20.5 and "raum_soll_wirksam" not in snapshot  # Feld ohne Wirkung
     assert env.geraet.sent.of("telemetry")
-    env.geraet.channel.setpoints({"schema": 4, "seq": snapshot["seq"], "ts": "x", "status": "ok", "reason": None,
-                                  "levers": {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0},
+    env.geraet.channel.setpoints({"schema": 5, "kreis": 1, "seq": snapshot["seq"], "ts": "x", "status": "ok", "code": None, "params": None,
+                                  "levers": {"curve": 0.95, "room_setpoint": 23.0, "heat_limit": 16.0, "min_flow": 20.5},
                                   "learned": {"curve": 1.0, "heat_limit": 16.0}})
     bridge.worker.run_pending()
     assert bridge.store.state.delivery.pending is None

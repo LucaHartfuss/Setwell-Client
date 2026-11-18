@@ -1,12 +1,12 @@
-"""Identitaet des Geraets (Spec 5b 1, aus gateway agent/identity.py): Signierschluessel ECDSA P-256 (Geraete-ID und
+"""Identitaet des Geraets: Signierschluessel ECDSA P-256 (Geraete-ID und
 signierte Bootstrap-Anfragen), eigener TLS-Schluessel fuer das MQTT-Zertifikat (CSR mit CN = Geraete-ID) und
-Uebernahme-Code (12 Zeichen Base32, 60 Bit), alle unter <daten>/device/ (0600, gleiche Dateinamen wie der Gateway-Agent
-bis 0.5.0). Den Verschluesselungsschluessel enc_key.pem erzeugt das Geraet seit Stufe 3 S8a-1 nicht mehr (P3); eine
+Uebernahme-Code (16 Zeichen Base32, 80 Bit), alle unter <daten>/device/ (0600). Den Verschluesselungsschluessel enc_key.pem erzeugt das Geraet nicht; eine
 vorhandene Datei bleibt liegen und wird nicht gelesen. Geraete-ID = shg- + die ersten 16
 Zeichen von Base32(SHA-256(DER-SPKI)) in Kleinbuchstaben (unveraendert). boot_id: neu je Prozessstart (Erkennung doppelt
-laufender Geraete, Spec 4.2). Schluessel und Code erscheinen nie in einem Log (Regel 6)."""
+laufender Geraete). Schluessel und Code erscheinen nie in einem Log (Regel 6)."""
 import base64
 import hashlib
+import logging
 import secrets
 import uuid
 from collections.abc import Callable
@@ -24,6 +24,11 @@ from smartheat_device import nachrichten, wire
 KEY_FILE = "key.pem"
 TLS_KEY_FILE = "tls_key.pem"
 CLAIM_CODE_FILE = "claim_code"
+_CODE_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+#: 10 Zufallsbytes = 80 Bit = genau 16 Base32-Zeichen ohne Auffuellung.
+_CODE_BYTES = wire.CLAIM_CODE_CHARS * 5 // 8
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -64,7 +69,11 @@ def _key(path: Path) -> ec.EllipticCurvePrivateKey:
 
 
 def new_claim_code(randbytes: Callable[[int], bytes] = secrets.token_bytes) -> str:
-    return base64.b32encode(randbytes(8)).decode()[: wire.CLAIM_CODE_CHARS]
+    return base64.b32encode(randbytes(_CODE_BYTES)).decode()
+
+
+def _code_gueltig(code: str) -> bool:
+    return len(code) == wire.CLAIM_CODE_CHARS and set(code) <= _CODE_ALPHABET
 
 
 def load_or_create(device_dir: Path, randbytes: Callable[[int], bytes] = secrets.token_bytes) -> Identity:
@@ -73,6 +82,9 @@ def load_or_create(device_dir: Path, randbytes: Callable[[int], bytes] = secrets
     code_path = device_dir / CLAIM_CODE_FILE
     try:
         code = code_path.read_text().strip()
+        if not _code_gueltig(code):
+            logger.warning("Uebernahme-Code hat nicht die vorgesehene Form (aelterer Stand); er wird neu erzeugt")
+            raise FileNotFoundError(code_path.name)
     except FileNotFoundError:
         code = new_claim_code(randbytes)
         dateien.schreiben_text(code_path, code, modus=dateien.PRIVAT)
@@ -102,6 +114,14 @@ assert {wire.SIGNATURE_ENCODING, wire.PUBLIC_KEY_ENCODING} <= set(_KODIERUNGEN),
 def sign(key: ec.EllipticCurvePrivateKey, method: str, path: str, timestamp: int, body: bytes) -> str:
     der = key.sign(wire.canonical_string(method, path, timestamp, body), ec.ECDSA(hashes.SHA256()))
     return _KODIERUNGEN[wire.SIGNATURE_ENCODING](der)
+
+
+def nachweis(ident: Identity, jetzt: int) -> dict:
+    """Besitznachweis fuer den Geraetecode der Einrichtung: Geraete-ID, Zeit (Unix-Sekunden) und die Signatur ueber
+    Methode, Pfad und Koerper aus wire (NACHWEIS_*). Beides steht hier nicht zur Wahl: ein anderer Pfad oder Koerper
+    wird nie signiert. Der Schluessel verlaesst die Funktion nicht, nur die Signatur."""
+    signatur = sign(ident.signing_key, wire.NACHWEIS_METHOD, wire.NACHWEIS_PATH, jetzt, wire.NACHWEIS_BODY)
+    return {"geraet_id": ident.device_id, "zeitstempel": jetzt, "signatur": signatur}
 
 
 def csr_pem(ident: Identity) -> str:

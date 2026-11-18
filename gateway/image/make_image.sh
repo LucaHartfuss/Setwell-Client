@@ -1,33 +1,35 @@
 #!/bin/bash
-# Gateway-Image bauen (Plan G2b-2 Task 9): prepare.sh auf dem Host, dann build.sh in einem privilegierten
+# Gateway-Image bauen: prepare.sh auf dem Host, dann build.sh in einem privilegierten
 # debian:trixie-Container fuer linux/arm64 (auf einem arm64-Host nativ, sonst ueber QEMU-binfmt, von rpi-image-gen
 # nicht offiziell unterstuetzt). Geraete-API- und Portal-Adresse: eigener DNS-Name per https (own_url.sh), geprueft vor
 # jeder anderen Arbeit.
-# Aufruf: make_image.sh --bundle ORDNER --out ORDNER --device-api-url URL --portal-base-url URL [--pilot-ssh PUBKEY]
-#         [--release-pub DATEI]
-#   --release-pub wird an prepare.sh durchgereicht (eigener minisign-Schluessel fuer Labor-Images, Standard
-#   host/release.pub); die Datei wird hier vor jeder Docker-Arbeit geprueft.
-# Ergebnis: OUT/smartheat-gateway-<version>[-pilot].img.zst und .sha256
+# Aufruf: make_image.sh --bundle ORDNER --out ORDNER --device-api-url URL --portal-base-url URL [--release-roots DATEI]
+#   --pilot-ssh gibt es nicht mehr: das Pilot-Image (SSH-Schluessel im Image) kommt mit AP-05b neu; der Aufruf bricht ab.
+#   --release-roots wird an prepare.sh durchgereicht (eigener Schluesselbund der Roots fuer Labor-Images, Standard
+#   host/release-roots.pem); die Datei wird hier vor jeder Docker-Arbeit geprueft.
+# Ergebnis (je Datei mit .sha256): OUT/smartheat-gateway-<version>.img.zst (Werks-Image, Pi 5 mit NVMe, A/B), OUT/system-<version>.ext4
+# und OUT/boot-<version>.vfat (Slot-Images fuer das System-Bundle), OUT/smartheat-gateway-<version>.sbom[.zst] (SBOM).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 DEBIAN_IMAGE="debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5"
 # shellcheck source=own_url.sh
 . "$HERE/own_url.sh"
-# shellcheck source=release_pub.sh
-. "$HERE/release_pub.sh"
+# shellcheck source=release_roots.sh
+. "$HERE/release_roots.sh"
 usage() { echo "FEHLER: $1" >&2; exit 2; }
-OUT="" API_URL="" PORTAL_URL="" RELEASE_PUB="" API_SET=0 PORTAL_SET=0 RELEASE_PUB_SET=0 PASS=()
+OUT="" API_URL="" PORTAL_URL="" RELEASE_ROOTS="" API_SET=0 PORTAL_SET=0 RELEASE_ROOTS_SET=0 PASS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --out|--bundle|--device-api-url|--portal-base-url|--pilot-ssh|--release-pub) [ $# -ge 2 ] || usage "$1 braucht einen Wert" ;;
+    --out|--bundle|--device-api-url|--portal-base-url|--release-roots) [ $# -ge 2 ] || usage "$1 braucht einen Wert" ;;
   esac
   case "$1" in
     --out) OUT="$2"; shift ;;
     --device-api-url) API_URL="$2"; API_SET=1; PASS+=("$1" "$2"); shift ;;
     --portal-base-url) PORTAL_URL="$2"; PORTAL_SET=1; PASS+=("$1" "$2"); shift ;;
-    --release-pub) RELEASE_PUB="$2"; RELEASE_PUB_SET=1; PASS+=("$1" "$2"); shift ;;
-    --bundle|--pilot-ssh) PASS+=("$1" "$2"); shift ;;
+    --release-roots) RELEASE_ROOTS="$2"; RELEASE_ROOTS_SET=1; PASS+=("$1" "$2"); shift ;;
+    --bundle) PASS+=("$1" "$2"); shift ;;
+    --pilot-ssh) usage "--pilot-ssh: das Pilot-Image gibt es bis AP-05b nicht (Pilot-Zugang kommt mit der Station)" ;;
     *) usage "Unbekannte Option: $1" ;;
   esac
   shift
@@ -36,7 +38,7 @@ done
 [ "$PORTAL_SET" = 1 ] || usage "--portal-base-url fehlt"
 shg_require_own_url --device-api-url "$API_URL"
 shg_require_own_url --portal-base-url "$PORTAL_URL"
-if [ "$RELEASE_PUB_SET" = 1 ]; then shg_release_pub_ok "$RELEASE_PUB" || usage "$shg_release_pub_hint"; fi
+if [ "$RELEASE_ROOTS_SET" = 1 ]; then shg_release_roots_ok "$RELEASE_ROOTS" || usage "$shg_release_roots_hint"; fi
 [ -n "$OUT" ] || usage "--out fehlt"
 arch="$(docker version -f '{{.Server.Arch}}' 2>/dev/null || true)"
 if [ "$arch" != arm64 ] && [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then

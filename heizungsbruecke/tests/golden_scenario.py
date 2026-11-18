@@ -1,14 +1,13 @@
-"""Golden-Master des ganzen Add-ons (Spec SHG 3.4 Punkt 1). Ein fester Szenario-Lauf mit Fake-HA, dem Link einer
+"""Golden-Master des ganzen Add-ons. Ein fester Szenario-Lauf mit Fake-HA, dem Link einer
 Geraete-Attrappe (geraet_helpers.FakeGeraet) und fester Uhr zeichnet jede Aussenwirkung auf: schreibende HA-Aufrufe,
 Push- und HA-Benachrichtigungen, HA-Ereignisse, Nachrichten des Links, Start/Stopp des Trigger-Clients,
 Prozess-Neustarts und nach jedem Schritt den Inhalt aller Dateien im Datenverzeichnis. Lesende HA-Aufrufe und Logs
 zaehlen nicht.
 
-Erzeugt auf dem Stand vor G1 (GOLDEN_UPDATE=1), mit 1.0.0 (Spec 5c, Plan D Task 10) einmal neu im Geraete-Pfad: die
+Erzeugt auf dem Stand vor G1 (GOLDEN_UPDATE=1), mit 1.0.0 einmal neu im Geraete-Pfad: die
 Laufzeit startet auf dem Konfigurationsdokument aus OPTIONS, das Abo kommt aus dem Dokument, Snapshots und Telemetrie
-gehen ueber den Link. Der Master von 0.36 bleibt als addon_scenario_0_36.json; normalisieren() haelt fest, dass sich
-beide nur in den ERLAUBT genannten Punkten unterscheiden. TRIGGER_CLIENT und install_wall_clock sind die Patch-Ziele;
-den Prozess-Neustart zeichnet der Rueckruf neustart auf, den start_process app.start uebergibt (Spec Stufe 3 S6 4.2)."""
+gehen ueber den Link. TRIGGER_CLIENT und install_wall_clock sind die Patch-Ziele; den Prozess-Neustart zeichnet der
+Rueckruf neustart auf, den start_process app.start uebergibt."""
 import copy
 import itertools
 import json
@@ -16,24 +15,20 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import geraet_helpers
-from conftest import FakeClock
-from fakes import FakeHa, FakeTriggerClient, trigger_klasse
+from fakes import FakeClock, FakeHa, FakeTriggerClient, trigger_klasse
 
 from heizungsbruecke.derived_sensors import DerivedSensors
-from heizungsbruecke.version import ADDON_VERSION
 
 TRIGGER_CLIENT = "heizungsbruecke.geraet_trigger.HaTriggerClient"
 
 BERLIN = ZoneInfo("Europe/Berlin")
 START = datetime(2026, 1, 15, 8, 0, tzinfo=BERLIN)
 FILES = {
-    "BACKUP_PATH": "backup.json", "FAILSAFE_PATH": "failsafe_state.json",
-    "ENTITLEMENT_PATH": "entitlement_state.json", "DERIVED_SENSORS_PATH": "derived_sensors.json",
-    "AUFRAEUMEN_PATH": "aufraeumen.json", "RUNTIME_DIR": "runtime", "ROOM_TARGET_PATH": "runtime/room_target.json",
+    "ALTER_BACKUP_PATH": "backup.json", "DERIVED_SENSORS_PATH": "derived_sensors.json",
+    "AUFRAEUMEN_PATH": "aufraeumen.json", "RUNTIME_DIR": "runtime",
     "ABGEMELDET_PATH": "runtime/abgemeldet.json", "RASTUNG_PATH": "device/sicherheitssatz.json",
 }
 #: Testdaten; die Laufzeit liest sie als Konfigurationsdokument (geraet_helpers.konfiguration_aus_optionen).
@@ -57,7 +52,7 @@ STATES = {
     "climate.zone": "auto", "climate.zone::temperature": 22.0,
     "sensor.flow_temperature": 35.0, "sensor.flow_setpoint": 35.0,
     "sensor.thermostat_battery": "80",
-    # echtes HA: die Klasse steht im Zustand (lokale Positivliste der Rollen, A6-02)
+    # echtes HA: die Klasse steht im Zustand (lokale Positivliste der Rollen)
     "sensor.flow_temperature::device_class": "temperature", "sensor.flow_setpoint::device_class": "temperature",
     "sensor.thermostat_battery::device_class": "battery",
 }
@@ -159,7 +154,8 @@ class World:
             monkeypatch.setattr(f"heizungsbruecke.config.{name}", self.data / file_name)
         monkeypatch.setattr(
             "heizungsbruecke.derived_sensors.ensure_all",
-            lambda **kwargs: DerivedSensors({"room_actual": "sensor.room_actual"}, (), "fp-golden"),
+            lambda **kwargs: DerivedSensors({"room_actual": "sensor.room_actual"}, (), "fp-golden",
+                                            raeume={n: "sensor.room_actual" for n, _ in kwargs["raeume"]}),
         )
         monkeypatch.setattr(TRIGGER_CLIENT, trigger_klasse(self.triggers, RecordingTrigger, log=self.log))
         counter = itertools.count(1)
@@ -215,10 +211,13 @@ class World:
     def last_seq(self) -> str:
         return self.snapshots()[-1]["seq"]
 
-    def answer(self, status="ok", reason=None, curve=0.95, shift=23.0, heat_limit=16.0) -> None:
+    def answer(self, status="ok", code=None, curve=0.95, shift=23.0, heat_limit=16.0) -> None:
+        # Der Server sendet den Mindestvorlauf wie bisher das Geraet ihn abgeleitet hat: das Raum-Soll.
+        min_flow = self.state().stable_target
         payload = {
-            "schema": 4, "seq": self.last_seq(), "ts": "2026-01-15T00:00:00+01:00", "status": status, "reason": reason,
-            "levers": {"curve": curve, "room_setpoint": shift, "heat_limit": heat_limit},
+            "schema": 5, "kreis": 1, "seq": self.last_seq(), "ts": "2026-01-15T00:00:00+01:00", "status": status, "code": code,
+            "params": None if code is None else {},
+            "levers": {"curve": curve, "room_setpoint": shift, "heat_limit": heat_limit, "min_flow": min_flow},
             "learned": {"curve": 1.0, "heat_limit": 16.0},
         }
         self.geraet.channel.setpoints(payload)
@@ -307,7 +306,7 @@ def run_scenario(tmp_path, monkeypatch) -> list[dict]:
 
     def datenfehler_server():
         w.set_room_target(21.5)
-        w.answer(status="rejected", reason="Testgrund")
+        w.answer(status="rejected", code="testgrund")
         fault = w.state().delivery.datenfehler
         _expect(fault is not None and fault.source == "server", "Datenfehler vom Server")
         w.set_room_target(21.0)
@@ -381,102 +380,6 @@ def run_scenario(tmp_path, monkeypatch) -> list[dict]:
     return w.record
 
 
-#: Spec 5c 5: erlaubte Unterschiede zwischen dem Master von 0.36 und 1.0.0, einzeln; alles andere ist ein Fehler.
-ERLAUBT = (
-    "abo_abfrage: ['accounts', 'status', …] fehlt (Abo aus dem Konfigurationsdokument)",
-    "mqtt_client: ['mqtt', 'loop_start'|'stop'] fehlt (Link des Geraetekerns)",
-    "snapshot: ['mqtt', 'snapshot', p] -> ['link', 'up/snapshot', p]",
-    "telemetrie: ['mqtt', 'telemetry', p] -> ['link', 'telemetry', p]",
-    "status: smartheat_status Schema 2 -> 3 (Geraete-Felder dazu, Laufzeit-Felder gleich)",
-    "dateien: runtime/room_target.json und runtime/abgemeldet.json neu; Zugangsoptionen fehlen",
-    "setup_id: Statusfeld entfaellt (Stufe 3 S7); in backup.json heisst das Feld tenant_id (= Anlage 'golden')",
-    "addon_version: 0.36.0 -> 1.0.0 (ADDON_VERSION)",
-    "write_budget: boost_start/emergency_start nach erfolgreichem Start (Fixrunde A, A6-01)",
-    "benachrichtigung: notify.mobile_app_* (Fixrunde A, A6-02)",
-    "status_start: Status 'startet' statt 'notbetrieb' beim Start mit veraltetem Notbetrieb (Fixrunde A, L4-09)",
-)
-#: Die Schritte, in denen die Laufzeit mit veraltetem Notbetrieb neu startet (ERLAUBT "status_start"); nur dort
-#: normalisiert normalisieren() "startet" + notbetrieb zu "notbetrieb".
-STATUS_START_SCHRITTE = ("abo_erneut_inaktiv", "abmelden")
-#: Schluessel im Schreibbudget (backup.json), die erst seit Fixrunde A auch nach einem erfolgreichen Start stehen.
-START_ZAEHLER = ("boost_start", "emergency_start")
-#: Was 0.36 aus den Optionen nahm und 1.0.0 aus dem Dokument bzw. der Version (ERLAUBT, letzte zwei Zeilen).
-ALT_ADDON_VERSION = "0.36.0"
-#: Der Benachrichtigungsdienst im Master von 0.36 und seit Fixrunde A (ERLAUBT "benachrichtigung"): nur noch Handy-Dienste.
-ALT_DIENST = "notify.handy"
-NEU_DIENST = "notify.mobile_app_handy"
-#: Felder, die Schema 3 dem Status-Ereignis hinzufuegt (ERLAUBT "status"); woertlich, nicht aus geraet_status gelesen.
-SCHEMA_3_GERAET_FELDER = ("geraet_id", "geraet_zustand", "server_verbunden", "raum_soll", "geraet_hinweise")
-
-
-def _neu_benannt(value, *, alt: bool):
-    """Nur im Master von 0.36: setup_id entfaellt (in backup.json, erkennbar an plant_id: -> tenant_id = Anlage),
-    addon_version -> aktuelle Version (rekursiv)."""
-    if not alt:
-        return value
-    if isinstance(value, dict):
-        result = {k: _neu_benannt(v, alt=alt) for k, v in value.items()}
-        if "setup_id" in result:
-            del result["setup_id"]
-            if "plant_id" in result:
-                result["tenant_id"] = OPTIONS["tenant_id"]
-        if result.get("addon_version") == ALT_ADDON_VERSION:
-            result["addon_version"] = ADDON_VERSION
-        return result
-    if isinstance(value, list):
-        return [_neu_benannt(v, alt=alt) for v in value]
-    return value
-
-
-def _ohne_start_zaehler(value):
-    """Nur im neuen Master: die Start-Zaehler des Schreibbudgets (ERLAUBT "write_budget") entfernen, ein dadurch leeres
-    write_budget faellt weg (der alte Master hat dort keinen Schluessel)."""
-    if isinstance(value, dict):
-        result = {k: _ohne_start_zaehler(v) for k, v in value.items()}
-        budget = result.get("write_budget")
-        if isinstance(budget, dict):
-            rest = {k: v for k, v in budget.items() if k not in START_ZAEHLER}
-            if rest:
-                result["write_budget"] = rest
-            else:
-                del result["write_budget"]
-        return result
-    if isinstance(value, list):
-        return [_ohne_start_zaehler(v) for v in value]
-    return value
-
-
-def normalisieren(record: list[dict], *, alt: bool) -> list[dict]:
-    """Bringt beide Master auf eine Form, in der nur noch fachliche Wirkungen stehen (ERLAUBT oben). alt: der Master von
-    0.36 (setup_id und addon_version auf die Werte von 1.0.0 umgeschrieben)."""
-    result = []
-    for schritt in _neu_benannt(record if alt else _ohne_start_zaehler(record), alt=alt):
-        wirkungen = []
-        for w in schritt["wirkungen"]:
-            if w[0] == "accounts" or w[:2] in (["mqtt", "loop_start"], ["mqtt", "stop"]):
-                continue
-            if alt and w[:2] == ["ha", "notify"] and w[2] == ALT_DIENST:
-                w = ["ha", "notify", NEU_DIENST, *w[3:]]
-            if w[:2] == ["link", "up/snapshot"]:
-                w = ["mqtt", "snapshot", w[2]]
-            elif w[0] == "link":
-                w = ["mqtt", w[1], w[2]]
-            if w[:3] == ["ha", "event", "smartheat_status"]:
-                # Schema 2 -> 3: nur das Schema und genau die Geraete-Felder von Schema 3 (im neuen Master); ein
-                # spaeter entfallenes Laufzeit-Feld faellt so als Unterschied auf.
-                weg = {"schema"} if alt else {"schema", *SCHEMA_3_GERAET_FELDER}
-                w = ["ha", "event", "smartheat_status", {k: v for k, v in w[3].items() if k not in weg}]
-                if (not alt and schritt["schritt"] in STATUS_START_SCHRITTE
-                        and w[3]["status"] == "startet" and w[3]["notbetrieb"] is True):
-                    # ERLAUBT "status_start": nur im neuen Master, nur in diesen Schritten
-                    w[3]["status"] = "notbetrieb"
-            wirkungen.append(w)
-        dateien = {name: inhalt for name, inhalt in schritt["dateien"].items()
-                   if Path(name).name not in ("room_target.json", "abgemeldet.json", "discovery.json")}
-        result.append({"schritt": schritt["schritt"], "wirkungen": wirkungen, "dateien": dateien})
-    return result
-
-
 def render(record: list[dict]) -> str:
     return json.dumps(record, ensure_ascii=False, indent=1) + "\n"
 
@@ -485,6 +388,6 @@ _VERSION_RE = re.compile(r'"addon_version": "[^"]+"')
 
 
 def render_ohne_version(record: list[dict]) -> str:
-    """A5-65: die Versionsnummer ist kein Verhalten; ohne sie muss der Master nicht bei jedem Release neu geschrieben
+    """Die Versionsnummer ist kein Verhalten; ohne sie muss der Master nicht bei jedem Release neu geschrieben
     werden."""
     return _VERSION_RE.sub('"addon_version": "<version>"', render(record))

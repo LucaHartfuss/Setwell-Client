@@ -1,20 +1,22 @@
-"""Spec 5b 5.1/5.3 (Plan D2 Task 3): der Gateway als Host des Geraetekerns - Faehigkeiten, Uhr, Status und Raum im
+"""Der Gateway als Host des Geraetekerns - Faehigkeiten, Uhr, Status und Raum im
 Prozess, Meldungen, Neustart bei neuer Konfiguration, Aufraeumen nach dem Entfernen, Software-Bruecke, LED-Datei."""
 import errno
 import json
 import logging
 import os
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from configs import dokumente_schreiben, konfiguration
+from befehle_sicht import registrierte_befehle
+from configs import bedienung, dokumente_schreiben, konfiguration, leer
 from fakes import FakeBus
+from geraet_welt import WALL, FakeDevice, Welt
+from rastung_beispiele import rastung_aus
 from world import GatewayWorld
 
-from smartheat_core import dateien
+from smartheat_core import dateien, meldungen, rastung
 from smartheat_device import nachrichten, wire
 from smartheat_device.documents import DocumentStore
 from smartheat_device.geraet_host_basis import EV_RELOAD
@@ -22,74 +24,15 @@ from smartheat_device.host import Anzeige
 from smartheat_gateway import geraet_host as gh
 from smartheat_gateway import runtime_main
 from smartheat_gateway.drivers import registry
-from smartheat_gateway.paths import Paths
 from smartheat_gateway.triggers import EV_TARGET_INPUT
 from smartheat_gateway.version import GATEWAY_VERSION
 from smartheat_gateway.zigbee import ZigbeeMirror
-from smartheat_runtime import dokument_config
+from smartheat_runtime import dokument_config, entitlement
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.soll_speicher import SOURCE_PORTAL
 from smartheat_runtime.worker import RegulationWorker
 
-WALL = 1_800_000_000.0
-LEER = {**konfiguration(), "anlage": None, "profil": None, "hebelsatz": None, "verteilsystem": None,
-        "bindung": None, "raumfuehler": [], "tagestick": None, "abo": None}
-
-
-class FakeDevice:
-    def __init__(self) -> None:
-        self.konf: dict | None = konfiguration()
-        self.bed: dict | None = None
-        self.dirty = False
-        self.meldungen, self.ergebnisse, self.wuensche, self.aus = [], [], [], []
-        self.ergebnis_ok = True
-        self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKL")
-        self.documents = SimpleNamespace(
-            aktuell=lambda art: SimpleNamespace(dirty=self.dirty) if self.bed is not None else None)
-
-    def konfiguration(self):
-        return self.konf
-
-    def bedienung(self):
-        return self.bed
-
-    def abo_status(self):
-        return dokument_config.abo_status(self.konf)
-
-    def wunsch(self, wert, *, herkunft, durch=None):
-        self.wuensche.append((wert, herkunft, durch))
-        return max(15.0, min(25.0, wert))
-
-    def soll_quelle_aus(self, aus, wirksam=None):
-        self.aus.append((aus, wirksam))
-
-    def meldung(self, key, text, *, offen, kritisch=True):
-        self.meldungen.append((key, text, offen, kritisch))
-
-    def ergebnis_software(self, version, ok, grund=None):
-        self.ergebnisse.append((version, ok, grund))
-        return self.ergebnis_ok
-
-
-class Welt:
-    def __init__(self, tmp_path, clock) -> None:
-        self.paths = Paths(tmp_path / "data")
-        self.host_dir = tmp_path / "host"
-        self.clock = clock
-        self.wall = {"t": WALL}
-        self.mirror = ZigbeeMirror(FakeBus(), clock)
-        self.host = gh.GatewayDeviceHost(self.paths, self.mirror, host_dir=self.host_dir, clock=clock,
-                                         wall=lambda: self.wall["t"])
-        self.device = FakeDevice()
-        self.host.verbinden(self.device)
-        self.worker = RegulationWorker(clock=clock)
-        self.events: list = []
-        self.worker.register(EV_RELOAD, self.events.append)
-        self.worker.register(EV_TARGET_INPUT, self.events.append)
-
-    def kinds(self):
-        self.worker.run_pending()
-        return [event.kind for event in self.events]
+LEER = leer()
 
 
 @pytest.fixture
@@ -106,7 +49,8 @@ def _anzeige(zustand="regelt", **changes):
 
 def test_capabilities_and_version(welt):
     assert (welt.host.host, welt.host.version) == ("gateway", GATEWAY_VERSION)
-    assert welt.host.faehigkeiten() == {"drivers": ["simulation", "vicare_cloud"], "zigbee": True, "updater": True}
+    assert welt.host.faehigkeiten() == {"drivers": ["simulation", "vicare_cloud"], "zigbee": True, "updater": True,
+                                         "testphase": True, "kaelteschutz": True}
 
 
 def test_capabilities_are_built_against_the_contract(welt, monkeypatch):
@@ -128,22 +72,59 @@ def test_clock_sync_comes_from_the_host_status(welt):
     assert welt.host.uhr_synchron() is None
 
 
+def test_the_gateway_has_no_hello_fields_of_the_ha_host(welt):
+    assert welt.host.hello_felder() == {}
+
+
 def test_status_and_room_stay_in_the_process(welt):
     welt.host.status_sink.publish({"schema": 2, "status": "regelt"})
-    welt.host.zustand.raum = {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t"}
+    welt.host.raum_merken(1, {"ist": 20.0, "soll": 21.0, "soll_quelle": "portal", "ts": "t"})
     assert welt.host.runtime_status() == {"schema": 2, "status": "regelt"}
     assert welt.host.raum()["soll"] == 21.0
 
 
 def test_runtime_messages_become_notifications(welt):
     sink = welt.host.notify_sink
-    sink.show("notbetrieb", "Notbetrieb aktiv")
-    sink.push("notbetrieb", "Notbetrieb aktiv")
-    sink.push("batterie:0x1", "Batterie schwach")
+    notbetrieb = meldungen.neu("meldung.notbetrieb")
+    batterie = meldungen.neu("meldung.batterie_schwach", bezeichnung="Bad")
+    sink.show("notbetrieb", notbetrieb)
+    sink.push("notbetrieb", notbetrieb)
+    sink.push("batterie:0x1", batterie)
     sink.withdraw("notbetrieb")
     assert welt.device.meldungen == [
-        ("notbetrieb", "Notbetrieb aktiv", True, True), ("notbetrieb", "Notbetrieb aktiv", True, True),
-        ("batterie:0x1", "Batterie schwach", False, False), ("notbetrieb", "Notbetrieb aktiv", False, True)]
+        ("notbetrieb", notbetrieb, True), ("notbetrieb", notbetrieb, True),
+        ("batterie:0x1", batterie, False), ("notbetrieb", notbetrieb, False)]
+
+
+def test_the_critical_minimum_version_goes_to_the_device_as_a_red_message_with_the_date(welt):
+    """Unter update_noetig geht die rote Meldung mit dem Datum der Ursprungswerte ueber den Geraetekern an den Server
+    (die Gateway-Kunden sehen sie nur dort); beim Verlassen des Zustands wird sie zurueckgenommen."""
+    welt.device.update_noetig_kritisch = lambda: True
+    pfad = welt.paths.entitlement(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    mez = timezone(timedelta(hours=1))
+    entitlement.mark_inactive(pfad, datetime(2026, 1, 1, tzinfo=mez), kritisch=True)
+    welt.host.anzeigen(_anzeige("update_noetig"))
+    welt.host.anzeigen(_anzeige("update_noetig"))
+    assert welt.device.meldungen == [("update_noetig", meldungen.neu("meldung.update_noetig", ende="2026-01-31"), True)]
+    welt.host.anzeigen(_anzeige("regelt"))
+    assert welt.device.meldungen[-1] == ("update_noetig", None, False)
+    assert len(welt.device.meldungen) == 2
+
+
+def test_the_datentraeger_message_goes_to_the_device_as_a_code(welt):
+    """Auf dem Draht steht der Code; den Wortlaut bildet der Server, kein Text und kein Gateway-Name geht mit."""
+    welt.host.notify_sink.show("datentraeger", meldungen.neu("meldung.datentraeger_nicht_beschreibbar"))
+    (_, meldung, _) = welt.device.meldungen[-1]
+    assert meldung.code == "meldung.datentraeger_nicht_beschreibbar"
+
+
+def test_the_gateway_reports_the_ways_of_its_drivers(welt):
+    """Jeder Treiber der Registry hat einen Weg; gemeldet werden die Weg-IDs des Servers, sortiert und einmalig."""
+    assert set(registry.driver_ids()) <= set(gh.WEG_JE_TREIBER)
+    assert welt.host.wege() == sorted({gh.WEG_JE_TREIBER[t] for t in registry.driver_ids()})
+    assert all(isinstance(weg, str) and weg for weg in welt.host.wege())
+    assert welt.host.wege() == ["simulation", "viessmann_vicare"]
 
 
 def test_a_runtime_relevant_configuration_requests_a_restart(welt):
@@ -172,7 +153,7 @@ def test_a_restart_requested_before_the_worker_exists_is_posted_on_binding(welt)
 
 
 def test_an_empty_configuration_after_a_setup_marks_the_cleanup(welt):
-    """Die Markierung schreibt konfiguration_vorbereiten (vor dem Speichern, Nr. 38), den Neustart fordert
+    """Die Markierung schreibt konfiguration_vorbereiten (vor dem Speichern), den Neustart fordert
     konfiguration_uebernommen an."""
     welt.host.konfiguration_vorbereiten(konfiguration(), LEER)
     assert json.loads(welt.paths.aufraeumen.read_text()) == {
@@ -191,7 +172,7 @@ def test_the_first_empty_configuration_marks_nothing(welt):
 
 
 def test_vergessen_removes_the_plant_state_but_keeps_device_and_simulation(welt):
-    for path in (welt.paths.backup, welt.paths.failsafe, welt.paths.abgemeldet, welt.paths.room_target,
+    for path in (welt.paths.backup(1), welt.paths.failsafe(1), welt.paths.abgemeldet, welt.paths.room_target(1),
                  welt.paths.inventur, welt.paths.driver_secrets_dir / "vicare.json",
                  welt.paths.device_dir / "konfiguration.json", welt.paths.sim_dir / "plant.json"):
         dateien.schreiben_json(path, {"x": 1}, modus=dateien.LESBAR)
@@ -202,7 +183,7 @@ def test_vergessen_removes_the_plant_state_but_keeps_device_and_simulation(welt)
 
 
 def _dokument(inhalt: dict, version: int) -> dict:
-    return {"schema": 1, "version": version, **inhalt}
+    return {"schema": 2, "version": version, **inhalt}
 
 
 @pytest.mark.parametrize("anders", [{"verteilsystem": "Fussbodenheizung"}, {"hebelsatz": "vaillant_vrc720"}])
@@ -213,7 +194,7 @@ def test_vergessen_keeps_the_lever_set_lock(welt, anders):
     store = DocumentStore(welt.paths.device_dir, host="gateway", software_version=GATEWAY_VERSION)
     assert store.empfangen("konfiguration", _dokument(konfiguration(), 1)).uebernommen
     assert store.empfangen("konfiguration", _dokument(LEER, 2)).uebernommen
-    dateien.schreiben_json(welt.paths.backup, {"x": 1}, modus=dateien.LESBAR)
+    dateien.schreiben_json(welt.paths.backup(1), {"x": 1}, modus=dateien.LESBAR)
     assert runtime_main._vergessen(welt.paths)
     assert not welt.paths.runtime_dir.exists()  # das Aufraeumen lief
     store = DocumentStore(welt.paths.device_dir, host="gateway", software_version=GATEWAY_VERSION)
@@ -241,7 +222,7 @@ def _entfernt_vorbereiten(paths) -> bytes:
     store = DocumentStore(paths.device_dir, host="gateway", software_version=GATEWAY_VERSION)
     assert store.empfangen("konfiguration", _dokument(konfiguration(), 1)).uebernommen
     assert store.empfangen("konfiguration", _dokument(LEER, 2)).uebernommen
-    for path in (paths.backup, paths.failsafe, paths.entitlement, paths.room_target, paths.abgemeldet,
+    for path in (paths.backup(1), paths.failsafe(1), paths.entitlement(1), paths.room_target(1), paths.abgemeldet,
                  paths.inventur, paths.driver_secrets_dir / "vicare.json"):
         dateien.schreiben_json(path, {"x": 1}, modus=dateien.LESBAR)
     dateien.schreiben_json(paths.aufraeumen, {"anlage": "test-tenant"}, modus=dateien.LESBAR)
@@ -256,20 +237,20 @@ def _alles_weg(paths) -> bool:
 @pytest.mark.parametrize("fehler, art", [(errno.EACCES, "PermissionError"), (errno.EIO, "OSError")])
 def test_a_state_file_that_cannot_be_deleted_keeps_the_marker_and_the_binding_and_the_start_goes_on(
         world, monkeypatch, caplog, fehler, art):
-    """Wie im Add-on (Task 11): scheitert das Loeschen einer Zustandsdatei, startet das Gateway trotzdem; die Datei,
+    """Wie im Add-on: scheitert das Loeschen einer Zustandsdatei, startet das Gateway trotzdem; die Datei,
     die Markierung und runtime/backup.json (der Bindungsanker, zuletzt und nur nach allem anderen geloescht) bleiben,
     der uebrige Zustand ist weg, im Log Datei und Fehlerart, keine Erfolgsmeldung. Der naechste Start loescht den Rest
     samt Markierung. Die Rastung bleibt in jedem Fall (G-1)."""
     rastung = _entfernt_vorbereiten(world.paths)
-    echt = _unlink_scheitert_fuer(monkeypatch, world.paths.failsafe, fehler)
+    echt = _unlink_scheitert_fuer(monkeypatch, world.paths.failsafe(1), fehler)
     with caplog.at_level(logging.INFO):
         world.start_runtime()  # wirft nicht
     assert world.result is not None
-    assert world.paths.failsafe.exists() and world.paths.backup.exists() and world.paths.aufraeumen.exists()
-    assert not world.paths.entitlement.exists() and not world.paths.room_target.exists()
+    assert world.paths.failsafe(1).exists() and world.paths.backup(1).exists() and world.paths.aufraeumen.exists()
+    assert not world.paths.entitlement(1).exists() and not world.paths.room_target(1).exists()
     assert not world.paths.abgemeldet.exists() and not world.paths.inventur.exists()
     assert not (world.paths.driver_secrets_dir / "vicare.json").exists()
-    assert f"{world.paths.failsafe.name} nicht geloescht ({art})" in caplog.text
+    assert f"{world.paths.failsafe(1).name} nicht geloescht ({art})" in caplog.text
     assert "Anlagengebundener Zustand geloescht" not in caplog.text
     assert world.paths.rastung.read_bytes() == rastung
 
@@ -289,10 +270,15 @@ def test_leftover_inventory_or_driver_login_keeps_the_marker_and_the_binding(wel
     with caplog.at_level(logging.INFO):
         assert runtime_main._vergessen(welt.paths) is False
         runtime_main.aufraeumen(welt.paths)
-    assert ziel.exists() and welt.paths.backup.exists() and welt.paths.aufraeumen.exists()
-    assert not welt.paths.failsafe.exists() and not welt.paths.entitlement.exists()
-    assert not welt.paths.room_target.exists() and not welt.paths.abgemeldet.exists()
+    assert ziel.exists() and welt.paths.backup(1).exists() and welt.paths.aufraeumen.exists()
+    assert not welt.paths.failsafe(1).exists() and not welt.paths.entitlement(1).exists()
+    assert not welt.paths.room_target(1).exists() and not welt.paths.abgemeldet.exists()
     assert "Anlagengebundener Zustand geloescht" not in caplog.text
+    if pfad == "inventur":
+        # Zwei Aufrufe (vergessen, aufraeumen), je Aufruf genau eine Zeile zur Datei: bisher ERROR und WARNING
+        fehler = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert [r.levelno for r in fehler] == [logging.ERROR] * 2, [r.getMessage() for r in fehler]
+        assert all(ziel.name in r.getMessage() for r in fehler)
     monkeypatch.setattr(Path, "unlink", echt)
     with caplog.at_level(logging.INFO):
         runtime_main.aufraeumen(welt.paths)
@@ -303,12 +289,12 @@ def test_leftover_inventory_or_driver_login_keeps_the_marker_and_the_binding(wel
 def test_a_binding_that_cannot_be_deleted_keeps_the_marker(welt, monkeypatch, caplog):
     """Scheitert nur das Loeschen von backup.json, ist der uebrige Zustand weg und die Markierung bleibt."""
     rastung = _entfernt_vorbereiten(welt.paths)
-    _unlink_scheitert_fuer(monkeypatch, welt.paths.backup, errno.EIO)
+    _unlink_scheitert_fuer(monkeypatch, welt.paths.backup(1), errno.EIO)
     runtime_main.aufraeumen(welt.paths)
-    assert welt.paths.backup.exists() and welt.paths.aufraeumen.exists()
-    assert not welt.paths.failsafe.exists() and not welt.paths.inventur.exists()
+    assert welt.paths.backup(1).exists() and welt.paths.aufraeumen.exists()
+    assert not welt.paths.failsafe(1).exists() and not welt.paths.inventur.exists()
     assert not (welt.paths.driver_secrets_dir / "vicare.json").exists()
-    assert f"{welt.paths.backup.name} nicht geloescht (OSError)" in caplog.text
+    assert f"{welt.paths.backup(1).name} nicht geloescht (OSError)" in caplog.text
     assert welt.paths.rastung.read_bytes() == rastung
 
 
@@ -345,7 +331,7 @@ def test_an_unreadable_runtime_folder_keeps_the_marker_and_the_binding(welt, mon
 
     monkeypatch.setattr(Path, "iterdir", iterdir)
     runtime_main.aufraeumen(welt.paths)
-    assert welt.paths.failsafe.exists() and welt.paths.backup.exists() and welt.paths.aufraeumen.exists()
+    assert welt.paths.failsafe(1).exists() and welt.paths.backup(1).exists() and welt.paths.aufraeumen.exists()
     assert f"{welt.paths.runtime_dir.name} nicht geloescht (OSError)" in caplog.text
     monkeypatch.setattr(Path, "iterdir", echt)
     runtime_main.aufraeumen(welt.paths)
@@ -360,10 +346,12 @@ def world(data_dir, monkeypatch, clock):
 
 
 def test_the_sign_off_ends_only_with_a_new_version_of_the_same_plant(world):
-    """5b-D2-7, Review Focus 2, ganzer Weg (Geraetekern, Dokumentspeicher, Host): abgemeldet bleibt bei erneuter
+    """Ganzer Weg (Geraetekern, Dokumentspeicher, Host): abgemeldet bleibt bei erneuter
     Zustellung derselben Version (kein Neustart); eine neue Version mit gleichem Inhalt hebt die Markierung auf, und der
     Neustart regelt wieder."""
     dokumente_schreiben(world.paths, konfiguration(), version=1)
+    # die Rastung gehoert zur gespeicherten Konfiguration (ohne sie lehnt der Speicher jede neue Konfiguration ab)
+    rastung.schreiben(world.paths.rastung, rastung_aus(konfiguration()), "2026-11-01T00:00:00")
     dokument_config.abmelden(world.paths.abgemeldet, "test-tenant")
     world.start_runtime()
     world.connect()
@@ -382,16 +370,16 @@ def test_the_sign_off_ends_only_with_a_new_version_of_the_same_plant(world):
 
 def test_an_operation_goes_to_the_worker_as_target_input(welt):
     welt.host.worker_binden(welt.worker)
-    welt.host.bedienung_uebernommen({"modus": "manuell", "raum_soll": 22.5})
+    welt.host.bedienung_uebernommen(bedienung(22.5))
     welt.worker.run_pending()
     (event,) = welt.events
     assert (event.kind, event.data) == (EV_TARGET_INPUT, {"value": 22.5, "source": SOURCE_PORTAL})
 
 
 def test_an_operation_before_the_worker_exists_is_posted_on_binding(welt):
-    # main(): der Geraete-Thread laeuft vor dem Worker; eine Bedienung gleich nach hello geht nicht verloren (Spec 3.3)
-    welt.host.bedienung_uebernommen({"modus": "manuell", "raum_soll": 21.0})
-    welt.host.bedienung_uebernommen({"modus": "manuell", "raum_soll": 22.5})
+    # main(): der Geraete-Thread laeuft vor dem Worker; eine Bedienung gleich nach hello geht nicht verloren
+    welt.host.bedienung_uebernommen(bedienung(21.0))
+    welt.host.bedienung_uebernommen(bedienung(22.5))
     welt.host.worker_binden(welt.worker)
     welt.worker.run_pending()
     (event,) = welt.events  # nur die letzte
@@ -400,19 +388,36 @@ def test_an_operation_before_the_worker_exists_is_posted_on_binding(welt):
 
 def test_operation_and_abo_for_the_runtime_host(welt):
     assert welt.host.bedienung() == (None, False)
-    welt.device.bed, welt.device.dirty = {"raum_soll": 21.0}, True
-    assert welt.host.bedienung() == ({"raum_soll": 21.0}, True)
+    welt.device.bed, welt.device.dirty = bedienung(21.0), True
+    assert welt.host.bedienung() == (bedienung(21.0), True)
     assert welt.host.abo_status() == "active" and welt.host.konfiguration()["anlage"] == "test-tenant"
 
 
 def test_the_software_target_is_written_for_the_updater(welt):
     software = {"version": "0.6.1", "manifest_url": "https://example.test/m.json", "manifest_sha256": "a" * 64,
-                "signature": "sig"}
+                "signature": "sig", "einmalig": False}
     welt.host.software_soll(software)
     assert json.loads(welt.paths.software_soll.read_text()) == software
     assert oct(welt.paths.software_soll.stat().st_mode & 0o777) == "0o644"  # der Updater (root) liest
     welt.host.software_soll(None)
     assert json.loads(welt.paths.software_soll.read_text()) is None
+
+
+def test_the_updates_setting_is_written_for_the_updater(welt):
+    updates = {"funktion": "aufschub", "sicherheit": "automatisch"}
+    welt.host.updates_soll(updates)
+    assert json.loads(welt.paths.updates_soll.read_text()) == updates
+    assert oct(welt.paths.updates_soll.stat().st_mode & 0o777) == "0o644"  # der Updater (root) liest
+    welt.host.updates_soll(None)
+    assert json.loads(welt.paths.updates_soll.read_text()) is None
+
+
+def test_an_unchanged_updates_setting_is_not_written_again(welt):
+    updates = {"funktion": "aus", "sicherheit": "aus"}
+    welt.host.updates_soll(updates)
+    os.utime(welt.paths.updates_soll, (1, 1))
+    welt.host.updates_soll(updates)
+    assert welt.paths.updates_soll.stat().st_mtime == 1
 
 
 def test_software_results_are_sent_in_order_and_acknowledged(welt, clock):
@@ -454,7 +459,7 @@ def test_software_results_go_up_once_per_seq_across_a_runtime_restart(welt, cloc
     welt.host.anzeigen(_anzeige())
     # Neustart der Laufzeit: neuer Host und neues Geraet auf denselben Dateien
     neu = gh.GatewayDeviceHost(welt.paths, welt.mirror, host_dir=welt.host_dir, clock=clock,
-                               wall=lambda: welt.wall["t"])
+                               wall=lambda: welt.wall["t"], echt=lambda: welt.wall["t"])
     geraet = FakeDevice()
     neu.verbinden(geraet)
     neu.anzeigen(_anzeige())
@@ -477,11 +482,12 @@ def test_the_led_file_follows_the_state(welt, clock):
 
 def test_snapshot_has_no_claim_code_and_only_known_host_fields(welt):
     dateien.schreiben_json(welt.host_dir / "status.json", {"netz": True, "dns": False, "zeit_synchron": True, "geheim": "x"}, modus=dateien.LESBAR)
-    welt.host.anzeigen(_anzeige(hinweise=({"key": "k", "stufe": "info", "text": "t"},)))
+    hinweis = {"key": "gesperrt", "code": "meldung.gesperrt", "params": {}, "stufe": "rot"}
+    welt.host.anzeigen(_anzeige(hinweise=(hinweis,)))
     snap = welt.host.snapshot()
     assert snap["geraet"] == "shg-aaaaaaaaaaaaaaaa" and snap["host"] == {"netz": True, "dns": False,
                                                                         "zeit_synchron": True}
-    assert "ABCDEFGHIJKL" not in json.dumps(snap) and snap["hinweise"] == [{"key": "k", "stufe": "info", "text": "t"}]
+    assert "ABCDEFGHIJKLMNOP" not in json.dumps(snap) and snap["hinweise"] == [hinweis]
 
 
 def test_wish_and_setpoint_source_go_to_the_device(welt):
@@ -496,7 +502,7 @@ def test_the_driver_check_and_commands(welt, tmp_path):
 
     register = CommandRegister(tmp_path / "reg", lambda body: True)
     welt.host.befehle_eintragen(register)
-    assert {"sign_off", "inventory", "diagnostics"} <= register.kinds
+    assert {"sign_off", "inventory", "diagnostics"} <= registrierte_befehle(register)
 
 
 SIM_BINDUNG = {"treiber": {"id": "simulation", "parameter": {"lever_set": "viessmann_vicare", "heizkreis": 0}}}
@@ -581,7 +587,7 @@ def test_a_persistently_failing_led_write_is_logged_once_per_error_type_and_on_r
     einen ERROR und bei der Erholung eine INFO (nur Typnamen, Regel 6)."""
     fehler: list[Exception] = [OSError("platte voll")]
 
-    def update(zustand):
+    def update(zustand, code_fenster=False):
         if fehler:
             raise fehler[0]
 
@@ -611,9 +617,25 @@ def test_an_operation_in_the_idle_state_is_not_posted_to_the_worker(welt, caplog
     """Ruhezustand (IdleBridge): der Worker hat keinen Soll-Eingang; die Bedienung bleibt im Geraetekern gespeichert
     und gilt beim naechsten Start mit Regelung. Kein "Kein Handler ... verworfen" je Dokument."""
     leerlauf = RegulationWorker(clock=welt.clock)
-    welt.host.bedienung_uebernommen({"modus": "manuell", "raum_soll": 21.0})  # vor dem Binden
+    welt.host.bedienung_uebernommen(bedienung(21.0))  # vor dem Binden
     with caplog.at_level("WARNING"):
         welt.host.worker_binden(leerlauf, soll_eingang=False)
-        welt.host.bedienung_uebernommen({"modus": "manuell", "raum_soll": 22.5})
+        welt.host.bedienung_uebernommen(bedienung(22.5))
         leerlauf.run_pending()
     assert "Kein Handler" not in caplog.text
+
+
+def test_das_gateway_hat_keine_integration_und_meldet_nie_integration_veraltet():
+    """Die Meldung zur veralteten Integration gibt es nur im HA-Host: das Gateway hat weder ein Lebenszeichen der
+    Integration noch einen Code dafuer."""
+    assert not hasattr(gh.GatewayDeviceHost, "integration_stand")
+    quellen = Path(gh.__file__).parent
+    assert not [p.name for p in quellen.rglob("*.py") if "integration_veraltet" in p.read_text()]
+
+
+def test_das_gateway_hat_kein_ereignis_der_integration_und_meldet_nie_push_nicht_zugestellt():
+    """Die Meldung zum aufgegebenen Push gibt es nur im HA-Host (Ereignis der Integration): das Gateway hat keinen
+    Stand dafuer und keinen Code."""
+    assert not hasattr(gh.GatewayDeviceHost, "push_stand")
+    quellen = Path(gh.__file__).parent
+    assert not [p.name for p in quellen.rglob("*.py") if "push_nicht_zugestellt" in p.read_text()]

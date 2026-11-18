@@ -1,4 +1,4 @@
-"""KPI- und Regel-Telemetrie auf smartheat/<geraete_id>/telemetry. Seit TP11 wertet der Server daraus
+"""KPI- und Regel-Telemetrie auf smartheat/<geraete_id>/telemetry. Der Server wertet daraus
 Regelabweichung und Betriebspunkt aus (room_target, outdoor_temp, flow_setpoint); fehlende Werte
 fuehren dort nur zu 'nicht lernen'. Den Takt gibt der Planeintrag EV_TELEMETRY vor."""
 import logging
@@ -13,9 +13,15 @@ from smartheat_core.bindungsparameter import ENERGIE_KANAELE
 from smartheat_core.logtext import lesbar
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime.delivery import DataFault
-from smartheat_runtime.ports import SignalUngueltig
+from smartheat_runtime.plausibility import ROOM_ACTUAL_RANGE, is_plausible
+from smartheat_runtime.ports import SignalUngueltig, SourceUnavailable
 
 logger = logging.getLogger(__name__)
+
+#: Kennzeichen `kaelteschutz` der Telemetrie: kein Lauf, oder die Art des laufenden Kaelteschutz-Laufs. Gegenstueck:
+#: heizungsserver regelung/history.KAELTESCHUTZ_WERTE (Contract-Check (Vertrag V1b)).
+KAELTESCHUTZ_AUS = "aus"
+KAELTESCHUTZ_WERTE = (KAELTESCHUTZ_AUS, "soll", "frost")
 
 # Optionale KPI-Rollen, nur wenn gemappt. Nicht lesbare Sensoren werden weggelassen, nie als
 # null/0 gesendet: der Server speichert fuer fehlende Felder NULL.
@@ -25,7 +31,7 @@ KPI_NUMERIC_ROLES = (
 )
 # Text-Rollen (Rohzustand, ohne Zahlumwandlung): Betriebsart und Status des Waermeerzeugers.
 KPI_TEXT_ROLES = ("operating_mode", "generator_state")
-#: Liefer-Signale fuer die Waermelieferung auf dem Server (Audit 4 P-B). Gegenstueck: heizungsserver
+#: Liefer-Signale fuer die Waermelieferung auf dem Server. Gegenstueck: heizungsserver
 #: regelung/history.TELEMETRY_DELIVERY_FIELDS (Contract-Check (Vertrag V1b)).
 DELIVERY_ROLES = ("generator_hours", "generator_starts", "generator_state")
 # Die Liefer-Signale gehen ueber die KPI-Rollen hinaus (read_kpi_fields); ein Liefer-Signal ohne Leser haelt den Import an.
@@ -33,14 +39,15 @@ if not set(DELIVERY_ROLES) <= {*KPI_NUMERIC_ROLES, *KPI_TEXT_ROLES}:
     raise RuntimeError("telemetry: DELIVERY_ROLES nennt eine Rolle ausserhalb der KPI-Rollen")
 KPI_ENERGY_ROLES = tuple(f"energy_{kanal}" for kanal in ENERGIE_KANAELE)
 
-#: Kanal -> zuletzt gemeldete fremde Einheit: eine Warnung je Wechsel, nicht je Tick (Spec Stufe 3 S4b 5).
+#: Kanal -> zuletzt gemeldete fremde Einheit: eine Warnung je Wechsel, nicht je Tick.
 _EINHEIT_GEWARNT: dict[str, str] = {}
 #: Pflichtfelder, deren Ausfall seit der letzten gesendeten Telemetrie schon gewarnt ist: eine WARNING je Ausfall,
-#: weitere Takte nur DEBUG, eine INFO-Zeile bei der Wiederaufnahme (Testoffensive T4').
+#: weitere Takte nur DEBUG, eine INFO-Zeile bei der Wiederaufnahme.
 _AUSFALL_GEWARNT: set[str] = set()
 _UNGUELTIG = "signal_ungueltig"  # Schluessel in _AUSFALL_GEWARNT: ein Signal der Telemetrie war ungueltig
+_QUELLE_WEG = "quelle_nicht_erreichbar"  # Schluessel in _AUSFALL_GEWARNT: die Signalquelle antwortete nicht
 
-# Regel-Telemetrie fuer den Regelkern (TP11). Gegenstueck: heizungsserver
+# Regel-Telemetrie fuer den Regelkern. Gegenstueck: heizungsserver
 # regelung/history.TELEMETRY_REGULATION_FIELDS (Contract-Check (Vertrag V1b)).
 REGULATION_FIELDS = ("room_target", "outdoor_temp", "flow_setpoint")
 
@@ -49,20 +56,34 @@ REGULATION_FIELDS = ("room_target", "outdoor_temp", "flow_setpoint")
 DATENFEHLER_KEY = "datenfehler"
 
 
+def _warne_einmal(schluessel: str, error: Exception) -> None:
+    """Erwarteter Ausfall eines Tick-Signals: eine WARNING ohne Traceback je Ausfall, weitere Takte DEBUG."""
+    if schluessel in _AUSFALL_GEWARNT:
+        logger.debug("Telemetrie nicht gesendet: %s", lesbar(str(error)))
+    else:
+        _AUSFALL_GEWARNT.add(schluessel)
+        logger.warning("Telemetrie nicht gesendet: %s; weitere Takte nur im DEBUG-Log bis zur Wiederaufnahme",
+                       lesbar(str(error)))
+
+
 def run_telemetry_tick(
     manifest, signals, mqtt_client, boost_active: bool, failsafe_active: bool,
     datenfehler: DataFault | None = None, room_target: float | None = None,
-    energy: Callable[[dict, dict], dict] | None = None, einheiten: Mapping[str, str] | None = None,
+    energy: Callable[[dict, dict], dict] | None = None, einheiten: Mapping[str, str] | None = None, *, kreis: int,
+    nur_raeume: bool = False, testphase_ohne: bool = False, kaelteschutz: str = KAELTESCHUTZ_AUS,
+    erzeuger_stoerung: str | None = None,
 ) -> None:
     """Liest room_actual selbst (lokaler HA-REST-Aufruf, kein Cloud-Roundtrip). `energy` normalisiert die
-    Energie-Rohwerte (Plan 3b, Tageszaehler; None = unveraendert), `einheiten` ist je Energiekanal die erwartete
-    Einheit (Spec Stufe 3 S4b 5; ohne Eintrag kein Kanal). Wirft nie."""
+    Energie-Rohwerte (Tageszaehler, None = unveraendert), `einheiten` ist je Energiekanal die erwartete
+    Einheit (ohne Eintrag kein Kanal). `nur_raeume` (Kreis ausser Betrieb) sendet ueber dasselbe Paket nur die
+    Raumwerte: keine KPI-, Energie- und Regelfelder und keine Kennzeichen `testphase_ohne`, `kaelteschutz`,
+    `erzeuger_stoerung` (der Kreis ist ausser Betrieb, nichts davon gilt dort). Wirft nie."""
     if "room_actual" not in manifest.refs:
         return
     try:
         room_actual = signals.get_state(manifest.refs["room_actual"])
         if not ist_endliche_zahl(room_actual):
-            # Pflichtfeld der Telemetrie (der Server lehnt sie sonst ab, Testoffensive T2, Nr. 17): kein Senden, der
+            # Pflichtfeld der Telemetrie (der Server lehnt sie sonst ab): kein Senden, der
             # naechste Tick liest erneut
             if "room_actual" in _AUSFALL_GEWARNT:
                 logger.debug("Telemetrie nicht gesendet: room_actual ist weiterhin keine endliche Zahl")
@@ -71,35 +92,48 @@ def run_telemetry_tick(
                 logger.warning("Telemetrie nicht gesendet: room_actual ist keine endliche Zahl; weitere Takte nur im "
                                "DEBUG-Log bis zur Wiederaufnahme")
             return
-        kpi_fields = read_kpi_fields(manifest, signals, energy, einheiten=einheiten)
-        regulation_fields = read_regulation_fields(manifest, signals, room_target)
+        if nur_raeume:
+            kpi_fields, regulation_fields = {}, {"raeume": read_raeume(manifest, signals)}
+        else:
+            kpi_fields = read_kpi_fields(manifest, signals, energy, einheiten=einheiten)
+            regulation_fields = read_regulation_fields(manifest, signals, room_target)
         publish_telemetry(
             mqtt_client=mqtt_client, room_actual=room_actual,
             boost_active=boost_active, failsafe_active=failsafe_active,
-            kpi_fields=kpi_fields, datenfehler=datenfehler, regulation_fields=regulation_fields,
+            kpi_fields=kpi_fields, datenfehler=datenfehler, regulation_fields=regulation_fields, kreis=kreis,
+            testphase_ohne=testphase_ohne, kaelteschutz=kaelteschutz, erzeuger_stoerung=erzeuger_stoerung,
+            mit_kennzeichen=not nur_raeume,
         )
         if "room_actual" in _AUSFALL_GEWARNT:  # erst nach dem gelungenen Senden
             _AUSFALL_GEWARNT.discard("room_actual")
             logger.info("Telemetrie wieder aufgenommen: room_actual ist wieder eine endliche Zahl")
-        _AUSFALL_GEWARNT.discard(_UNGUELTIG)
+        _AUSFALL_GEWARNT.difference_update((_UNGUELTIG, _QUELLE_WEG))
     except SignalUngueltig as error:
-        # Erwartet (L4-17): der Fuehler liefert gerade keinen gueltigen Wert; der Tick meldet es dem Kunden. Eine
+        # Erwartet: der Fuehler liefert gerade keinen gueltigen Wert; der Tick meldet es dem Kunden. Eine
         # WARNING ohne Traceback bis zum naechsten gelungenen Senden, danach nur DEBUG.
-        if _UNGUELTIG in _AUSFALL_GEWARNT:
-            logger.debug("Telemetrie nicht gesendet: %s", lesbar(str(error)))
-        else:
-            _AUSFALL_GEWARNT.add(_UNGUELTIG)
-            logger.warning("Telemetrie nicht gesendet: %s; weitere Takte nur im DEBUG-Log bis zur Wiederaufnahme",
-                           lesbar(str(error)))
+        _warne_einmal(_UNGUELTIG, error)
+    except SourceUnavailable as error:
+        # Ebenso erwartet: die Quelle antwortet nicht (HA nicht erreichbar, lokaler Bus getrennt).
+        _warne_einmal(_QUELLE_WEG, error)
     except Exception:
         logger.exception("Fehler beim Veroeffentlichen der KPI-Telemetrie, wird beim naechsten Tick erneut versucht")
 
 
 def publish_telemetry(
     mqtt_client, room_actual: float, boost_active: bool, failsafe_active: bool, kpi_fields: dict | None = None,
-    datenfehler: DataFault | None = None, regulation_fields: dict | None = None,
+    datenfehler: DataFault | None = None, regulation_fields: dict | None = None, *, kreis: int,
+    testphase_ohne: bool = False, kaelteschutz: str = KAELTESCHUTZ_AUS, erzeuger_stoerung: str | None = None,
+    mit_kennzeichen: bool = True,
 ) -> None:
+    """Sendet ein Telemetrie-Paket des Kreises. `testphase_ohne` und `kaelteschutz` kennzeichnen Zeiten, die der Server
+    nicht lernen darf; `erzeuger_stoerung` ist die normalisierte Kennung der offenen Stoerung des Waermeerzeugers oder
+    `None` (das Feld steht immer im Paket); `mit_kennzeichen=False` laesst alle drei Felder weg (Paket nur mit Raumwerten).
+    Ein Wert ausserhalb von KAELTESCHUTZ_WERTE wuerde der Server ablehnen: ValueError am Absender statt einer
+    verlorenen Telemetrie."""
+    if mit_kennzeichen and kaelteschutz not in KAELTESCHUTZ_WERTE:
+        raise ValueError(f"kaelteschutz: unbekannter Wert {kaelteschutz!r}")
     payload = {
+        "kreis": kreis,
         "room_actual": room_actual,
         "boost_active": boost_active,
         "failsafe_active": failsafe_active,
@@ -107,6 +141,10 @@ def publish_telemetry(
         **(kpi_fields or {}),
         **(regulation_fields or {}),
     }
+    if mit_kennzeichen:
+        payload["testphase_ohne"] = testphase_ohne
+        payload["kaelteschutz"] = kaelteschutz
+        payload["erzeuger_stoerung"] = erzeuger_stoerung
     if datenfehler is not None:
         payload[DATENFEHLER_KEY] = {"source": datenfehler.source, "detail": list(datenfehler.detail)}
     mqtt_client.publish_telemetry(payload)
@@ -114,8 +152,9 @@ def publish_telemetry(
 
 def read_regulation_fields(manifest, signals, room_target: float | None) -> dict:
     """Aussentemperatur und Vorlauf-Soll lesen (nur gemappte, nur endliche Werte) plus das
-    stabile Raum-Soll. Ein nicht lesbarer Wert fehlt, er wird nie als 0 gesendet."""
-    fields: dict = {}
+    stabile Raum-Soll und `raeume`, den Ist-Wert je Raum (Referenz- und Kontrollraeume) nach Raumnummer. Ein nicht
+    lesbarer oder unplausibler Wert fehlt, er wird nie als 0 gesendet; `raeume` steht immer da, im Zweifel leer."""
+    fields: dict = {"raeume": read_raeume(manifest, signals)}
     if room_target is not None and math.isfinite(room_target):
         fields["room_target"] = room_target
     for role in (rolle for rolle in REGULATION_FIELDS if rolle != "room_target"):  # room_target ist das Argument
@@ -132,6 +171,27 @@ def read_regulation_fields(manifest, signals, room_target: float | None) -> dict
     return fields
 
 
+def read_raeume(manifest, signals) -> list[dict]:
+    """Ist je Raum aus `manifest.raum_refs`, aufsteigend nach Raumnummer. Ein Raum ohne lesbaren Wert im Raumbereich
+    (ROOM_ACTUAL_RANGE) fehlt mit einer Warnung je Ausfall und Raum; die uebrigen bleiben."""
+    raeume = []
+    for raum, ref in sorted(manifest.raum_refs.items()):
+        schluessel = f"raum:{raum}"
+        try:
+            ist = signals.get_state(ref)
+            if not is_plausible(ist, ROOM_ACTUAL_RANGE):
+                raise ValueError("kein Wert im Raumbereich")
+        except Exception as exc:
+            if schluessel not in _AUSFALL_GEWARNT:
+                _AUSFALL_GEWARNT.add(schluessel)
+                logger.warning("Ist von Raum %d nicht lesbar, der Raum fehlt in der Telemetrie: %s", raum,
+                               lesbar(str(exc)))
+            continue
+        _AUSFALL_GEWARNT.discard(schluessel)
+        raeume.append({"raum": raum, "ist": ist})
+    return raeume
+
+
 def read_kpi_fields(
     manifest, signals, normalize_energy: Callable[[dict, dict], dict] | None = None,
     einheiten: Mapping[str, str] | None = None,
@@ -140,7 +200,7 @@ def read_kpi_fields(
     weggelassen und blockiert weder die Kern-Telemetrie noch die anderen Sensoren. `energy`
     gibt es nur, wenn mindestens ein Kanal lesbar war. Ein Energiekanal wird nur gelesen, wenn `einheiten` seine
     erwartete Einheit nennt, und nur gesendet, wenn die Entity genau diese meldet (Wh wird in kWh umgerechnet); sonst
-    fehlt er (eine Warnung je Wechsel). normalize_energy(werte, zieleinheiten) (Plan 3b) macht aus Tageszaehlern
+    fehlt er (eine Warnung je Wechsel). normalize_energy(werte, zieleinheiten) macht aus Tageszaehlern
     monoton wachsende Summen unter denselben Kanalnamen."""
     einheiten = einheiten or {}
     kpi_fields: dict = {}
@@ -174,7 +234,7 @@ def read_kpi_fields(
         kanal = role.removeprefix("energy_")
         erwartet = einheiten.get(kanal)
         if role not in manifest.refs or erwartet is None:
-            continue  # Spec Stufe 3 S4b 5: ohne erwartete Einheit kein Energiekanal
+            continue  # Ohne erwartete Einheit kein Energiekanal
         ok, value = _read(role, signals.get_state)
         if not ok:
             continue

@@ -1,12 +1,15 @@
-"""Status-Modell Schema 2 (Spec TP7 1.1, 3.1); der Host sendet es ueber seinen StatusSink, beim HA-Host als
+"""Status-Modell Schema 2; der Host sendet es ueber seinen StatusSink, beim HA-Host als
 Ereignis `smartheat_status` an die SmartHeat-Integration. Gesendet wird der volle Status: nach jedem
 Worker-Ereignis, wenn sich der Inhalt geaendert hat, bei jedem (Wieder-)Verbinden des WS-Trigger-Clients und
 als Lebenszeichen alle HEARTBEAT_SECONDS. Die Integration haelt daraus ihre Entities; bleibt das Lebenszeichen
 aus, meldet sie das selbst. Felder und Wertemengen sind Cross-Repo-Vertrag mit const.py der Integration
 (Contract-Check)."""
 import logging
+import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
+from smartheat_core import kreisansicht
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime import battery, delivery, entitlement, room_sensors
 from smartheat_runtime.ports import StatusSink
@@ -29,6 +32,12 @@ STATUS_VALUES = (
     STATUS_STARTET, STATUS_REGELT, STATUS_KONFIGURATIONSFEHLER, STATUS_ZUGANG_ABGELEHNT, STATUS_ABO_BEENDET,
     STATUS_ABO_INAKTIV, STATUS_NOTBETRIEB, STATUS_DATENFEHLER, STATUS_ABGEMELDET,
 )
+#: Schwere der Zustaende, schlechtester zuerst: die Reihenfolge von `overall_status`; `zugang_abgelehnt` (nur der Host
+#: kennt ihn) steht nach dem Konfigurationsfehler. Bei mehreren Kreisen folgen die Felder der Anlage dem schlechtesten.
+SCHWERE = (
+    STATUS_ABGEMELDET, STATUS_KONFIGURATIONSFEHLER, STATUS_ZUGANG_ABGELEHNT, STATUS_ABO_BEENDET, STATUS_ABO_INAKTIV,
+    STATUS_NOTBETRIEB, STATUS_DATENFEHLER, STATUS_STARTET, STATUS_REGELT,
+)
 _STATUS_WITH_REASON = frozenset({
     STATUS_ABGEMELDET, STATUS_KONFIGURATIONSFEHLER, STATUS_ZUGANG_ABGELEHNT, STATUS_ABO_BEENDET,
 })
@@ -44,6 +53,21 @@ ABO_BEENDET = "beendet"
 ABO_UNBEKANNT = "unbekannt"
 ABO_VALUES = (ABO_AKTIV, ABO_INAKTIV, ABO_BEENDET, ABO_UNBEKANNT)
 
+#: Kaelteschutz des Kreises im Ereignis (Quelle `BridgeState.kaelteschutz_art`, ohne Lauf `aus`).
+KAELTESCHUTZ_AUS = "aus"
+KAELTESCHUTZ_VALUES = (KAELTESCHUTZ_AUS, "soll", "frost")
+
+#: Kreiszustand fuer die Anzeige: die kleine Menge dieses Stands, weitere Codes kommen additiv hinzu.
+KREIS_ZUSTAND_REGELT = "regelt"
+KREIS_ZUSTAND_ABO_INAKTIV = "abo_inaktiv"
+KREIS_ZUSTAND_ABO_BEENDET = "abo_beendet"
+KREIS_ZUSTAND_TESTPHASE = "testphase"
+KREIS_ZUSTAND_AUSSER_BETRIEB = "ausser_betrieb"
+KREIS_ZUSTAND_VALUES = (
+    KREIS_ZUSTAND_REGELT, KREIS_ZUSTAND_ABO_INAKTIV, KREIS_ZUSTAND_ABO_BEENDET, KREIS_ZUSTAND_TESTPHASE,
+    KREIS_ZUSTAND_AUSSER_BETRIEB,
+)
+
 DATENFEHLER_ARTEN = ("lokal", "server", "anlage")
 _FAULT_ART = dict(
     zip((delivery.SOURCE_LOCAL, delivery.SOURCE_SERVER, delivery.SOURCE_WRITE), DATENFEHLER_ARTEN, strict=True)
@@ -52,8 +76,42 @@ _FAULT_ART = dict(
 HINT_FIELDS = ("raumfuehler_ausgefallen", "batterie_niedrig", "manueller_eingriff")
 EVENT_FIELDS = (
     "schema", "tenant_id", "addon_version", "status", "grund", "notbetrieb", "datenfehler",
-    "boost", "letzte_serverantwort", "hebelsatz", "hebel", "gelernt", "abo", "abo_frist_ende", "hinweise",
+    "boost", "letzte_serverantwort", "hebelsatz", "hebel", "gelernt", "abo", "abo_frist_ende", "zustand",
+    "kaelteschutz", "hinweise",
 )
+#: Felder der Anlage und Felder des Kreises: zusammen genau EVENT_FIELDS. Das Ereignis eines Kreises ist flach (Server,
+#: up/status); die Zusammenfassung der Anlage fuehrt die Kreisfelder zusaetzlich je Kreis in `kreise`.
+ANLAGE_FELDER = (
+    "schema", "tenant_id", "addon_version", "status", "grund", "notbetrieb", "datenfehler", "letzte_serverantwort",
+    "hinweise",
+)
+KREIS_FELDER = ("boost", "hebelsatz", "hebel", "gelernt", "abo", "abo_frist_ende", "zustand", "kaelteschutz")
+# Felder der Anlage, die dem schlechtesten Kreis folgen (der Notbetrieb ist ein ODER, die uebrigen kommen vom ersten).
+_SCHLECHTESTER = ("status", "grund", "datenfehler", "letzte_serverantwort", "hinweise")
+
+
+#: Gruende, aus denen der Status eine Stoerung traegt; der Code im Ereignis ist `status.grund_<name>`, der Server
+#: haelt die Texte (Katalog), hier steht kein Text.
+GRUENDE = (
+    "start_fehlgeschlagen", "zustand_nicht_migriert", "andere_anlage", "konfiguration_ungueltig",
+    "zuruecksetzen_scheitert", "wiederherstellung_scheitert",
+)
+GRUND_PREFIX = "status.grund_"
+#: Parameter je Grund (Name -> Zahlen); die uebrigen Gruende tragen keine.
+GRUND_PARAMS = {"zuruecksetzen_scheitert": ("sekunden",)}
+
+
+def laufzeitgrund(name: str, **params) -> dict:
+    """Grund einer Stoerung im Status als Code mit Parametern (`{code, params}`); ein unbekannter Name oder abweichende
+    Parameter sind ein Programmierfehler."""
+    if name not in GRUENDE:
+        raise ValueError(f"unbekannter Laufzeitgrund: {name!r}")
+    if set(params) != set(GRUND_PARAMS.get(name, ())):
+        raise ValueError(f"Parameter des Laufzeitgrunds {name!r} stimmen nicht: {sorted(params)}")
+    if not all(isinstance(wert, (int, float)) and not isinstance(wert, bool) for wert in params.values()):
+        raise ValueError(f"Parameter des Laufzeitgrunds {name!r} sind keine Zahlen")
+    return {"code": GRUND_PREFIX + name, "params": {key: int(wert) if float(wert).is_integer() else wert
+                                                     for key, wert in params.items()}}
 
 
 @dataclass(frozen=True)
@@ -61,13 +119,12 @@ class Flags:
     """Laufzeit-Merkmale des Gesamtzustands, die nicht in BridgeState stehen."""
     abgemeldet: bool = False
     konfigurationsfehler: bool = False
-    zugang_abgelehnt: bool = False
     # Abschluss-Start, dessen Zuruecksetzen noch scheitert (abo_finished ist dann noch False).
     abo_beendet: bool = False
     # Erster Start abgeschlossen: MQTT verbunden bzw. im Abo-inaktiv-Modus hochgefahren.
     gestartet: bool = False
     abo: str = ABO_UNBEKANNT  # Ergebnis der Abo-Abfrage beim Start (aktiv/unbekannt)
-    grund: str | None = None
+    grund: dict | None = None  # laufzeitgrund(...)
 
 
 _STORAGE_FAULT_ROLES = (delivery.ROLE_DATENTRAEGER,)
@@ -76,13 +133,13 @@ _STORAGE_FAULT_ROLES = (delivery.ROLE_DATENTRAEGER,)
 def _veralteter_notbetrieb(state) -> bool:
     """Notbetrieb ohne offenen Tick stammt aus dem Abo-inaktiv-Modus; der Start beendet oder klaert ihn per Pruef-Tick
     (app._is_stale_notbetrieb). Bis zum ersten abgeschlossenen Start zeigt der Status deshalb `startet` statt eines
-    kurzen `notbetrieb` (L4-09)."""
+    kurzen `notbetrieb`."""
     return state.delivery.notbetrieb and state.delivery.pending is None
 
 
 def overall_status(flags: Flags, state, storage_failed: bool = False) -> str:
-    """Erster zutreffender Zustand (Spec TP7 3.1): Endzustaende und Abo gelten immer, danach
-    Notbetrieb und Datenfehler (auch ein nicht beschreibbarer Datentraeger, TP12b), erst dann vor
+    """Erster zutreffender Zustand: Endzustaende und Abo gelten immer, danach
+    Notbetrieb und Datenfehler (auch ein nicht beschreibbarer Datentraeger), erst dann vor
     dem ersten abgeschlossenen Start `startet` (sonst stuende ein Add-on, dessen Verbindung nie aufgebaut wird, im
     Notbetrieb dauerhaft auf `startet`).
     Ausnahme: ein veralteter Notbetrieb (ohne offenen Tick) zaehlt vor dem Start nicht als Notbetrieb."""
@@ -90,8 +147,6 @@ def overall_status(flags: Flags, state, storage_failed: bool = False) -> str:
         return STATUS_ABGEMELDET
     if flags.konfigurationsfehler:
         return STATUS_KONFIGURATIONSFEHLER
-    if flags.zugang_abgelehnt and state.abo_inactive_since is None:
-        return STATUS_ZUGANG_ABGELEHNT
     if flags.abo_beendet or state.abo_finished:
         return STATUS_ABO_BEENDET
     if state.abo_inactive_since is not None:
@@ -131,6 +186,24 @@ def _abo(flags: Flags, state) -> str:
     return flags.abo
 
 
+def _kreis_zustand(kreiszustand: str, abo: str) -> str:
+    """Zustand fuer die Anzeige mit Vorrang: ausser Betrieb, Abo beendet, Abo inaktiv, Testphase, sonst `regelt`.
+    `abo` ist der Wert des Ereignisfelds (Abo beendet geht auch aus dem Abschluss-Start hervor)."""
+    if kreiszustand == kreisansicht.AUSSER_BETRIEB:
+        return KREIS_ZUSTAND_AUSSER_BETRIEB
+    if abo == ABO_BEENDET:
+        return KREIS_ZUSTAND_ABO_BEENDET
+    if abo == ABO_INAKTIV:
+        return KREIS_ZUSTAND_ABO_INAKTIV
+    if kreiszustand == kreisansicht.TESTPHASE_OHNE:
+        return KREIS_ZUSTAND_TESTPHASE
+    return KREIS_ZUSTAND_REGELT
+
+
+def _kaelteschutz(state) -> str:
+    return state.kaelteschutz_art or KAELTESCHUTZ_AUS
+
+
 def _open_keys(state, prefix: str, value: str) -> list[str]:
     """Entity-IDs der Meldeschluessel `<prefix>:<entity>` im Zustand `value`, sortiert."""
     return sorted(
@@ -141,7 +214,7 @@ def _open_keys(state, prefix: str, value: str) -> list[str]:
 
 def _zahl(value) -> float | None:
     """Eine nicht endliche Zahl (NaN, Inf, Ganzzahl ausserhalb des float-Bereichs) geht nie in den Status, sondern als
-    None des Feldes (Testoffensive T2, Nr. 17): ein Laufzeitwert legt das Ereignis und damit up/status nicht lahm."""
+    None des Feldes: ein Laufzeitwert legt das Ereignis und damit up/status nicht lahm."""
     return value if ist_endliche_zahl(value) else None
 
 
@@ -157,11 +230,8 @@ def _manual(state) -> dict | None:
 
 
 def _levers(state, lever_set) -> dict:
-    """Stand je Hebel (Wiederherstellungspunkt = zuletzt bestaetigt) plus die vom Client abgeleiteten (Mindestvorlauf)."""
-    levers = {lever: _zahl(state.restore_point.get(lever)) for lever in lever_set.levers}
-    if "min_flow" in lever_set.client_derived:
-        levers["min_flow"] = _zahl(state.min_flow_current)
-    return levers
+    """Stand je Hebel (Wiederherstellungspunkt = zuletzt bestaetigt)."""
+    return {lever: _zahl(state.restore_point.get(lever)) for lever in lever_set.levers}
 
 
 def _im_vertrag(feld: str, wert: str, erlaubt: tuple[str, ...], ersatz: str) -> str:
@@ -176,7 +246,7 @@ def _im_vertrag(feld: str, wert: str, erlaubt: tuple[str, ...], ersatz: str) -> 
 
 def build_event(
     tenant_id: str, flags: Flags, state, lever_set, client_version: str,
-    storage_failed: bool = False,
+    storage_failed: bool = False, kreiszustand: str = kreisansicht.IN_BETRIEB,
 ) -> dict:
     status = _im_vertrag("status", overall_status(flags, state, storage_failed), STATUS_VALUES, STATUS_DATENFEHLER)
     abo = _im_vertrag("abo", _abo(flags, state), ABO_VALUES, ABO_UNBEKANNT)
@@ -201,6 +271,8 @@ def build_event(
         "abo_frist_ende": (
             entitlement.grace_end(state.abo_inactive_since).date().isoformat() if abo == ABO_INAKTIV else None
         ),
+        "zustand": _im_vertrag("zustand", _kreis_zustand(kreiszustand, abo), KREIS_ZUSTAND_VALUES, KREIS_ZUSTAND_REGELT),
+        "kaelteschutz": _im_vertrag("kaelteschutz", _kaelteschutz(state), KAELTESCHUTZ_VALUES, KAELTESCHUTZ_AUS),
         "hinweise": dict(zip(HINT_FIELDS, (
             _open_keys(state, "raumfuehler", room_sensors.STATE_FAILED),
             _open_keys(state, "batterie", battery.STATE_LOW),
@@ -215,12 +287,14 @@ class StatusReporter:
 
     def __init__(
         self, sink: StatusSink, tenant_id: str, store, lever_set, client_version: str,
+        zustand_source: Callable[[], str] = lambda: kreisansicht.IN_BETRIEB,
     ) -> None:
         self._sink = sink
         self._tenant_id = tenant_id
         self._store = store
         self._lever_set = lever_set
         self._client_version = client_version
+        self._zustand_source = zustand_source  # Kreiszustand des Dokuments, bei jedem Ereignis frisch gelesen
         self.flags = Flags()
         self._published: dict | None = None
 
@@ -231,7 +305,7 @@ class StatusReporter:
     def event(self) -> dict:
         return build_event(
             self._tenant_id, self.flags, self._store.state, self._lever_set,
-            self._client_version, self._store.storage_failed,
+            self._client_version, self._store.storage_failed, self._zustand_source(),
         )
 
     def update(self, **changes) -> None:
@@ -252,3 +326,57 @@ class StatusReporter:
             logger.warning("Status (%s) konnte nicht gesendet werden", event["status"])
             return
         self._published = event
+
+
+def zusammenfassen(ereignisse: Mapping[int, dict]) -> dict:
+    """Ein Ereignis der Anlage aus den Ereignissen ihrer Kreise (Schluessel: Kreisnummer). Status, Grund, Datenfehler,
+    letzte Serverantwort und Hinweise folgen dem schlechtesten Kreis (bei Gleichstand dem mit Grund, dann dem niedrigeren),
+    der Notbetrieb steht, sobald ein Kreis ihn meldet; Boost, Hebelsatz, Hebel, Gelerntes, Abo, Zustand und Kaelteschutz stehen je Kreis in
+    `kreise` (aufsteigend nach Kreisnummer) und flach, wie das Laufzeit-Ereignis sie kennt, vom niedrigsten Kreis. Abgemeldet ist die Anlage erst, wenn jeder Kreis es ist: solange ein anderer Kreis regelt oder wartet, zaehlt
+    der schlechteste der uebrigen (sonst gaelte die Anlage als zurueckgesetzt, obwohl ein Kreis noch regelt)."""
+    if not ereignisse:
+        raise ValueError("Ohne Kreis kein Ereignis der Anlage")
+    kreise = sorted(ereignisse)
+    kandidaten = [kreis for kreis in kreise if ereignisse[kreis]["status"] != STATUS_ABGEMELDET] or kreise
+    schlechtester = min(kandidaten, key=lambda kreis: (
+        SCHWERE.index(ereignisse[kreis]["status"]), ereignisse[kreis]["grund"] is None, kreis))
+    erg = dict(ereignisse[kreise[0]])
+    for feld in _SCHLECHTESTER:
+        erg[feld] = ereignisse[schlechtester][feld]
+    erg["notbetrieb"] = any(ereignisse[kreis]["notbetrieb"] for kreis in kreise)
+    erg["kreise"] = [{"kreis": kreis, **{feld: ereignisse[kreis][feld] for feld in KREIS_FELDER}} for kreis in kreise]
+    return erg
+
+
+def ohne_kreise(ereignis: Mapping) -> dict:
+    """Das flache Laufzeit-Ereignis (Schema 2) ohne die Kreisliste der Zusammenfassung: das, was Server, up/status und
+    das Abmelden lesen."""
+    return {feld: wert for feld, wert in ereignis.items() if feld != "kreise"}
+
+
+class Statussammler:
+    """Fasst die Status der Kreise in ein Ereignis der Anlage fuer die eine Senke des Hosts. Jeder Kreis meldet ueber
+    `senke(kreis)`; nach jeder Meldung geht das Ereignis der Anlage hinaus. Ein Fehler der Senke erreicht den Kreis,
+    dessen StatusReporter dann beim naechsten Anlass erneut sendet."""
+
+    def __init__(self, sink: StatusSink) -> None:
+        self._sink = sink
+        self._lock = threading.Lock()
+        self._ereignisse: dict[int, dict] = {}
+
+    def senke(self, kreis: int) -> StatusSink:
+        return _KreisSenke(self, kreis)
+
+    def melden(self, kreis: int, event: dict) -> None:
+        with self._lock:
+            self._ereignisse[kreis] = event
+            self._sink.publish(zusammenfassen(self._ereignisse))
+
+
+class _KreisSenke:
+    def __init__(self, sammler: Statussammler, kreis: int) -> None:
+        self._sammler = sammler
+        self._kreis = kreis
+
+    def publish(self, event: dict) -> None:
+        self._sammler.melden(self._kreis, event)

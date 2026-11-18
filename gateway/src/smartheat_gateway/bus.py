@@ -1,6 +1,7 @@
-"""Lokaler Bus (Spec SHG G2 6.1): kleine paho-Huelle fuer die Laufzeit (ab 0.6.0 nur Zigbee2MQTT), getrennt von
+"""Lokaler Bus: kleine paho-Huelle fuer die Laufzeit (nur Zigbee2MQTT), getrennt von
 der MQTT-Verbindung zum Server (Geraetekern). Callbacks laufen im paho-Thread und duerfen nur Daten ablegen bzw.
 Ereignisse in den Worker stellen. Abos werden bei jedem (Wieder-)Verbinden erneuert."""
+import contextlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from smartheat_core.logtext import lesbar
 logger = logging.getLogger(__name__)
 
 Callback = Callable[[str, bytes, bool], None]
+BUS_PORT = 1883  # Mosquitto in der Compose-Datei und mqtt://mosquitto:1883 in der Zigbee2MQTT-Konfiguration
 
 
 def decode(payload: bytes) -> object | None:
@@ -42,13 +44,14 @@ class Bus(Protocol):
     def subscribe(self, topic_filter: str, callback: Callback) -> None: ...
     def publish(self, topic: str, payload, *, retain: bool = False) -> None: ...
     def on_connected(self, hook: Callable[[], None]) -> None: ...
+    def off_connected(self, hook: Callable[[], None]) -> None: ...
     def wait_connected(self, timeout: float | None = None) -> bool: ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
 
 
 def credentials_from_env() -> tuple[str, str] | None:
-    """Zugangsdaten des Dienstes am lokalen Bus (Plan G2b-1 Task 7): Datei aus SHG_BUS_CREDENTIALS, geschrieben vom
+    """Zugangsdaten des Dienstes am lokalen Bus: Datei aus SHG_BUS_CREDENTIALS, geschrieben vom
     Init-Schritt. Ohne Variable anonym (Tests). Gesetzt, aber unlesbar: Fehler, damit Compose den Dienst neu startet
     statt ihn anonym (und damit abgewiesen) laufen zu lassen."""
     path = os.environ.get("SHG_BUS_CREDENTIALS")
@@ -95,6 +98,11 @@ class LocalBus:
     def on_connected(self, hook: Callable[[], None]) -> None:
         self._hooks.append(hook)
 
+    def off_connected(self, hook: Callable[[], None]) -> None:
+        """Nimmt den Hook zurueck (ein Kreis, der neu startet, haengt sonst bei jedem Verbund einen Hook mehr an)."""
+        with contextlib.suppress(ValueError):
+            self._hooks.remove(hook)
+
     def wait_connected(self, timeout: float | None = None) -> bool:
         return self._connected.wait(timeout)
 
@@ -116,7 +124,7 @@ class LocalBus:
             self._connected.set()
         for topic_filter in filters:
             client.subscribe(topic_filter, qos=1)
-        for hook in self._hooks:
+        for hook in list(self._hooks):
             try:
                 hook()
             except Exception:

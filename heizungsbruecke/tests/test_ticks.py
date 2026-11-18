@@ -3,13 +3,15 @@ from types import SimpleNamespace
 
 import pytest
 from bindung_beispiele import VAILLANT_MYPYLLANT
-from fakes import FakeHa, FakeMqttChannel
+from fakes import FakeHa, FakeMqttChannel, FakeNotifySink
 
 from heizungsbruecke.ha_binding import HaPlantBinding
 from smartheat_core.pipeline import DeviceWriteError, LeverPipeline
 from smartheat_core.safety import LocalSafety
 from smartheat_runtime import delivery, ticks
+from smartheat_runtime.notifier import Notifier
 from smartheat_runtime.roles import ChannelManifest
+from smartheat_runtime.texts import HA_TEXTS
 
 SETTLE = VAILLANT_MYPYLLANT.settle_seconds
 
@@ -24,12 +26,13 @@ def _safety(heat_limit_max=20.0):
     )
 
 
-def _rt(ha, manifest, store, override=None, mqtt=None, clock=None):
-    """Laufzeit-Sicht von ticks._attempt mit echter Pipeline (Vaillant) und dem MQTT-Kanal als Port (A5-25)."""
+def _rt(ha, manifest, store, override=None, mqtt=None, clock=None, zone_prepared=True):
+    """Laufzeit-Sicht von ticks._attempt mit echter Pipeline (Vaillant) und dem MQTT-Kanal als Port.
+    zone_prepared: die Zone wurde in diesem Prozess vorbereitet (Runtime.zone_prepared)."""
     if override is None:
         override = LeverPipeline(store, HaPlantBinding(ha, manifest, VAILLANT_MYPYLLANT), _safety(), clock=clock)
     return SimpleNamespace(manifest=manifest, signals=ha, mqtt_client=mqtt, store=store, override=override,
-                           manual_override_seq=None, manual_override_sent=None)
+                           manual_override_seq=None, manual_override_sent=None, zone_prepared=zone_prepared, config=SimpleNamespace(kreis=1))
 
 
 @pytest.mark.parametrize("mqtt", [None, FakeMqttChannel(connected=False)], ids=["ohne-kanal", "getrennt"])
@@ -55,6 +58,69 @@ def test_snapshot_uses_restore_point_when_zone_is_off(make_store, clock, zone, e
     assert [s["levers"] for s in mqtt.snapshots] == [{"room_setpoint": expected}]
 
 
+def test_ruhende_zone_beim_ersten_start_nimmt_das_raum_soll(make_store, clock):
+    """Zone vorbereitet, ruht (liest 0), und es gibt noch keinen Wiederherstellungspunkt (erster Start): der
+    Snapshot meldet das stabile Raum-Soll statt eines Datenfehlers; der Wiederherstellungspunkt bleibt leer (ihn
+    schreibt erst die Antwort des Servers)."""
+    ha = FakeHa()
+    ha.states["climate.zone::temperature"] = 0.0
+    manifest = ChannelManifest(refs={"room_target": "sensor.room_target", "shift_current": "climate.zone::temperature"})
+    store = make_store()
+    store.update(stable_target=21.0)
+    mqtt = FakeMqttChannel()
+    rt = _rt(ha, manifest, store, mqtt=mqtt, clock=clock)
+    clock.advance(SETTLE + 1)
+
+    assert ticks._attempt(rt, "s1", "daily") == delivery.Published(seq="s1")
+    assert [s["levers"] for s in mqtt.snapshots] == [{"room_setpoint": 21.0}]
+    assert store.state.restore_point == {}
+
+
+def test_ruhende_nie_vorbereitete_zone_ohne_wiederherstellungspunkt_bleibt_ein_datenfehler(make_store, clock):
+    """Gegenprobe: ist die Zone in diesem Prozess nie vorbereitet worden, gilt der
+    Rueckfall auf das Raum-Soll nicht; der Snapshot bleibt zurueckgehalten. Sonst stellte die Antwort des Servers
+    die Zone ausserhalb des Kontingents `zone_prepare` um."""
+    ha = FakeHa()
+    ha.states["climate.zone::temperature"] = 0.0
+    manifest = ChannelManifest(refs={"room_target": "sensor.room_target", "shift_current": "climate.zone::temperature"})
+    store = make_store()
+    store.update(stable_target=21.0)
+    mqtt = FakeMqttChannel()
+    rt = _rt(ha, manifest, store, mqtt=mqtt, clock=clock, zone_prepared=False)
+    clock.advance(SETTLE + 1)
+
+    assert ticks._attempt(rt, "s1", "daily") == delivery.ReadInvalid(seq="s1", roles=("room_setpoint",))
+    assert mqtt.snapshots == []
+
+
+def test_ruhende_zone_ohne_wiederherstellungspunkt_und_ohne_raum_soll_bleibt_ein_datenfehler(make_store, clock):
+    """Gegenprobe: ohne stabiles Raum-Soll gibt es nichts zu melden, der Snapshot wird zurueckgehalten."""
+    ha = FakeHa()
+    ha.states["climate.zone::temperature"] = 0.0
+    manifest = ChannelManifest(refs={"room_target": "sensor.room_target", "shift_current": "climate.zone::temperature"})
+    mqtt = FakeMqttChannel()
+    rt = _rt(ha, manifest, make_store(), mqtt=mqtt, clock=clock)
+    clock.advance(SETTLE + 1)
+
+    assert ticks._attempt(rt, "s1", "daily") == delivery.ReadInvalid(seq="s1", roles=("room_setpoint",))
+    assert mqtt.snapshots == []
+
+
+def test_ruhende_zone_bevorzugt_den_wiederherstellungspunkt_vor_dem_raum_soll(make_store, clock):
+    """Gegenprobe: der Rueckfall auf das Raum-Soll gilt nur ohne Wiederherstellungspunkt."""
+    ha = FakeHa()
+    ha.states["climate.zone::temperature"] = 0.0
+    manifest = ChannelManifest(refs={"room_target": "sensor.room_target", "shift_current": "climate.zone::temperature"})
+    store = make_store(backup={"restore_point": {"room_setpoint": 19.0}})
+    store.update(stable_target=21.0)
+    mqtt = FakeMqttChannel()
+    rt = _rt(ha, manifest, store, mqtt=mqtt, clock=clock)
+    clock.advance(SETTLE + 1)
+
+    assert ticks._attempt(rt, "s1", "daily") == delivery.Published(seq="s1")
+    assert [s["levers"] for s in mqtt.snapshots] == [{"room_setpoint": 19.0}]
+
+
 class _StaleZoneHa:
     """mypyllant nach dem Umstellen auf Manuell: HA zeigt bis zum naechsten Poll weiter den Sollwert
     des Zeitprogramms, eigene Schreibvorgaenge erscheinen noch nicht."""
@@ -78,12 +144,12 @@ class _StaleZoneHa:
 
 
 def test_first_start_snapshot_reports_the_written_start_shift_not_the_stale_zone(make_store, clock):
-    # Re-Review: _prime schreibt die Startverschiebung (21.0), der erzwungene Tick geht Sekunden spaeter
+    # _prime schreibt die Startverschiebung (21.0), der erzwungene Tick geht Sekunden spaeter
     # raus. Der Live-Read zeigt noch 18.0 aus dem Zeitprogramm; der Server-Erstkontakt wuerde 18
     # uebernehmen und mit seiner Antwort die 21 ueberschreiben.
     manifest = ChannelManifest(refs={
         "room_target": "sensor.room_target", "curve_current": "number.curve",
-        "shift_current": "climate.zone::temperature", "min_flow": "number.min_flow",
+        "shift_current": "climate.zone::temperature",
     })
     ha, store, mqtt = _StaleZoneHa(), make_store(), FakeMqttChannel()
     override = LeverPipeline(store, HaPlantBinding(ha, manifest, VAILLANT_MYPYLLANT), _safety(), clock=clock)
@@ -123,7 +189,7 @@ class _LaggingPlantHa:
 
 
 def test_snapshot_reports_all_own_writes_until_settled_then_the_live_values(make_store, clock):
-    # Audit 3, A3-02: der Tagestick vergleicht curve/heat_limit mit den zuletzt gesendeten Werten
+    # Der Tagestick vergleicht curve/heat_limit mit den zuletzt gesendeten Werten
     # ("Anlage folgt nicht"). Kurz nach einem eigenen Schreiben zeigt HA noch die alten Werte; ohne diese Regel
     # zaehlte eine Soll-Absenkung kurz vor dem Tagestick als Abweichung. Einschwingzeit Vaillant: 2100 s.
     manifest = ChannelManifest(refs={
@@ -151,11 +217,88 @@ def test_snapshot_reports_all_own_writes_until_settled_then_the_live_values(make
 
 
 def test_write_fault_detail_names_the_lever():
-    # Ersetzt test_write_fault_detail_keeps_the_role_names_of_the_customer_text (Controller-Ruling Task 10, Spec
-    # P2-3): Datenfehler nennen Hebel; der Detailtext ist der von DeviceWriteError ("curve (number.x): Ursache").
+    # Datenfehler nennen Hebel; der Detailtext ist der von DeviceWriteError ("curve (number.x): Ursache").
     error = DeviceWriteError("curve", "number.curve", RuntimeError("myVAILLANT-Cloud nicht erreichbar"))
     assert str(error) == "curve (number.curve): myVAILLANT-Cloud nicht erreichbar"
     error = DeviceWriteError("room_setpoint", "climate.zone::temperature", RuntimeError("x" * 300))
     assert str(error) == "room_setpoint (climate.zone::temperature): " + "x" * 200
     error = DeviceWriteError("heat_limit", "number.hl", RuntimeError("weg"))
     assert str(error) == "heat_limit (number.hl): weg"
+
+
+# --- Gruende aus der Serverantwort ---
+
+class _FakeWorker:
+    def schedule(self, delay_s, event):
+        return 0
+
+
+def _rt_mit_offenem_tick(make_store, clock):
+    """Laufzeit-Sicht von handle_setpoints: echte Pipeline, echter Notifier mit FakeNotifySink, offener Tick s1."""
+    manifest = ChannelManifest(refs={"room_target": "sensor.room_target", "shift_current": "number.shift_current"})
+    store = make_store(failsafe={"failsafe_active": False, "datenfehler": None,
+                                 "pending": {"seq": "s1", "trigger": "daily"}})
+    sink = FakeNotifySink()
+    rt = _rt(FakeHa(), manifest, store, clock=clock)
+    rt.notifier, rt.texts, rt.worker = Notifier(store, sink), HA_TEXTS, _FakeWorker()
+    return rt, sink
+
+
+def _server_grund(rt):
+    return rt.store.state.delivery.datenfehler.detail[0]
+
+
+def test_riesige_ungueltige_antwort_gibt_nur_einen_code(make_store, clock):
+    """Der Server liefert ungueltige `levers` von 130 KB; Datenfehler, Push und Speicher tragen nur den Code, nie
+    einen Teil der Antwort."""
+    rt, sink = _rt_mit_offenem_tick(make_store, clock)
+
+    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "ok", "levers": {"curve": "x" * 130_000}})
+
+    assert _server_grund(rt) == "antwort_ungueltig"
+    (_, meldung) = sink.pushes[-1]
+    assert len(meldung) < 400 and "xxxx" not in meldung
+    assert len(str(rt.store.state.notify_meldungen["datenfehler"])) < 400
+
+
+def test_riesiges_unbekanntes_schema_gibt_nur_einen_code(make_store, clock):
+    rt, _ = _rt_mit_offenem_tick(make_store, clock)
+
+    ticks.handle_setpoints(rt, {"seq": "s1", "schema": "x" * 130_000})
+
+    assert _server_grund(rt) == "antwort_schema_unbekannt"
+
+
+@pytest.mark.parametrize("kreis", [2, 0, True, "1", 1.0, None, "fehlt"])
+def test_antwort_eines_anderen_oder_unbrauchbaren_kreises_schreibt_nichts_und_ist_ein_serverfehler(
+        make_store, clock, kreis):
+    """Der Worker eines Kreises nimmt nur Antworten seines eigenen Kreises an (Randwert: Kreis 1 gilt, jeder andere nicht)."""
+    rt, _ = _rt_mit_offenem_tick(make_store, clock)
+    antwort = {"seq": "s1", "schema": 5, "status": "ok", "levers": {"curve": 1.0, "room_setpoint": 20.0}}
+    if kreis != "fehlt":
+        antwort["kreis"] = kreis
+
+    ticks.handle_setpoints(rt, antwort)
+
+    assert _server_grund(rt) == "antwort_kreis_unpassend"
+    assert rt.signals.writes == []
+
+
+@pytest.mark.parametrize("code", ["wert_unplausibel", "a", "a" * 64])
+def test_ablehnungscode_mit_der_form_eines_codes_wird_uebernommen(make_store, clock, code):
+    rt, _ = _rt_mit_offenem_tick(make_store, clock)
+
+    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "code": code, "params": {}})
+
+    assert _server_grund(rt) == code
+
+
+@pytest.mark.parametrize("code", ["a" * 65, "Gross", "mit leerzeichen", "1zahl", "x\ny", "unplausibler Wert: 99", 5, None])
+def test_ablehnungscode_ohne_die_form_eines_codes_wird_nicht_uebernommen(make_store, clock, code):
+    """Fremder Text aus der Antwort kommt nie in Datenfehler, Push oder Speicher; Randwert: 64 Zeichen gelten, 65 nicht."""
+    rt, sink = _rt_mit_offenem_tick(make_store, clock)
+
+    ticks.handle_setpoints(rt, {"seq": "s1", "schema": 5, "kreis": 1, "status": "rejected", "code": code})
+
+    assert _server_grund(rt) == "grund_fehlt"
+    assert "grund_fehlt" in sink.pushes[-1][1]
