@@ -70,7 +70,9 @@ def test_claim_code_uses_80_bits_of_randomness():
 
 
 @pytest.mark.parametrize("alt", ["ABCDEFGHIJKL", "ABCDEFGHIJKLMNOP1", "abcdefghijklmnop", "ABCD-EFGH-IJKL-MNOP", ""])
-def test_a_stored_code_of_the_wrong_shape_is_replaced_and_logged_without_the_code(tmp_path, caplog, alt):
+def test_a_stored_code_of_the_wrong_shape_is_kept_and_logged_without_the_code(tmp_path, caplog, alt):
+    """Der Server kennt nur den Hash des alten Codes: ihn zu ersetzen, ohne den neuen zu melden, machte ein nicht
+    uebernommenes Geraet unuebernehmbar. Das Geraet (Device) meldet den neuen Code und speichert ihn danach."""
     identity.load_or_create(tmp_path)
     pfad = tmp_path / identity.CLAIM_CODE_FILE
     pfad.write_text(alt)
@@ -79,11 +81,10 @@ def test_a_stored_code_of_the_wrong_shape_is_replaced_and_logged_without_the_cod
     with caplog.at_level("WARNING"):
         ident = identity.load_or_create(tmp_path, lambda n: bytes(range(n)))
 
-    assert ident.claim_code == "AAAQEAYEAUDAOCAJ" == pfad.read_text()
-    assert stat.S_IMODE(pfad.stat().st_mode) == 0o600
+    assert ident.claim_code == alt == pfad.read_text()
+    assert not identity.code_gueltig(ident.claim_code)
     assert any(r.levelname == "WARNING" for r in caplog.records)
     assert not alt or alt not in caplog.text
-    assert "AAAQEAYEAUDAOCAJ" not in caplog.text
 
 
 def test_a_stored_code_of_the_right_shape_stays(tmp_path):
