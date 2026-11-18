@@ -481,7 +481,7 @@ def test_ein_schon_festgehaltenes_ende_setzt_den_zustand_ohne_offenen_soll_merke
 
 
 def test_die_gescheiterte_wiederherstellung_wird_kritisch_gemeldet():
-    notifier = MagicMock()
+    notifier = MagicMock(spec=Notifier)
 
     abo.report_restore(notifier, ok=False)
 
