@@ -828,6 +828,110 @@ def test_neuer_uebernahme_code_meldet_neu_uebernommen_und_keine_verbindung(tmp_p
     assert bootstrap.device_state(world.dir) == "uebernommen"
 
 
+ALTER_CODE = "ABCDEFGHIJKL"  # Form aelterer Staende: zu kurz
+
+
+def _welt_mit_altem_code(tmp_path, *, state=None, **kwargs):
+    """Eine Welt, deren Code-Datei die alte Form hat; state: gespeicherter Uebernahmestand (nur mit Zugang)."""
+    geraete_dir = tmp_path / device.DEVICE_DIR
+    identity.load_or_create(geraete_dir)
+    (geraete_dir / identity.CLAIM_CODE_FILE).write_text(ALTER_CODE)
+    world = World(tmp_path, **kwargs)
+    if state is not None:
+        bootstrap.device_state_speichern(world.dir, state)
+    return world
+
+
+def _hash_stimmt(world, ident):
+    return (identity.code_gueltig(ident.claim_code) and ident.claim_code != ALTER_CODE
+            and wire.claim_code_hash(ident.device_id, ident.claim_code)
+            == wire.claim_code_hash(world.device.identity.device_id, world.device.identity.claim_code))
+
+
+def test_ein_registriertes_geraet_meldet_den_neuen_code_statt_ihn_nur_zu_speichern(tmp_path):
+    """Code alter Form, Zugang vorhanden, nicht uebernommen: register mit dem Hash des neuen Codes, erst danach
+    gespeichert; der Zugang bleibt, der Link steht."""
+    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+    assert world.device.identity.claim_code == ALTER_CODE  # beim Laden nicht ueberschrieben
+    world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
+    world.device.schritt()
+    assert [call[0] for call in world.client.calls] == ["register"]
+    gemeldet = world.client.idents[-1]
+    assert _hash_stimmt(world, gemeldet)
+    assert world.device.identity.claim_code == gemeldet.claim_code
+    assert identity.load_or_create(world.dir).claim_code == gemeldet.claim_code
+    assert bootstrap.laden(world.dir) == world.zugang and world.link.started
+    world.device.schritt()
+    assert len(world.client.calls) == 1  # fertig, kein zweites register
+
+
+def test_ein_gescheitertes_melden_laesst_den_alten_code_und_wird_mit_pause_wiederholt(tmp_path):
+    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+    world.client.script["register"] = [bootstrap.Unavailable("register: HTTP 503"),
+                                       bootstrap.Antwort("nicht_uebernommen", world.zugang)]
+    world.device.schritt()
+    assert len(world.client.calls) == 1
+    assert world.device.identity.claim_code == ALTER_CODE
+    assert identity.load_or_create(world.dir).claim_code == ALTER_CODE
+    world.device.schritt()
+    assert len(world.client.calls) == 1  # Pause: nicht jeder Takt
+    world.clock.now += bootstrap.RETRY_MAX_SECONDS
+    world.device.schritt()
+    assert len(world.client.calls) == 2
+    neu = world.client.idents[-1].claim_code
+    assert identity.code_gueltig(neu) and neu != ALTER_CODE
+    assert world.device.identity.claim_code == neu == identity.load_or_create(world.dir).claim_code
+
+
+def test_ein_uebernommenes_geraet_mit_altem_code_meldet_nichts(tmp_path):
+    world = _welt_mit_altem_code(tmp_path, state="uebernommen")
+    for _ in range(3):
+        world.device.schritt()
+        world.clock.now += bootstrap.RETRY_MAX_SECONDS
+    assert world.client.calls == []
+    assert world.device.identity.claim_code == ALTER_CODE
+
+
+def test_die_antwort_uebernommen_beendet_das_melden_ohne_den_code_zu_speichern(tmp_path):
+    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+    world.client.script["register"] = [bootstrap.Antwort("uebernommen", world.zugang)]
+    for _ in range(3):
+        world.device.schritt()
+        world.clock.now += bootstrap.RETRY_MAX_SECONDS
+    assert len(world.client.calls) == 1
+    assert bootstrap.device_state(world.dir) == "uebernommen"
+    assert world.device.identity.claim_code == ALTER_CODE
+
+
+def test_ein_gesperrtes_geraet_fragt_den_server_nicht_in_jedem_takt(tmp_path):
+    """Antwortet der Server mit einem Stand ausser nicht_uebernommen und uebernommen (gesperrt), bleibt der alte Code
+    und das Geraet fragt erst nach der langen Pause wieder, nicht in jedem Takt."""
+    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+    world.client.script["register"] = [bootstrap.Antwort("gesperrt", world.zugang),
+                                       bootstrap.Antwort("gesperrt", world.zugang)]
+    for _ in range(5):
+        world.device.schritt()
+        world.clock.now += bootstrap.RETRY_MIN_SECONDS
+    assert len(world.client.calls) == 1
+    assert world.device.identity.claim_code == ALTER_CODE
+    world.clock.now += bootstrap.RETRY_MAX_SECONDS
+    world.device.schritt()
+    assert len(world.client.calls) == 2
+
+
+def test_ein_geraet_ohne_zugang_und_mit_altem_code_registriert_sich_gleich_mit_einem_neuen(tmp_path):
+    world = _welt_mit_altem_code(tmp_path, access=False)
+    world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
+    world.device.schritt()
+    assert [call[0] for call in world.client.calls] == ["register"]
+    gemeldet = world.client.idents[-1]
+    assert identity.code_gueltig(gemeldet.claim_code) and gemeldet.claim_code != ALTER_CODE
+    assert world.device.identity.claim_code == gemeldet.claim_code
+    assert identity.load_or_create(world.dir).claim_code == gemeldet.claim_code
+    world.device.schritt()
+    assert len(world.client.calls) == 1
+
+
 @pytest.mark.parametrize(("ergebnis", "antwort"), [
     ("neu", None), ("keine_verbindung", {"grund": "intern"}), ("uebernommen", {"grund": "bereits_uebernommen"})])
 def test_new_claim_code_befehl_unveraendert(tmp_path, ergebnis, antwort):
