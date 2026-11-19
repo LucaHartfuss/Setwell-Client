@@ -60,7 +60,8 @@ def _boot(konfiguration, tmp_path, abgemeldet=False):
 
 
 def test_fields_are_contract_fields():
-    assert set(dc.FELDER) <= set(wire.KONFIGURATION_FIELDS)
+    assert set(dc.FELDER) <= set(wire.KONFIGURATION_FIELDS) | set(wire.KONFIGURATION_PROGRAMM)
+    assert "zeitzone" in dc.FELDER
     assert set(dc.LAUFZEIT_FELDER) <= set(dc.FELDER)
 
 

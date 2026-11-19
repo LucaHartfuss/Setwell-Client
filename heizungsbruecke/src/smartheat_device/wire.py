@@ -184,6 +184,19 @@ KREIS_ZUSTAENDE = ("in_betrieb", "ausser_betrieb", "testphase_ohne")
 BEDIENUNG_FIELDS = ("schema", "version", "kreise", "quelle", "ts")
 BEDIENUNG_KREIS_FIELDS = ("kreis", "modus", "raum_soll")  # ein Eintrag je Kreis, Nummern aufsteigend und einmalig
 MODI = ("manuell",)
+# Felder der Faehigkeit `programm` (Wochenplan, Away, Leerstand, Uebersteuerung): eigene Konstanten neben den Grundfeldern, weil
+# ein Geraet ohne die Faehigkeit keines davon bekommt und strikt prueft; Fixture `geraet_v1.json` fuehrt dieselben Werte.
+KONFIGURATION_PROGRAMM = ("zeitzone",)  # anlagenweit, zusaetzlich zu KONFIGURATION_FIELDS
+KONFIGURATION_KREIS_PROGRAMM = ("aufheizen", "absenkung_k", "aufheizdauer_min")
+AUFHEIZDAUER_MIN_FIELDS = ("plan", "weg")
+#: Obergrenze der Aufheizdauer in Minuten, in der Reihenfolge von `AUFHEIZDAUER_MIN_FIELDS`: `plan` 12 h, `weg` 72 h. Ein
+#: gelernter oder gemeldeter Wert darueber wird gekappt (Entscheidung des Nutzers; eine andere Zahl braucht eine neue).
+AUFHEIZDAUER_MIN_GRENZE = (720, 4320)
+AUFHEIZEN_ARTEN = ("boost", "kurve")
+#: Absenkung der kuehlen Phase (Regel 4, freigegeben): 0 bis 5 K in Schritten von 0,5 K.
+ABSENKUNG_K_MIN = 0.0
+ABSENKUNG_K_MAX = 5.0
+ABSENKUNG_K_STEP = 0.5
 # Anzeige: ein Eintrag je Kreis der Konfiguration, nur Host ha; der Server schreibt, das Geraet zeigt und prueft den
 # vollen Feldsatz (einlernphase_tag, testphase_bis null = nicht aktiv; befunde, aufgaben, raumziele leere Listen;
 # kennzahlen leeres Objekt)
@@ -265,6 +278,7 @@ PRUEF_REGELN = ("fehlt", "ungueltig", "anzahl", "bereich", "format", "doppelt", 
 #: pruefbar).
 PRUEF_FELDER = tuple(dict.fromkeys((
     *KONFIGURATION_FIELDS, *KONFIGURATION_KREIS_FIELDS, *KONFIGURATION_KREIS_OPTIONAL, *KONFIGURATION_RAUM_FIELDS,
+    *KONFIGURATION_PROGRAMM, *KONFIGURATION_KREIS_PROGRAMM, *AUFHEIZDAUER_MIN_FIELDS,
     *BINDUNGSPARAMETER_FIELDS, *SCHREIBSCHUTZ_FIELDS,
     *BINDUNG_GATEWAY_FIELDS, *TREIBER_FIELDS, *BINDUNG_HA_FIELDS, *BINDUNG_HA_OPTIONAL, *KREIS_FIELDS, *KREIS_OPTIONAL,
     *HA_ROLLEN,

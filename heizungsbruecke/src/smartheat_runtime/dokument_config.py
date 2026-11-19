@@ -26,7 +26,7 @@ from smartheat_runtime.plan_quelle import PlanEingabe
 from smartheat_runtime.runtime_config import BootInfo, RuntimeConfig
 from smartheat_runtime.windows import validate_daily_trigger_time
 
-FELDER = ("anlage", "anlage_name", "weg", "kreise", "tagestick", "bindungsparameter")
+FELDER = ("anlage", "anlage_name", "weg", "kreise", "tagestick", "bindungsparameter", "zeitzone")
 #: Aendert sich eines davon, startet der Host die Laufzeit neu (software, mindest_software und Anlagenname nicht).
 #: Die Kreise gehoeren dazu (Bindung, Raeume, Hebelsatz, Verteilsystem, Abo), aber ohne die gespiegelten
 #: Ursprungswerte; die Bindungsparameter auch: Schritte, Toleranzen, Wartezeit und Schreibschutz kommen nur von dort.
