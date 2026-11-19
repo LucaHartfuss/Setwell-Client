@@ -1,0 +1,11 @@
+#!/bin/bash
+# postbuild-Hook vor postbuild50-rootfs-checks (der Runner nimmt die Hooks in Glob-Reihenfolge): kein statischer Hostname
+# im Image. rpi-image-gen gibt device.hostname als --hostname an bdebstrap (rpi-image-gen:320, Commit d2d5705), und
+# bdebstrap schreibt /etc/hostname als letzten customize-Hook, also nach hostname_default.sh des Layers. Erst hier, nach
+# bdebstrap, nimmt hostname_default.sh die Datei wirklich weg (idempotent; der Lauf im Layer bleibt fuer die Teilpruefung von
+# customize.sh). Die Zeilen im Baulog sind die Gegenprobe gegen stilles Ignorieren (wie postbuild50-rootfs-checks).
+set -euo pipefail
+R="${1:?Root-Dateisystem fehlt}"
+HERE="$(cd "$(dirname "$0")/.." && pwd)"  # <SRCROOT>: der Runner startet den Hook in seinem eigenen Ordner
+echo "postbuild40-hostname: $R"
+bash "$HERE/hostname_default.sh" "$R"

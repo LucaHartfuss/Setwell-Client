@@ -403,7 +403,8 @@ def test_no_tenant_ids_in_image_files():
 
 
 HOOK_NAME = re.compile(r"^(preimage|postbuild|finalize|deploy)[0-9]{2}-[a-zA-Z0-9-]+$")
-HOOKS = ("preimage50-werk", "postbuild50-rootfs-checks", "finalize10-bootfs-checks", "deploy50-slot-images")
+HOOKS = ("preimage50-werk", "postbuild40-hostname", "postbuild50-rootfs-checks", "finalize10-bootfs-checks",
+         "deploy50-slot-images")
 
 
 def test_source_tree_hooks_are_found_and_executable():
@@ -740,6 +741,24 @@ def test_hostname_hook_removes_the_static_hostname_and_sets_the_images_fallback_
     assert lines.count("DEFAULT_HOSTNAME=smartheat-gateway") == 1 and not [ln for ln in lines if ln == "DEFAULT_HOSTNAME=localhost"]
     assert "ID=debian" in lines
     assert _hostname_hook(root).returncode == 0 and (root / "usr/lib/os-release").read_text().splitlines() == lines  # idempotent
+
+
+def test_postbuild_hostname_hook_removes_the_hostname_that_bdebstrap_writes_last(tmp_path):
+    """rpi-image-gen gibt device.hostname als --hostname an bdebstrap (rpi-image-gen:320, Commit d2d5705); bdebstrap
+    schreibt /etc/hostname als letzten customize-Hook, nach dem des Layers. Erst der postbuild-Hook vor den Rootfs-Pruefungen
+    nimmt die Datei wirklich weg (Labor-Bau 0.9.0 am 2026-11-19 scheiterte daran)."""
+    assert sorted(["postbuild40-hostname", "postbuild50-rootfs-checks"])[0] == "postbuild40-hostname"  # Runner: Glob-Reihenfolge
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "usr/lib").mkdir(parents=True)
+    (root / "etc/hostname").write_text("smartheat-gateway\n")
+    (root / "usr/lib/os-release").write_text("ID=debian\nDEFAULT_HOSTNAME=smartheat-gateway\n")
+    result = _run_hook("postbuild40-hostname", str(root))
+    assert result.returncode == 0, result.stderr
+    assert not (root / "etc/hostname").exists() and not (root / "etc/hostname").is_symlink()
+    assert (root / "usr/lib/os-release").read_text().splitlines().count("DEFAULT_HOSTNAME=smartheat-gateway") == 1
+    assert "postbuild40-hostname:" in result.stdout  # Gegenprobe im Baulog gegen stilles Ignorieren
+    assert _run_hook("postbuild40-hostname").returncode != 0  # ohne Root-Dateisystem laut
 
 
 def test_hostname_hook_needs_os_release_and_the_fallback_name_is_the_configured_hostname(tmp_path):
