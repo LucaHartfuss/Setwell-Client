@@ -2,6 +2,9 @@
 
 ## Unveroeffentlicht
 
+- Werks-Image: `/etc/hostname` fehlt jetzt wirklich (Hook `postbuild40-hostname` nach bdebstrap). Vorher schrieb
+  bdebstrap die Datei nach dem Layer-Hook neu; die Rootfs-Pruefung brach den Bau ab.
+
 - Das Geraet nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
   (`smartheat_device/anker.pem`, aktiver Schluessel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
   loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Frostschutz laufen unveraendert
