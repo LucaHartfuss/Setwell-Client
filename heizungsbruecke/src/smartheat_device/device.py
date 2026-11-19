@@ -49,7 +49,8 @@ SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
 #: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
 ENTFERNT_WIEDERHOLUNG_SECONDS = 60
-#: Hinweis des Geraets, wenn Away aus HA nicht uebernommen wurde (Parameter `grund`: einer der festen Codes unten).
+#: Lokaler Hinweis im Statusereignis an HA (kein Draht-Key, nie eine Meldung an den Server), wenn Away aus HA nicht
+#: uebernommen wurde (Parameter `grund`: einer der festen Codes unten).
 ABWESEND_ABGELEHNT_KEY = "abwesend_abgelehnt"
 #: Feste Gruende, nie ein Wert: Kreis ohne Bedienung, Rueckkehrzeit, Temperatur, Urheber, Leerstand, Ende ohne Away.
 ABGELEHNT_KREIS = "kreis"
@@ -164,6 +165,7 @@ class Device:
         self._code_fehler = 0
         self._kanaele: dict[int, RuntimeChannel] = {}  # je Kreis ein Kanal ueber denselben Link
         self._eigene: dict[str, meldungen.Meldung] = {}  # eigene Meldungen des Geraets: key -> Meldung
+        self._abwesend_hinweis: meldungen.Meldung | None = None  # lokal, nie an den Server (nur im Statusereignis an HA)
         self._meldungen: dict[str, dict] = {}  # offene Meldungen (Geraet und Laufzeit)
         self._meldungen_neu: dict[str, dict] = {}  # geaendert, noch nicht gesendet
         self._meldungen_at: float | None = None
@@ -366,7 +368,7 @@ class Device:
 
     def abwesend_abgelehnt(self, grund: str) -> None:
         """Hinweis `abwesend_abgelehnt` mit dem festen Grund; er schliesst beim naechsten angenommenen Away."""
-        self._inbox.put(("eigene", ABWESEND_ABGELEHNT_KEY, meldungen.neu("meldung.abwesend_abgelehnt", grund=grund)))
+        self._inbox.put(("abwesend_hinweis", meldungen.neu("meldung.abwesend_abgelehnt", grund=grund)))
 
     def abo_status(self, kreis: int | None = None) -> str:
         """abo_source der Laufzeit (dokument_config.runtime_config): das Abo des Kreises, ohne Angabe des ersten."""
@@ -403,6 +405,8 @@ class Device:
             konfiguration_abgelehnt=(
                 meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))
                 if ablehnung is not None else None),
+            abwesend_abgelehnt=(meldungen.zu_dict(self._abwesend_hinweis)
+                                if self._abwesend_hinweis is not None else None),
             konto_hinweis=bootstrap.konto_hinweis(self._dir))
 
     # --- Geraete-Thread ---
@@ -453,6 +457,8 @@ class Device:
             self._abwesend_wunsch(*item[1:])
         elif quelle == "eigene":
             self._eigene_meldung(item[1], item[2])
+        elif quelle == "abwesend_hinweis":
+            self._abwesend_hinweis = item[1]
         elif quelle == "meldung":
             self._meldung_merken(item[1])
         elif quelle == "aufgabe":
@@ -857,8 +863,7 @@ class Device:
                        programm={"abwesend": abwesend})
         self.wunsch_puffer.setzen(neu)
         self.documents.mark_dirty()
-        if ABWESEND_ABGELEHNT_KEY in self._eigene:
-            self._eigene_meldung(ABWESEND_ABGELEHNT_KEY, None)
+        self._abwesend_hinweis = None
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:

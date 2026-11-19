@@ -39,8 +39,8 @@ def _eintrag(welt: World) -> dict:
     return welt.device.bedienung()["kreise"][0]
 
 
-def _hinweise(welt: World) -> list[dict]:
-    return [m for m in welt.host.anzeigen_liste[-1].meldungen if m["key"] == device.ABWESEND_ABGELEHNT_KEY]
+def _hinweis(welt: World) -> dict | None:
+    return welt.host.anzeigen_liste[-1].abwesend_abgelehnt
 
 
 def test_away_wirkt_ohne_server_auf_das_geltende_soll(tmp_path):
@@ -170,18 +170,30 @@ def test_die_lokale_wirkung_verdraengt_das_gespeicherte_dokument_nicht(tmp_path)
     assert welt.device.documents.inhalt("bedienung")["kreise"][0]["modus"] == "manuell"
 
 
-def test_die_ablehnung_ist_ein_hinweis_mit_festem_grund_und_schliesst_beim_naechsten_erfolg(tmp_path, monkeypatch):
-    monkeypatch.setattr(wire, "MELDUNGEN", (*wire.MELDUNGEN, device.ABWESEND_ABGELEHNT_KEY))
+def test_die_ablehnung_ist_ein_lokaler_hinweis_mit_festem_grund_und_schliesst_beim_naechsten_erfolg(tmp_path):
     welt = _welt(tmp_path)
+    assert wire.MELDUNGEN.count(device.ABWESEND_ABGELEHNT_KEY) == 0  # kein Draht-Key: nie eine Meldung an den Server
     welt.device.abwesend_abgelehnt(device.ABGELEHNT_TEMP)
     welt.device.schritt()
-    (hinweis,) = _hinweise(welt)
+    hinweis = _hinweis(welt)
+    assert hinweis is not None
     assert (hinweis["code"], hinweis["params"], hinweis["stufe"]) == (
         "meldung.abwesend_abgelehnt", {"grund": "temp"}, "orange")
-    assert any(m["key"] == device.ABWESEND_ABGELEHNT_KEY for m in welt.link.of("up/notifications")[-1]["items"])
+    assert not any(m["key"] == device.ABWESEND_ABGELEHNT_KEY
+                   for sendung in welt.link.of("up/notifications") for m in sendung["items"])
     assert welt.device.abwesend_setzen(1, BIS, 16.0, None) is None
     welt.device.schritt()
-    assert _hinweise(welt) == []
+    assert _hinweis(welt) is None
+
+
+def test_das_angenommene_ende_schliesst_den_hinweis(tmp_path):
+    welt = _welt(tmp_path, modus="abwesend", abwesend={"bis": BIS_TEXT, "temp": 16.0, "aufheizen_ab": None})
+    welt.device.abwesend_abgelehnt(device.ABGELEHNT_BIS)
+    welt.device.schritt()
+    assert _hinweis(welt)["params"] == {"grund": "bis"}
+    assert welt.device.abwesend_beenden(1, None) is None
+    welt.device.schritt()
+    assert _hinweis(welt) is None
 
 
 def test_die_rueckkehrzeit_steht_in_keinem_logeintrag(tmp_path, caplog):

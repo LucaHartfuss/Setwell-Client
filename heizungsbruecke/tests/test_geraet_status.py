@@ -95,10 +95,10 @@ def test_abwesend_aus_der_bedienung_gilt_nur_im_modus_abwesend():
 
 
 def test_der_hinweis_abwesend_abgelehnt_steht_mit_code_und_grund_in_den_meldungen():
-    hinweis = {"key": "abwesend_abgelehnt", "code": "meldung.abwesend_abgelehnt", "params": {"grund": "bis"},
-               "stufe": "orange"}
-    liste = geraet_status.meldungen_liste(_anzeige(meldungen=(hinweis,)), kritisch=False)
+    hinweis = {"code": "meldung.abwesend_abgelehnt", "params": {"grund": "bis"}, "stufe": "orange"}
+    liste = geraet_status.meldungen_liste(_anzeige(abwesend_abgelehnt=hinweis), kritisch=False)
     assert liste and liste[0]["key"] == "abwesend_abgelehnt" and liste[0]["params"] == {"grund": "bis"}
+    assert geraet_status.meldungen_liste(_anzeige(), kritisch=False) == []
 
 
 def test_event_carries_runtime_and_device_fields():

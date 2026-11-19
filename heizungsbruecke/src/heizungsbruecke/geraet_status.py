@@ -43,6 +43,8 @@ LOKAL_KREIS_FIELDS = ("name", "raum_soll", "raum_ist", "einlernphase_tag", "test
 EVENT_FIELDS = (*status.ANLAGE_FELDER, *GERAET_FIELDS, "kreise")
 KREIS_EVENT_FIELDS = ("kreis", *LOKAL_KREIS_FIELDS, *status.KREIS_FELDER)
 KONFIGURATION_ABGELEHNT = "konfiguration_abgelehnt"
+#: Lokaler Hinweis (nicht in `wire.MELDUNGEN`): Away aus HA nicht uebernommen, mit festem Grund als Parameter.
+ABWESEND_ABGELEHNT = "abwesend_abgelehnt"
 #: HA nicht erreichbar: so lange Pause bis zum naechsten Versuch des Takts (wie discovery.RETRY_SECONDS: Log nicht fuellen).
 WIEDERHOLEN_SECONDS = 60
 #: Zustaende des Geraets, die einen Hinweis tragen, mit dem Code der Meldung (update_noetig: siehe `meldungen_liste`).
@@ -67,6 +69,9 @@ def meldungen_liste(anzeige: Anzeige, ende: str | None = None, *, kritisch: bool
     abgelehnt = meldungen.aus_dict(anzeige.konfiguration_abgelehnt)
     if abgelehnt is not None:
         result.append(meldung_daten(KONFIGURATION_ABGELEHNT, abgelehnt))
+    abwesend = meldungen.aus_dict(anzeige.abwesend_abgelehnt)
+    if abwesend is not None:
+        result.append(meldung_daten(ABWESEND_ABGELEHNT, abwesend))
     if anzeige.zustand == "update_noetig":
         result.append(meldung_daten("update_noetig", meldungen.update_noetig(kritisch=kritisch, ende=ende)))
     if anzeige.zustand in ZUSTAND_MELDUNGEN:
