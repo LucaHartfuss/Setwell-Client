@@ -101,6 +101,19 @@ class HaDeviceHost(GeraetHostBasis):
         """Worker-Thread des Kreises (raum.RaumPublisher): {ist, soll, soll_quelle, ts} fuer up/status."""
         self._raeume[kreis] = raum
 
+    # --- Away aus Home Assistant (geraet_trigger): der Geraetekern fuehrt aus, ohne Geraet gibt es nichts anzunehmen ---
+
+    def abwesend_setzen(self, kreis: int, bis, temp: float | None, durch: str | None) -> str | None:
+        """Worker-Thread des Kreises: None (angenommen) oder der feste Ablehnungsgrund des Geraetekerns."""
+        return self.device.abwesend_setzen(kreis, bis, temp, durch) if self.device is not None else "kreis"
+
+    def abwesend_beenden(self, kreis: int, durch: str | None) -> str | None:
+        return self.device.abwesend_beenden(kreis, durch) if self.device is not None else "kreis"
+
+    def abwesend_abgelehnt(self, grund: str) -> None:
+        if self.device is not None:
+            self.device.abwesend_abgelehnt(grund)
+
     # --- DeviceHost ---
 
     def faehigkeiten(self) -> dict:

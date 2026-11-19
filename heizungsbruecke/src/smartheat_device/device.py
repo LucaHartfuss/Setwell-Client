@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from smartheat_core import config_check, kreisansicht, meldungen
+from smartheat_core import config_check, kreisansicht, meldungen, safety
 from smartheat_core.logtext import lesbar
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_core.zeitquelle import echte_epoche, fachliche_epoche
@@ -49,6 +49,16 @@ SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
 #: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
 ENTFERNT_WIEDERHOLUNG_SECONDS = 60
+#: Hinweis des Geraets, wenn Away aus HA nicht uebernommen wurde (Parameter `grund`: einer der festen Codes unten).
+ABWESEND_ABGELEHNT_KEY = "abwesend_abgelehnt"
+#: Feste Gruende, nie ein Wert: Kreis ohne Bedienung, Rueckkehrzeit, Temperatur, Urheber, Leerstand, Ende ohne Away.
+ABGELEHNT_KREIS = "kreis"
+ABGELEHNT_BIS = "bis"
+ABGELEHNT_TEMP = "temp"
+ABGELEHNT_DURCH = "durch"
+ABGELEHNT_LEERSTAND = "leerstand"
+ABGELEHNT_KEIN_ABWESEND = "kein_abwesend"
+_ZEIT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 #: Down-Topic eines Dokuments -> Dokumentart (wire.DOKUMENT_TOPICS umgekehrt)
 _DOKUMENT_ART = {topic: art for art, topic in wire.DOKUMENT_TOPICS.items()}
 _RUNNING = ("regelt", "abo_inaktiv")
@@ -137,6 +147,11 @@ class Device:
         self.befehle.register("weg_pruefen", lambda _nutzlast: commands.Failed("nicht_unterstuetzt"))
         host.befehle_eintragen(self.befehle)
         self.wunsch_puffer = wish.WunschPuffer(self._dir, clock)
+        #: Away aus HA je Kreis, bis eine neue Bedienung des Servers kommt: {bis, temp, aufheizen_ab} oder None (beendet).
+        #: Nur im Speicher: nach einem Neustart ohne Server gilt wieder der Plan (die sichere Richtung).
+        self._abwesend_lokal: dict[int, dict | None] = {}
+        self._abwesend_temp: dict[int, float] = {}  # zuletzt gewaehlte Abwesenheitstemperatur je Kreis
+        self._abwesend_sperre = threading.Lock()  # Host-Thread (Rueckrufe) und Geraete-Thread
         self._bootstrap = bootstrap.Bootstrap(
             self._dir, lambda: self._client_for(self.identity), register_args=self._register_args,
             uhr_synchron=self._uhr_synchron, identity=lambda: self.identity, clock=clock)
@@ -275,7 +290,83 @@ class Device:
         return self.documents.inhalt(KONFIGURATION)
 
     def bedienung(self) -> dict | None:
-        return self.documents.inhalt(BEDIENUNG)
+        """Die Bedienung, wie sie jetzt gilt: das Dokument des Servers, darueber das Away, das HA lokal gesetzt oder
+        beendet hat und das der Server noch nicht bestaetigt hat. Das gespeicherte Dokument bleibt unveraendert."""
+        inhalt = self.documents.inhalt(BEDIENUNG)
+        with self._abwesend_sperre:
+            lokal = dict(self._abwesend_lokal)
+        if not lokal or not isinstance(inhalt, dict) or not isinstance(kreise := inhalt.get("kreise"), list):
+            return inhalt
+        return {**inhalt, "kreise": [self._mit_abwesend(eintrag, lokal) for eintrag in kreise]}
+
+    @staticmethod
+    def _mit_abwesend(eintrag, lokal: dict[int, dict | None]):
+        nummer = eintrag.get("kreis") if isinstance(eintrag, dict) else None
+        if type(nummer) is not int or nummer not in lokal:
+            return eintrag
+        abwesend = lokal[nummer]
+        if abwesend is None:
+            return {**eintrag, "modus": "manuell", "abwesend": None}
+        return {**eintrag, "modus": "abwesend", "abwesend": dict(abwesend)}
+
+    def _kreis_eintrag(self, kreis: int) -> dict | None:
+        inhalt = self.documents.inhalt(BEDIENUNG)
+        kreise = inhalt.get("kreise") if isinstance(inhalt, dict) else None
+        for eintrag in kreise if isinstance(kreise, list) else ():
+            if isinstance(eintrag, dict) and type(eintrag.get("kreis")) is int and eintrag["kreis"] == kreis:
+                return eintrag
+        return None
+
+    def abwesend_setzen(self, kreis: int, bis: datetime, temp: float | None, durch: str | None) -> str | None:
+        """Away aus HA (Host-Thread): wirkt sofort und ohne Server in der Planrechnung und geht als Bedienwunsch mit
+        Herkunft `ha` zum Server. `temp` None: der zuletzt gewaehlte Wert des Kreises. Rueckgabe: None (angenommen) oder
+        der feste Grund der Ablehnung (ABGELEHNT_*), nie ein Wert."""
+        try:
+            wish.pruefen_herkunft("ha", durch)
+            wish.pruefen_kreis(kreis)
+        except ValueError:
+            return ABGELEHNT_DURCH if durch is not None and durch not in wire.DURCH else ABGELEHNT_KREIS
+        eintrag = self._kreis_eintrag(kreis)
+        if eintrag is None:
+            return ABGELEHNT_KREIS
+        if eintrag.get("modus") == "leerstand":
+            return ABGELEHNT_LEERSTAND
+        if not isinstance(bis, datetime) or not safety.abwesend_bis_gueltig(bis, datetime.fromtimestamp(self._wall(), UTC)):
+            return ABGELEHNT_BIS
+        with self._abwesend_sperre:
+            wert = temp if temp is not None else self._abwesend_temp.get(kreis, eintrag.get("abwesend_temp_standard"))
+            if isinstance(wert, bool) or not isinstance(wert, int | float) or not safety.abwesend_temperatur_gueltig(wert):
+                return ABGELEHNT_TEMP
+            abwesend = {"bis": bis.astimezone(UTC).strftime(_ZEIT_FORMAT), "temp": float(wert), "aufheizen_ab": None}
+            self._abwesend_lokal[kreis] = abwesend
+            self._abwesend_temp[kreis] = float(wert)
+        self._inbox.put(("abwesend", kreis, dict(abwesend), durch))
+        return None
+
+    def abwesend_beenden(self, kreis: int, durch: str | None) -> str | None:
+        """Ende von Away aus HA (Host-Thread): Rueckgabe wie bei abwesend_setzen; ohne laufendes Away ABGELEHNT_KEIN_ABWESEND."""
+        try:
+            wish.pruefen_herkunft("ha", durch)
+            wish.pruefen_kreis(kreis)
+        except ValueError:
+            return ABGELEHNT_DURCH if durch is not None and durch not in wire.DURCH else ABGELEHNT_KREIS
+        eintrag = self._kreis_eintrag(kreis)
+        if eintrag is None:
+            return ABGELEHNT_KREIS
+        with self._abwesend_sperre:
+            if kreis in self._abwesend_lokal:
+                laeuft = self._abwesend_lokal[kreis] is not None
+            else:
+                laeuft = eintrag.get("modus") == "abwesend" and isinstance(eintrag.get("abwesend"), dict)
+            if not laeuft:
+                return ABGELEHNT_KEIN_ABWESEND
+            self._abwesend_lokal[kreis] = None
+        self._inbox.put(("abwesend", kreis, None, durch))
+        return None
+
+    def abwesend_abgelehnt(self, grund: str) -> None:
+        """Hinweis `abwesend_abgelehnt` mit dem festen Grund; er schliesst beim naechsten angenommenen Away."""
+        self._inbox.put(("eigene", ABWESEND_ABGELEHNT_KEY, meldungen.neu("meldung.abwesend_abgelehnt", grund=grund)))
 
     def abo_status(self, kreis: int | None = None) -> str:
         """abo_source der Laufzeit (dokument_config.runtime_config): das Abo des Kreises, ohne Angabe des ersten."""
@@ -358,6 +449,8 @@ class Device:
                         self.wunsch_puffer.abgelehnt(mid)
         elif quelle == "wunsch":
             self._wunsch(*item[1:])
+        elif quelle == "abwesend":
+            self._abwesend_wunsch(*item[1:])
         elif quelle == "eigene":
             self._eigene_meldung(item[1], item[2])
         elif quelle == "meldung":
@@ -651,6 +744,9 @@ class Device:
                     bootstrap.device_state_speichern(self._dir, "uebernommen")
                 self._host_rufen("konfiguration_uebernommen", self.host.konfiguration_uebernommen, alt, neu)
             elif art == BEDIENUNG:
+                with self._abwesend_sperre:  # der Server hat gesprochen: sein Dokument gilt wieder allein
+                    self._abwesend_lokal.clear()
+                    self._abwesend_temp.clear()
                 self._host_rufen("bedienung_uebernommen", self.host.bedienung_uebernommen, neu)
         if (angebot := angebot_aus(art, body)) is not None:
             # dasselbe Angebot, das der Speicher merkt, auch aus einer abgelehnten Konfiguration (ein Update kann der
@@ -751,6 +847,18 @@ class Device:
         self.documents.mark_dirty()
         meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
         self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
+        self._wunsch_senden()
+
+    def _abwesend_wunsch(self, kreis: int, abwesend: dict | None, durch: str | None) -> None:
+        """Away (Objekt) oder sein Ende (None) als Bedienwunsch mit Herkunft ha; ein angenommenes Away schliesst den
+        Hinweis einer frueheren Ablehnung."""
+        neu = wish.neu(None, None, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
+                       uhr_synchron=self._uhr_synchron() is True, herkunft="ha", durch=durch, wall=self._wall(),
+                       programm={"abwesend": abwesend})
+        self.wunsch_puffer.setzen(neu)
+        self.documents.mark_dirty()
+        if ABWESEND_ABGELEHNT_KEY in self._eigene:
+            self._eigene_meldung(ABWESEND_ABGELEHNT_KEY, None)
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:

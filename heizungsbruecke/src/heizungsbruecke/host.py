@@ -286,6 +286,9 @@ class HaHost:
             tagestick=self._runtime.daily_trigger_time, wache_s=self._runtime.local_check_interval,
             wunsch=lambda wert, herkunft, durch: geraet.wunsch(wert, herkunft=herkunft, durch=durch, kreis=self.kreis),
             soll_quelle_aus=geraet.soll_quelle_aus, quelle=quelle, kreis=self.kreis,
+            abwesend_setzen=lambda bis, temp, durch: geraet.abwesend_setzen(self.kreis, bis, temp, durch),
+            abwesend_beenden=lambda durch: geraet.abwesend_beenden(self.kreis, durch),
+            abwesend_abgelehnt=geraet.abwesend_abgelehnt,
             anlagenkreise=anlagenkreise,
             # das Lebenszeichen der Integration gilt der Anlage: nur der Client des kleinsten Kreises abonniert es
             integration_stand=geraet.integration_stand if self.kreis == min(anlagenkreise) else None,

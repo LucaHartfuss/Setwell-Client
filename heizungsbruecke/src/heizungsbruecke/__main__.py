@@ -48,7 +48,7 @@ from smartheat_core import zustandspfade
 from smartheat_core.zeitquelle import echte_epoche
 from smartheat_device import prozess
 from smartheat_device.device import DEVICE_DIR, Device
-from smartheat_device.documents import ANZEIGE, BEDIENUNG, KONFIGURATION, DocumentStore
+from smartheat_device.documents import ANZEIGE, KONFIGURATION, DocumentStore
 from smartheat_runtime import aufraeumen as markierung
 from smartheat_runtime import kreise
 from smartheat_runtime.runtime import Runtime
@@ -238,8 +238,7 @@ def verdrahten(geraet: HaDeviceHost, device, ha_api, supervisor) -> GeraetStatus
         return dokument.inhalt if dokument is not None else None
 
     def bedienung_inhalt() -> dict | None:
-        dokument = device.documents.aktuell(BEDIENUNG)
-        return dokument.inhalt if dokument is not None else None
+        return device.bedienung()  # mit dem Away, das HA lokal gesetzt hat und der Server noch nicht bestaetigte
 
     lokal = lokale_sicht(lambda: device.documents.aktuell(KONFIGURATION), _raum_soll, lambda kreis: (geraet.raum(kreis) or {}).get("ist"),
                          anzeige_inhalt, kritisch_ende=geraet.kritisches_ende,

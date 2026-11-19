@@ -1,5 +1,6 @@
 """HaHost liest das Konfigurationsdokument; der Raum-Soll kommt aus dem Soll-Speicher."""
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fakes import FakeHa
@@ -292,6 +293,45 @@ def test_trigger_source_is_built_on_the_real_entity_and_wishes_reach_the_device(
         "event_type": "smartheat_wunsch", "data": {"raum_soll": 22.0, "kreis": 1}, "context": {"parent_id": "p"}}})
     worker.run_pending()
     assert geraet.wuensche == [(22.0, "ha", "automation")]
+
+
+def _abwesend_ereignis(client, worker, name, daten):
+    client.kwargs["on_trigger_event"]({"platform": "event", "event": {
+        "event_type": name, "data": {"schema": 1, **daten}, "context": {"user_id": "u"}}})
+    worker.run_pending()
+
+
+def test_away_events_reach_the_device_with_the_circuit_of_the_host(env):
+    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS))
+    host = HaHost(geraet, env.ha, clock=env.clock)
+    worker = RegulationWorker(env.clock)
+    client = host.trigger_source(host.load().manifest, worker)
+    bis = (datetime.now(UTC) + timedelta(days=2)).replace(microsecond=0)
+    _abwesend_ereignis(client, worker, "smartheat_abwesend", {"kreis": 1, "bis": bis.isoformat(), "temp": 17.5})
+    _abwesend_ereignis(client, worker, "smartheat_abwesend_ende", {"kreis": 1})
+    assert geraet.abwesend == [("setzen", 1, bis, 17.5, "nutzer"), ("beenden", 1, "nutzer")]
+
+
+def test_a_refused_away_becomes_a_notice_with_the_fixed_reason(env):
+    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS))
+    geraet.abwesend_antwort = "leerstand"
+    host = HaHost(geraet, env.ha, clock=env.clock)
+    worker = RegulationWorker(env.clock)
+    client = host.trigger_source(host.load().manifest, worker)
+    bis = (datetime.now(UTC) + timedelta(days=2)).replace(microsecond=0)
+    _abwesend_ereignis(client, worker, "smartheat_abwesend", {"kreis": 1, "bis": bis.isoformat(), "temp": 17.5})
+    _abwesend_ereignis(client, worker, "smartheat_abwesend", {"kreis": 1, "bis": bis.isoformat(), "temp": 99.0})
+    assert [eintrag for eintrag in geraet.abwesend if eintrag[0] == "abgelehnt"] == [
+        ("abgelehnt", "leerstand"), ("abgelehnt", "temp")]
+
+
+def test_a_refused_away_of_the_device_host_without_device_is_a_fixed_reason(env):
+    from heizungsbruecke.geraet_host import HaDeviceHost
+    host = HaDeviceHost(env.ha, None)
+    bis = datetime.now(UTC) + timedelta(days=2)
+    assert host.abwesend_setzen(1, bis, 17.5, None) == "kreis"
+    assert host.abwesend_beenden(1, None) == "kreis"
+    host.abwesend_abgelehnt("temp")  # ohne Geraet kein Hinweis, kein Fehler
 
 
 def test_a_climate_target_without_attribute_is_a_start_failure(env):

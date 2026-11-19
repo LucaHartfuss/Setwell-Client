@@ -128,6 +128,8 @@ class FakeGeraet:
         self.start_markierung = start_markierung  # die beim Start gelesene Aufraeum-Markierung (aufraeumen.entscheiden)
         self._supervisor, self._clock, self._uhr = Supervisor(), clock, None  # Zustand fuer uhr_synchron
         self.wuensche, self.aus, self.status = [], [], []
+        self.abwesend: list[tuple] = []  # Away-Aufrufe des Triggers: ("setzen", kreis, bis, temp, durch) usw.
+        self.abwesend_antwort: str | None = None  # der Ablehnungsgrund, den der Host liefern soll
         self.integration_stand = IntegrationStand()  # wie im echten Geraete-Host
         self.push_stand = PushStand()
         self.wunsch_kreise: list[int] = []  # der Kreis jedes Wunschs, parallel zu wuensche
@@ -192,6 +194,17 @@ class FakeGeraet:
 
     def soll_quelle_aus(self, aus, wirksam):
         self.aus.append((aus, wirksam))
+
+    def abwesend_setzen(self, kreis, bis, temp, durch):
+        self.abwesend.append(("setzen", kreis, bis, temp, durch))
+        return self.abwesend_antwort
+
+    def abwesend_beenden(self, kreis, durch):
+        self.abwesend.append(("beenden", kreis, durch))
+        return self.abwesend_antwort
+
+    def abwesend_abgelehnt(self, grund):
+        self.abwesend.append(("abgelehnt", grund))
 
     def ursprungswerte_merken(self, werte, kreis=1):
         self.gemeldet.append(werte)
