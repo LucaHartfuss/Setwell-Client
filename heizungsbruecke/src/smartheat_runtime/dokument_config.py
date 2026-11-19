@@ -31,6 +31,11 @@ FELDER = ("anlage", "anlage_name", "weg", "kreise", "tagestick", "bindungsparame
 #: Die Kreise gehoeren dazu (Bindung, Raeume, Hebelsatz, Verteilsystem, Abo), aber ohne die gespiegelten
 #: Ursprungswerte; die Bindungsparameter auch: Schritte, Toleranzen, Wartezeit und Schreibschutz kommen nur von dort.
 LAUFZEIT_FELDER = ("anlage", "weg", "kreise", "tagestick", "bindungsparameter")
+#: Felder eines Kreiseintrags, die keinen Neustart brauchen: die gespiegelten Ursprungswerte, der Zustand (er wechselt
+#: ohne Neustart, die Laufzeit liest ihn bei jedem Check) und die Programmfelder des Kreises (Aufheizart, Absenkung,
+#: Aufheizdauer): die Rechnung des Solls liest sie bei jedem Check frisch aus dem Dokument (`plan_quelle`). Die Zeitzone
+#: gehoert ebenfalls nicht zu `LAUFZEIT_FELDER` und wird ebenso frisch gelesen.
+KREISFELDER_OHNE_NEUSTART = ("ursprungswerte", "zustand", *config_check.KONFIG_KREIS_PROGRAMM)
 ABO = {"aktiv": entitlement.ACTIVE, "inaktiv": entitlement.INACTIVE}
 # Lokale Checks laufen eventgetrieben; dieser Takt gilt nur noch fuer den Watchdog-Fallback
 # bei getrennter WS-Verbindung (und fuer grace_check/health).
@@ -244,9 +249,9 @@ def laufzeit_relevant_kreis(alt, neu, kreis: int) -> bool:
 
 
 def _kreis_wert(konfiguration: Mapping, kreis: int, *, ohne_abo: bool):
-    """Eintrag des Kreises ohne Ursprungswerte und Zustand (und ohne Abo, wenn gewuenscht); None, wenn es ihn nicht
-    gibt."""
-    weg = ("ursprungswerte", "zustand", "abo") if ohne_abo else ("ursprungswerte", "zustand")
+    """Eintrag des Kreises ohne die Felder, die keinen Neustart brauchen (und ohne Abo, wenn gewuenscht); None, wenn es
+    ihn nicht gibt."""
+    weg = (*KREISFELDER_OHNE_NEUSTART, "abo") if ohne_abo else KREISFELDER_OHNE_NEUSTART
     for eintrag in kreisansicht.kreise(konfiguration):
         if eintrag.get("kreis") == kreis:
             return {k: v for k, v in eintrag.items() if k not in weg}
@@ -260,11 +265,10 @@ def abo_wiederaufnahme(alt, neu, kreis: int) -> bool:
 
 
 def _laufzeit_wert(konfiguration: Mapping, feld: str):
-    """Wert eines Laufzeitfeldes; die Kreise ohne die gespiegelten Ursprungswerte (ihr Eintreffen startet nichts neu) und
-    ohne den Zustand (er wechselt ohne Neustart, die Laufzeit liest ihn bei jedem Check)."""
+    """Wert eines Laufzeitfeldes; die Kreise ohne die Felder, die keinen Neustart brauchen (`KREISFELDER_OHNE_NEUSTART`)."""
     wert = konfiguration.get(feld)
     if feld == "kreise" and isinstance(wert, list):
-        return [{k: v for k, v in kreis.items() if k not in ("ursprungswerte", "zustand")}
+        return [{k: v for k, v in kreis.items() if k not in KREISFELDER_OHNE_NEUSTART}
                 if isinstance(kreis, Mapping) else kreis
                 for kreis in wert]
     return wert
