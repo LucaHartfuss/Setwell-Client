@@ -473,6 +473,25 @@ def test_login_phases_map_every_failure_to_a_contract_reason_without_secrets(tmp
         server.stop()
 
 
+@pytest.mark.parametrize("code", ["", 7, None, ["c"]])
+def test_finish_without_usable_code_is_rejected_before_the_open_login_is_used(tmp_path, clock, monkeypatch, code):
+    server = FakeVicare()
+    base = server.start()
+    try:
+        monkeypatch.setenv("SHG_TEST_ENDPOINTS", "1")
+        monkeypatch.setenv("SHG_VICARE_IAM_BASE", base)
+        monkeypatch.setenv("SHG_VICARE_API_BASE", base)
+        driver = ViCareCloudDriver({}, Paths(tmp_path), clock=clock)
+        driver.login_begin(BEGIN)
+        with pytest.raises(DriverError) as abgelehnt:
+            driver.login_finish({**FINISH, "code": code})
+        assert abgelehnt.value.grund == "login_fehlgeschlagen" and abgelehnt.value.__cause__ is None
+        assert "pending" in json.loads((Paths(tmp_path).driver_secrets_dir / "vicare.json").read_text())
+        driver.login_finish(FINISH)  # die offene Anmeldung gilt weiter
+    finally:
+        server.stop()
+
+
 class _Installations:
     """ViCareApi-Ersatz: zwei Installationen (Ferienhaus), je ein Heizgeraet, dazu ein Stromzaehler ohne Heizkreis."""
 
