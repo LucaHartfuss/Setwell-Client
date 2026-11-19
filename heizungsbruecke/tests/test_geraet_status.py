@@ -56,6 +56,51 @@ def _kreisliste(*nummern, je_kreis=None):
     return [{"kreis": nr, **dict.fromkeys(status.KREIS_FELDER)} | (je_kreis or {}).get(nr, {}) for nr in nummern]
 
 
+def test_der_kreis_traegt_abwesend_mit_bis_und_temp_oder_null():
+    ha = FakeHa()
+    away = {"bis": "2026-12-01T10:00:00+00:00", "temp": 17.5}
+    kreise = {1: _lokal_kreis() | {"abwesend": away}, 2: _lokal_kreis(name="Bad")}
+    sink, _ = _status(ha, kreise=kreise)
+    sink.anzeige(_anzeige())
+    je_kreis = {k["kreis"]: k["abwesend"] for k in ha.events[-1][1]["kreise"]}
+    assert je_kreis == {1: away, 2: None}
+    assert "abwesend" in geraet_status.KREIS_EVENT_FIELDS
+
+
+def test_die_lokale_sicht_nimmt_abwesend_aus_dem_rueckruf_und_nur_als_bis_und_temp():
+    konfiguration = {"kreise": [{"kreis": 1, "name": "A"}, {"kreis": 2, "name": "B"}]}
+    dokument = Dokument("konfiguration", 1, konfiguration)
+    gesetzt = {1: {"bis": "2026-12-01T10:00:00+00:00", "temp": 17.5, "aufheizen_ab": "2026-12-01T05:00:00+00:00"}}
+    sicht = geraet_status.lokale_sicht(lambda: dokument, lambda n: 20.0, lambda n: 19.0, lambda: None,
+                                       update_noetig_kritisch=lambda: False, abwesend=gesetzt.get)()
+    assert sicht["kreise"][1]["abwesend"] == {"bis": "2026-12-01T10:00:00+00:00", "temp": 17.5}
+    assert sicht["kreise"][2]["abwesend"] is None
+
+
+@pytest.mark.parametrize("wert", [{"bis": "x"}, {"bis": 5, "temp": 17.5}, {"bis": "2026-12-01", "temp": True}, "text", []])
+def test_ein_unbrauchbares_abwesend_wird_null(wert):
+    dokument = Dokument("konfiguration", 1, {"kreise": [{"kreis": 1, "name": "A"}]})
+    sicht = geraet_status.lokale_sicht(lambda: dokument, lambda n: 20.0, lambda n: 19.0, lambda: None,
+                                       update_noetig_kritisch=lambda: False, abwesend=lambda n: wert)()
+    assert sicht["kreise"][1]["abwesend"] is None
+
+
+def test_abwesend_aus_der_bedienung_gilt_nur_im_modus_abwesend():
+    away = {"bis": "2026-12-01T10:00:00+00:00", "temp": 17.5, "aufheizen_ab": None}
+    bedienung = {"kreise": [{"kreis": 1, "modus": "abwesend", "abwesend": away},
+                            {"kreis": 2, "modus": "manuell", "abwesend": away}, {"kreis": 3, "modus": "abwesend"}]}
+    lesen = geraet_status.abwesend_aus_bedienung(lambda: bedienung)
+    assert lesen(1) == away and lesen(2) is None and lesen(3) is None and lesen(4) is None
+    assert geraet_status.abwesend_aus_bedienung(lambda: None)(1) is None
+
+
+def test_der_hinweis_abwesend_abgelehnt_steht_mit_code_und_grund_in_den_meldungen():
+    hinweis = {"key": "abwesend_abgelehnt", "code": "meldung.abwesend_abgelehnt", "params": {"grund": "bis"},
+               "stufe": "orange"}
+    liste = geraet_status.meldungen_liste(_anzeige(meldungen=(hinweis,)), kritisch=False)
+    assert liste and liste[0]["key"] == "abwesend_abgelehnt" and liste[0]["params"] == {"grund": "bis"}
+
+
 def test_event_carries_runtime_and_device_fields():
     ha = FakeHa()
     sink, seen = _status(ha)

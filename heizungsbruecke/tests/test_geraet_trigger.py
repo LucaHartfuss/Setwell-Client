@@ -29,7 +29,7 @@ SOLL = f"{CLIMATE}::temperature"
 
 class Aufbau:
     def __init__(self, tmp_path: Path, soll=SOLL, room_actual="sensor.raum", ha=None, stand=None, push_stand=None,
-                 anlagenkreise=None, quelle=None, kreis=1):
+                 anlagenkreise=None, quelle=None, kreis=1, **mehr):
         self.clock = FakeClock()
         self.worker = RegulationWorker(self.clock)
         self.ha = ha or FakeHa()
@@ -43,7 +43,7 @@ class Aufbau:
             wunsch=lambda v, h, d: self.wuensche.append((v, h, d)) or min(max(v, 15.0), 25.0),
             soll_quelle_aus=lambda aus, wirksam: self.aus.append((aus, wirksam)),
             integration_stand=stand, push_stand=push_stand, anlagenkreise=anlagenkreise, uhr=self.clock, quelle=quelle,
-            kreis=kreis)
+            kreis=kreis, **mehr)
         self.fire = self.client._on_trigger_event
 
     def run(self):

@@ -45,6 +45,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -105,6 +106,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -181,6 +183,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -241,6 +244,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -344,6 +348,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -472,6 +477,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -614,6 +620,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -757,6 +764,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -906,6 +914,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "komfort",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -969,6 +978,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "komfort",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1119,6 +1129,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1291,6 +1302,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1443,6 +1455,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "notfall",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1586,6 +1599,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "notfall",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1727,6 +1741,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1871,6 +1886,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1976,6 +1992,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2137,6 +2154,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2230,6 +2248,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2400,6 +2419,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2511,6 +2531,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2637,6 +2658,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2724,6 +2746,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2811,6 +2834,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2898,6 +2922,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2985,6 +3010,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3072,6 +3098,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3159,6 +3186,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3246,6 +3274,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3333,6 +3362,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3440,6 +3470,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3511,6 +3542,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3598,6 +3630,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3738,6 +3771,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3833,6 +3867,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3978,6 +4013,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4043,6 +4079,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4112,6 +4149,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4201,6 +4239,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4346,6 +4385,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4428,6 +4468,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4586,6 +4627,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4745,6 +4787,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4814,6 +4857,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4973,6 +5017,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -5085,6 +5130,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -5240,6 +5286,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -5318,6 +5365,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {

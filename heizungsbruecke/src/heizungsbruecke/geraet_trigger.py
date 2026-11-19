@@ -9,12 +9,15 @@ import logging
 import math
 import time
 from collections.abc import Callable
+from datetime import datetime
 from typing import TypeGuard
 
 from heizungsbruecke.ha_trigger_client import HaTriggerClient
 from heizungsbruecke.integration_stand import IntegrationStand
 from heizungsbruecke.push_stand import PushStand
+from smartheat_core import wallclock
 from smartheat_core.logtext import lesbar
+from smartheat_core.safety import abwesend_bis_gueltig, abwesend_temperatur_gueltig
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.dokument_config import ConfigError
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
@@ -44,9 +47,24 @@ EREIGNIS_WUNSCH = "smartheat_wunsch"
 EREIGNIS_INTEGRATION = "smartheat_integration"
 #: Die Integration hat einen Push-Eintrag nach 24 h aufgegeben (Stufe und Kreis), gelesen in push_aufgegeben_lesen.
 EREIGNIS_PUSH_AUFGEGEBEN = "smartheat_push_aufgegeben"
+#: Away aus Home Assistant (Integration): setzen mit `bis` (und wahlweise `temp`) bzw. beenden, je Kreis.
+EREIGNIS_ABWESEND = "smartheat_abwesend"
+EREIGNIS_ABWESEND_ENDE = "smartheat_abwesend_ende"
+#: Intern (Worker): ein Away-Ereignis nach dem Kreis-Routing; die Pruefung und der Aufruf des Hosts laufen dort.
+EV_ABWESEND = "ha_abwesend"
+#: Feste Gruende einer Ablehnung (nie ein Wert): der Hinweis `abwesend_abgelehnt` traegt nur diesen Code.
+ABGELEHNT_KREIS = "kreis"
+ABGELEHNT_BIS = "bis"
+ABGELEHNT_TEMP = "temp"
 HERKUNFT_SOLL = "soll_entity"
 HERKUNFT_SMARTHEAT = "ha"
 _PUSH_STUFEN = ("rot", "orange")
+
+#: Rueckruf des Hosts: Away setzen (`bis`, `temp` oder None fuer den Standard des Hosts, `durch`) bzw. beenden (`durch`);
+#: Ergebnis None = angenommen, sonst der feste Ablehnungsgrund. Der Host fuehrt aus wie das Portal (Ist zuerst finden,
+#: Bedienwunsch mit Herkunft `ha`).
+AbwesendSetzen = Callable[[datetime, float | None, str | None], str | None]
+AbwesendBeenden = Callable[[str | None], str | None]
 
 
 def durch_aus_kontext(context) -> str | None:
@@ -126,6 +144,28 @@ def _wunschwert(value) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _abwesend_bis(wert) -> datetime | None:
+    """`bis` aus dem Ereignis: ein Zeitpunkt als ISO-Text; alles andere None (die Zone und den Bereich prueft safety)."""
+    if not isinstance(wert, str):
+        return None
+    try:
+        return datetime.fromisoformat(wert)
+    except ValueError:
+        return None
+
+
+def _abwesend_temp(daten: dict) -> tuple[bool, float | None]:
+    """(gueltig, temp): fehlendes oder leeres `temp` ist gueltig (None: der Host nimmt seinen Standard), sonst muss die
+    Zahl im Bereich aus safety liegen."""
+    wert = daten.get("temp")
+    if wert is None:
+        return True, None
+    zahl = _wunschwert(wert)
+    if zahl is None or not abwesend_temperatur_gueltig(zahl):
+        return False, None
+    return True, zahl
+
+
 class HaSollQuelle:
     """Die Soll-Entity als Soll-Quelle (SollQuelle): schreibbar nur als Climate-Entity (Attribut temperature).
     angleichen_offen: das letzte Schreiben an die Climate-Entity ist gescheitert (HA Core startet, HA lehnt ab), die
@@ -170,7 +210,10 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
           tagestick: str | None, wache_s: float, wunsch, soll_quelle_aus,
           quelle: HaSollQuelle | None = None, kreis: int = KREIS,
           anlagenkreise: frozenset[int] | None = None, integration_stand: IntegrationStand | None = None,
-          push_stand: PushStand | None = None, uhr: Callable[[], float] = time.monotonic) -> HaTriggerClient:
+          push_stand: PushStand | None = None, uhr: Callable[[], float] = time.monotonic,
+          abwesend_setzen: AbwesendSetzen | None = None, abwesend_beenden: AbwesendBeenden | None = None,
+          abwesend_abgelehnt: Callable[[str], None] | None = None,
+          wanduhr: Callable[[], datetime] = wallclock.now) -> HaTriggerClient:
     """integration_stand: nimmt das Lebenszeichen der Integration (Ereignis smartheat_integration, anlagenweit) auf, nach
     der monotonen uhr; nur der Client, der ihn bekommt, abonniert das Ereignis (ohne Stand gibt es kein Abonnement).
     push_stand: ebenso fuer das Ereignis smartheat_push_aufgegeben (Stufe und Kreis, nur im Stand, nie im Worker).
@@ -185,6 +228,11 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
     (Aenderungen waehrend der Trennung, Thermostat schon aus beim Start). Solange der WebSocket getrennt ist, liest
     EV_SOLL_WACHE im Takt des lokalen Checks dasselbe (der Raum-Soll kommt nur ueber den Soll-Eingang in den Soll-Speicher, nie
     direkt aus HA). Nur HA; das Gateway bleibt unberuehrt.
+
+    Away (Fähigkeit programm): mit `abwesend_setzen` abonniert der Client die Ereignisse smartheat_abwesend und
+    smartheat_abwesend_ende (Kreis wie beim Wunsch geroutet). Im Worker prueft er `bis` (Zone, in der Zukunft, hoechstens
+    365 Tage nach der `wanduhr`) und `temp` gegen safety.py und ruft dann den Host (`abwesend_setzen`, `abwesend_beenden`);
+    ein Ablehnungsgrund (eigener oder des Hosts) geht als fester Code an `abwesend_abgelehnt`, nie ein Wert, nie ins Log.
 
     Gescheiterte Angleichung (quelle.angleichen_offen: Bedienung vom Server, Angleichen beim Start, Zurueckschreiben
     eines Wunschs): jeder gezeigte Wert (Bericht, Nachlesen, Lesen beim Verbinden und in der Wache; die Wache liest dann
@@ -221,6 +269,9 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
         triggers.append({"platform": "event", "event_type": EREIGNIS_INTEGRATION})
     if push_stand is not None:
         triggers.append({"platform": "event", "event_type": EREIGNIS_PUSH_AUFGEGEBEN})
+    if abwesend_setzen is not None:
+        triggers.append({"platform": "event", "event_type": EREIGNIS_ABWESEND})
+        triggers.append({"platform": "event", "event_type": EREIGNIS_ABWESEND_ENDE})
     if tagestick:
         triggers.append({"platform": "time", "at": tagestick})
 
@@ -304,6 +355,47 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
     worker.register(EV_SOLL_NACHLESEN, on_nachlesen)
     worker.register(EV_SOLL_LESEN, on_lesen)
 
+    def abwesend_pruefen_und_rufen(daten: dict) -> str | None:
+        """Der Ablehnungsgrund oder None (angenommen). Der Host bekommt nur geprueftes."""
+        if daten["ende"]:
+            return abwesend_beenden(daten["durch"]) if abwesend_beenden is not None else None
+        bis = _abwesend_bis(daten["bis"])
+        if bis is None or not abwesend_bis_gueltig(bis, wanduhr()):
+            return ABGELEHNT_BIS
+        temp_gueltig, temp = _abwesend_temp(daten)
+        if not temp_gueltig:
+            return ABGELEHNT_TEMP
+        assert abwesend_setzen is not None  # nur abonniert, wenn gesetzt
+        return abwesend_setzen(bis, temp, daten["durch"])
+
+    def on_abwesend(event: Event) -> None:
+        grund = event.data.get("abgelehnt") or abwesend_pruefen_und_rufen(event.data)
+        if grund:
+            logger.warning("Abwesenheit abgelehnt (%s)", grund)  # fester Code, nie ein Wert
+            if abwesend_abgelehnt is not None:
+                abwesend_abgelehnt(grund)
+
+    worker.register(EV_ABWESEND, on_abwesend)
+
+    def abwesend_ereignis(event: dict) -> None:
+        """Kreis-Routing wie beim Wunsch; was den eigenen Kreis trifft (oder ein unbekannter Kreis, vom Client des
+        niedrigsten Kreises gemeldet), geht in den Worker. Ungueltiger Kreis: verworfen, ohne Hinweis."""
+        daten = event.get("data")
+        ziel = _wunsch_kreis(daten)
+        if ziel is None:
+            logger.warning("Ereignis %s mit ungueltigem Kreis verworfen", event.get("event_type"))
+            return
+        if anlagenkreise is not None and ziel not in anlagenkreise:
+            if kreis == min(anlagenkreise):
+                worker.post(Event(EV_ABWESEND, {"abgelehnt": ABGELEHNT_KREIS}))
+            return
+        if ziel != kreis:
+            return
+        daten = daten if isinstance(daten, dict) else {}
+        worker.post(Event(EV_ABWESEND, {"ende": event.get("event_type") == EREIGNIS_ABWESEND_ENDE,
+                                        "bis": daten.get("bis"), "temp": daten.get("temp"),
+                                        "durch": durch_aus_kontext(event.get("context"))}))
+
     ohne_zahl: list = [False, None]  # (gerade ohne Zahl, Zeitpunkt der letzten Info-Zeile); nur im WS-Thread
 
     def _ohne_zahl_melden() -> None:
@@ -349,6 +441,10 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
                     gelesen = push_aufgegeben_lesen(event.get("data"), anlagenkreise)
                     if gelesen is not None:
                         push_stand.aufgegeben(gelesen[0], gelesen[1], uhr())
+                return
+            if event.get("event_type") in (EREIGNIS_ABWESEND, EREIGNIS_ABWESEND_ENDE):
+                if abwesend_setzen is not None:  # kein Wunsch, kein lokaler Check
+                    abwesend_ereignis(event)
                 return
             ziel = _wunsch_kreis(event.get("data"))
             if ziel is None:

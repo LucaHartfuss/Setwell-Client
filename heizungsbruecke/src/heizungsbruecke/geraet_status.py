@@ -39,7 +39,7 @@ MAX_ZIELE = 10
 MINDEST_INTEGRATION_RE = re.compile(
     r"(?=.{1,32}\Z)\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z]{1,16}|\.dev\d{1,6})?", re.ASCII)
 #: Felder der Anlage im Ereignis und Felder eines Kreises: die Kreisfelder der Laufzeit plus die lokalen.
-LOKAL_KREIS_FIELDS = ("name", "raum_soll", "raum_ist", "einlernphase_tag", "testphase_bis", "befunde")
+LOKAL_KREIS_FIELDS = ("name", "raum_soll", "raum_ist", "einlernphase_tag", "testphase_bis", "befunde", "abwesend")
 EVENT_FIELDS = (*status.ANLAGE_FELDER, *GERAET_FIELDS, "kreise")
 KREIS_EVENT_FIELDS = ("kreis", *LOKAL_KREIS_FIELDS, *status.KREIS_FELDER)
 KONFIGURATION_ABGELEHNT = "konfiguration_abgelehnt"
@@ -109,10 +109,34 @@ def _push_regeln(wert) -> dict[str, int]:
     return {feld: getattr(regeln, feld) for feld in PUSH_REGELN_FELDER}
 
 
+def _abwesend(wert) -> dict | None:
+    """Abwesenheit eines Kreises im Ereignis: genau `bis` (Zeitpunkt als Text) und `temp` (Zahl), sonst None; was der
+    Bedienung sonst anhaengt (etwa `aufheizen_ab`) geht nicht hinaus."""
+    if not isinstance(wert, Mapping):
+        return None
+    bis, temp = wert.get("bis"), _zahl(wert.get("temp"))
+    if not isinstance(bis, str) or not bis or temp is None:
+        return None
+    return {"bis": bis, "temp": temp}
+
+
+def abwesend_aus_bedienung(bedienung: Callable[[], Mapping | None]) -> Callable[[int], Mapping | None]:
+    """Rueckruf fuer `lokale_sicht`: das Feld `abwesend` des Kreises aus dem Bedienungs-Dokument, nur im Modus `abwesend`
+    (sonst gilt keine Abwesenheit, ein Rest im Feld zaehlt nicht)."""
+    def lesen(kreis: int) -> Mapping | None:
+        dokument = bedienung()
+        for eintrag in (dokument.get("kreise") if isinstance(dokument, Mapping) else None) or ():
+            if isinstance(eintrag, Mapping) and eintrag.get("kreis") == kreis and not isinstance(eintrag.get("kreis"), bool):
+                return eintrag.get("abwesend") if eintrag.get("modus") == "abwesend" else None
+        return None
+    return lesen
+
+
 def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[int], float | None],
                  raum_ist: Callable[[int], float | None], anzeige: Callable[[], Mapping | None],
                  kritisch_ende: Callable[[list[int]], str | None] | None = None, *,
-                 update_noetig_kritisch: Callable[[], bool]) -> Callable[[], dict]:
+                 update_noetig_kritisch: Callable[[], bool],
+                 abwesend: Callable[[int], Mapping | None] | None = None) -> Callable[[], dict]:
     """Die lokale Sicht des Ereignisses: Anlagenname, Version des Konfigurationsdokuments und dessen kritische
     Mindestversion der Integration (beide null ohne Dokument bzw. ohne gueltigen Wert) und je Kreis der Konfiguration
     Name, Soll (Soll-Speicher), Ist des Raums und die Felder des Anzeige-Dokuments (heute ohne Befund: null/null/[]).
@@ -139,6 +163,7 @@ def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[i
                 "name": name if isinstance(name, str) else None, "raum_soll": _zahl(soll(nummer)),
                 "raum_ist": _zahl(raum_ist(nummer)), "einlernphase_tag": angezeigt.get("einlernphase_tag"),
                 "testphase_bis": angezeigt.get("testphase_bis"), "befunde": list(befunde) if isinstance(befunde, list) else [],
+                "abwesend": _abwesend(abwesend(nummer)) if abwesend is not None else None,
             }
         name = konf.get("anlage_name") if isinstance(konf, Mapping) else None
         dienste, kategorien = _ziele(konf)
