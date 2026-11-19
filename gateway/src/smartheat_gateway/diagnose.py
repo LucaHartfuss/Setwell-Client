@@ -7,6 +7,8 @@ Gateway nicht uebernommen ist (Anzeige.code_zeigen) und nach einem Knopfdruck da
 Geraete-ID und Uebernahme-Code (kein QR-Code, kein Portal-Link mit Code, GW 7.1) - nur lokal; sonst nach einem Druck den Hinweis "keine Verbindung"
 bzw. "uebernommen". Dauerhaft, auch ohne Fenster, zeigt die Tabelle im Stand uebernommen die Zeile "uebernommen" und
 die Maske der Adresse des Kontos (`a***@e***.com`, nie die volle Adresse), solange das Geraet eine hat.
+Bei offener Anmeldung beim Hersteller (`anmeldung`) zeigt die Seite hinter der Sitzung den Abschnitt "Anmelden beim Hersteller"
+mit der Adresse (geheimer state; nur in dieser Antwort, nie im Zustand, in diagnostics oder im Log).
 Die festen Texte stehen in lokale_texte.json (de, en); Accept-Language waehlt nur zwischen den beiden (sonst en) und wird nie ausgegeben.
 Den Uebernahmestand meldet der Server (claim_state, new_claim_code); bis dahin gilt der Stand des Bootstraps. /healthz
 fuer den Updater.
@@ -167,13 +169,18 @@ def render_html(data: dict, sprache: str = lokale_texte.STANDARD) -> str:
                  f"<p>{html.escape(t['label.code'])}: <strong>{code}</strong></p>")
     elif data.get("code_hinweis") in code_hinweise:
         claim = f"<h2>{uebernehmen}</h2><p>{html.escape(code_hinweise[data['code_hinweis']])}</p>"
+    hersteller = ""
+    if isinstance(data.get("anmelde_url"), str) and data["anmelde_url"]:
+        hersteller = (f"<h2>{html.escape(t['abschnitt.anmelden'])}</h2><p>{html.escape(t['text.anmelden'])}</p>"
+                      f'<p><a href="{html.escape(data["anmelde_url"])}" rel="noreferrer noopener">'
+                      f"{html.escape(t['link.anmelden'])}</a></p>")
     titel = html.escape(t["titel"])
     return (
         f'<!doctype html><html lang="{sprache}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}"><title>{titel}</title>'
         "<style>body{font-family:sans-serif;margin:16px;max-width:640px}th{text-align:left;padding-right:12px}</style>"
-        f"</head><body><h1>{titel}</h1><table>{rows}</table>{ablehnung}{hinweise}{meldungen}{claim}"
+        f"</head><body><h1>{titel}</h1><table>{rows}</table>{ablehnung}{hinweise}{meldungen}{claim}{hersteller}"
         "</body></html>"
     )
 
@@ -269,7 +276,7 @@ class _BegrenzterServer(ThreadingHTTPServer):
 
 def start_server(
     port: int, snapshot_fn: Callable[[], dict], hostnames: Iterable[str] = (),
-    *, nur_health: bool = False, zugang: Zugang | None = None,
+    *, nur_health: bool = False, zugang: Zugang | None = None, anmeldung: Callable[[], str | None] | None = None,
 ) -> ThreadingHTTPServer:
     """`nur_health`: der Gesundheitsserver fuer Compose-Healthcheck und Updater antwortet nur auf /healthz (kein HTML,
     kein Uebernahme-Code, keine Sitzung). Er hat eigene Plaetze und Fristen; die Compose-Datei veroeffentlicht ihn nur
@@ -277,7 +284,8 @@ def start_server(
     Netz ihn mit Docker vor Version 28 ueber direktes Routing trotzdem erreicht, ist offen (gateway-host.md, Bekannte
     Grenzen).
     Die Seite (ohne `nur_health`) verlangt `zugang`: ohne ihn gaebe es keine Anmeldung, und der Server wuerde nicht
-    gestartet (nie offen)."""
+    gestartet (nie offen). `anmeldung` liefert die Adresse einer offenen Anmeldung beim Hersteller oder None; sie kommt
+    nur in die Antwort der Seite hinter der Sitzung."""
     if zugang is None and not nur_health:
         raise ValueError("Die Diagnoseseite braucht einen Zugang (Anmeldung)")
     allowed = frozenset(hostnames)
@@ -359,6 +367,17 @@ def start_server(
             """de oder en nach Accept-Language (sonst en); der Kopf selbst wird nie ausgegeben."""
             return lokale_texte.sprache_waehlen(self.headers.get("Accept-Language"))
 
+        def _anmelde_url(self) -> str | None:
+            """Die offene Anmeldung beim Hersteller, nur fuer eine angemeldete Anfrage an die Seite (der Aufrufer prueft
+            die Sitzung); die Adresse traegt den geheimen state und steht nur in dieser Antwort, nie im Zustand, nie im Log."""
+            if anmeldung is None or nur_health:
+                return None
+            try:
+                return anmeldung()
+            except (OSError, ValueError, KeyError):
+                logger.warning("Offene Anmeldung beim Hersteller nicht lesbar")
+                return None
+
         def _zugelassen(self) -> bool:
             """Client im privaten Netz und erlaubter Host-Header (auch der Hostname aus werk.json); sonst 403."""
             if not client_allowed(self.client_address[0]):
@@ -404,7 +423,8 @@ def start_server(
                 self._answer(200, body.encode(), "application/json")
                 return
             werk = zugang.werk() if zugang is not None else None
-            data = {**data, "seriennummer": werk["seriennummer"] if werk is not None else None}
+            data = {**data, "seriennummer": werk["seriennummer"] if werk is not None else None,
+                    "anmelde_url": self._anmelde_url()}
             self._seite(200, render_html(data, self._sprache()))
 
         def do_POST(self):

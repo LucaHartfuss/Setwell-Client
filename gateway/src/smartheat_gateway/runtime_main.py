@@ -38,6 +38,7 @@ from smartheat_gateway import befehle, diagnose
 from smartheat_gateway import geraet_host as geraet_host_module
 from smartheat_gateway.anmeldung import WERK_DATEI, Zugang
 from smartheat_gateway.bus import BUS_PORT, LocalBus, credentials_from_env
+from smartheat_gateway.drivers.vicare_cloud import oauth
 from smartheat_gateway.geraet_host import GatewayDeviceHost
 from smartheat_gateway.host import GatewayAnlagenHost, GatewayHost
 from smartheat_gateway.paths import Paths, from_env
@@ -201,8 +202,11 @@ def _vorbereiten(paths: Paths, mirror: ZigbeeMirror,
     geraet.verbinden(device)
     hostnames = diagnose.parse_hostnames(os.environ.get("SHG_DIAG_HOSTNAMES", ""))
     # Die Seite auf Port 80 verlangt die Anmeldung mit dem Etikett-Passwort aus werk.json (Kopie des Hosts, GW 8)
+    # Die offene Anmeldung beim Hersteller (Adresse mit geheimem state) liest die Seite hinter der Sitzung aus der privaten
+    # Token-Datei des Treibers; der Gesundheitsserver und der Zustand des Geraetekerns kennen sie nicht.
+    tokens = oauth.TokenStore(paths.driver_secrets_dir / "vicare.json")
     diagnose.start_server(DIAG_PORT, lambda: diagnose.seite(geraet, device), hostnames,
-                          zugang=Zugang(host_dir / WERK_DATEI))
+                          zugang=Zugang(host_dir / WERK_DATEI), anmeldung=tokens.offene_anmeldung)
     # Dieselben erlaubten Host-Namen: der Docker-Test des Updaters fragt den Dienst `runtime` im Test-Netz.
     diagnose.start_server(HEALTH_PORT, lambda: diagnose.seite(geraet, device), hostnames, nur_health=True)
     software_soll_nachholen(geraet, device)  # vor dem Geraete-Thread: kein Rennen mit einer neuen Konfiguration

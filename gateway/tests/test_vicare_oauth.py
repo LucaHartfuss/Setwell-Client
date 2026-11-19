@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 import threading
 from unittest import mock
@@ -506,3 +507,173 @@ def test_forget_removes_everything_and_the_test_endpoints_need_the_flag(fake, tm
     assert oauth.iam_base() == "https://iam.viessmann-climatesolutions.com"
     monkeypatch.setenv("SHG_TEST_ENDPOINTS", "1")
     assert oauth.iam_base() == "http://evil.test"
+
+
+# --- Anmeldung im Geraet: Gerät erzeugt Challenge und state, der Server liefert nur die Parameter ---
+
+PORTAL_REDIRECT = "https://portal.setwell.de/oauth/callback"
+GUTE_PARAMS = {"client_id": "0123456789abcdef0123456789abcdef", "redirect_uri": PORTAL_REDIRECT,
+               "scope": "IoT User offline_access"}
+
+
+def _abfrage(url: str) -> dict:
+    from urllib.parse import parse_qs, urlsplit
+    return {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"redirect_uri": "https://evil.test/oauth/callback"},
+    {"redirect_uri": "https://portal.setwell.de/anderer/pfad"},
+    {"redirect_uri": "https://portal.setwell.de.evil.test/oauth/callback"},
+    {"redirect_uri": "http://portal.setwell.de/oauth/callback"},
+    {"redirect_uri": PORTAL_REDIRECT + "?x=1"},
+    {"scope": "IoT User offline_access admin"},
+    {"scope": "admin"},
+    {"client_id": "kurz"},
+    {"client_id": "a b c d e f g h i j"},
+    {"client_id": "x" * 200},
+    {"client_id": 7},
+    {"scope": None},
+])
+def test_foreign_host_scope_or_bad_client_id_is_refused_and_nothing_is_stored(tmp_path, aenderung):
+    tokens = store(tmp_path, "http://iam.test")
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_beginnen({**GUTE_PARAMS, **aenderung})
+    assert tokens.offene_anmeldung() is None
+    assert not (tmp_path / "vicare.json").exists()
+
+
+def test_missing_parameters_are_refused(tmp_path):
+    tokens = store(tmp_path, "http://iam.test")
+    for fehlt in GUTE_PARAMS:
+        with pytest.raises(oauth.LoginRejected):
+            tokens.anmeldung_beginnen({k: v for k, v in GUTE_PARAMS.items() if k != fehlt})
+
+
+def test_begin_returns_only_the_hash_of_the_state_and_the_url_carries_challenge_and_state(tmp_path):
+    tokens = store(tmp_path, "http://iam.test")
+    ergebnis = tokens.anmeldung_beginnen(GUTE_PARAMS)
+    assert set(ergebnis) == {"state_hash"} and re.fullmatch(r"[0-9a-f]{64}", ergebnis["state_hash"])
+    url = tokens.offene_anmeldung()
+    assert url.startswith("http://iam.test/idp/v3/authorize?") or url.startswith(
+        "https://iam.viessmann-climatesolutions.com/idp/v3/authorize?")
+    abfrage = _abfrage(url)
+    assert abfrage["client_id"] == GUTE_PARAMS["client_id"] and abfrage["redirect_uri"] == PORTAL_REDIRECT
+    assert abfrage["scope"] == GUTE_PARAMS["scope"] and abfrage["response_type"] == "code"
+    assert abfrage["code_challenge_method"] == "S256"
+    assert hashlib.sha256(abfrage["state"].encode()).hexdigest() == ergebnis["state_hash"]
+    pending = json.loads((tmp_path / "vicare.json").read_text())["pending"]
+    assert abfrage["code_challenge"] == base64.urlsafe_b64encode(
+        hashlib.sha256(pending["verifier"].encode()).digest()).rstrip(b"=").decode()
+    text = json.dumps(ergebnis)
+    assert pending["verifier"] not in text and abfrage["state"] not in text and abfrage["code_challenge"] not in text
+
+
+def test_the_authorize_address_follows_the_test_endpoint_only_with_the_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHG_VICARE_IAM_BASE", "http://iam.test")
+    monkeypatch.setenv("SHG_TEST_ENDPOINTS", "1")
+    tokens = oauth.TokenStore(tmp_path / "vicare.json")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    assert tokens.offene_anmeldung().startswith("http://iam.test/idp/v3/authorize?")
+    monkeypatch.delenv("SHG_TEST_ENDPOINTS")
+    assert tokens.offene_anmeldung().startswith("https://iam.viessmann-climatesolutions.com/idp/v3/authorize?")
+
+
+def test_every_begin_makes_a_fresh_state_and_verifier(tmp_path):
+    tokens = store(tmp_path, "http://iam.test")
+    erster = tokens.anmeldung_beginnen(GUTE_PARAMS)["state_hash"]
+    url_1 = tokens.offene_anmeldung()
+    zweiter = tokens.anmeldung_beginnen(GUTE_PARAMS)["state_hash"]
+    url_2 = tokens.offene_anmeldung()
+    assert erster != zweiter
+    assert _abfrage(url_1)["state"] != _abfrage(url_2)["state"]
+    assert _abfrage(url_1)["code_challenge"] != _abfrage(url_2)["code_challenge"]
+
+
+def test_no_url_after_the_deadline(tmp_path):
+    now = [1000.0]
+    tokens = store(tmp_path, "http://iam.test", wall=lambda: now[0])
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    now[0] += oauth.PENDING_SECONDS
+    assert tokens.offene_anmeldung() is not None
+    now[0] += 1
+    assert tokens.offene_anmeldung() is None
+
+
+def test_finish_takes_redirect_and_client_from_the_open_login_and_exchanges_the_code(fake, tmp_path):
+    server, base = fake
+    sent = []
+    real = requests.post
+
+    def post(url, **kw):
+        sent.append(kw["data"])
+        return real(url, **kw)
+
+    tokens = store(tmp_path, base, post=post)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    verifier = json.loads((tmp_path / "vicare.json").read_text())["pending"]["verifier"]
+    assert tokens.anmeldung_abschliessen(GOOD_CODE) is None
+    assert tokens.logged_in() and tokens.access_token()
+    assert sent[0]["redirect_uri"] == PORTAL_REDIRECT and sent[0]["client_id"] == GUTE_PARAMS["client_id"]
+    assert sent[0]["code_verifier"] == verifier and sent[0]["code"] == GOOD_CODE
+    assert "pending" not in json.loads((tmp_path / "vicare.json").read_text())
+    assert tokens.offene_anmeldung() is None
+
+
+def test_finish_without_an_open_login_or_after_the_deadline_is_refused(fake, tmp_path):
+    server, base = fake
+    now = [1000.0]
+    tokens = store(tmp_path, base, wall=lambda: now[0])
+    with pytest.raises(oauth.NotLoggedIn):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    now[0] += oauth.PENDING_SECONDS + 1
+    with pytest.raises(oauth.NotLoggedIn):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+    assert not tokens.logged_in()
+
+
+def test_the_open_login_is_used_once_even_when_the_exchange_fails(fake, tmp_path):
+    server, base = fake
+    tokens = store(tmp_path, base)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_abschliessen("falscher-code")
+    assert tokens.offene_anmeldung() is None
+    with pytest.raises(oauth.NotLoggedIn):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+
+
+def test_the_open_login_is_gone_also_when_the_iam_is_unreachable(tmp_path):
+    def post(*args, **kw):
+        raise requests.ConnectionError("weg")
+
+    tokens = store(tmp_path, "http://iam.test", post=post)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    with pytest.raises(oauth.TokenUnavailable):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+    assert tokens.offene_anmeldung() is None
+
+
+def test_a_failed_new_login_keeps_an_existing_one(fake, tmp_path):
+    server, base = fake
+    tokens = store(tmp_path, base)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
+    alt = tokens.access_token()
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_abschliessen("falscher-code")
+    assert tokens.logged_in() and tokens.access_token() == alt
+
+
+def test_state_verifier_and_url_never_reach_the_log(fake, tmp_path, caplog):
+    server, base = fake
+    caplog.set_level(logging.DEBUG)
+    tokens = store(tmp_path, base)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    url = tokens.offene_anmeldung()
+    verifier = json.loads((tmp_path / "vicare.json").read_text())["pending"]["verifier"]
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_abschliessen("falscher-code")
+    assert _abfrage(url)["state"] not in caplog.text and verifier not in caplog.text and url not in caplog.text
