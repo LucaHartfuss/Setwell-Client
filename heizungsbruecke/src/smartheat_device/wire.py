@@ -249,6 +249,8 @@ DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
     "finish": ("phase", "driver_id", "code"),
 }
+#: Form von `state_hash` im Ergebnis von `driver_login begin` (SHA-256 des `state`, den nur das Geraet und der Browser kennen).
+STATE_HASH_MUSTER = r"[0-9a-f]{64}"
 #: Ergebnisse von `weg_pruefen`.
 WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
 #: Laengste Zeichenkette von `claim_state.konto_hinweis` (die Maske ist kuerzer; laenger lehnt der Server ab, das Geraet liest sie nicht).
