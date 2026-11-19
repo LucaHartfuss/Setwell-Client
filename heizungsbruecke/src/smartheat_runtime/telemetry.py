@@ -71,9 +71,10 @@ def run_telemetry_tick(
     datenfehler: DataFault | None = None, room_target: float | None = None,
     energy: Callable[[dict, dict], dict] | None = None, einheiten: Mapping[str, str] | None = None, *, kreis: int,
     nur_raeume: bool = False, testphase_ohne: bool = False, kaelteschutz: str = KAELTESCHUTZ_AUS,
-    erzeuger_stoerung: str | None = None,
+    erzeuger_stoerung: str | None = None, soll_art: str | None = None,
 ) -> None:
-    """Liest room_actual selbst (lokaler HA-REST-Aufruf, kein Cloud-Roundtrip). `energy` normalisiert die
+    """Liest room_actual selbst (lokaler HA-REST-Aufruf, kein Cloud-Roundtrip). `soll_art` (nur mit Plan, dann ist
+    `room_target` das geltende Soll) nennt die Art dieses Solls; ohne Plan fehlt das Feld. `energy` normalisiert die
     Energie-Rohwerte (Tageszaehler, None = unveraendert), `einheiten` ist je Energiekanal die erwartete
     Einheit (ohne Eintrag kein Kanal). `nur_raeume` (Kreis ausser Betrieb) sendet ueber dasselbe Paket nur die
     Raumwerte: keine KPI-, Energie- und Regelfelder und keine Kennzeichen `testphase_ohne`, `kaelteschutz`,
@@ -97,6 +98,8 @@ def run_telemetry_tick(
         else:
             kpi_fields = read_kpi_fields(manifest, signals, energy, einheiten=einheiten)
             regulation_fields = read_regulation_fields(manifest, signals, room_target)
+            if soll_art is not None:
+                regulation_fields["soll_art"] = soll_art
         publish_telemetry(
             mqtt_client=mqtt_client, room_actual=room_actual,
             boost_active=boost_active, failsafe_active=failsafe_active,

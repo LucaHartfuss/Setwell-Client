@@ -96,7 +96,6 @@ NUR_SERVER: set[str] = {
     "MAX_CLOCK_SKEW_SECONDS",  # nur der Server prueft das Zeitfenster der Signatur
     "UNAUTHENTICATED_ERROR",  # Text der 401-Antwort; das Geraet wertet nur den Status 401 (immer gleich)
     "WEG_ERGEBNISSE",  # Ergebnisse von weg_pruefen; der Server prueft sie, das Geraet lehnt den Befehl noch ab
-    "WISH_WERTE_PROGRAMM",  # Wunsch-Werte der Betriebsarten; der Wunsch des Geraets sendet sie noch nicht
     "WOCHENPLAN_TAGE",  # Tage 1-7; das Geraet prueft den Wochenplan ueber plan.wochenplan_fehler, das den Bereich selbst fuehrt
 }
 NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts importieren), nur gepinnt (P4)

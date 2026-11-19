@@ -33,6 +33,7 @@ from smartheat_runtime import (
     roles,
     room_sensors,
     soll_ende,
+    soll_meldung,
     telemetry,
     testphase,
     ticks,
@@ -580,10 +581,12 @@ def _on_telemetry(rt: Runtime, event: Event) -> None:
     datenfehler = state.delivery.datenfehler
     if datenfehler is None and rt.store.storage_failed:
         datenfehler = DataFault(SOURCE_LOCAL, (ROLE_DATENTRAEGER,))
+    gemeldet = soll_meldung.gemeldet(rt)  # mit Plan das geltende Soll samt Art, sonst der Wunsch wie bisher
     telemetry.run_telemetry_tick(
         rt.manifest, rt.signals, rt.mqtt_client,
         boost_active=state.boost_active, failsafe_active=state.delivery.notbetrieb,
-        datenfehler=datenfehler, room_target=state.stable_target,
+        datenfehler=datenfehler, room_target=state.stable_target if gemeldet is None else gemeldet.soll,
+        soll_art=None if gemeldet is None else gemeldet.soll_art,
         energy=telemetry.energy_normalizer(rt.store, rt.override.binding.description.energy_counters),
         einheiten=rt.override.binding.description.energie, kreis=rt.config.kreis,
         testphase_ohne=testphase.aktiv(rt), kaelteschutz=state.kaelteschutz_art or telemetry.KAELTESCHUTZ_AUS,

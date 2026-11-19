@@ -7,6 +7,7 @@ from fakes import FakeHa, FakeMqttChannel, FakeNotifySink
 
 from heizungsbruecke.ha_binding import HaPlantBinding
 from smartheat_core.pipeline import DeviceWriteError, LeverPipeline
+from smartheat_core.plan import SollErgebnis
 from smartheat_core.safety import LocalSafety
 from smartheat_runtime import delivery, ticks
 from smartheat_runtime.notifier import Notifier
@@ -26,13 +27,47 @@ def _safety(heat_limit_max=20.0):
     )
 
 
-def _rt(ha, manifest, store, override=None, mqtt=None, clock=None, zone_prepared=True):
+def _rt(ha, manifest, store, override=None, mqtt=None, clock=None, zone_prepared=True, geltendes_soll=None, plan=True):
     """Laufzeit-Sicht von ticks._attempt mit echter Pipeline (Vaillant) und dem MQTT-Kanal als Port.
-    zone_prepared: die Zone wurde in diesem Prozess vorbereitet (Runtime.zone_prepared)."""
+    zone_prepared: die Zone wurde in diesem Prozess vorbereitet (Runtime.zone_prepared); geltendes_soll: das Ergebnis des
+    letzten lokalen Checks, plan: ob die Dokumente eine Planeingabe hergeben."""
     if override is None:
         override = LeverPipeline(store, HaPlantBinding(ha, manifest, VAILLANT_MYPYLLANT), _safety(), clock=clock)
+    config = SimpleNamespace(kreis=1, plan_source=lambda: object() if plan else None, zustand_source=lambda: "in_betrieb")
     return SimpleNamespace(manifest=manifest, signals=ha, mqtt_client=mqtt, store=store, override=override,
-                           manual_override_seq=None, manual_override_sent=None, zone_prepared=zone_prepared, config=SimpleNamespace(kreis=1))
+                           manual_override_seq=None, manual_override_sent=None, zone_prepared=zone_prepared, config=config,
+                           geltendes_soll=geltendes_soll)
+
+
+@pytest.mark.parametrize("art, soll", [("wunsch", 21.0), ("absenkung", 18.0), ("aufheizen", 21.0), ("abwesend", 17.0),
+                                       ("leerstand", 16.0), ("uebersteuert", 23.0)])
+def test_der_snapshot_meldet_das_geltende_soll_je_art_nicht_den_wunsch(make_store, clock, art, soll):
+    ha = FakeHa()
+    ha.states["sensor.room_target"] = 21.0  # der Wunsch im Soll-Speicher
+    ha.states["climate.zone::temperature"] = 22.0
+    manifest = ChannelManifest(refs={"room_target": "sensor.room_target", "shift_current": "climate.zone::temperature"})
+    mqtt = FakeMqttChannel()
+    rt = _rt(ha, manifest, make_store(), mqtt=mqtt, clock=clock, geltendes_soll=SollErgebnis(soll, art, None))
+    clock.advance(SETTLE + 1)
+
+    assert ticks._attempt(rt, "s1", "daily") == delivery.Published(seq="s1")
+    assert mqtt.snapshots[-1]["room_target"] == soll
+    assert "soll_art" not in mqtt.snapshots[-1]  # die Art reist nur in der Telemetrie
+
+
+@pytest.mark.parametrize("plan, soll", [(False, SollErgebnis(17.0, "abwesend", None)), (True, None)],
+                         ids=["ohne-plan", "ohne-geltendes-soll"])
+def test_der_snapshot_bleibt_ohne_plan_beim_wunsch(make_store, clock, plan, soll):
+    ha = FakeHa()
+    ha.states["sensor.room_target"] = 21.0
+    ha.states["climate.zone::temperature"] = 22.0
+    manifest = ChannelManifest(refs={"room_target": "sensor.room_target", "shift_current": "climate.zone::temperature"})
+    mqtt = FakeMqttChannel()
+    rt = _rt(ha, manifest, make_store(), mqtt=mqtt, clock=clock, geltendes_soll=soll, plan=plan)
+    clock.advance(SETTLE + 1)
+
+    assert ticks._attempt(rt, "s1", "daily") == delivery.Published(seq="s1")
+    assert mqtt.snapshots[-1]["room_target"] == 21.0
 
 
 @pytest.mark.parametrize("mqtt", [None, FakeMqttChannel(connected=False)], ids=["ohne-kanal", "getrennt"])

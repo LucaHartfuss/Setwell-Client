@@ -62,13 +62,23 @@ class Wunsch:
     basis_version: int
     ts: str
     uhr_synchron: bool
-    raum_soll: float
+    raum_soll: float | None
     roh: float | None = None
     herkunft: str | None = None
     durch: str | None = None
+    #: Die Programmwerte (Faehigkeit `programm`): Schluessel aus WISH_WERTE_PROGRAMM, Wert Objekt oder None (beenden).
+    programm: dict | None = None
+
+    def werte(self) -> dict:
+        """`werte` der Nachricht: je Situation nur, was sich aendert (raum_soll und/oder Programmwerte)."""
+        werte = {} if self.raum_soll is None else {"raum_soll": self.raum_soll}
+        werte.update(self.programm or {})
+        pflicht = wire.WISH_WERTE if self.raum_soll is not None else ()
+        nachrichten.pruefen("wunsch.werte", werte, pflicht, wire.WISH_WERTE_PROGRAMM)
+        return werte
 
     def payload(self) -> dict:
-        werte = nachrichten.pruefen("wunsch.werte", {"raum_soll": self.raum_soll}, wire.WISH_WERTE)
+        werte = self.werte()
         body = {"schema": wire.SCHEMA, "wish_id": self.wish_id, "kreis": self.kreis,
                 "basis_version": self.basis_version, "ts": self.ts,
                 "uhr_synchron": self.uhr_synchron, "werte": werte}
@@ -94,12 +104,40 @@ def pruefen_kreis(kreis) -> None:
         raise ValueError("kreis ist keine Kreisnummer")
 
 
-def neu(raum_soll: float, roh: float | None, *, kreis: int, basis_version: int, uhr_synchron: bool, herkunft: str | None,
-        durch: str | None, wall: float) -> Wunsch:
+def _objekt(name: str, wert, felder: tuple[str, ...]) -> None:
+    if not isinstance(wert, dict) or set(wert) != set(felder):
+        raise ValueError(f"{name} hat nicht genau die Felder des Vertrags")
+
+
+def pruefen_programm(programm: dict | None, herkunft: str | None) -> None:
+    """ValueError, wenn die Programmwerte nicht zum Vertrag passen: nur die Schluessel aus WISH_WERTE_PROGRAMM; `leerstand`
+    nur als null (das setzt der Server); `abwesend` als Objekt nur aus HA, vom Thermostat nur als null."""
+    for key, wert in (programm or {}).items():
+        if key not in wire.WISH_WERTE_PROGRAMM:
+            raise ValueError("programm nennt einen Schluessel ausserhalb des Vertrags")
+        if wert is None:
+            continue
+        if key == "leerstand":
+            raise ValueError("leerstand setzt nur der Server")
+        if key == "abwesend":
+            if herkunft != "ha":
+                raise ValueError("abwesend als Objekt kommt nur aus HA")
+            _objekt("abwesend", wert, wire.ABWESEND_FIELDS)
+        else:
+            _objekt("uebersteuerung", wert, wire.UEBERSTEUERUNG_FIELDS)
+
+
+def neu(raum_soll: float | None, roh: float | None, *, kreis: int, basis_version: int, uhr_synchron: bool,
+        herkunft: str | None, durch: str | None, wall: float, programm: dict | None = None) -> Wunsch:
+    """Ein Wunsch braucht mindestens einen Wert: raum_soll und/oder Programmwerte."""
     pruefen_herkunft(herkunft, durch)
     pruefen_kreis(kreis)
+    pruefen_programm(programm, herkunft)
+    if raum_soll is None and not programm:
+        raise ValueError("Wunsch ohne Wert")
     ts = datetime.fromtimestamp(wall, UTC).isoformat(timespec="seconds")
-    return Wunsch(uuid.uuid4().hex, kreis, basis_version, ts, uhr_synchron, raum_soll, roh, herkunft, durch)
+    return Wunsch(uuid.uuid4().hex, kreis, basis_version, ts, uhr_synchron, raum_soll, roh, herkunft, durch,
+                  dict(programm) if programm else None)
 
 
 def _laden(path: Path) -> Wunsch | None:
@@ -113,8 +151,17 @@ def _laden(path: Path) -> Wunsch | None:
     gueltig = (isinstance(wunsch.wish_id, str) and isinstance(wunsch.kreis, int) and not isinstance(wunsch.kreis, bool)
                and wire.KREIS_MIN <= wunsch.kreis <= wire.KREIS_MAX and isinstance(wunsch.basis_version, int)
                and isinstance(wunsch.ts, str) and isinstance(wunsch.uhr_synchron, bool)
-               and isinstance(wunsch.raum_soll, int | float))
-    return wunsch if gueltig else None
+               and (isinstance(wunsch.raum_soll, int | float) and not isinstance(wunsch.raum_soll, bool)
+                    or wunsch.raum_soll is None and bool(wunsch.programm))
+               and (wunsch.programm is None or isinstance(wunsch.programm, dict)))
+    if not gueltig:
+        return None
+    try:
+        pruefen_programm(wunsch.programm, wunsch.herkunft)
+        wunsch.werte()
+    except ValueError:
+        return None
+    return wunsch
 
 
 class _Platz:

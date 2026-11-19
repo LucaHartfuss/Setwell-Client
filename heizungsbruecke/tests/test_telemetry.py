@@ -441,6 +441,37 @@ def test_regulation_fields_and_local_ts():
     assert datetime.fromisoformat(payload["ts"]).tzinfo is not None
 
 
+@pytest.mark.parametrize("soll_art", ["wunsch", "absenkung", "aufheizen", "abwesend", "leerstand", "uebersteuert"])
+def test_die_telemetrie_traegt_die_soll_art_neben_dem_geltenden_soll(soll_art):
+    manifest = ChannelManifest(refs={"room_actual": "sensor.r"})
+    ha = MagicMock(spec=SignalSource)
+    ha.get_state.side_effect = {"sensor.r": 20.1}.__getitem__
+    mqtt = MagicMock(spec=MqttChannel)
+    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, room_target=17.0,
+                                 soll_art=soll_art, kreis=1)
+    payload = mqtt.publish_telemetry.call_args.args[0]
+    assert (payload["room_target"], payload["soll_art"]) == (17.0, soll_art)
+
+
+def test_ohne_soll_art_hat_die_telemetrie_kein_neues_feld():
+    manifest = ChannelManifest(refs={"room_actual": "sensor.r"})
+    ha = MagicMock(spec=SignalSource)
+    ha.get_state.side_effect = {"sensor.r": 20.1}.__getitem__
+    mqtt = MagicMock(spec=MqttChannel)
+    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, room_target=20.5, kreis=1)
+    assert "soll_art" not in mqtt.publish_telemetry.call_args.args[0]
+
+
+def test_die_schutz_telemetrie_ohne_regelfelder_traegt_keine_soll_art():
+    manifest = ChannelManifest(refs={"room_actual": "sensor.r"})
+    ha = MagicMock(spec=SignalSource)
+    ha.get_state.side_effect = {"sensor.r": 20.1}.__getitem__
+    mqtt = MagicMock(spec=MqttChannel)
+    telemetry.run_telemetry_tick(manifest, ha, mqtt, boost_active=False, failsafe_active=False, soll_art="abwesend",
+                                 nur_raeume=True, kreis=1)
+    assert "soll_art" not in mqtt.publish_telemetry.call_args.args[0]
+
+
 def test_read_regulation_fields_liest_aussentemperatur_und_vorlaufsoll_aus_den_signalen():
     manifest = ChannelManifest(refs={"outdoor_temp": "sensor.o", "flow_setpoint": "sensor.vl", "room_target": "x.y"})
     signals = MagicMock(spec=SignalSource)
