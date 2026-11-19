@@ -1250,6 +1250,150 @@ def test_ein_geraet_mit_dem_alten_schema_lehnt_ab(tmp_path):
     assert _store(tmp_path).empfangen("bedienung", _bedienung(schema=1)).grund == "schema_unbekannt"
 
 
+# --- Bedienung mit den Teilen der Faehigkeit programm ---
+
+_WOCHE = [{"tag": tag, "warm_ab": "06:00", "kuehl_ab": "22:00"} for tag in range(1, 8)]
+_ABWESEND = {"bis": "2027-01-20T10:00:00Z", "temp": 17.0, "aufheizen_ab": None}
+_LEERSTAND = {"von": "2027-01-15T08:00:00Z", "bis": "2027-02-15T10:00:00Z", "temp": 16.0, "aufheizen_ab": "2027-02-15T04:00:00Z"}
+_UEBERSTEUERUNG = {"temp": 22.0, "bis": "2027-01-15T20:00:00Z"}
+
+
+def _programm_kreis(**changes):
+    """Ein Kreis der Bedienung mit allen Feldern der Faehigkeit programm (nicht gesetzte Teile null)."""
+    kreis = {"kreis": 1, "modus": "manuell", "raum_soll": 21.0, "wochenplan": None, "abwesend": None, "leerstand": None,
+             "uebersteuerung": None, "abwesend_temp_standard": None}
+    return {**kreis, **changes}
+
+
+def _programm_bedienung(version=1, **changes):
+    return _bedienung(version=version, kreise=[_programm_kreis(**changes)])
+
+
+def test_eine_bedienung_mit_allen_teilen_ohne_wert_wird_angenommen(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("bedienung", _programm_bedienung()).uebernommen
+    assert store.inhalt("bedienung")["kreise"] == [_programm_kreis()]
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"wochenplan": _WOCHE},
+    {"modus": "abwesend", "abwesend": _ABWESEND},
+    {"modus": "abwesend", "abwesend": None},  # der Modus ohne Teil gilt: die Rechnung nimmt dann den Wunsch
+    {"modus": "leerstand", "leerstand": _LEERSTAND},
+    {"modus": "manuell", "uebersteuerung": _UEBERSTEUERUNG},
+    {"modus": "abwesend", "abwesend": _ABWESEND, "uebersteuerung": _UEBERSTEUERUNG},
+    {"modus": "leerstand", "leerstand": {**_LEERSTAND, "aufheizen_ab": None}},
+    {"abwesend_temp_standard": 19.5},
+])
+def test_ein_teil_zum_passenden_modus_wird_angenommen(tmp_path, aenderung):
+    assert _store(tmp_path).empfangen("bedienung", _programm_bedienung(**aenderung)).uebernommen
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"abwesend": _ABWESEND},  # modus manuell
+    {"modus": "leerstand", "abwesend": _ABWESEND},
+    {"leerstand": _LEERSTAND},  # modus manuell
+    {"modus": "abwesend", "leerstand": _LEERSTAND},
+])
+def test_ein_teil_ohne_passenden_modus_ist_ungueltig(tmp_path, aenderung):
+    store = _store(tmp_path)
+    ergebnis = store.empfangen("bedienung", _programm_bedienung(**aenderung))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert store.inhalt("bedienung") is None
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"wochenplan": _WOCHE[:6]},  # nicht jeder Tag
+    {"wochenplan": [*_WOCHE[:6], {**_WOCHE[0]}]},  # Tag 1 doppelt
+    {"wochenplan": [*_WOCHE[:6], {"tag": 7, "warm_ab": "06:00"}]},  # Feld fehlt
+    {"wochenplan": [*_WOCHE[:6], {**_WOCHE[6], "name": "x"}]},  # fremdes Feld
+    {"wochenplan": [*_WOCHE[:6], {**_WOCHE[6], "tag": True}]},
+    {"wochenplan": [*_WOCHE[:6], {**_WOCHE[6], "warm_ab": 6}]},
+    {"wochenplan": "woche"},
+    {"modus": "abwesend", "abwesend": {"bis": "2027-01-20T10:00:00Z", "temp": 17.0}},  # Feld fehlt
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "von": None}},  # fremdes Feld
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "bis": "morgen"}},
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "bis": None}},
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "temp": True}},
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "temp": "17"}},
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "aufheizen_ab": "frueh"}},
+    {"modus": "abwesend", "abwesend": "bald"},
+    {"modus": "leerstand", "leerstand": {**_LEERSTAND, "von": None}},
+    {"modus": "leerstand", "leerstand": {"bis": "2027-02-15T10:00:00Z", "temp": 16.0, "aufheizen_ab": None}},
+    {"uebersteuerung": {"temp": 22.0}},
+    {"uebersteuerung": {**_UEBERSTEUERUNG, "bis": 5}},
+    {"uebersteuerung": {**_UEBERSTEUERUNG, "temp": None}},
+    {"abwesend_temp_standard": "kalt"},
+    {"abwesend_temp_standard": True},
+    {"modus": "ferien"},
+])
+def test_ein_teil_mit_falscher_form_ist_ungueltig(tmp_path, aenderung):
+    store = _store(tmp_path)
+    assert store.empfangen("bedienung", _programm_bedienung(**aenderung)).grund == "ungueltig"
+    assert store.inhalt("bedienung") is None
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "temp": 14.5}},  # unter 15 Grad
+    {"modus": "abwesend", "abwesend": {**_ABWESEND, "temp": 30.0}},  # ueber dem Bedienbereich
+    {"modus": "leerstand", "leerstand": {**_LEERSTAND, "temp": 14.0}},
+    {"uebersteuerung": {**_UEBERSTEUERUNG, "temp": 15.5}},  # unter der Absenk-Untergrenze von 16 Grad
+    {"uebersteuerung": {**_UEBERSTEUERUNG, "temp": 26.0}},
+    {"abwesend_temp_standard": 14.5},
+])
+def test_ein_teil_ausserhalb_der_grenzen_wird_abgelehnt(tmp_path, aenderung):
+    store = _store(tmp_path)
+    ergebnis = store.empfangen("bedienung", _programm_bedienung(**aenderung))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ausserhalb_bereich")
+    assert ergebnis.details["regel"] == "bereich"
+    assert store.inhalt("bedienung") is None
+
+
+@pytest.mark.parametrize("fehlt", ["wochenplan", "abwesend", "leerstand", "uebersteuerung", "abwesend_temp_standard"])
+def test_die_felder_der_faehigkeit_gelten_ganz_oder_gar_nicht(tmp_path, fehlt):
+    kreis = _programm_kreis()
+    del kreis[fehlt]
+    ergebnis = _store(tmp_path).empfangen("bedienung", _bedienung(kreise=[kreis]))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert ergebnis.details["regel"] == "fehlt"
+
+
+def test_ein_altes_dokument_ohne_die_felder_gilt_nach_dem_update_bis_zum_neuen(tmp_path):
+    alt = _bedienung(version=3, raum_soll=20.5)
+    assert _store(tmp_path).empfangen("bedienung", alt).uebernommen
+    nach_update = _store(tmp_path)  # neuer Start mit dem Stand der Datei
+    assert nach_update.version("bedienung") == 3
+    assert nach_update.inhalt("bedienung")["kreise"] == [{"kreis": 1, "modus": "manuell", "raum_soll": 20.5}]
+    neu = _programm_bedienung(version=4, modus="abwesend", abwesend=_ABWESEND)
+    assert nach_update.empfangen("bedienung", neu).uebernommen
+    assert _store(tmp_path).inhalt("bedienung")["kreise"][0]["abwesend"] == _ABWESEND
+
+
+def test_ein_kreis_mit_und_einer_ohne_die_felder_wird_angenommen(tmp_path):
+    """Die Felder gelten je Kreis ganz oder gar nicht; der Server sendet sie an alle Kreise eines Geraets zugleich,
+    die Pruefung hier verlangt es nicht kreisuebergreifend."""
+    zwei = [_programm_kreis(), {"kreis": 2, "modus": "manuell", "raum_soll": 19.5}]
+    assert _store(tmp_path).empfangen("bedienung", _bedienung(kreise=zwei)).uebernommen
+
+
+# --- Konfiguration mit der Zeitzone ---
+
+def test_eine_konfiguration_mit_zeitzone_wird_angenommen(tmp_path):
+    store = _store(tmp_path)
+    assert store.empfangen("konfiguration", _konfiguration(zeitzone="Europe/Berlin")).uebernommen
+    assert store.inhalt("konfiguration")["zeitzone"] == "Europe/Berlin"
+
+
+def test_eine_konfiguration_mit_unbekannter_zeitzone_wird_abgelehnt(tmp_path):
+    ergebnis = _store(tmp_path).empfangen("konfiguration", _konfiguration(zeitzone="Mars/Olympus"))
+    assert (ergebnis.ok, ergebnis.grund) == (False, "ungueltig")
+    assert ergebnis.details == {"feld": "zeitzone", "regel": "unbekannt"}
+
+
+def test_eine_konfiguration_ohne_zeitzone_gilt_weiter(tmp_path):
+    assert _store(tmp_path).empfangen("konfiguration", _konfiguration()).uebernommen
+
+
 def test_die_anzeige_wird_mit_eigener_version_gespeichert_und_ueberlebt_den_neustart(tmp_path):
     store = _store(tmp_path)
     assert store.version("anzeige") == 0

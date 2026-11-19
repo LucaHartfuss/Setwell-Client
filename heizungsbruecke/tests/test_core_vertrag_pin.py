@@ -7,7 +7,7 @@ Die Kopie muss ein anderes Objekt sein als der Vertrag; dass sie aus dem Kern od
 test_device_wire.py per AST."""
 import pytest
 
-from smartheat_core import bindungsparameter, config_check, safety
+from smartheat_core import bindungsparameter, config_check, plan, safety
 from smartheat_device import wire
 from smartheat_runtime import dokument_config
 
@@ -38,7 +38,11 @@ _VERTRAG_GEPINNT_AUFHEIZEN_ARTEN = (wire.AUFHEIZEN_ARTEN, config_check.AUFHEIZEN
 _VERTRAG_GEPINNT_ABSENKUNG_K_MIN = (wire.ABSENKUNG_K_MIN, safety.ABSENKUNG_MIN_K)
 _VERTRAG_GEPINNT_ABSENKUNG_K_MAX = (wire.ABSENKUNG_K_MAX, safety.ABSENKUNG_MAX_K)
 _VERTRAG_GEPINNT_ABSENKUNG_K_STEP = (wire.ABSENKUNG_K_STEP, safety.ABSENKUNG_SCHRITT_K)
-_VERTRAG_GEPINNT_RAUM_ROLLEN = (wire.RAUM_ROLLEN, config_check.RAUM_ROLLEN)
+_VERTRAG_GEPINNT_SOLL_ARTEN = (wire.SOLL_ARTEN, (
+    plan.SOLL_ART_WUNSCH, plan.SOLL_ART_ABSENKUNG, plan.SOLL_ART_AUFHEIZEN, plan.SOLL_ART_ABWESEND,
+    plan.SOLL_ART_LEERSTAND, plan.SOLL_ART_UEBERSTEUERT))
+_VERTRAG_GEPINNT_WOCHENPLAN_EINTRAG_FIELDS = (wire.WOCHENPLAN_EINTRAG_FIELDS, plan._EINTRAG_FELDER)  # Menge, ohne Reihenfolge
+_VERTRAG_GEPINNT_RAUM_ROLLEN =(wire.RAUM_ROLLEN, config_check.RAUM_ROLLEN)
 _VERTRAG_GEPINNT_KREISE_MAX = (wire.KREISE_MAX, config_check.KREISE_MAX)
 _VERTRAG_GEPINNT_RAEUME_MAX = (wire.RAEUME_MAX, config_check.RAEUME_MAX)
 _VERTRAG_GEPINNT_RAUM_FUEHLER_MAX = (wire.RAUM_FUEHLER_MAX, config_check.RAUM_FUEHLER_MAX)
@@ -63,7 +67,7 @@ PINS = {name: wert for name, wert in sorted(globals().items()) if name.startswit
 @pytest.mark.parametrize("name", PINS)
 def test_die_kopie_im_kern_gleicht_dem_vertrag(name):
     vertrag, kopie = PINS[name]
-    assert kopie == vertrag, name
+    assert kopie == (frozenset(vertrag) if isinstance(kopie, frozenset) else vertrag), name
     if not isinstance(vertrag, int):  # kleine Zahlen sind in Python ohnehin dasselbe Objekt
         assert kopie is not vertrag, name  # eine Kopie, kein Verweis auf den Vertrag
 

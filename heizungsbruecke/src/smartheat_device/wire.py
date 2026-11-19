@@ -109,6 +109,8 @@ ERROR_FIELDS = ("grund", "details")
 WISH_FIELDS = ("schema", "wish_id", "kreis", "basis_version", "ts", "uhr_synchron", "werte")
 WISH_OPTIONAL = ("roh", "herkunft", "durch")  # fehlt = nicht begrenzt bzw. unbekannt
 WISH_WERTE = ("raum_soll",)
+#: Weitere Schluessel in `werte` (Faehigkeit `programm`): Objekt oder null; `leerstand` nimmt der Server vom Geraet nur als null.
+WISH_WERTE_PROGRAMM = ("uebersteuerung", "abwesend", "leerstand")
 #: Das Geraet verlaesst das Konto (nach der lokalen Abmeldung): die Wahl des Nutzers beim Entfernen der Verbindung. `freigeben`
 #: bittet den Server, das Geraet aus dem Konto zu loesen; `behalten` laesst es dort (der Server fuehrt es weiter als abgemeldet).
 ENTFERNT_FIELDS = ("schema", "wahl", "ts")
@@ -186,6 +188,11 @@ BEDIENUNG_KREIS_FIELDS = ("kreis", "modus", "raum_soll")  # ein Eintrag je Kreis
 MODI = ("manuell",)
 # Felder der Faehigkeit `programm` (Wochenplan, Away, Leerstand, Uebersteuerung): eigene Konstanten neben den Grundfeldern, weil
 # ein Geraet ohne die Faehigkeit keines davon bekommt und strikt prueft; Fixture `geraet_v1.json` fuehrt dieselben Werte.
+# `abwesend_temp_standard` (die zuletzt gewaehlte Abwesenheitstemperatur, Zahl oder null) steht in der Bedienung, nicht in der
+# Konfiguration: die Konfiguration liest der Betreiber, und jede ihrer Versionen entstuende mit einer Abwesenheit.
+BEDIENUNG_KREIS_PROGRAMM = ("wochenplan", "abwesend", "leerstand", "uebersteuerung",
+                            "abwesend_temp_standard")  # zusaetzlich zu BEDIENUNG_KREIS_FIELDS
+MODI_PROGRAMM = ("abwesend", "leerstand")  # zusaetzlich zu MODI
 KONFIGURATION_PROGRAMM = ("zeitzone",)  # anlagenweit, zusaetzlich zu KONFIGURATION_FIELDS
 KONFIGURATION_KREIS_PROGRAMM = ("aufheizen", "absenkung_k", "aufheizdauer_min")
 AUFHEIZDAUER_MIN_FIELDS = ("plan", "weg")
@@ -193,10 +200,16 @@ AUFHEIZDAUER_MIN_FIELDS = ("plan", "weg")
 #: gelernter oder gemeldeter Wert darueber wird gekappt (Entscheidung des Nutzers; eine andere Zahl braucht eine neue).
 AUFHEIZDAUER_MIN_GRENZE = (720, 4320)
 AUFHEIZEN_ARTEN = ("boost", "kurve")
+WOCHENPLAN_EINTRAG_FIELDS = ("tag", "warm_ab", "kuehl_ab")
+WOCHENPLAN_TAGE = (1, 2, 3, 4, 5, 6, 7)  # ISO-Wochentage, jeder genau einmal im Wochenplan
+ABWESEND_FIELDS = ("bis", "temp", "aufheizen_ab")
+LEERSTAND_FIELDS = ("von", "bis", "temp", "aufheizen_ab")
+UEBERSTEUERUNG_FIELDS = ("temp", "bis")
 #: Absenkung der kuehlen Phase (Regel 4, freigegeben): 0 bis 5 K in Schritten von 0,5 K.
 ABSENKUNG_K_MIN = 0.0
 ABSENKUNG_K_MAX = 5.0
 ABSENKUNG_K_STEP = 0.5
+SOLL_ARTEN = ("wunsch", "absenkung", "aufheizen", "abwesend", "leerstand", "uebersteuert")  # soll_art je Kreis in der Telemetrie
 # Anzeige: ein Eintrag je Kreis der Konfiguration, nur Host ha; der Server schreibt, das Geraet zeigt und prueft den
 # vollen Feldsatz (einlernphase_tag, testphase_bis null = nicht aktiv; befunde, aufgaben, raumziele leere Listen;
 # kennzahlen leeres Objekt)
