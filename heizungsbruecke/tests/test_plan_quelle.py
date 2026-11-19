@@ -98,3 +98,69 @@ def test_die_eingabe_des_geraets_liest_beide_dokumente_bei_jedem_aufruf():
     assert eingabe_des_geraets(geraet, 2).bedienung["raum_soll"] == 19.0
     geraet.bedien = (None, False)
     assert eingabe_des_geraets(geraet, 2) is None
+
+
+# --- Rueckkehr: was das Geraet aus den Dokumenten rechnet, ohne Server und ohne Portal ---
+
+def _zeit(text):
+    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+
+
+def _soll(jetzt, aufheizdauer, **bedienung):
+    """Das geltende Soll von Kreis 1 (Wunsch 21 Grad, Absenkung 3 K, Plan warm 06:30 und kuehl 22:30 Ortszeit)."""
+    konfiguration = {"zeitzone": "Europe/Berlin",
+                     "kreise": [{"kreis": 1, "absenkung_k": 3, "aufheizdauer_min": aufheizdauer}]}
+    dokument = {"kreise": [{"kreis": 1, "modus": "manuell", "wochenplan": PLAN, **bedienung}]}
+    eingabe = plan_eingabe(konfiguration, dokument, 1)
+    erg = geltendes_soll(eingabe, 21.0, _zeit(jetzt), uhr_vertrauenswuerdig=True, soll_quelle_aus=False)
+    return erg.soll, erg.soll_art, erg.naechster_wechsel
+
+
+def test_rueckkehr_in_der_kuehlen_phase_uebersteuerung_endet_zum_aufheizbeginn():
+    aufheizdauer = {"plan": 60, "weg": 0}
+    ueber = {"temp": 20.0, "bis": "2026-11-03T04:30:00Z"}  # Aufheizbeginn: 05:30 Uhr UTC (warm) minus 60 Minuten
+    assert _soll("2026-11-02T23:00:00Z", aufheizdauer, uebersteuerung=ueber) == (20.0, "uebersteuert",
+                                                                                _zeit("2026-11-03T04:30:00Z"))
+    assert _soll("2026-11-03T04:30:00Z", aufheizdauer, uebersteuerung=ueber) == (21.0, "aufheizen",
+                                                                                _zeit("2026-11-03T05:30:00Z"))
+
+
+def test_rueckkehr_aus_dem_leerstand_in_warmer_phase_heizt_vorher_auf_das_warme_soll():
+    leerstand = {"von": "2026-11-01T00:00:00Z", "bis": "2026-11-20T10:00:00Z", "temp": 16.0, "aufheizen_ab": None}
+    aufheizdauer = {"plan": 0, "weg": 120}
+    kwargs = {"modus": "leerstand", "leerstand": leerstand}
+    assert _soll("2026-11-20T07:59:59Z", aufheizdauer, **kwargs) == (16.0, "leerstand", _zeit("2026-11-20T08:00:00Z"))
+    assert _soll("2026-11-20T08:00:00Z", aufheizdauer, **kwargs) == (21.0, "aufheizen", _zeit("2026-11-20T10:00:00Z"))
+    assert _soll("2026-11-20T10:00:00Z", aufheizdauer, **kwargs) == (21.0, "wunsch", _zeit("2026-11-20T21:30:00Z"))
+
+
+def test_rueckkehr_aus_dem_leerstand_in_kuehler_phase_heizt_nur_auf_die_absenktemperatur():
+    leerstand = {"von": "2026-11-01T00:00:00Z", "bis": "2026-11-20T22:30:00Z", "temp": 16.0, "aufheizen_ab": None}
+    kwargs = {"modus": "leerstand", "leerstand": leerstand}
+    aufheizdauer = {"plan": 0, "weg": 120}
+    assert _soll("2026-11-20T20:30:00Z", aufheizdauer, **kwargs) == (18.0, "aufheizen", _zeit("2026-11-20T22:30:00Z"))
+    assert _soll("2026-11-20T22:30:00Z", aufheizdauer, **kwargs) == (18.0, "absenkung", _zeit("2026-11-21T05:30:00Z"))
+
+
+def test_abwesend_endet_zur_gespeicherten_zeit_ohne_server_und_ohne_aufheizbeginn_vom_server():
+    abwesend = {"bis": "2026-11-10T16:00:00Z", "temp": 17.0, "aufheizen_ab": None}
+    kwargs = {"modus": "abwesend", "abwesend": abwesend}
+    aufheizdauer = {"plan": 0, "weg": 0}
+    assert _soll("2026-11-10T15:59:59Z", aufheizdauer, **kwargs) == (17.0, "abwesend", _zeit("2026-11-10T16:00:00Z"))
+    assert _soll("2026-11-10T16:00:00Z", aufheizdauer, **kwargs) == (21.0, "wunsch", _zeit("2026-11-10T21:30:00Z"))
+
+
+def test_uebersteuerung_im_leerstand_endet_nach_vier_stunden_und_laengere_gilt_nicht():
+    leerstand = {"von": "2026-11-01T00:00:00Z", "bis": "2026-11-20T10:00:00Z", "temp": 16.0, "aufheizen_ab": None}
+    aufheizdauer = {"plan": 0, "weg": 0}
+
+    def im_leerstand(jetzt, bis):
+        return _soll(jetzt, aufheizdauer, modus="leerstand", leerstand=leerstand,
+                     uebersteuerung={"temp": 19.0, "bis": bis})
+
+    assert im_leerstand("2026-11-05T12:00:00Z", "2026-11-05T16:00:00Z") == (19.0, "uebersteuert",
+                                                                           _zeit("2026-11-05T16:00:00Z"))
+    assert im_leerstand("2026-11-05T16:00:00Z", "2026-11-05T16:00:00Z") == (16.0, "leerstand",
+                                                                           _zeit("2026-11-20T10:00:00Z"))
+    assert im_leerstand("2026-11-05T12:00:00Z", "2026-11-05T16:00:01Z") == (16.0, "leerstand",
+                                                                           _zeit("2026-11-20T10:00:00Z"))

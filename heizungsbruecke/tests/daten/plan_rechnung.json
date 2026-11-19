@@ -150,6 +150,16 @@
      "modus": "leerstand",
      "leerstand": {"von": "2026-11-01T00:00:00Z", "bis": "2026-11-20T10:00:00Z", "temp": 16.0, "aufheizen_ab": null},
      "uebersteuerung": {"temp": 19.0, "bis": "2026-11-05T16:00:00Z"},
-     "erwartet": {"soll": 19.0, "soll_art": "uebersteuert", "naechster_wechsel": "2026-11-05T16:00:00Z"}}
+     "erwartet": {"soll": 19.0, "soll_art": "uebersteuert", "naechster_wechsel": "2026-11-05T16:00:00Z"}},
+    {"name": "Uebersteuerung im Leerstand genau 4 Stunden gilt", "zone": "Europe/Berlin",
+     "jetzt": "2026-11-05T12:00:00Z", "modus": "leerstand",
+     "leerstand": {"von": "2026-11-01T00:00:00Z", "bis": "2026-11-20T10:00:00Z", "temp": 16.0, "aufheizen_ab": null},
+     "uebersteuerung": {"temp": 19.0, "bis": "2026-11-05T16:00:00Z"},
+     "erwartet": {"soll": 19.0, "soll_art": "uebersteuert", "naechster_wechsel": "2026-11-05T16:00:00Z"}},
+    {"name": "Uebersteuerung im Leerstand laenger als 4 Stunden gilt nicht", "zone": "Europe/Berlin",
+     "jetzt": "2026-11-05T12:00:00Z", "modus": "leerstand",
+     "leerstand": {"von": "2026-11-01T00:00:00Z", "bis": "2026-11-20T10:00:00Z", "temp": 16.0, "aufheizen_ab": null},
+     "uebersteuerung": {"temp": 19.0, "bis": "2026-11-05T16:00:01Z"},
+     "erwartet": {"soll": 16.0, "soll_art": "leerstand", "naechster_wechsel": "2026-11-20T10:00:00Z"}}
   ]
 }

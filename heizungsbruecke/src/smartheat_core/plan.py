@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from smartheat_core.safety import (
+    UEBERSTEUERUNG_LEERSTAND_HOECHSTDAUER,
     absenktemperatur,
     abwesend_bis_gueltig,
     abwesend_temperatur_gueltig,
@@ -285,6 +286,7 @@ class _Rechnung:
                  wunsch: float, jetzt: datetime) -> None:
         self._zone = zone
         self._wunsch = wunsch
+        self._jetzt = jetzt
         modus = bedienung.get("modus")
         zeiten = None
         if bedienung.get("wochenplan") is not None:
@@ -400,10 +402,16 @@ class _Rechnung:
             return None
         return _Zustand(self._plan_zustand(fenster.bis).soll, SOLL_ART_AUFHEIZEN)
 
+    def _uebersteuerung_im_leerstand(self, zeitpunkt: datetime, bis: datetime, leerstand: _Fenster) -> bool:
+        """Im laufenden Leerstand gilt eine Uebersteuerung nur bis zum Ende des Leerstands und hoechstens
+        UEBERSTEUERUNG_LEERSTAND_HOECHSTDAUER ab jetzt: eine laengere gilt wie nicht gesetzt (die Leerstandstemperatur)."""
+        return zeitpunkt < bis <= leerstand.bis and bis - self._jetzt <= UEBERSTEUERUNG_LEERSTAND_HOECHSTDAUER
+
     def zustand(self, zeitpunkt: datetime) -> _Zustand:
         leerstand, abwesend = self._leerstand, self._abwesend
         if leerstand is not None and leerstand.von is not None and leerstand.von <= zeitpunkt < leerstand.bis:
-            if self._uebersteuerung is not None and zeitpunkt < self._uebersteuerung[1] <= leerstand.bis:
+            if self._uebersteuerung is not None and self._uebersteuerung_im_leerstand(
+                    zeitpunkt, self._uebersteuerung[1], leerstand):
                 return _Zustand(self._uebersteuerung[0], SOLL_ART_UEBERSTEUERT)
             return self._aufheizzustand(leerstand, zeitpunkt) or _Zustand(leerstand.temp, SOLL_ART_LEERSTAND)
         if abwesend is not None and zeitpunkt < abwesend.bis:
