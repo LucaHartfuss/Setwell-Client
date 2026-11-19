@@ -14,7 +14,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 IAM_BASE = "https://iam.viessmann-climatesolutions.com"
 API_BASE = "https://api.viessmann-climatesolutions.com"
-PORTAL_BASE = "https://portal.setwell.de"
 TOKEN_PATH = "/idp/v3/token"
 AUTHORIZE_PATH = "/idp/v3/authorize"
 CALLBACK_PATH = "/oauth/callback"
@@ -52,9 +51,16 @@ def api_base() -> str:
     return _base("SHG_VICARE_API_BASE", API_BASE)
 
 
-def portal_redirect_uri() -> str:
-    """Die einzige `redirect_uri`, die das Geraet annimmt: fester Portal-Host samt Pfad."""
-    return _base("SHG_VICARE_PORTAL_BASE", PORTAL_BASE) + CALLBACK_PATH
+def portal_redirect_uri() -> str | None:
+    """Die einzige `redirect_uri`, die das Geraet annimmt: das Portal aus dem signierten Bau (`install.sh` legt
+    SHG_PORTAL_BASE_URL in gateway.env ab, Compose reicht sie durch) samt Pfad; der Server kann sie nicht setzen.
+    Ohne gueltiges Portal (https, nur Host) gibt es keine; http nur fuer die Testumgebung."""
+    base = os.environ.get("SHG_PORTAL_BASE_URL", "").rstrip("/")
+    teile = urlsplit(base)
+    schemata = ("https", "http") if os.environ.get("SHG_TEST_ENDPOINTS") == "1" else ("https",)
+    if teile.scheme not in schemata or not teile.hostname or teile.path or teile.query or teile.fragment:
+        return None
+    return base + CALLBACK_PATH
 
 
 class NotLoggedIn(Exception):
@@ -158,8 +164,9 @@ class TokenStore:
         gegen die feste Liste), legt Verifier und state als offene Anmeldung an und gibt nur den Hash des state zurueck.
         Eine neue Anmeldung ersetzt die offene."""
         client_id, redirect_uri, scope = params.get("client_id"), params.get("redirect_uri"), params.get("scope")
+        ziel = portal_redirect_uri()
         if not (isinstance(client_id, str) and CLIENT_ID_FORM.fullmatch(client_id)
-                and redirect_uri == portal_redirect_uri() and scope in ERLAUBTE_SCOPES):
+                and ziel is not None and redirect_uri == ziel and scope in ERLAUBTE_SCOPES):
             logger.warning("Anmeldevorgaben des Servers abgelehnt")
             raise LoginRejected()
         verifier, _ = new_pair()

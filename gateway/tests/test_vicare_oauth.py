@@ -516,6 +516,33 @@ GUTE_PARAMS = {"client_id": "0123456789abcdef0123456789abcdef", "redirect_uri": 
                "scope": "IoT User offline_access"}
 
 
+@pytest.fixture(autouse=True)
+def _portal_des_baus(monkeypatch):
+    """Der Portal-Host kommt aus dem signierten Bau (`install.sh` -> gateway.env -> Compose), nicht vom Server."""
+    monkeypatch.setenv("SHG_PORTAL_BASE_URL", "https://portal.setwell.de")
+
+
+@pytest.mark.parametrize("wert", [None, "", "http://portal.setwell.de", "portal.setwell.de"])
+def test_without_an_https_portal_of_the_build_every_begin_is_refused(tmp_path, monkeypatch, wert):
+    if wert is None:
+        monkeypatch.delenv("SHG_PORTAL_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("SHG_PORTAL_BASE_URL", wert)
+    tokens = store(tmp_path, "http://iam.test")
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_beginnen(GUTE_PARAMS)
+    assert tokens.offene_anmeldung() is None
+
+
+def test_the_redirect_follows_the_portal_of_the_build_not_a_fixed_host(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHG_PORTAL_BASE_URL", "https://portal.labor.setwell.de/")
+    tokens = store(tmp_path, "http://iam.test")
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_beginnen(GUTE_PARAMS)
+    labor = {**GUTE_PARAMS, "redirect_uri": "https://portal.labor.setwell.de/oauth/callback"}
+    assert set(tokens.anmeldung_beginnen(labor)) == {"state_hash"}
+
+
 def _abfrage(url: str) -> dict:
     from urllib.parse import parse_qs, urlsplit
     return {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
