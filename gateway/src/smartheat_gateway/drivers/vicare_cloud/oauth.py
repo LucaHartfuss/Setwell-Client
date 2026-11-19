@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TypeGuard
 from urllib.parse import urlencode, urlsplit
 
 import requests
@@ -208,7 +209,7 @@ class TokenStore:
             "code_challenge": challenge, "code_challenge_method": "S256"})
         return f"{iam_base()}{AUTHORIZE_PATH}?{query}"
 
-    def _offen(self, pending) -> bool:
+    def _offen(self, pending: object) -> TypeGuard[dict]:
         return (isinstance(pending, dict) and all(isinstance(pending.get(k), str)
                                                   for k in ("verifier", "client_id", "redirect_uri"))
                 and ist_endliche_zahl(pending.get("created")) and self._wall() - pending["created"] <= PENDING_SECONDS)
