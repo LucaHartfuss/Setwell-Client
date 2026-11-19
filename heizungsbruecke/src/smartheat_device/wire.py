@@ -230,7 +230,7 @@ COMMANDS: dict[str, Command] = {
     "zigbee_devices": Command((), ("devices",), 60, ("zigbee_nicht_bereit",)),
     "driver_login": Command(
         ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code"),
-        ("code_challenge", "code_challenge_method"), 120,
+        ("state_hash",), 120,
         ("treiber_unbekannt", "login_nicht_noetig", "login_fehlgeschlagen", "anlage_nicht_erreichbar"),
     ),
     "inventory": Command(("stunden",), (), None,
@@ -247,7 +247,7 @@ COMMANDS: dict[str, Command] = {
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
-    "finish": ("phase", "driver_id", "code", "redirect_uri"),
+    "finish": ("phase", "driver_id", "code"),
 }
 #: Ergebnisse von `weg_pruefen`.
 WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")

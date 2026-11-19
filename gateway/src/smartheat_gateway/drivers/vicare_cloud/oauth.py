@@ -134,30 +134,6 @@ class TokenStore:
 
     # --- Anmeldung ---
 
-    def begin(self, client_id: str, redirect_uri: str) -> str:
-        verifier, challenge = new_pair()
-        with self._locked():
-            data = self._load()
-            data["pending"] = {"verifier": verifier, "client_id": client_id, "redirect_uri": redirect_uri,
-                               "created": self._wall()}
-            self._save(data)
-        return challenge
-
-    def finish(self, code: str, redirect_uri: str) -> None:
-        with self._locked():
-            data = self._load()
-            pending = data.get("pending")
-            if (not isinstance(pending, dict) or pending.get("redirect_uri") != redirect_uri
-                    or not ist_endliche_zahl(pending.get("created"))
-                    or self._wall() - pending["created"] > PENDING_SECONDS):
-                raise NotLoggedIn("Es wurde keine Anmeldung vorbereitet (oder sie ist abgelaufen).")
-            body = self._token_request({
-                "grant_type": "authorization_code", "client_id": pending["client_id"], "code": code,
-                "redirect_uri": redirect_uri, "code_verifier": pending["verifier"]})
-            if body is None:
-                raise LoginRejected()
-            self._save(self._with_tokens({"client_id": pending["client_id"]}, body))
-
     # --- Anmeldung im Geraet: Verifier und state entstehen hier und verlassen das Geraet nie ---
 
     def anmeldung_beginnen(self, params: dict) -> dict:

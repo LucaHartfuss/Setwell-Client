@@ -10,6 +10,7 @@ import bindung_beispiele
 import pytest
 from bindung_beispiele import VIESSMANN_VICARE_BINDING
 from configs import SENSOR, THERMOSTAT, bedienung, dokumente_schreiben, konfiguration, kreis_bindung, leer
+from conftest import ANMELDE_PARAMETER
 from fake_vicare.server import GOOD_CODE, FakeVicare
 from fakes import FakeBus
 from geraet_fakes import geraet_fuer
@@ -277,8 +278,8 @@ def test_manifest_is_built_after_the_first_poll_so_optional_signals_are_in_it(da
             monkeypatch.setenv(key, value)
         paths = Paths(data_dir)
         login = ViCareCloudDriver(VICARE["parameter"], paths, clock=clock)
-        login.login_begin({"client_id": "c", "redirect_uri": "r"})
-        login.login_finish({"code": GOOD_CODE, "redirect_uri": "r"})
+        login.login_begin(ANMELDE_PARAMETER)
+        login.login_finish({"code": GOOD_CODE})
         host = _host(paths, konfiguration(bindung={"treiber": VICARE, "thermostat": THERMOSTAT}), clock)
         loaded = host.load()
         assert loaded.manifest.refs["flow_temperature"] == "treiber:flow_temperature"

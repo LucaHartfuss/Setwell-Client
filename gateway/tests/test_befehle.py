@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 from befehle_sicht import registrierte_befehle
 from configs import SENSOR, THERMOSTAT, bedienung, dokumente_schreiben, konfiguration
+from conftest import ANMELDE_PARAMETER
+from fake_vicare.server import GOOD_CODE
 from fake_z2m import FakeZigbee2Mqtt
 from fakes import FakeBus, SofortHintergrund
 from world import GatewayWorld
@@ -517,6 +519,34 @@ def server_calls(server) -> int:
     return len(server.calls)
 
 
+def test_driver_login_begin_returns_only_the_state_hash_and_refuses_foreign_parameters(vicare_kontext):
+    ctx, server, clock = vicare_kontext
+    begin = {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER}
+    done = befehle.driver_login(ctx, begin)
+    assert isinstance(done, Done) and set(done.result) == {"state_hash"}
+    pending = json.loads((ctx.paths.driver_secrets_dir / "vicare.json").read_text())["pending"]
+    assert all(geheim not in str(done.result) for geheim in (pending["verifier"], pending["state"]))
+    for fremd in ({"redirect_uri": "https://evil.test/oauth/callback"}, {"scope": "IoT admin"}):
+        with pytest.raises(DriverError) as abgelehnt:
+            befehle.driver_login(ctx, {**begin, **fremd})
+        assert abgelehnt.value.grund == "login_fehlgeschlagen"
+
+
+def test_driver_login_finish_with_a_wrong_code_or_without_an_open_login_is_refused(vicare_kontext):
+    ctx, server, clock = vicare_kontext
+    finish = {"phase": "finish", "driver_id": "vicare_cloud", "code": "falsch"}
+    with pytest.raises(DriverError) as ohne_begin:  # die Anmeldung des Fixtures ist abgeschlossen, keine offen
+        befehle.driver_login(ctx, finish)
+    assert ohne_begin.value.grund == "login_fehlgeschlagen"
+    befehle.driver_login(ctx, {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER})
+    with pytest.raises(DriverError) as falsch:
+        befehle.driver_login(ctx, finish)
+    assert falsch.value.grund == "login_fehlgeschlagen" and "falsch" not in str(falsch.value)
+    with pytest.raises(DriverError) as verbraucht:  # die offene Anmeldung ist mit dem Fehlversuch verbraucht
+        befehle.driver_login(ctx, {**finish, "code": GOOD_CODE})
+    assert verbraucht.value.grund == "login_fehlgeschlagen"
+
+
 def test_inventory_samples_every_15_minutes_and_returns_the_series(vicare_kontext):
     ctx, server, clock = vicare_kontext
     outcome = befehle.inventory(ctx, {"stunden": 1})
@@ -892,7 +922,7 @@ def test_a_blocking_login_does_not_stall_the_device_thread_and_keeps_its_contrac
 
     gestartet, frei = _blockieren(
         monkeypatch, "smartheat_gateway.drivers.vicare_cloud.driver.ViCareCloudDriver.login_finish", abgelehnt)
-    payload = {"phase": "finish", "driver_id": "vicare_cloud", "code": "abc", "redirect_uri": "https://portal.test/cb"}
+    payload = {"phase": "finish", "driver_id": "vicare_cloud", "code": "abc"}
     _geraete_thread_arbeitet_weiter(world, gestartet, lambda: _befehl(world, "c-login", "driver_login", payload))
     assert _ergebnisse(world, command_id="c-login") == []
     frei.set()

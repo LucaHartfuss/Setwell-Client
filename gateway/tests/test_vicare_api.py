@@ -4,6 +4,7 @@ import time
 
 import pytest
 import requests
+from conftest import ANMELDE_PARAMETER
 from fake_vicare.server import GOOD_CODE, FakeVicare
 
 from smartheat_gateway.drivers.vicare_cloud import api as vicare
@@ -18,8 +19,8 @@ def world(tmp_path):
     server = FakeVicare()
     base = server.start()
     tokens = oauth.TokenStore(tmp_path / "vicare.json", iam=base)
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(ANMELDE_PARAMETER)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     guard = QuotaGuard(tmp_path / "quota" / "vicare_cloud.json", QuotaSpec(3, 86400))
     client = vicare.ViCareApi(tokens, guard, base=base)
     yield server, client, guard, tokens

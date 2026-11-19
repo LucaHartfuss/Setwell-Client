@@ -5,6 +5,7 @@ import threading
 
 import pytest
 from bindung_beispiele import VIESSMANN_VICARE_BINDING as BINDING
+from conftest import ANMELDE_PARAMETER
 from fake_vicare.server import DEFAULT, GOOD_CODE, FakeVicare
 from test_vicare_capabilities import GARBAGE, good_features, number
 from test_vicare_capabilities import feature as feature_dict
@@ -24,7 +25,8 @@ from smartheat_runtime.texts import HA_TEXTS
 
 PARAMETER = {"installation_id": 2012345, "gateway_serial": "7637415000000001", "device_id": "0", "heizkreis": 0,
              "poll_seconds": 300.0}
-REDIRECT = "https://portal.test/oauth/callback"
+BEGIN = {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER}
+FINISH = {"phase": "finish", "driver_id": "vicare_cloud", "code": GOOD_CODE}
 
 
 def _umgebung(tmp_path, clock, monkeypatch, recordings=None):
@@ -36,10 +38,8 @@ def _umgebung(tmp_path, clock, monkeypatch, recordings=None):
     monkeypatch.setenv("SHG_VICARE_API_BASE", base)
     paths = Paths(tmp_path)
     driver = ViCareCloudDriver(PARAMETER, paths, clock=clock, writer=True, description=BINDING)
-    challenge = driver.login_begin({"phase": "begin", "driver_id": "vicare_cloud", "client_id": "c",
-                                    "redirect_uri": REDIRECT, "scope": "x"})
-    assert set(challenge) == {"code_challenge", "code_challenge_method"} and challenge["code_challenge_method"] == "S256"
-    driver.login_finish({"phase": "finish", "driver_id": "vicare_cloud", "code": GOOD_CODE, "redirect_uri": REDIRECT})
+    assert set(driver.login_begin(BEGIN)) == {"state_hash"}
+    driver.login_finish(FINISH)
     driver.poll_once()
     return server, driver, paths, clock
 
@@ -439,27 +439,36 @@ def test_login_phases_map_every_failure_to_a_contract_reason_without_secrets(tmp
         monkeypatch.setenv("SHG_VICARE_IAM_BASE", base)
         monkeypatch.setenv("SHG_VICARE_API_BASE", base)
         driver = ViCareCloudDriver({}, Paths(tmp_path), clock=clock)
-        finish = {"phase": "finish", "driver_id": "vicare_cloud", "code": GOOD_CODE, "redirect_uri": REDIRECT}
+        finish = FINISH
         with pytest.raises(DriverError) as not_begun:
             driver.login_finish(finish)
         assert not_begun.value.grund == "login_fehlgeschlagen"
-        begin = {"phase": "begin", "driver_id": "vicare_cloud", "client_id": "c", "redirect_uri": REDIRECT, "scope": "x"}
+        begin = BEGIN
         driver.login_begin(begin)
         with pytest.raises(DriverError) as rejected:
             driver.login_finish({**finish, "code": "falsch"})
         assert rejected.value.grund == "login_fehlgeschlagen"
-        driver.login_begin(begin)
+        ergebnis = driver.login_begin(begin)
+        pending = json.loads((Paths(tmp_path).driver_secrets_dir / "vicare.json").read_text())["pending"]
+        assert set(ergebnis) == {"state_hash"}
+        assert all(geheim not in str(ergebnis) for geheim in (pending["verifier"], pending["state"]))
         monkeypatch.setenv("SHG_VICARE_IAM_BASE", "http://127.0.0.1:9")  # IAM nicht erreichbar
         with pytest.raises(DriverError) as unreachable:
             driver.login_finish(finish)
         assert unreachable.value.grund == "anlage_nicht_erreichbar"
         assert isinstance(unreachable.value.__cause__, oauth.TokenUnavailable)
-        pending = json.loads((Paths(tmp_path).driver_secrets_dir / "vicare.json").read_text())["pending"]
         for error in (not_begun.value, rejected.value, unreachable.value):
-            assert pending["verifier"] not in str(error) and GOOD_CODE not in str(error)
+            assert pending["verifier"] not in str(error) and pending["state"] not in str(error)
+            assert GOOD_CODE not in str(error)
         with pytest.raises(DriverError) as missing:
             driver.login_begin({"phase": "begin", "driver_id": "vicare_cloud"})
         assert missing.value.grund == "login_fehlgeschlagen"
+        for fremd in ({"redirect_uri": "https://evil.test/oauth/callback"}, {"scope": "IoT admin"},
+                      {"client_id": "kurz"}):
+            with pytest.raises(DriverError) as abgelehnt:  # ein Server, der die Vorgaben verfaelscht, meldet nicht an
+                driver.login_begin({**begin, **fremd})
+            assert abgelehnt.value.grund == "login_fehlgeschlagen"
+            assert isinstance(abgelehnt.value.__cause__, oauth.LoginRejected)
     finally:
         server.stop()
 
