@@ -161,16 +161,13 @@ class TargetStore:
             written, stale, until = self._pending
             if self._clock() >= until:
                 self._pending = None
-                if not self._bestaetigt(value, written):
+                if value != written:
                     logger.warning("Thermostat hat das Soll %.1f nicht bestaetigt, sein Wert %.1f gilt", written, value)
             elif value == written:
                 self._pending = None
                 return None
             elif value in stale:
                 logger.info("Thermostat meldet noch einen alten Sollwert %.1f (Schreibbefehl offen), verworfen", value)
-                return None
-            elif self._bestaetigt(value, written):
-                self._pending = None
                 return None
             else:
                 self._pending = None

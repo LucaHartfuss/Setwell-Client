@@ -206,6 +206,12 @@ class FakeGeraet:
     def abwesend_abgelehnt(self, grund):
         self.abwesend.append(("abgelehnt", grund))
 
+    def programm_faehig(self):
+        return False
+
+    def uebersteuerung_senden(self, kreis, temp, bis, herkunft, durch):
+        raise ValueError("keine Faehigkeit programm")
+
     def ursprungswerte_merken(self, werte, kreis=1):
         self.gemeldet.append(werte)
         self.gemeldet_kreise.append(kreis)
@@ -292,6 +298,7 @@ class FakeDevice:
         self.konf, self.bed = konfiguration, bedienung
         self.order = order if order is not None else []
         self.identity = SimpleNamespace(device_id=DEVICE_ID, claim_code=CLAIM_CODE)
+        self.programm_faehig = lambda: False
         self.documents = SimpleNamespace(aktuell=lambda art: (
             Dokument(art, 1, self.konf) if art == "konfiguration" and self.konf is not None else None))
         self.sent = []

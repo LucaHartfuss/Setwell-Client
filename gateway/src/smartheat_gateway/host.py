@@ -34,6 +34,7 @@ from smartheat_runtime.raum import RaumPublisher
 from smartheat_runtime.roles import ALL_ROLES, REQUIRED_ROLES_BY_LEVER_SET, ChannelManifest, ManifestError
 from smartheat_runtime.runtime import EV_LOCAL_CHECK
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT, BatteryRef, BootInfo
+from smartheat_runtime.soll_eingang import UebersteuerungsWeg
 from smartheat_runtime.soll_ende import SollEnde
 from smartheat_runtime.soll_speicher import DEFAULT_RAUM_SOLL, TargetStore, bedienung_start, gespeicherter_wunsch
 from smartheat_runtime.texts import HostTexts
@@ -175,7 +176,7 @@ class GatewayHost:
                 self.konfiguration, self._paths, lambda: self._geraet.abo_status(self.kreis), self.kreis,
                 lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
                 update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
-                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
+                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis, self._store))
         except ConfigFormError as error:
             raise StartFailure(str(error), KEY_CONFIG, konfigurationsform=True) from error
         except (ConfigError, KeyError) as error:  # Rastung, Sicherheitswerte, ungueltige Werte, Luecke im Dokument
@@ -241,6 +242,10 @@ class GatewayHost:
         return BusTriggerSource(
             self._bus, worker, self.mirror, self._store, thermostat=bindung.thermostat, sensor_ieees=sensor_ieees,
             daily_trigger_time=self._runtime_config.daily_trigger_time, wunsch=lambda wert: self._geraet.wunsch(wert, kreis=self.kreis),
+            uebersteuerung=UebersteuerungsWeg(
+                lage=worker.geltendes_soll, moeglich=self._geraet.programm_faehig,
+                senden=lambda temp, bis, herkunft, durch: self._geraet.uebersteuerung_senden(
+                    self.kreis, temp, bis, herkunft, durch)),
             soll_quelle_aus=self._geraet.soll_quelle_aus, clock=self._clock,
             # Thermostat, Portal und Geraet zeigen denselben Wert (einmal je Start; Echo-Fenster); die Quelle
             # schreibt beim Start, nach Thermostatmodus und Anzeige (Profil), ein ganzzahliges Thermostat gerundet, und

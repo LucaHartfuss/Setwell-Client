@@ -366,6 +366,29 @@ class Device:
         self._inbox.put(("abwesend", kreis, None, durch))
         return None
 
+    def programm_faehig(self) -> bool:
+        """Der Host bietet die Faehigkeit `programm` an (Uebersteuerung und Away als Wunsch); ohne sie bleibt jede
+        Eingabe am Thermostat ein Wunsch."""
+        faehigkeiten, _ = self._host_wert("faehigkeiten", self.host.faehigkeiten)
+        return isinstance(faehigkeiten, dict) and faehigkeiten.get("programm") is True
+
+    def uebersteuerung_senden(self, kreis: int, temp: float, bis: str, herkunft: str | None,
+                              durch: str | None) -> None:
+        """Eine Uebersteuerung der kuehlen Phase (Worker-Thread des Kreises) geht als Bedienwunsch mit programm zum
+        Server; sie gilt lokal schon im Soll-Speicher des Kreises. ValueError (nie mit Wert oder Zeit), wenn die
+        Faehigkeit fehlt oder ein Wert nicht zum Vertrag passt."""
+        if not self.programm_faehig():
+            raise ValueError("Faehigkeit programm nicht angeboten")
+        wish.pruefen_herkunft(herkunft, durch)
+        wish.pruefen_kreis(kreis)
+        if not safety.uebersteuerung_temperatur_gueltig(temp):
+            raise ValueError("Uebersteuerung ausserhalb der Grenzen")
+        try:
+            datetime.strptime(bis, _ZEIT_FORMAT)
+        except (TypeError, ValueError):
+            raise ValueError("Uebersteuerung ohne gueltiges Ende") from None
+        self._inbox.put(("uebersteuerung", kreis, {"temp": float(temp), "bis": bis}, herkunft, durch))
+
     def abwesend_abgelehnt(self, grund: str) -> None:
         """Hinweis `abwesend_abgelehnt` mit dem festen Grund; er schliesst beim naechsten angenommenen Away."""
         self._inbox.put(("abwesend_hinweis", meldungen.neu("meldung.abwesend_abgelehnt", grund=grund)))
@@ -455,6 +478,8 @@ class Device:
             self._wunsch(*item[1:])
         elif quelle == "abwesend":
             self._abwesend_wunsch(*item[1:])
+        elif quelle == "uebersteuerung":
+            self._uebersteuerung_wunsch(*item[1:])
         elif quelle == "eigene":
             self._eigene_meldung(item[1], item[2])
         elif quelle == "abwesend_hinweis":
@@ -864,6 +889,15 @@ class Device:
         self.wunsch_puffer.setzen(neu)
         self.documents.mark_dirty()
         self._abwesend_hinweis = None
+        self._wunsch_senden()
+
+    def _uebersteuerung_wunsch(self, kreis: int, uebersteuerung: dict, herkunft: str | None, durch: str | None) -> None:
+        """Die Uebersteuerung der kuehlen Phase als Bedienwunsch (werte.uebersteuerung) mit der Herkunft der Eingabe."""
+        neu = wish.neu(None, None, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
+                       uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall(),
+                       programm={"uebersteuerung": uebersteuerung})
+        self.wunsch_puffer.setzen(neu)
+        self.documents.mark_dirty()
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:

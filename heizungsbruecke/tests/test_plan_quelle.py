@@ -100,6 +100,53 @@ def test_die_eingabe_des_geraets_liest_beide_dokumente_bei_jedem_aufruf():
     assert eingabe_des_geraets(geraet, 2) is None
 
 
+class _Speicher:
+    def __init__(self, ueb):
+        self.ueb = ueb
+
+    def uebersteuerung(self):
+        return self.ueb
+
+
+class _Dokumente:
+    def __init__(self, **kreis):
+        self.kreis = kreis
+
+    def konfiguration(self):
+        return {"zeitzone": "Europe/Berlin",
+                "kreise": [{"kreis": 1, "absenkung_k": 3, "aufheizdauer_min": {"plan": 60, "weg": 0}}]}
+
+    def bedienung(self):
+        return ({"kreise": [{"kreis": 1, "modus": "manuell", **self.kreis}]}, False)
+
+
+def test_die_lokale_uebersteuerung_gilt_in_der_planeingabe_wenn_der_server_keine_kennt():
+    ueber = {"temp": 19.0, "bis": "2026-11-03T04:30:00Z"}
+    eingabe = eingabe_des_geraets(_Dokumente(), 1, _Speicher(ueber))
+    assert eingabe.bedienung["uebersteuerung"] == ueber
+    assert "uebersteuerung" not in eingabe_des_geraets(_Dokumente(), 1, _Speicher(None)).bedienung
+    assert "uebersteuerung" not in eingabe_des_geraets(_Dokumente(), 1).bedienung
+
+
+def test_die_gespiegelte_uebersteuerung_des_servers_geht_der_lokalen_vor():
+    server = {"temp": 20.0, "bis": "2026-11-03T04:30:00Z"}
+    lokal = {"temp": 19.0, "bis": "2026-11-03T04:30:00Z"}
+    eingabe = eingabe_des_geraets(_Dokumente(uebersteuerung=server), 1, _Speicher(lokal))
+    assert eingabe.bedienung["uebersteuerung"] == server
+
+
+def test_die_lokale_uebersteuerung_wirkt_im_soll_und_endet_zum_aufheizbeginn():
+    ueber = {"temp": 19.0, "bis": "2026-11-03T04:30:00Z"}
+    eingabe = eingabe_des_geraets(_Dokumente(wochenplan=PLAN), 1, _Speicher(ueber))
+    assert eingabe is not None
+    vorher = geltendes_soll(eingabe, 21.0, _zeit("2026-11-02T23:00:00Z"), uhr_vertrauenswuerdig=True,
+                            soll_quelle_aus=False)
+    assert (vorher.soll, vorher.soll_art) == (19.0, "uebersteuert")
+    nachher = geltendes_soll(eingabe, 21.0, _zeit("2026-11-03T05:00:00Z"), uhr_vertrauenswuerdig=True,
+                             soll_quelle_aus=False)
+    assert nachher.soll_art != "uebersteuert"
+
+
 # --- Rueckkehr: was das Geraet aus den Dokumenten rechnet, ohne Server und ohne Portal ---
 
 def _zeit(text):

@@ -341,9 +341,10 @@ def test_halbes_grad_am_ganzzahligen_thermostat_ist_echo_und_keine_aenderung(tmp
     store = _store(tmp_path, clock)
     store.apply_portal(20.5)
     store.note_own_write()
-    clock.advance(ECHO_WINDOW_SECONDS + 1)
-    assert store.apply_thermostat(21.0) is False  # gerundeter Schreibwert
+    clock.advance(5)
+    assert store.apply_thermostat(21.0) is False  # gerundeter Schreibwert im Echo-Fenster
     assert (store.value, store.source) == (20.5, SOURCE_PORTAL)
+    clock.advance(ECHO_WINDOW_SECONDS)
     assert store.apply_thermostat(21.0) is False  # Wiederholung desselben gerundeten Werts
     assert (store.value, store.source) == (20.5, SOURCE_PORTAL)
     assert store.apply_thermostat(22.0) is True  # eine echte Drehung gilt

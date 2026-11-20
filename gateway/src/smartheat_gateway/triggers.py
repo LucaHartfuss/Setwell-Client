@@ -30,7 +30,14 @@ from smartheat_gateway.thermostat_profil import ThermostatProfil, modus_setzen, 
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
-from smartheat_runtime.soll_eingang import EV_SOLL_MODUS, EV_TARGET_INPUT, FROSTSCHUTZ_BIS, MODUS_AUS, SollEingang
+from smartheat_runtime.soll_eingang import (
+    EV_SOLL_MODUS,
+    EV_TARGET_INPUT,
+    FROSTSCHUTZ_BIS,
+    MODUS_AUS,
+    SollEingang,
+    UebersteuerungsWeg,
+)
 from smartheat_runtime.soll_speicher import SOURCE_THERMOSTAT, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
@@ -117,7 +124,8 @@ class BusTriggerSource:
                  thermostat: str | None, sensor_ieees: tuple[str, ...], daily_trigger_time: str | None,
                  now=wallclock.now, wunsch: Callable[[float], float] = lambda value: value,
                  soll_quelle_aus: Callable[[bool, float | None], None] = lambda aus, wirksam: None,
-                 angleichen: bool = False, clock: Callable[[], float] = monotonic) -> None:
+                 angleichen: bool = False, clock: Callable[[], float] = monotonic,
+                 uebersteuerung: UebersteuerungsWeg | None = None) -> None:
         """angleichen: beim Start das geltende Soll ans Thermostat, nach Thermostatmodus und Anzeige, sobald
         der Zustand bekannt und nicht aus ist, ein Thermostat mit Profil nach gemeldetem ON."""
         self._bus, self._worker, self._mirror, self._store = bus, worker, mirror, store
@@ -133,7 +141,8 @@ class BusTriggerSource:
         self._quelle = _ZigbeeQuelle(mirror, thermostat, store) if thermostat is not None else None
         self._eingang = SollEingang(worker, store, self._quelle,
                                     wunsch=lambda value, herkunft, durch: wunsch(value),
-                                    soll_quelle_aus=soll_quelle_aus, entprellen_s=ROOM_TARGET_DEBOUNCE_SECONDS)
+                                    soll_quelle_aus=soll_quelle_aus, entprellen_s=ROOM_TARGET_DEBOUNCE_SECONDS,
+                                    uebersteuerung=uebersteuerung)
         worker.register(EV_DAILY, self._on_daily)
         worker.register(EV_ZIGBEE_SOLL, self._on_zigbee_soll)
         worker.register(EV_THERMOSTAT_EINRICHTEN, self._on_einrichten)

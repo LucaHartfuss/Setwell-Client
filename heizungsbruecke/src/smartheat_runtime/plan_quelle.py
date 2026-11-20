@@ -66,7 +66,15 @@ def geltendes_soll(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: dat
         return nur_wunsch
 
 
-def eingabe_des_geraets(geraet, kreis: int) -> PlanEingabe | None:
+def eingabe_des_geraets(geraet, kreis: int, speicher=None) -> PlanEingabe | None:
     """Die Planeingabe des Kreises aus den laufenden Dokumenten des Geraets (`konfiguration()`, `bedienung()`), bei jedem
-    Aufruf frisch gelesen."""
-    return plan_eingabe(geraet.konfiguration(), geraet.bedienung()[0], kreis)
+    Aufruf frisch gelesen. Kennt die Bedienung keine Uebersteuerung, gilt die lokale aus dem Soll-Speicher des Kreises
+    (`speicher.uebersteuerung()`): sie wirkt sofort und uebersteht einen Neustart, ein Eintrag des Servers geht vor."""
+    eingabe = plan_eingabe(geraet.konfiguration(), geraet.bedienung()[0], kreis)
+    if eingabe is None or speicher is None or isinstance(eingabe.bedienung.get("uebersteuerung"), Mapping):
+        return eingabe
+    lokal = speicher.uebersteuerung()
+    if lokal is None:
+        return eingabe
+    return PlanEingabe(zone=eingabe.zone, bedienung={**eingabe.bedienung, "uebersteuerung": lokal},
+                       konfiguration=eingabe.konfiguration)

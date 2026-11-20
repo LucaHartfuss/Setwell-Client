@@ -959,6 +959,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     if rt.mqtt_client is not None:
         rt.mqtt_client.loop_start()
 
+    rt.worker.geltendes_soll = lambda: rt.geltendes_soll  # der Soll-Eingang erkennt daran die kuehle Phase
     rt.trigger_client = host.trigger_source(loaded.manifest, rt.worker)
     rt.trigger_client.start()
     if ausser and rt.store.state.soll_ende_offen:

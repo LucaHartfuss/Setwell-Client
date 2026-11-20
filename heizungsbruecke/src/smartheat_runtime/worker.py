@@ -15,6 +15,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import NoReturn
 
+from smartheat_core.plan import SollErgebnis
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,9 @@ class RegulationWorker:
         self._coalesce_lock = threading.Lock()
         self._coalesced: dict[str, dict[str, bool]] = {}
         self._after_each: Callable[[], None] | None = None
+        #: das geltende Soll des Kreises (SollErgebnis oder None), vom Start der Laufzeit gesetzt; der Soll-Eingang
+        #: prueft damit, ob eine Eingabe eine Uebersteuerung der kuehlen Phase ist. Nur im Worker-Thread lesen.
+        self.geltendes_soll: Callable[[], SollErgebnis | None] = lambda: None
 
     def register(self, kind: str, handler: Handler) -> None:
         self._handlers[kind] = handler

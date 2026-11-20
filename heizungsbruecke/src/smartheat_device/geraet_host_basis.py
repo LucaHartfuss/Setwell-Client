@@ -284,6 +284,17 @@ class GeraetHostBasis:
             return wert
         return self.device.wunsch(wert, herkunft=herkunft or self.wunsch_herkunft, durch=durch, kreis=kreis)
 
+    def programm_faehig(self) -> bool:
+        return self.device is not None and self.device.programm_faehig()
+
+    def uebersteuerung_senden(self, kreis: int, temp: float, bis: str, herkunft: str | None,
+                              durch: str | None) -> None:
+        """Worker-Thread des Kreises: die Uebersteuerung der kuehlen Phase als Wunsch mit programm; ValueError, wenn
+        der Geraetekern sie nicht annimmt (ohne Geraet, ohne Faehigkeit, ungueltiger Wert)."""
+        if self.device is None:
+            raise ValueError("kein Geraet")
+        self.device.uebersteuerung_senden(kreis, temp, bis, herkunft or self.wunsch_herkunft, durch)
+
     def soll_quelle_aus(self, aus: bool, wirksam: float | None) -> None:
         if self.device is not None:
             self.device.soll_quelle_aus(aus, wirksam)

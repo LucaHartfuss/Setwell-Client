@@ -21,7 +21,13 @@ from smartheat_core.safety import abwesend_bis_gueltig, abwesend_temperatur_guel
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.dokument_config import ConfigError
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
-from smartheat_runtime.soll_eingang import EV_SOLL_MODUS, EV_TARGET_INPUT, FROSTSCHUTZ_BIS, SollEingang
+from smartheat_runtime.soll_eingang import (
+    EV_SOLL_MODUS,
+    EV_TARGET_INPUT,
+    FROSTSCHUTZ_BIS,
+    SollEingang,
+    UebersteuerungsWeg,
+)
 from smartheat_runtime.soll_speicher import KREIS, SOURCE_LOKAL, SOURCE_THERMOSTAT, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
@@ -213,6 +219,7 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
           push_stand: PushStand | None = None, uhr: Callable[[], float] = time.monotonic,
           abwesend_setzen: AbwesendSetzen | None = None, abwesend_beenden: AbwesendBeenden | None = None,
           abwesend_abgelehnt: Callable[[str], None] | None = None,
+          uebersteuerung: UebersteuerungsWeg | None = None,
           wanduhr: Callable[[], datetime] = wallclock.now) -> HaTriggerClient:
     """integration_stand: nimmt das Lebenszeichen der Integration (Ereignis smartheat_integration, anlagenweit) auf, nach
     der monotonen uhr; nur der Client, der ihn bekommt, abonniert das Ereignis (ohne Stand gibt es kein Abonnement).
@@ -233,6 +240,8 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
     smartheat_abwesend_ende (Kreis wie beim Wunsch geroutet). Im Worker prueft er `bis` (Zone, in der Zukunft, hoechstens
     365 Tage nach der `wanduhr`) und `temp` gegen safety.py und ruft dann den Host (`abwesend_setzen`, `abwesend_beenden`);
     ein Ablehnungsgrund (eigener oder des Hosts) geht als fester Code an `abwesend_abgelehnt`, nie ein Wert, nie ins Log.
+    `uebersteuerung`: Verdrahtung der Uebersteuerung der kuehlen Phase im Soll-Eingang (ohne sie bleibt jede Eingabe ein
+    Wunsch).
 
     Gescheiterte Angleichung (quelle.angleichen_offen: Bedienung vom Server, Angleichen beim Start, Zurueckschreiben
     eines Wunschs): jeder gezeigte Wert (Bericht, Nachlesen, Lesen beim Verbinden und in der Wache; die Wache liest dann
@@ -245,7 +254,8 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
     pruefe_soll_ref(soll_ref)
     if quelle is None and soll_ref:
         quelle = HaSollQuelle(ha_api, soll_ref)
-    eingang = SollEingang(worker, store, quelle, wunsch=wunsch, soll_quelle_aus=soll_quelle_aus, entprellen_s=0)
+    eingang = SollEingang(worker, store, quelle, wunsch=wunsch, soll_quelle_aus=soll_quelle_aus, entprellen_s=0,
+                          uebersteuerung=uebersteuerung)
     soll_entity, soll_attribute = _split(soll_ref) if soll_ref else (None, None)
     climate = soll_entity is not None and soll_entity.startswith("climate.")
     triggers: list[dict] = []

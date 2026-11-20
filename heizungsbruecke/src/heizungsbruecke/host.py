@@ -32,7 +32,7 @@ from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, Trigge
 from smartheat_runtime.raum import RaumPublisher
 from smartheat_runtime.roles import ChannelManifest, ManifestError
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT, BatteryRef, BootInfo, RuntimeConfig
-from smartheat_runtime.soll_eingang import FROSTSCHUTZ_BIS
+from smartheat_runtime.soll_eingang import FROSTSCHUTZ_BIS, UebersteuerungsWeg
 from smartheat_runtime.soll_ende import SollEnde
 from smartheat_runtime.soll_speicher import (
     BEDIENBEREICH_MAX,
@@ -212,7 +212,7 @@ class HaHost:
                 abo_source=lambda: self._geraet.abo_status(self.kreis),
                 update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
                 zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
-                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
+                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis, self.store))
             # Ohne gueltige Bindungsparameter kein Start
             description = dokument_config.beschreibung(self._konfiguration, self.kreis)
             _wait_for_required_entities(self._ha_api, b)
@@ -289,6 +289,10 @@ class HaHost:
             abwesend_setzen=lambda bis, temp, durch: geraet.abwesend_setzen(self.kreis, bis, temp, durch),
             abwesend_beenden=lambda durch: geraet.abwesend_beenden(self.kreis, durch),
             abwesend_abgelehnt=geraet.abwesend_abgelehnt,
+            uebersteuerung=UebersteuerungsWeg(
+                lage=worker.geltendes_soll, moeglich=geraet.programm_faehig,
+                senden=lambda temp, bis, herkunft, durch: geraet.uebersteuerung_senden(
+                    self.kreis, temp, bis, herkunft, durch)),
             anlagenkreise=anlagenkreise,
             # das Lebenszeichen der Integration gilt der Anlage: nur der Client des kleinsten Kreises abonniert es
             integration_stand=geraet.integration_stand if self.kreis == min(anlagenkreise) else None,
