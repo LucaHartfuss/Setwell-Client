@@ -394,6 +394,79 @@ def test_abgelaufene_oder_kaputte_uebersteuerung_gilt_nicht(tmp_path, clock):
     assert _store(tmp_path, clock).uebersteuerung() is None
 
 
+def test_uebersteuerung_mit_ende_genau_jetzt_gilt_als_abgelaufen(tmp_path, clock):
+    store = _store(tmp_path, clock)  # jetzt: 2026-01-15T08:00:00+01:00 = 07:00 UTC
+    store.uebersteuerung_setzen(18.5, "2026-01-15T07:00:00Z")
+    assert store.uebersteuerung() is None
+    assert _store(tmp_path, clock).uebersteuerung() is None  # auch aus der Datei entfernt
+    store.uebersteuerung_setzen(18.5, "2026-01-15T07:00:01Z")  # eine Sekunde spaeter noch nicht
+    assert store.uebersteuerung() == {"temp": 18.5, "bis": "2026-01-15T07:00:01Z"}
+
+
+@pytest.mark.parametrize("bis", ["unlesbar", ""], ids=["text", "leer"])
+def test_uebersteuerung_mit_unlesbarem_ende_gilt_als_abgelaufen(tmp_path, clock, bis):
+    """Aus der Datei liest `_ueb_lesen` so etwas gar nicht erst ein; ueber `uebersteuerung_setzen` (ungeprueft) bleibt
+    nur die Abfrage des Endes."""
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, bis)
+    assert store.uebersteuerung() is None
+    assert _store(tmp_path, clock).uebersteuerung() is None
+
+
+# --- _bestaetigt: exakt, gerundet am ganzzahligen Thermostat, sonst nicht ---
+
+def test_ohne_offenen_befehl_ist_keine_rueckmeldung_eine_bestaetigung(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(20.0) is False
+    assert store._bestaetigt(21.0) is False
+    assert store._gerundet is None
+
+
+def test_exakter_rueckwert_eines_ganzzahligen_schreibwerts_bestaetigt(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(21.0, written=21.0) is True
+    assert store._gerundet is None  # exakt, nichts gerundet
+
+
+def test_rundung_um_hoechstens_ein_halbes_kelvin_bestaetigt_und_merkt_die_anzeige(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(21.0, written=20.5) is True  # genau 0,5 K daneben
+    assert store._gerundet == 21.0
+    assert store._bestaetigt(20.0, written=20.5) is True
+    assert store._gerundet == 20.0
+
+
+@pytest.mark.parametrize(("value", "written"), [(21.0, 20.4), (21.0, 20.0), (22.0, 20.5), (21.5, 21.0)],
+                         ids=["0,6 K daneben", "ganzzahliger Schreibwert", "1,5 K daneben", "ganzzahliger Schreibwert, halbe Anzeige"])
+def test_mehr_als_ein_halbes_kelvin_daneben_bestaetigt_nicht(tmp_path, clock, value, written):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(value, written=written) is False
+    assert store._gerundet is None
+
+
+def test_bestaetigung_im_echo_fenster_schliesst_den_befehl_auch_bei_gerundeter_anzeige(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)
+    store.note_own_write()  # veraltet: 20.0
+    clock.advance(5)
+    assert store.thermostat_pruefen(21.0) is None  # gerundeter Schreibwert im Echo-Fenster: bestaetigt
+    clock.advance(ECHO_WINDOW_SECONDS)
+    # der Befehl ist geschlossen: 20.0 ist kein "veralteter Wert bei offenem Befehl" mehr, sondern eine Eingabe
+    assert store.thermostat_pruefen(20.0) == 20.0
+    assert store.thermostat_pruefen(21.0) is None  # die gemerkte gerundete Anzeige bleibt keine Eingabe
+
+
+def test_gerundete_anzeige_wiederholt_ist_keine_eingabe(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)
+    store.note_own_write()
+    clock.advance(5)
+    assert store.thermostat_pruefen(21.0) is None
+    clock.advance(ECHO_WINDOW_SECONDS)
+    assert store.thermostat_pruefen(21.0) is None  # Wiederholung der gerundeten Anzeige
+    assert store.thermostat_pruefen(22.0) == 22.0  # eine echte Drehung gilt
+
+
 def test_uebersteuerung_aufheben_loescht_auch_die_gespeicherte(tmp_path, clock):
     store = _store(tmp_path, clock)
     store.uebersteuerung_setzen(18.5, BIS)

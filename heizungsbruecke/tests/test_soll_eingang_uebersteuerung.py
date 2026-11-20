@@ -47,7 +47,7 @@ class Quelle:
 
 class Aufbau:
     def __init__(self, tmp_path: Path, *, art=SOLL_ART_ABSENKUNG, faehig=True, wechsel=AUFHEIZBEGINN, weg=True,
-                 fehler=None):
+                 fehler=None, entprellen_s=0.0):
         self.clock = FakeClock()
         self.worker = RegulationWorker(self.clock)
         self.store = TargetStore(tmp_path / "soll.json", 21.0, self.clock, lambda: "2026-01-15T20:00:00+00:00")
@@ -58,7 +58,7 @@ class Aufbau:
         self.worker.register(EV_LOCAL_CHECK, lambda event: self.checks.append(event.data))
         self.eingang = SollEingang(
             self.worker, self.store, self.quelle, wunsch=self._wunsch, soll_quelle_aus=lambda aus, wirksam: None,
-            entprellen_s=0.0,
+            entprellen_s=entprellen_s,
             uebersteuerung=UebersteuerungsWeg(lage=lambda: self.lage, senden=self._senden,
                                               moeglich=lambda: self.faehig) if weg else None)
 
@@ -74,6 +74,17 @@ class Aufbau:
     def post(self, value, source, **extra):
         self.worker.post(Event(EV_TARGET_INPUT, {"value": value, "source": source, **extra}))
         self.worker.run_pending()
+
+    def modus(self, mode):
+        self.worker.post(Event(EV_SOLL_MODUS, {"mode": mode}))
+        self.worker.run_pending()
+
+    def entprellen(self):
+        self.clock.advance(11)
+        self.worker.run_pending()
+
+
+VORHER = "2026-01-15T21:00:00Z"  # Ende einer Uebersteuerung, die schon vor der Eingabe galt
 
 
 def test_kuehl_aenderung_am_thermostat_ist_eine_uebersteuerung_bis_zum_aufheizbeginn(tmp_path):
@@ -207,3 +218,138 @@ def test_im_log_stehen_keine_zeiten(tmp_path, caplog):
     a = Aufbau(tmp_path, fehler=ValueError("kein Vertragswert"))
     a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
     assert "2026" not in caplog.text and "21:30" not in caplog.text and BIS not in caplog.text
+
+
+# --- Verwerfen einer offenen Uebersteuerung (Soll-Quelle geht aus) ---
+
+def test_verwerfen_stellt_die_uebersteuerung_von_vor_der_eingabe_wieder_her(tmp_path):
+    """Galt schon eine Uebersteuerung (etwa aus der Datei nach dem Neustart), gilt nach dem Verwerfen wieder sie."""
+    a = Aufbau(tmp_path, entprellen_s=10.0)
+    a.store.uebersteuerung_setzen(19.0, VORHER)
+    a.post(20.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.uebersteuerung() == {"temp": 20.0, "bis": BIS}
+    a.modus("off")
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": VORHER}
+
+
+def test_verwerfen_nach_zwei_eingaben_stellt_die_uebersteuerung_vor_der_ersten_wieder_her(tmp_path):
+    a = Aufbau(tmp_path, entprellen_s=10.0)
+    a.store.uebersteuerung_setzen(19.0, VORHER)
+    a.post(20.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.uebersteuerung() == {"temp": 22.0, "bis": BIS}
+    a.modus("off")
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": VORHER}
+
+
+def test_verwerfen_ohne_vorherige_uebersteuerung_hinterlaesst_keine(tmp_path):
+    a = Aufbau(tmp_path, entprellen_s=10.0)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": BIS}
+    a.modus("off")
+    assert a.store.uebersteuerung() is None
+
+
+def test_nach_dem_verwerfen_ist_nichts_mehr_offen(tmp_path):
+    a = Aufbau(tmp_path, entprellen_s=10.0)
+    a.store.uebersteuerung_setzen(19.0, VORHER)
+    a.post(20.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.modus("off")
+    a.entprellen()
+    assert a.gesendet == [] and a.quelle.geschrieben == []
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": VORHER}
+
+
+# --- Bedienung des Servers schliesst die offene Uebersteuerung ---
+
+def test_das_portal_schliesst_eine_offene_uebersteuerung(tmp_path):
+    a = Aufbau(tmp_path, entprellen_s=10.0)
+    a.store.uebersteuerung_setzen(19.0, VORHER)
+    a.post(20.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.post(22.0, SOURCE_PORTAL)
+    assert a.store.uebersteuerung() is None
+    a.modus("off")  # Verwerfen stellt nichts mehr her
+    assert a.store.uebersteuerung() is None and a.store.value == 22.0
+    # eine spaeter gesetzte Uebersteuerung gehoert nicht zur geschlossenen Eingabe: die Entprellung sendet sie nicht
+    a.store.uebersteuerung_setzen(18.0, VORHER)
+    a.entprellen()
+    assert a.gesendet == []
+
+
+def test_nach_dem_portal_gilt_die_uebersteuerung_der_naechsten_eingabe_als_neue_eingabe(tmp_path):
+    a = Aufbau(tmp_path, entprellen_s=10.0)
+    a.post(20.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.post(22.0, SOURCE_PORTAL)
+    a.store.uebersteuerung_setzen(18.0, VORHER)
+    a.clock.advance(120)  # Echo-Fenster des Portal-Schreibens vorbei
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.modus("off")  # verwerfen: die Uebersteuerung von vor dieser Eingabe
+    assert a.store.uebersteuerung() == {"temp": 18.0, "bis": VORHER}
+
+
+# --- Was in der kuehlen Phase keine Eingabe ist ---
+
+def test_echo_am_thermostat_in_der_kuehlen_phase_ist_keine_eingabe(tmp_path):
+    a = Aufbau(tmp_path)
+    a.post(21.5, SOURCE_PORTAL)  # eigenes Schreiben: Echo-Fenster
+    a.checks.clear()
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.uebersteuerung() is None and a.gesendet == [] and a.checks == []
+    assert a.quelle.geschrieben == [21.5]
+
+
+def test_wiederholung_der_angezeigten_uebersteuerung_am_thermostat_ist_keine_eingabe(tmp_path):
+    a = Aufbau(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert len(a.checks) == 1
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert len(a.gesendet) == 1 and len(a.checks) == 1
+
+
+def test_unplausibler_lokaler_wert_in_der_kuehlen_phase_ist_keine_eingabe(tmp_path):
+    a = Aufbau(tmp_path)
+    a.post(50.0, SOURCE_LOKAL, herkunft="ha")
+    assert a.store.uebersteuerung() is None and a.gesendet == [] and a.quelle.geschrieben == []
+    assert a.checks == [] and a.wuensche == []
+
+
+def test_dieselbe_lokale_zahl_mit_gleichem_ende_ist_keine_eingabe(tmp_path):
+    a = Aufbau(tmp_path)
+    a.store.uebersteuerung_setzen(19.0, BIS)
+    a.post(19.0, SOURCE_LOKAL, herkunft="ha")
+    assert a.gesendet == [] and a.quelle.geschrieben == [] and a.checks == []
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": BIS}
+
+
+def test_dieselbe_lokale_zahl_mit_anderem_ende_ist_eine_eingabe(tmp_path):
+    a = Aufbau(tmp_path)
+    a.store.uebersteuerung_setzen(19.0, VORHER)
+    a.post(19.0, SOURCE_LOKAL, herkunft="ha")
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": BIS}
+    assert a.gesendet == [(19.0, BIS, "ha", None)] and a.checks
+
+
+def test_andere_lokale_zahl_mit_gleichem_ende_ist_eine_eingabe(tmp_path):
+    a = Aufbau(tmp_path)
+    a.store.uebersteuerung_setzen(19.0, BIS)
+    a.post(20.0, SOURCE_LOKAL, herkunft="ha")
+    assert a.store.uebersteuerung() == {"temp": 20.0, "bis": BIS}
+    assert a.gesendet == [(20.0, BIS, "ha", None)] and a.checks
+
+
+def test_ohne_eingabe_sendet_die_entprellung_keine_gespeicherte_uebersteuerung(tmp_path):
+    """Eine aus der Datei geladene Uebersteuerung geht nur mit einer Eingabe an den Server, nicht mit einem Wunsch."""
+    a = Aufbau(tmp_path, art=SOLL_ART_WUNSCH, wechsel=None)
+    a.store.uebersteuerung_setzen(19.0, BIS)
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.wuensche == [(22.0, "soll_entity", None)]
+    assert a.gesendet == []
+
+
+def test_die_quelle_wird_nur_nach_einer_lokalen_eingabe_angeglichen(tmp_path):
+    a = Aufbau(tmp_path)
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha")
+    assert a.quelle.geschrieben == [22.0]
+    a.clock.advance(120)  # Echo-Fenster vorbei
+    a.post(20.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # am Thermostat gedreht: es zeigt den Wert schon
+    assert a.store.uebersteuerung()["temp"] == 20.0 and a.quelle.geschrieben == [22.0]
