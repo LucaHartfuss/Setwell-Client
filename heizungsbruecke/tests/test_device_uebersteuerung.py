@@ -8,6 +8,7 @@ from device_helpers import World, _bedienung
 
 from smartheat_core import safety
 from smartheat_core.plan import soll_effektiv
+from smartheat_device import device
 
 BIS = "2027-01-20T18:00:00Z"
 
@@ -247,3 +248,32 @@ def test_im_log_stehen_keine_zeiten_oder_werte(tmp_path, caplog):
     with pytest.raises(ValueError):
         welt.device.uebersteuerung_senden(1, 15.0, BIS, "soll_entity", None)
     assert "2027" not in caplog.text and BIS not in caplog.text
+
+
+def test_scheitert_das_speichern_des_endes_geht_der_wunsch_trotzdem_hinaus(tmp_path, caplog):
+    welt = _leerstand_welt(tmp_path)
+    (welt.device._dir / device.LEERSTAND_BEENDET_DATEI).mkdir()  # Schreiben scheitert mit OSError
+    assert welt.device.betriebsart_beenden(1, "leerstand", 22.5, None, "soll_entity", "nutzer") == 22.5
+    welt.device.schritt()
+    (gesendet,) = welt.link.of("up/wish")
+    assert gesendet["werte"] == {"raum_soll": 22.5, "leerstand": None}
+    assert welt.device.bedienung()["kreise"][0]["modus"] == "manuell"  # bis zum Neustart gilt das Ende
+    assert "nicht gespeichert" in caplog.text and "22.5" not in caplog.text and "2027" not in caplog.text
+
+
+@pytest.mark.parametrize("inhalt", ["{kaputt", '{"kreis": 1}', '["eins", 99, null, 1.5]'])
+def test_eine_kaputte_leerstand_beendet_datei_laesst_den_leerstand_des_servers_gelten(tmp_path, inhalt):
+    _leerstand_welt(tmp_path)
+    (tmp_path / device.DEVICE_DIR / device.LEERSTAND_BEENDET_DATEI).write_text(inhalt)
+    neu = _leerstand_welt(tmp_path, neu=True)
+    neu.empfangen("down/operation", _leerstand_bedienung(4))
+    assert _soll_jetzt(neu) == (16.0, "leerstand")
+
+
+def test_away_nach_dem_ende_des_leerstands_traegt_das_offene_ende_weiter(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.betriebsart_beenden(1, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    welt.device.schritt()
+    welt.device._abwesend_wunsch(1, {"bis": BIS, "temp": 16.0, "aufheizen_ab": None}, "nutzer")  # sonst nicht erreichbar
+    programm = welt.device.wunsch_puffer.wunsch(1).programm
+    assert programm["leerstand"] is None and programm["abwesend"]["temp"] == 16.0

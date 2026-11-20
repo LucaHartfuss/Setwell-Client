@@ -124,9 +124,24 @@ def test_unconfirmed_write_expires(tmp_path, clock, caplog):
     store.apply_portal(22.0)
     store.note_own_write()
     clock.advance(PENDING_SECONDS + 1)
-    assert store.apply_thermostat(20.0)        # nie bestaetigt: Thermostat gilt wieder, mit Warnung
+    assert store.apply_thermostat(19.0)        # nie bestaetigt, weder alt noch geschrieben: Thermostat gilt, mit Warnung
     assert "nicht bestaetigt" in caplog.text
-    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+    assert (store.value, store.source) == (19.0, SOURCE_THERMOSTAT)
+
+
+@pytest.mark.parametrize("inhalt", ["{kaputt", "[]", '{"temp": 99.0}', '{"temp": "warm"}', '{"temp": null}'])
+def test_a_broken_remembered_display_file_means_no_remembered_display(tmp_path, clock, inhalt):
+    store = _store(tmp_path, clock)
+    store.anzeige_merken(19.0)
+    (tmp_path / "runtime" / "room_target.angezeigt.json").write_text(inhalt)
+    neu = _store(tmp_path, clock)  # kein Absturz; 19 ist nun eine Eingabe, nicht die gemerkte Anzeige
+    assert neu.apply_thermostat(19.0) and neu.value == 19.0
+
+
+def test_the_remembered_display_survives_a_restart(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.anzeige_merken(19.0)
+    assert not _store(tmp_path, clock).apply_thermostat(19.0)  # Gegenprobe: heile Datei, die Anzeige ist keine Eingabe
 
 
 def test_report_of_the_written_value_after_expiry_changes_nothing(tmp_path, clock):
@@ -296,9 +311,10 @@ def test_ein_offener_befehl_verfaellt_nach_dreissig_minuten_genau(tmp_path, cloc
     clock.advance(1799)
     assert store.apply_thermostat(20.0) is False  # alter Wert, Befehl noch offen
 
-    clock.advance(1)  # genau 1800 Sekunden: der Befehl ist verfallen, der Wert des Thermostats gilt
-    assert store.apply_thermostat(20.0) is True
-    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+    clock.advance(1)  # genau 1800 Sekunden: der Befehl ist verfallen, der alte Wert ist kein Wunsch, er wird neu geschrieben
+    assert store.apply_thermostat(20.0) is False
+    assert store.nachschreiben_nehmen() == (22.0, 20.0)
+    assert (store.value, store.source) == (22.0, SOURCE_PORTAL)
 
 
 def test_ein_zweiter_befehl_nach_genau_dreissig_minuten_erbt_die_alten_werte_nicht(tmp_path, clock):

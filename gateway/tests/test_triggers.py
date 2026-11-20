@@ -10,11 +10,18 @@ from configs import SENSOR, THERMOSTAT
 from fake_z2m import FakeZigbee2Mqtt
 from fakes import FakeBus
 
-from smartheat_gateway.triggers import EV_TARGET_INPUT, BusTriggerSource, local_zone, seconds_until
+from smartheat_core.plan import SollErgebnis
+from smartheat_gateway.triggers import (
+    EV_TARGET_INPUT,
+    EV_THERMOSTAT_SOLL,
+    BusTriggerSource,
+    local_zone,
+    seconds_until,
+)
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
-from smartheat_runtime.soll_eingang import EV_SOLL_QUELLE, FROSTSCHUTZ_BIS
+from smartheat_runtime.soll_eingang import EV_SOLL_QUELLE, FROSTSCHUTZ_BIS, UebersteuerungsWeg
 from smartheat_runtime.soll_speicher import TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
@@ -847,7 +854,8 @@ def test_a_w100_showing_the_rounded_target_lifts_the_frost_position(mit_w100, ca
 ALTER = {"frisch": 0.0, "drei Stunden alt": 3 * 3600.0, "ohne last_seen": None}
 
 
-def _neustart(tmp_path, clock, *, zustand=None, alter=0.0, w100=False, soll=22.0, schlaeft=False, ueb=None):
+def _neustart(tmp_path, clock, *, zustand=None, alter=0.0, w100=False, soll=22.0, schlaeft=False, ueb=None,
+              weg=None):
     """Prozessstart wie nach einem Neustart: Zigbee2MQTT hat den Zustand des Thermostats vorher retained gemeldet
     (Broker-Replay beim Abonnieren, keine Hooks); alter None = Meldung ohne last_seen. Danach die Laufzeit mit
     Angleichen beim Start."""
@@ -878,7 +886,8 @@ def _neustart(tmp_path, clock, *, zustand=None, alter=0.0, w100=False, soll=22.0
                              (lambda: "ts") if ueb is None else (lambda: "2026-01-15T20:00:00+00:00"))
     welt.trigger = BusTriggerSource(bus, worker, mirror, welt.store, thermostat=ieee, sensor_ieees=(SENSOR,),
                                     daily_trigger_time=None, wunsch=wunsch, clock=clock, angleichen=True,
-                                    soll_quelle_aus=lambda aus, wirksam: welt.aus.append((aus, wirksam)))
+                                    soll_quelle_aus=lambda aus, wirksam: welt.aus.append((aus, wirksam)),
+                                    uebersteuerung=weg)
     welt.trigger.start()
     worker.run_pending()
     return welt
@@ -919,6 +928,31 @@ def test_start_aligns_a_running_override_not_the_wish(tmp_path, clock):
     zustand = {"system_mode": "heat", "occupied_heating_setpoint": 7.5, "local_temperature": 20.0}
     welt = _neustart(tmp_path, clock, zustand=zustand, ueb={"temp": 19.0, "bis": "2026-01-15T22:00:00Z"})
     assert _sollwerte(welt) == [19.0] and welt.store.value == 22.0
+
+
+def _weg(lage):
+    return UebersteuerungsWeg(lage=lambda: lage, senden=lambda temp, bis, herkunft, durch: None, moeglich=lambda: True)
+
+
+@pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
+def test_start_aligns_the_temperature_of_a_running_vacancy_or_away_not_the_wish(tmp_path, clock, art, soll):
+    zustand = {"system_mode": "heat", "occupied_heating_setpoint": 7.5, "local_temperature": 20.0}
+    weg = _weg(SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None))
+    welt = _neustart(tmp_path, clock, zustand=zustand, weg=weg)
+    assert _sollwerte(welt) == [soll] and welt.store.value == 22.0
+
+
+@pytest.mark.parametrize("ueb,art,soll", [({"temp": 19.0, "bis": "2026-01-15T22:00:00Z"}, "uebersteuert", 19.0),
+                                          (None, "leerstand", 16.0)])
+def test_the_setup_writes_the_geltende_anzeige_not_the_wish(tmp_path, clock, ueb, art, soll):
+    """Nach der Einrichtung des Thermostats (thermostat_mode ON) steht das geltende Soll darauf, nicht der Wunsch."""
+    zustand = {"system_mode": "heat", "occupied_heating_setpoint": 7.5, "local_temperature": 20.0}
+    weg = _weg(SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None))
+    welt = _neustart(tmp_path, clock, zustand=zustand, ueb=ueb, weg=weg, w100=True)
+    welt.z2m.set_requests.clear()
+    welt.worker.post(Event(EV_THERMOSTAT_SOLL))
+    welt.worker.run_pending()
+    assert _sollwerte(welt) == [soll] and welt.store.value == 22.0
 
 
 def test_start_without_a_known_state_aligns_with_the_first_report(tmp_path, clock):

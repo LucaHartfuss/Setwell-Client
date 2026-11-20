@@ -310,7 +310,7 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
             quelle.angleichen_offen = False  # Wiedereinschalten an; Frostschutz bleibt unangetastet
             eingabe(wert, durch)
             return
-        soll = store.anzeige()  # eine laufende Uebersteuerung gilt vor dem Wunsch
+        soll = eingang.geltende_anzeige()  # Uebersteuerung, Leerstand und Abwesenheit gelten vor dem Wunsch
         if wert == soll:  # zeigt das Soll doch (HA hat es trotz Fehler uebernommen)
             quelle.angleichen_offen = False
             return

@@ -256,7 +256,7 @@ class BusTriggerSource:
             logger.info("Thermostat %s aus oder in Frostschutz-Stellung: kein Angleichen beim Start", self._thermostat)
             return
         angezeigt = self._quelle.angezeigt()
-        soll = self._store.anzeige()  # eine laufende Uebersteuerung gilt vor dem Wunsch
+        soll = self._eingang.geltende_anzeige()  # Uebersteuerung, Leerstand und Abwesenheit gelten vor dem Wunsch
         if self._quelle.schreiben(soll):
             self._store.note_own_write(veraltet=angezeigt, geschrieben=soll)
 
@@ -265,7 +265,7 @@ class BusTriggerSource:
         p = self._quelle.profil()
         if p is None:
             return
-        soll = self._store.anzeige()
+        soll = self._eingang.geltende_anzeige()
         soll_und_heizen(self._mirror, self._thermostat, p, soll)
         self._store.note_own_write(geschrieben=soll)
 

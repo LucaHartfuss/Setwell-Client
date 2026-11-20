@@ -12,6 +12,7 @@ from heizungsbruecke import config
 from heizungsbruecke.ha_signals import SOLL_REF
 from heizungsbruecke.host import HaHost
 from smartheat_core import meldungen
+from smartheat_core.plan import SollErgebnis
 from smartheat_runtime import app, aufraeumen
 from smartheat_runtime.app import StartFailure
 from smartheat_runtime.notifier import Notifier
@@ -130,7 +131,7 @@ CLIMATE = "climate.wz"
 CLIMATE_SOLL = f"{CLIMATE}::temperature"
 
 
-def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gespeichert=None):
+def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gespeichert=None, lage=None):
     env.ha.states.update({CLIMATE: modus, CLIMATE_SOLL: angezeigt})
     if gespeichert is not None:
         config.room_target_path(1).parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +141,8 @@ def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gesp
     host = HaHost(geraet, env.ha, clock=env.clock)
     loaded = host.load()
     worker = RegulationWorker(env.clock)
+    if lage is not None:
+        worker.geltendes_soll = lambda: lage
     client = host.trigger_source(loaded.manifest, worker)
     return host, geraet, worker, client
 
@@ -230,6 +233,15 @@ def test_a_thermostat_in_frost_protection_is_not_written(env):
     assert env.ha.writes == [] and host.store.echo_rest() == 0
     _erstes_lesen(env, worker, client, angezeigt=5.0)
     assert geraet.wuensche == [] and host.store.value == 21.5 and geraet.aus[-1] == (True, 21.5)
+
+
+@pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
+def test_the_start_writes_the_temperature_of_a_running_vacancy_or_away_not_the_wish(env, art, soll):
+    """Nach dem Zurueckschreiben der Leerstandstemperatur zeigt die Entity sie; der Neustart darf sie nicht auf den
+    Wunsch fuer danach zuruecksetzen."""
+    lage = SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None)
+    host, geraet, worker, client = _climate_start(env, angezeigt=23.0, bedienung=bedienung_inhalt(21.5), lage=lage)
+    assert env.ha.writes == [(CLIMATE_SOLL, soll)] and host.store.value == 21.5
 
 
 def test_a_sensor_target_is_never_written(env):

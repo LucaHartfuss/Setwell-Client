@@ -14,10 +14,11 @@ from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.integration_stand import IntegrationStand
 from heizungsbruecke.push_stand import FRIST_SECONDS as FRIST_PUSH_SECONDS
 from heizungsbruecke.push_stand import PushStand
+from smartheat_core.plan import SollErgebnis
 from smartheat_runtime.dokument_config import ConfigError
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
-from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
+from smartheat_runtime.soll_eingang import EV_TARGET_INPUT, UebersteuerungsWeg
 from smartheat_runtime.soll_speicher import TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
@@ -29,12 +30,12 @@ SOLL = f"{CLIMATE}::temperature"
 
 class Aufbau:
     def __init__(self, tmp_path: Path, soll=SOLL, room_actual="sensor.raum", ha=None, stand=None, push_stand=None,
-                 anlagenkreise=None, quelle=None, kreis=1, **mehr):
+                 anlagenkreise=None, quelle=None, kreis=1, speicher_uhr=None, **mehr):
         self.clock = FakeClock()
         self.worker = RegulationWorker(self.clock)
         self.ha = ha or FakeHa()
         self.ha.states.update({CLIMATE: "heat", SOLL: 21.0})
-        self.store = TargetStore(tmp_path / "soll.json", 21.0, self.clock, lambda: "t")
+        self.store = TargetStore(tmp_path / "soll.json", 21.0, self.clock, speicher_uhr or (lambda: "t"))
         self.wuensche, self.aus, self.checks = [], [], []
         self.worker.register(EV_LOCAL_CHECK, lambda event: self.checks.append(event.data))
         manifest = ChannelManifest(refs={"room_target": "smartheat:raum_soll", "room_actual": room_actual})
@@ -700,6 +701,31 @@ def test_a_portal_operation_whose_alignment_failed_survives_the_reconnect(tmp_pa
     a.run()
     assert a.ha.writes == [(SOLL, 22.5)] and a.ha.states[SOLL] == 22.5
     assert a.store.value == 22.5 and a.store.source == "portal" and a.wuensche == []
+
+
+def _weg(lage):
+    return UebersteuerungsWeg(lage=lambda: lage, senden=lambda temp, bis, herkunft, durch: None, moeglich=lambda: True)
+
+
+def test_the_owed_alignment_writes_a_running_override_not_the_wish(tmp_path):
+    a = Aufbau(tmp_path, speicher_uhr=lambda: "2026-01-15T20:00:00+00:00",
+               uebersteuerung=_weg(SollErgebnis(soll=19.0, soll_art="uebersteuert", naechster_wechsel=None)))
+    _portal_waehrend_ha_down(a)
+    a.store.uebersteuerung_setzen(19.0, "2026-01-15T22:00:00Z")
+    a.ha.write_error = None
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, 19.0)] and a.store.value == 22.5 and a.wuensche == []
+
+
+@pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
+def test_the_owed_alignment_writes_the_temperature_of_a_running_vacancy_or_away_not_the_wish(tmp_path, art, soll):
+    a = Aufbau(tmp_path, uebersteuerung=_weg(SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None)))
+    _portal_waehrend_ha_down(a)
+    a.ha.write_error = None
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, soll)] and a.store.value == 22.5 and a.wuensche == []
 
 
 def test_after_the_owed_write_a_stale_report_is_no_wish_but_a_real_user_change_is(tmp_path):

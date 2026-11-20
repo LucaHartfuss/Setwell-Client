@@ -443,7 +443,10 @@ class Device:
                 self._abwesend_lokal[kreis] = None
             else:  # der Leerstand endet lokal, bis der Server ein neues Dokument schickt
                 self._leerstand_beendet.add(kreis)
-                self._leerstand_beendet_speichern()
+                try:
+                    self._leerstand_beendet_speichern()
+                except OSError as exc:  # das Ende gilt bis zum Neustart; der Wunsch an den Server geht trotzdem hinaus
+                    logger.warning("Ende des Leerstands nicht gespeichert (%s)", type(exc).__name__)
         self._inbox.put(("beenden", kreis, art, begrenzt, roh, uebersteuerung, herkunft, durch))
         return begrenzt
 
@@ -958,7 +961,7 @@ class Device:
         neu = wish.neu(None, None, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
                        uhr_synchron=self._uhr_synchron() is True, herkunft="ha", durch=durch, wall=self._wall(),
                        programm={"abwesend": abwesend})
-        self.wunsch_puffer.setzen(neu)
+        self._wunsch_puffern(neu)
         self.documents.mark_dirty()
         self._abwesend_hinweis = None
         self._wunsch_senden()

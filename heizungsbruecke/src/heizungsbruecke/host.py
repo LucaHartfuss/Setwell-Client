@@ -32,7 +32,7 @@ from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, Trigge
 from smartheat_runtime.raum import RaumPublisher
 from smartheat_runtime.roles import ChannelManifest, ManifestError
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT, BatteryRef, BootInfo, RuntimeConfig
-from smartheat_runtime.soll_eingang import FROSTSCHUTZ_BIS, UebersteuerungsWeg
+from smartheat_runtime.soll_eingang import FROSTSCHUTZ_BIS, UebersteuerungsWeg, geltende_anzeige
 from smartheat_runtime.soll_ende import SollEnde
 from smartheat_runtime.soll_speicher import (
     BEDIENBEREICH_MAX,
@@ -281,6 +281,13 @@ class HaHost:
         # eine Soll-Quelle fuer Start und Betrieb: scheitert das Angleichen beim Start, holt der Trigger es nach
         quelle = HaSollQuelle(self._ha_api, self.soll_entity) if self.soll_entity else None
         anlagenkreise = frozenset(self._anlagenkreise())
+        weg = UebersteuerungsWeg(
+            lage=worker.geltendes_soll, moeglich=geraet.programm_faehig,
+            senden=lambda temp, bis, herkunft, durch: geraet.uebersteuerung_senden(
+                self.kreis, temp, bis, herkunft, durch),
+            betriebsart=worker.betriebsart,
+            beenden=lambda art, raum_soll, uebersteuerung, herkunft, durch: geraet.betriebsart_beenden(
+                self.kreis, art, raum_soll, uebersteuerung, herkunft, durch))
         client = geraet_trigger.build(
             manifest, self._ha_api, worker, self.store, self.soll_entity,
             tagestick=self._runtime.daily_trigger_time, wache_s=self._runtime.local_check_interval,
@@ -289,20 +296,14 @@ class HaHost:
             abwesend_setzen=lambda bis, temp, durch: geraet.abwesend_setzen(self.kreis, bis, temp, durch),
             abwesend_beenden=lambda durch: geraet.abwesend_beenden(self.kreis, durch),
             abwesend_abgelehnt=geraet.abwesend_abgelehnt,
-            uebersteuerung=UebersteuerungsWeg(
-                lage=worker.geltendes_soll, moeglich=geraet.programm_faehig,
-                senden=lambda temp, bis, herkunft, durch: geraet.uebersteuerung_senden(
-                    self.kreis, temp, bis, herkunft, durch),
-                betriebsart=worker.betriebsart,
-                beenden=lambda art, raum_soll, uebersteuerung, herkunft, durch: geraet.betriebsart_beenden(
-                    self.kreis, art, raum_soll, uebersteuerung, herkunft, durch)),
+            uebersteuerung=weg,
             anlagenkreise=anlagenkreise,
             # das Lebenszeichen der Integration gilt der Anlage: nur der Client des kleinsten Kreises abonniert es
             integration_stand=geraet.integration_stand if self.kreis == min(anlagenkreise) else None,
             push_stand=geraet.push_stand if self.kreis == min(anlagenkreise) else None,
             uhr=self._clock)
         if self._angleichen and quelle is not None:
-            self._soll_entity_angleichen(quelle)
+            self._soll_entity_angleichen(quelle, weg)
         raum = self.raum
         assert raum is not None
 
@@ -314,7 +315,7 @@ class HaHost:
         worker.schedule(0, Event(EV_RAUM))
         return client
 
-    def _soll_entity_angleichen(self, quelle: HaSollQuelle) -> None:
+    def _soll_entity_angleichen(self, quelle: HaSollQuelle, weg: UebersteuerungsWeg) -> None:
         """"Bedienung angleichen" beim Start (Gateway: _angleichen): Thermostat, HA und Portal zeigen
         denselben Wert. Nur wenn die Entity etwas anderes zeigt und nicht aus ist (HVAC off oder Frostschutz-Stellung
         bis FROSTSCHUTZ_BIS = Soll-Quelle aus: keine Bedienung an die Quelle; beim Wiedereinschalten
@@ -332,7 +333,7 @@ class HaHost:
         except Exception as error:
             logger.warning("HVAC-Modus der Soll-Entity nicht gelesen (%s)", type(error).__name__)
         angezeigt = quelle.angezeigt()
-        soll = self.store.anzeige()  # eine laufende Uebersteuerung gilt vor dem Wunsch
+        soll = geltende_anzeige(self.store, weg)  # Uebersteuerung oder Leerstand/Away vor dem Wunsch
         if angezeigt == soll:
             return
         if angezeigt is not None and angezeigt <= FROSTSCHUTZ_BIS:

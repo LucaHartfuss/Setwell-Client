@@ -39,6 +39,10 @@ _SOURCES = (SOURCE_PORTAL, SOURCE_THERMOSTAT, SOURCE_LOKAL)
 BEDIENBEREICH_MIN, BEDIENBEREICH_MAX, BEDIENBEREICH_STEP = 15.0, 25.0, 0.5
 ECHO_WINDOW_SECONDS = 60
 PENDING_SECONDS = 1800
+#: Ein Schreibbefehl, den das Thermostat nach PENDING_SECONDS nicht bestaetigt hat (es meldet weiter den alten Wert, etwa
+#: ein schlafendes Geraet), wird bis zu so oft erneut geschrieben, ein Versuch je Ablauf. Danach gilt der gemeldete Wert
+#: als Eingabe des Kunden wie bisher: ein Thermostat, das dauerhaft nicht folgt, wird nicht endlos beschrieben.
+MAX_NACHSCHREIBEN = 3
 
 
 def im_bedienbereich(value) -> bool:
@@ -101,6 +105,8 @@ class TargetStore:
         self._echo_until: float | None = None
         # (geschrieben, veraltete Werte, Frist) - nur im Speicher
         self._pending: tuple[float, frozenset[float], float] | None = None
+        self._versuche = 0  # Wiederholungen des offenen Schreibbefehls (nur im Speicher)
+        self._nachschreiben: tuple[float, float] | None = None  # (geschrieben, gemeldet): erneut schreiben (nur im Speicher)
         self._before: float | None = None  # Wert vor der letzten Aenderung (= was das Thermostat noch zeigt)
         self._gerundet: float | None = None  # ganzzahlige Anzeige des halben Grads, die das Thermostat zeigt (nur im Speicher)
         self._ueb_path = path.with_name(path.stem + ".uebersteuerung.json")
@@ -125,10 +131,14 @@ class TargetStore:
         self.uebersteuerung_aufheben()  # eine neue Bedienung des Servers gilt vor der lokalen Uebersteuerung
         return self._set(float(value), SOURCE_PORTAL)
 
-    def note_own_write(self, veraltet: float | None = None, geschrieben: float | None = None) -> None:
+    def note_own_write(self, veraltet: float | None = None, geschrieben: float | None = None, *,
+                       wiederholung: bool = False) -> None:
         """veraltet: was das Thermostat zuletzt gemeldet hat, falls bekannt (Wiedereinschalten: der Wert vor dem
         Ausschalten, nicht unbedingt der vorige Wert des Speichers); gilt zusaetzlich als alter Wert. geschrieben: der
-        geschriebene Wert, wenn er nicht der Wunsch ist (Uebersteuerung); dann zeigte das Thermostat zuvor den Wunsch."""
+        geschriebene Wert, wenn er nicht der Wunsch ist (Uebersteuerung); dann zeigte das Thermostat zuvor den Wunsch.
+        wiederholung: dieselbe, unbestaetigte Schreibung noch einmal (zaehlt gegen MAX_NACHSCHREIBEN)."""
+        if not wiederholung:
+            self._versuche = 0
         now = self._clock()
         self._echo_until = now + ECHO_WINDOW_SECONDS
         self._gerundet = None
@@ -153,6 +163,19 @@ class TargetStore:
     def angezeigt_zuletzt(self) -> float | None:
         """Die zuletzt angenommene oder geschriebene Anzeige des Thermostats (None: noch keine bekannt)."""
         return self._angezeigt
+
+    def nachschreiben_nehmen(self) -> tuple[float, float] | None:
+        """(geschrieben, gemeldet), wenn die letzte Pruefung einen unbestaetigten Schreibbefehl abgelaufen sah, dessen alten
+        Wert das Thermostat weiter meldet: der Aufrufer schreibt `geschrieben` erneut. Einmal je Ablauf, dann leer."""
+        offen, self._nachschreiben = self._nachschreiben, None
+        return offen
+
+    def anzeige_verwerfen(self) -> None:
+        """Die gemerkte Anzeige gilt nicht mehr (das Thermostat ist aus: es zeigt, was der Kunde dort einstellt)."""
+        if self._angezeigt is None:
+            return
+        self._angezeigt = None
+        dateien.schreiben_json(self._angezeigt_path, {"temp": None}, modus=dateien.LESBAR)
 
     def anzeige_merken(self, wert: float) -> None:
         """Das Thermostat zeigt `wert` (angenommene Eingabe des Kunden): eine Wiederholung ist keine Eingabe mehr."""
@@ -182,6 +205,7 @@ class TargetStore:
         if self._echo_until is not None and self._clock() < self._echo_until:
             if self._pending is not None and is_plausible(value, ROOM_TEMP_RANGE) and self._bestaetigt(float(value)):
                 self._pending = None  # Bestaetigung im Echo-Fenster schliesst den offenen Befehl trotzdem
+                self._versuche = 0
             return None
         if not is_plausible(value, ROOM_TEMP_RANGE):
             logger.warning("Wunschtemperatur %r vom Thermostat unplausibel, verworfen", value)
@@ -192,9 +216,16 @@ class TargetStore:
             if self._clock() >= until:
                 self._pending = None
                 if value != written:
+                    if value in stale and self._versuche < MAX_NACHSCHREIBEN:
+                        self._versuche += 1  # der Befehl kam nicht an: der alte Wert ist keine Eingabe des Kunden
+                        self._nachschreiben = (written, value)
+                        logger.info("Thermostat meldet nach Ablauf der Frist noch den alten Sollwert %.1f, der Befehl "
+                                    "wird wiederholt (Versuch %d)", value, self._versuche)
+                        return None
                     logger.warning("Thermostat hat das Soll %.1f nicht bestaetigt, sein Wert %.1f gilt", written, value)
             elif value == written:
                 self._pending = None
+                self._versuche = 0
                 self.anzeige_merken(value)
                 return None
             elif value in stale:

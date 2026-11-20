@@ -513,6 +513,7 @@ def test_away_die_lokale_zahl_beendet_es_nicht(tmp_path):
     a.betriebsart = Betriebsart("abwesend", WARM_DANACH)
     a.post(22.0, SOURCE_LOKAL, herkunft="ha")
     assert a.beendet == [] and a.wuensche == [(22.0, "ha", None)]
+    assert a.quelle.geschrieben == []  # der Wunsch gilt erst nach Away: die Quelle zeigt weiter die Away-Temperatur
 
 
 @pytest.mark.parametrize("art", ["leerstand", "abwesend"])
@@ -760,6 +761,7 @@ def test_leerstand_die_lokale_zahl_aendert_eine_laufende_uebersteuerung_nicht_un
     assert a.store.uebersteuerung() == ende and a.gesendet == gesendet
     assert a.wuensche == [(22.0, "ha", "nutzer")] and a.store.value == 22.0
     assert a.store.leerstand_zaehler.anzahl() == 1  # die lokale Zahl zaehlt nicht
+    assert a.quelle.geschrieben == []  # die Quelle zeigt weiter die Uebersteuerung, nicht den Wunsch
 
 
 def test_leerstand_ende_in_der_kuehlen_phase_ueber_dem_maximum_wird_begrenzt(tmp_path):
@@ -769,3 +771,105 @@ def test_leerstand_ende_in_der_kuehlen_phase_ueber_dem_maximum_wird_begrenzt(tmp
     oben = safety.BEDIENBEREICH_MAX_C
     assert a.beendet == [("leerstand", None, {"temp": oben, "bis": BIS}, "soll_entity", "nutzer")]
     assert a.store.uebersteuerung() == {"temp": oben, "bis": BIS} and a.quelle.geschrieben == [oben]
+
+
+# Geltende Anzeige: in Leerstand und Away zeigt die Quelle deren Soll, nie den Wunsch fuer danach
+
+def test_ohne_betriebsart_zeigt_die_quelle_nach_einem_ausschalten_den_wunsch_wieder(tmp_path):
+    a = Aufbau(tmp_path)
+    a.quelle.wert = 5.0
+    a.modus("off")
+    a.modus("heat")
+    assert a.quelle.geschrieben == [21.0] and a.eingang.geltende_anzeige() == 21.0
+
+
+@pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
+def test_geltende_anzeige_in_einer_betriebsart_ohne_uebersteuerung_ist_ihr_soll(tmp_path, art, soll):
+    a = Aufbau(tmp_path)
+    a.lage = SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None)
+    a.betriebsart = Betriebsart(art, WARM_DANACH)
+    assert a.eingang.geltende_anzeige() == soll and a.store.value == 21.0
+    a.store.uebersteuerung_setzen(19.0, BIS)
+    assert a.eingang.geltende_anzeige() == 19.0  # eine laufende Uebersteuerung gilt vor der Betriebsart
+
+
+@pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
+def test_modus_aus_und_wieder_an_in_einer_betriebsart_zeigt_deren_soll_nicht_den_wunsch(tmp_path, art, soll):
+    a = Aufbau(tmp_path)
+    a.lage = SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None)
+    a.betriebsart = Betriebsart(art, WARM_DANACH)
+    a.modus("off")
+    a.quelle.wert = 5.0
+    a.modus("heat")
+    assert a.quelle.geschrieben == [soll] and a.store.value == 21.0
+
+
+def test_modus_aus_und_wieder_an_mit_laufender_uebersteuerung_zeigt_sie_nicht_den_wunsch(tmp_path):
+    a = Aufbau(tmp_path)
+    a.store.uebersteuerung_setzen(19.0, BIS)
+    a.quelle.wert = 5.0
+    a.modus("off")
+    a.modus("heat")
+    assert a.quelle.geschrieben == [19.0] and a.store.value == 21.0
+
+
+def test_leerstand_modus_wieder_an_nach_dem_ablauf_zeigt_die_leerstandstemperatur(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    a.modus("off")
+    _ablaufen(a)  # bei ausgeschalteter Quelle bleibt sie, wie sie ist
+    assert a.quelle.geschrieben == []
+    a.modus("heat")
+    assert a.quelle.geschrieben == [LEERSTAND_LAGE.soll]
+
+
+def test_leerstand_ein_ablauf_bei_offener_eingabe_wird_nach_dem_entprellen_nachgeholt(tmp_path):
+    a = _leerstand(tmp_path, entprellen_s=5.0)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    for _ in range(5):
+        a.clock.advance(1)
+    a.weiter(UEBERSTEUERUNG_DAUER - 3 * KNAPP)
+    a.clock.advance((UEBERSTEUERUNG_DAUER - 3 * KNAPP).total_seconds() - 5)
+    a.worker.run_pending()
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha", durch="nutzer")  # offen, wenn die Uebersteuerung endet
+    for _ in range(12):
+        a.weiter(KNAPP)
+        a.clock.advance(1)
+        a.worker.run_pending()
+    assert a.store.uebersteuerung() is None and a.wuensche == [(22.0, "ha", "nutzer")]
+    assert a.quelle.geschrieben == [LEERSTAND_LAGE.soll]
+
+
+def test_leerstand_der_wechsel_auf_aus_verwirft_die_gemerkte_anzeige(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    _ablaufen(a)
+    assert a.store.angezeigt_zuletzt == LEERSTAND_LAGE.soll
+    a.modus("off")
+    assert a.store.angezeigt_zuletzt is None
+    assert TargetStore(tmp_path / "soll.json", 21.0, a.clock, lambda: a.jetzt.isoformat()).angezeigt_zuletzt is None
+
+
+def test_leerstand_eine_verlorene_schreibung_wird_hoechstens_dreimal_wiederholt(tmp_path):
+    """Das schlafende Thermostat bekommt den Befehl nicht und meldet nach der Frist weiter die alte Anzeige 19: das ist
+    keine Eingabe des Kunden. Nach den Wiederholungen gilt es wie bisher."""
+    from smartheat_runtime import soll_speicher
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    _ablaufen(a)
+    assert a.quelle.geschrieben == [16.0]
+    for n in range(soll_speicher.MAX_NACHSCHREIBEN):
+        a.weiter(timedelta(seconds=1900))
+        a.clock.advance(1900)  # Frist des offenen Befehls und Echo-Fenster vorbei, der Befehl kam nie an
+        a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+        assert a.quelle.geschrieben == [16.0] * (n + 2)
+        assert a.store.leerstand_zaehler.anzahl() == 1 and len(a.gesendet) == 1 and a.beendet == []
+    a.weiter(timedelta(seconds=1900))
+    a.clock.advance(1900)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert len(a.quelle.geschrieben) == soll_speicher.MAX_NACHSCHREIBEN + 1
+    assert a.store.leerstand_zaehler.anzahl() == 2  # danach wie bisher: die Meldung gilt als Eingabe

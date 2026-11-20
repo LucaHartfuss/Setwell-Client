@@ -36,7 +36,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
-from smartheat_core.plan import SOLL_ART_ABSENKUNG, SOLL_ART_LEERSTAND, SOLL_ART_UEBERSTEUERT, SollErgebnis
+from smartheat_core.plan import (
+    SOLL_ART_ABSENKUNG,
+    SOLL_ART_ABWESEND,
+    SOLL_ART_LEERSTAND,
+    SOLL_ART_UEBERSTEUERT,
+    SollErgebnis,
+)
 from smartheat_core.safety import ABSENK_UNTERGRENZE_C, BEDIENBEREICH_MAX_C
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime.debounce import Debouncer
@@ -88,6 +94,18 @@ class UebersteuerungsWeg:
     beenden: Callable[[str, float | None, dict | None, str | None, str | None], float | None] | None = None
 
 
+def geltende_anzeige(store: TargetStore, weg: UebersteuerungsWeg | None) -> float:
+    """Was die Soll-Quelle jetzt zeigen soll, fuer jedes Angleichen und Zurueckschreiben aller Hosts: eine laufende
+    Uebersteuerung; sonst in Leerstand oder Away deren Soll (der Wunsch gilt erst danach); sonst der Wunsch."""
+    ueb = store.uebersteuerung()
+    if ueb is not None:
+        return ueb["temp"]
+    lage = weg.lage() if weg is not None else None
+    if lage is not None and lage.soll is not None and lage.soll_art in (SOLL_ART_LEERSTAND, SOLL_ART_ABWESEND):
+        return lage.soll
+    return store.value
+
+
 class SollQuelle(Protocol):
     def schreiben(self, value: float) -> bool:
         """Soll an die Quelle schreiben; False, wenn sie nicht schreibbar ist (dann kein Echo-Fenster)."""
@@ -133,6 +151,7 @@ class SollEingang:
         self._worker, self._store, self._quelle = worker, store, quelle
         self._wunsch, self._soll_quelle_aus = wunsch, soll_quelle_aus
         self._uebersteuerung = uebersteuerung
+        self._entprellen_s = entprellen_s
         self._aus: set[str] = set()  # Gruende: "modus", "frost"
         self._wunsch_offen = False
         self._lokal_offen = False
@@ -150,7 +169,7 @@ class SollEingang:
         self._ende_geplant = False  # eine Wiederholung des Soll-Endes ist eingeplant (eine Kette)
         self._ablauf_geplant = False  # das Ende der Uebersteuerung ist eingeplant (eine Kette)
         self._debouncer = Debouncer(worker, DEBOUNCE_KIND, entprellen_s, self._entprellt)
-        worker.register(EV_TARGET_INPUT, self._on_target_input)
+        worker.register(EV_TARGET_INPUT, self._on_target_input)  # nimmt danach einen unbestaetigten Befehl wieder auf
         worker.register(EV_SOLL_MODUS, self._on_mode)
         worker.register(EV_SOLL_ENDE, self._on_ende)
         worker.register(EV_SOLL_ENDE_WIEDERHOLEN, self._on_ende_wiederholen)
@@ -162,9 +181,12 @@ class SollEingang:
         """Soll-Quelle aus (Modus off oder Frostschutz-Stellung): kein Wunsch, keine Bedienung an die Quelle."""
         return bool(self._aus)
 
-    def _schreiben(self, value: float, veraltet: float | None = None) -> None:
+    def geltende_anzeige(self) -> float:
+        return geltende_anzeige(self._store, self._uebersteuerung)
+
+    def _schreiben(self, value: float, veraltet: float | None = None, *, wiederholung: bool = False) -> None:
         if self._quelle is not None and self._quelle.schreiben(value):
-            self._store.note_own_write(veraltet=veraltet, geschrieben=value)
+            self._store.note_own_write(veraltet=veraltet, geschrieben=value, wiederholung=wiederholung)
 
     def _setze_aus(self, grund: str, aus: bool) -> None:
         vorher = bool(self._aus)
@@ -176,6 +198,7 @@ class SollEingang:
         if bool(self._aus) != vorher:
             if self._aus:
                 self._wunsch_verwerfen()  # Soll-Quelle aus ist kein Wunsch: auch ein offener nicht
+                self._store.anzeige_verwerfen()  # ausgeschaltet zeigt sie nur noch, was der Kunde dort einstellt
             self._worker.post(Event(EV_SOLL_QUELLE, {"aus": bool(self._aus)}))
             self._soll_quelle_aus(bool(self._aus), self._store.value if self._aus else None)
         if grund == "modus" and war_aus and not self._aus:
@@ -188,8 +211,9 @@ class SollEingang:
         if self._quelle is None:
             return
         angezeigt = self._quelle.angezeigt()
-        soll = self._store.anzeige()  # eine laufende Uebersteuerung gilt vor dem Wunsch
+        soll = self.geltende_anzeige()  # Uebersteuerung oder Leerstand/Away vor dem Wunsch
         if angezeigt == soll:
+            self._store.anzeige_merken(soll)  # eine Wiederholung dieser Anzeige ist keine Eingabe
             return
         self._schreiben(soll, veraltet=angezeigt)
 
@@ -208,15 +232,19 @@ class SollEingang:
     def _on_ueb_ablauf(self, event: Event) -> None:
         """Die Uebersteuerung ist abgelaufen: im Leerstand zeigt die Soll-Quelle wieder die Leerstandstemperatur. Ohne das
         zeigte das Thermostat weiter den Wert des Kunden, und jede Wiederholung der Meldung sah aus wie eine neue Aenderung.
-        Laeuft noch eine (neu gesetzt), wird erneut eingeplant; bei Soll-Quelle aus oder offener Eingabe des Kunden
-        bleibt die Quelle, wie sie ist."""
+        Laeuft noch eine (neu gesetzt), wird erneut eingeplant; bei Soll-Quelle aus bleibt die Quelle, wie sie ist (das
+        Wiedereinschalten zeigt dann die geltende Anzeige). Bei offener Eingabe des Kunden wird nach dem Entprellen
+        erneut geprueft, statt das Zurueckschreiben zu verwerfen."""
         self._ablauf_geplant = False
         if self._store.uebersteuerung() is not None:
             self._ablauf_planen()
             return
         weg = self._uebersteuerung
-        if (self._quelle is None or weg is None or self._aus or self._wunsch_offen or self._ueb_offen
-                or self._beenden_offen is not None):
+        if self._quelle is None or weg is None or self._aus:
+            return
+        if self._wunsch_offen or self._ueb_offen or self._beenden_offen is not None:
+            self._ablauf_geplant = True
+            self._worker.schedule(self._entprellen_s + UEB_ABLAUF_PUFFER_S, Event(EV_UEB_ABLAUF))
             return
         lage = weg.lage()
         if lage is None or lage.soll_art != SOLL_ART_LEERSTAND or lage.soll is None:
@@ -283,6 +311,21 @@ class SollEingang:
         self._setze_aus("modus", mode == MODUS_AUS)
 
     def _on_target_input(self, event: Event) -> None:
+        self._eingabe_verarbeiten(event)
+        self._nachschreiben()
+
+    def _nachschreiben(self) -> None:
+        """Die Pruefung der Meldung sah einen Schreibbefehl, der nie ankam (das Thermostat meldet nach der Frist noch den
+        alten Wert): die geltende Anzeige noch einmal schreiben, statt den alten Wert als Eingabe des Kunden zu zaehlen.
+        Nicht bei Soll-Quelle aus, offener Eingabe oder wenn die geltende Anzeige inzwischen eine andere ist."""
+        offen = self._store.nachschreiben_nehmen()
+        if offen is None or self._aus or self._wunsch_offen or self._ueb_offen or self._beenden_offen is not None:
+            return
+        geschrieben, gemeldet = offen
+        if geschrieben == self.geltende_anzeige():
+            self._schreiben(geschrieben, veraltet=gemeldet, wiederholung=True)
+
+    def _eingabe_verarbeiten(self, event: Event) -> None:
         value, source = event.data["value"], event.data["source"]
         herkunft, durch = event.data.get("herkunft"), event.data.get("durch")
         if source == SOURCE_PORTAL:
@@ -509,7 +552,8 @@ class SollEingang:
                 self._store.begrenzen(begrenzt)
                 if not self._aus:
                     self._schreiben(begrenzt)
-            elif lokal and not self._aus:
+            elif lokal and not self._aus and not self._betriebsart_laeuft():
+                # In Leerstand und Away zeigt die Quelle deren Soll, bei laufender Uebersteuerung diese: der Wunsch gilt erst danach
                 self._schreiben(self._store.value)
         if self._ende_wartet and not self._wunsch_offen:
             self._worker.post(Event(EV_SOLL_ENDE))  # das Soll-Ende kam bei offenem Wunsch: jetzt mit dem Wert des Kunden
