@@ -24,8 +24,9 @@ def inactive_meldung(inactive_since: datetime) -> Meldung:
 
 
 def enter_inactive(rt: Runtime, now: datetime) -> None:
-    """Notbetrieb an (persistiert), Kanal des Geraetekerns gestoppt, keine Snapshots/Telemetrie mehr. Gemeldet
-    wird nur beim erstmaligen Setzen von inactive_since, nicht bei jedem Neustart.
+    """Notbetrieb an (persistiert), keine Snapshots mehr. Kanal des Geraetekerns gestoppt, ausser in der Testphase ohne
+    Setwell: dort bleibt er offen und sendet weiter Raumwerte (app._on_telemetry), Zustellung und Schreibweg ruhen.
+    Gemeldet wird nur beim erstmaligen Setzen von inactive_since, nicht bei jedem Neustart.
     `mqtt_client.stop()` schaltet den Kanal der Laufzeit ab (smartheat_device.laufzeit.RuntimeChannel nimmt keine
     Ereignisse mehr an); den Link betreibt weiter das Geraet."""
     state = rt.store.state

@@ -23,9 +23,10 @@ def ausser_betrieb(rt: Runtime) -> bool:
 
 def pruefen(rt: Runtime) -> bool:
     """Fuehrt den Eintritt nach und gibt zurueck, ob der Kreis ruht (ausser Betrieb und Rueckstellung erledigt). Beim
-    Eintritt wird einmal zurueckgestellt, auch der Comfort-Boost endet; scheitert das, bleibt die Rueckstellung offen, eine kritische
-    Meldung geht einmal je Fehlschlag raus (Entwarnung beim Gelingen) und der naechste Check versucht es erneut. Ein laufender Kaelteschutz schiebt sie bis zu seinem Ende auf (er schuetzt
-    weiter). Der Merker steht in backup.json: ein Neustart mitten im Zustand wiederholt die Rueckstellung nicht und
+    Eintritt wird einmal zurueckgestellt, auch der Comfort-Boost endet; scheitert das, bleibt die Rueckstellung offen, eine
+    kritische Meldung geht einmal je Fehlschlag-Episode raus (Entwarnung beim Gelingen oder bei der Rueckkehr in den
+    Betrieb) und der naechste Check versucht es erneut. Ein laufender Kaelteschutz schiebt sie bis zu seinem Ende auf (er
+    schuetzt weiter). Der Merker steht in backup.json: ein Neustart mitten im Zustand wiederholt die Rueckstellung nicht und
     ueberschreibt keine Handaenderung. Im selben Schritt steht der Merker "Soll-Ende offen" (soll_ende_offen): er faellt
     erst, wenn die Soll-Quelle den gemerkten Wunsch zeigt (EV_SOLL_ENDE_ERLEDIGT), ein Neustart davor holt das Ende nach
     (app.start). Ein Wechsel zurueck nach `in_betrieb` setzt beide Merker zurueck, damit ein
@@ -36,6 +37,10 @@ def pruefen(rt: Runtime) -> bool:
     if not ausser_betrieb(rt):
         if state.ausser_betrieb_rueckgestellt:
             rt.store.update(ausser_betrieb_rueckgestellt=False, soll_ende_offen=False)
+        # Eine Fehlschlag-Meldung dieser Rueckstellung entwarnt mit der Rueckkehr. Bei laufender Abo-Frist kann die Meldung
+        # auch vom Fristende stammen: dann entwarnt nur dessen eigene Wiederherstellung.
+        if state.abo_inactive_since is None and state.notify_states.get(abo.RESTORE_KEY) == abo.RESTORE_FAILED_STATE:
+            abo.report_restore(rt.notifier, ok=True)
         return False
     if not state.ausser_betrieb_rueckgestellt and state.kaelteschutz_art is None:
         if rt.override.restore_and_clear(True):

@@ -575,8 +575,13 @@ def _on_telemetry(rt: Runtime, event: Event) -> None:
         logger.debug("Telemetrie uebersprungen, keine MQTT-Verbindung")
         return
     if nur_raeume:
+        # Ausser Betrieb gibt es weder Boost noch Notbetrieb des Kreises (die Rueckstellung beendet sie): fest falsch. In der
+        # Testphase ohne Abo stehen dieselben Werte wie im vollen Satz (der Notbetrieb gilt dort ab dem Ende des Abos).
+        ausser = kreiszustand.ausser_betrieb(rt)
         telemetry.run_telemetry_tick(
-            rt.manifest, rt.signals, rt.mqtt_client, boost_active=False, failsafe_active=False,
+            rt.manifest, rt.signals, rt.mqtt_client,
+            boost_active=False if ausser else state.boost_active,
+            failsafe_active=False if ausser else state.delivery.notbetrieb,
             kreis=rt.config.kreis, nur_raeume=True,
         )  # Schutz-Telemetrie: nur Raumwerte fuer die Frostnaehe, keine Hebel- und Regelungsdaten
         return
