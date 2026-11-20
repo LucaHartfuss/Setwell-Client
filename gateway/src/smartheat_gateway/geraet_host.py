@@ -39,7 +39,7 @@ from pathlib import Path
 from smartheat_core import dateien, zustandspfade
 from smartheat_core.logtext import lesbar
 from smartheat_core.zeitquelle import echte_epoche, fachliche_epoche
-from smartheat_device import fehler, nachrichten, wire
+from smartheat_device import fehler, nachrichten, programm, wire
 from smartheat_device.commands import CommandRegister
 from smartheat_device.geraet_host_basis import GeraetHostBasis
 from smartheat_device.host import Anzeige
@@ -249,9 +249,26 @@ class GatewayDeviceHost(GeraetHostBasis):
     # --- DeviceHost ---
 
     def faehigkeiten(self) -> dict:
-        return nachrichten.pruefen("faehigkeiten", {"drivers": list(registry.driver_ids()), "zigbee": True,
-                                                    "updater": True, "testphase": True, "kaelteschutz": True},
-                                   wire.CAPABILITY_FIELDS, wire.CAPABILITY_OPTIONAL)
+        """Bei jedem hello und jeder Registrierung neu gerechnet; `programm` nur mit Zonendaten, Uhr-Port und je Kreis
+        einem Thermostat als Soll-Ziel (_ZigbeeQuelle schreibt das Soll dorthin)."""
+        wert = {"drivers": list(registry.driver_ids()), "zigbee": True, "updater": True, "testphase": True,
+                "kaelteschutz": True}
+        if programm.angeboten(uhr_port=callable(getattr(self, "uhr_synchron", None)),
+                              soll_quellen=self._soll_quellen_schreibbar()):
+            wert["programm"] = True
+        return nachrichten.pruefen("faehigkeiten", wert, wire.CAPABILITY_FIELDS, wire.CAPABILITY_OPTIONAL)
+
+    def _soll_quellen_schreibbar(self) -> list[bool]:
+        """Je Kreis der Konfiguration: ein Thermostat ist als Soll-Ziel gebunden (leer ohne Konfiguration)."""
+        konfiguration = self.konfiguration()
+        schreibbar = []
+        for nummer in self.kreis_nummern():
+            try:
+                thermostat = gateway_config.bindung(konfiguration, nummer).thermostat
+            except dokument_config.ConfigError:
+                thermostat = None
+            schreibbar.append(thermostat is not None)
+        return schreibbar
 
     def wege(self) -> list[str]:
         """Wege des Katalogs, die dieses Gateway ueber seine Treiber bedient (Treiber-ID -> Weg-ID)."""

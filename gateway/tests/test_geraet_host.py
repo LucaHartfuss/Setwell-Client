@@ -17,7 +17,7 @@ from rastung_beispiele import rastung_aus
 from world import GatewayWorld
 
 from smartheat_core import dateien, meldungen, rastung
-from smartheat_device import nachrichten, wire
+from smartheat_device import nachrichten, programm, wire
 from smartheat_device.documents import DocumentStore
 from smartheat_device.geraet_host_basis import EV_RELOAD
 from smartheat_device.host import Anzeige
@@ -50,7 +50,27 @@ def _anzeige(zustand="regelt", **changes):
 def test_capabilities_and_version(welt):
     assert (welt.host.host, welt.host.version) == ("gateway", GATEWAY_VERSION)
     assert welt.host.faehigkeiten() == {"drivers": ["simulation", "vicare_cloud"], "zigbee": True, "updater": True,
-                                         "testphase": True, "kaelteschutz": True}
+                                         "testphase": True, "kaelteschutz": True, "programm": True}
+
+
+def test_programm_nur_mit_zonendaten_uhr_port_und_thermostat(welt, monkeypatch):
+    assert welt.host.faehigkeiten()["programm"] is True
+    welt.device.konf = konfiguration()
+    welt.device.konf["kreise"][0]["bindung"]["thermostat"] = None  # kein Soll-Ziel: nichts, was das Soll schreibt
+    assert "programm" not in welt.host.faehigkeiten()
+    welt.device.konf = konfiguration()
+    monkeypatch.setattr(programm, "zonendaten_vorhanden", lambda: False)
+    assert "programm" not in welt.host.faehigkeiten()
+    monkeypatch.undo()
+    monkeypatch.setattr(gh.GatewayDeviceHost, "uhr_synchron", None)
+    assert "programm" not in welt.host.faehigkeiten()
+
+
+def test_programm_ohne_konfiguration_kann_der_host_es(welt):
+    welt.device.konf = None  # Registrierung vor der ersten Konfiguration
+    assert welt.host.faehigkeiten()["programm"] is True
+    welt.device.konf = leer()
+    assert welt.host.faehigkeiten()["programm"] is True
 
 
 def test_capabilities_are_built_against_the_contract(welt, monkeypatch):

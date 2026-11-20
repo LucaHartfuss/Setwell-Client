@@ -25,11 +25,12 @@ from heizungsbruecke.integration_stand import IntegrationStand
 from heizungsbruecke.push_stand import PushStand
 from heizungsbruecke.version import ADDON_VERSION
 from smartheat_core import meldungen
-from smartheat_device import fehler, nachrichten, wire
+from smartheat_device import fehler, nachrichten, programm, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Outcome, Waiting
 from smartheat_device.geraet_host_basis import SIGN_OFF_WAIT_SECONDS, GeraetHostBasis, abmeldung_abwarten
 from smartheat_device.host import Anzeige
 from smartheat_runtime import dokument_config
+from smartheat_runtime.dokument_config import ConfigError
 
 logger = logging.getLogger(__name__)
 
@@ -117,10 +118,25 @@ class HaDeviceHost(GeraetHostBasis):
     # --- DeviceHost ---
 
     def faehigkeiten(self) -> dict:
-        return nachrichten.pruefen("faehigkeiten", {"drivers": [], "zigbee": False, "testphase": True,
-                                                    "kaelteschutz": True},
-                                   wire.CAPABILITY_FIELDS,
-                                   wire.CAPABILITY_OPTIONAL)
+        """Bei jedem hello und jeder Registrierung neu gerechnet; `programm` nur mit Zonendaten, Uhr-Port und je Kreis
+        einer schreibbaren Soll-Entity (nur eine Climate-Entity ist schreibbar, HaSollQuelle)."""
+        wert = {"drivers": [], "zigbee": False, "testphase": True, "kaelteschutz": True}
+        if programm.angeboten(uhr_port=callable(getattr(self, "uhr_synchron", None)),
+                              soll_quellen=self._soll_quellen_schreibbar()):
+            wert["programm"] = True
+        return nachrichten.pruefen("faehigkeiten", wert, wire.CAPABILITY_FIELDS, wire.CAPABILITY_OPTIONAL)
+
+    def _soll_quellen_schreibbar(self) -> list[bool]:
+        """Je Kreis der Konfiguration: die Soll-Entity ist eine Climate-Entity (leer ohne Konfiguration)."""
+        konfiguration = self.konfiguration()
+        schreibbar = []
+        for nummer in self.kreis_nummern():
+            try:
+                soll = dokument.bindung(konfiguration, nummer).soll_entity
+            except ConfigError:
+                soll = None
+            schreibbar.append(soll is not None and soll.partition("::")[0].startswith("climate."))
+        return schreibbar
 
     def wege(self) -> list[str]:
         """Wege des Katalogs, die dieser Host ueber seine Schreib-Plattformen bedient (Plattform -> Weg-ID)."""
