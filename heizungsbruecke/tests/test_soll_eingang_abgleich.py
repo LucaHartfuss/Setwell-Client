@@ -8,9 +8,11 @@ import pytest
 from fakes import FakeClock
 from test_regulation import RESTORE_POINT, WOCHENPLAN, _mit_plan, _runtime
 
+from smartheat_core import dateien
 from smartheat_runtime import app
 from smartheat_runtime.soll_eingang import (
     EV_SOLL_ENDE,
+    EV_SOLL_ENDE_ERLEDIGT,
     EV_SOLL_QUELLE,
     SollEingang,
     UebersteuerungsWeg,
@@ -480,3 +482,39 @@ def test_nach_dem_ende_wird_die_uebersteuerung_aufgehoben_und_das_nachschreiben_
     a.rt.worker.post(Event("shg_target_input", {"value": 22.0, "source": "thermostat"}))
     a.rt.worker.run_pending()
     assert a.quelle.geschrieben == [19.0] and a.store.uebersteuerung() is None
+
+
+def test_ein_scheiternder_speicher_beim_aufheben_verhindert_das_soll_ende_nicht(make_store, monkeypatch, tmp_path):
+    """Die Platte ist voll: die Uebersteuerung wird im Speicher aufgehoben, die Datei nicht. Das Soll-Ende schreibt den
+    Wunsch trotzdem und meldet sich erledigt."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "manuell"}, ueb=UEBERSTEUERUNG, angezeigt=19.0, folgt=True)
+    erledigt = []
+    a.rt.worker.register(EV_SOLL_ENDE_ERLEDIGT, lambda event: erledigt.append(event))
+
+    schreiben = dateien.schreiben_json
+
+    def voll(pfad, *args, **kwargs):
+        if pfad == a.store._ueb_path:
+            raise OSError(28, "No space left")
+        return schreiben(pfad, *args, **kwargs)
+
+    monkeypatch.setattr(dateien, "schreiben_json", voll)
+    _kreis_ausser_betrieb(a)
+    _ende(a)
+    assert a.quelle.geschrieben == [21.0] and len(erledigt) == 1 and a.store.uebersteuerung() is None
+
+
+def test_nach_dem_ende_schreibt_das_nachschreiben_nicht_die_geschriebene_uebersteuerung_ueber_dem_wunsch(
+        make_store, monkeypatch, tmp_path):
+    """Der erste Check schreibt die Uebersteuerung 23 (Wunsch 21); der Befehl geht verloren, das Thermostat zeigt 21. Das
+    Soll-Ende schreibt nichts (21 ist der Wunsch). Nach der Frist meldet das Thermostat 21: nichts, nie die 23."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "manuell"}, ueb={"temp": 23.0, "bis": UEB_BIS}, angezeigt=21.0)
+    a.check()
+    assert a.quelle.geschrieben == [23.0]
+    _kreis_ausser_betrieb(a)
+    _ende(a)
+    assert a.quelle.geschrieben == [23.0]
+    a.weiter(1900)
+    a.rt.worker.post(Event("shg_target_input", {"value": 21.0, "source": "thermostat"}))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == [23.0]

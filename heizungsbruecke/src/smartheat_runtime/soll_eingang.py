@@ -409,7 +409,10 @@ class SollEingang:
         Uebersteuerung ist mit dem Ende aufgehoben (im Speicher in einem Schritt): sie gehoert zur Regelung, die endet,
         und kein Nachschreiben darf sie danach noch einmal an die Quelle bringen."""
         self._stillgelegt = True
-        self._store.uebersteuerung_aufheben()
+        try:
+            self._store.uebersteuerung_aufheben()  # im Speicher zuerst: scheitert nur die Datei, gilt sie trotzdem als aufgehoben
+        except OSError as exc:  # das Soll-Ende selbst darf daran nicht scheitern
+            logger.warning("Uebersteuerung nicht aufgehoben (%s)", type(exc).__name__)
         if self._quelle is None or self._aus:
             self._ende_erledigt()
         elif self._wunsch_offen:

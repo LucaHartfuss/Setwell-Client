@@ -508,8 +508,13 @@ def _start_angleichen(eingang: SollEingang, quelle: HaSollQuelle) -> None:
     """"Bedienung angleichen" beim Start (Gateway: `_on_angleichen`): Thermostat, HA und Portal zeigen denselben Wert, ueber
     den Anzeige-Abgleich des Soll-Eingangs. Nicht bei Modus off und nicht in der Frostschutz-Stellung (bis FROSTSCHUTZ_BIS:
     Soll-Quelle aus, beim Wiedereinschalten gleicht der Soll-Eingang an). Scheitert das Schreiben, holt der Trigger es beim
-    Verbinden nach (`quelle.angleichen_offen`). Laeuft im Hauptthread vor dem Worker."""
+    Verbinden nach (`quelle.angleichen_offen`). Ist die Anzeige beim Start unlesbar (HA startet noch), wird nichts
+    geschrieben: es bleibt als offen vermerkt, und das Nachholen prueft die dann gelesene Anzeige (Frostschutz-Stellung,
+    Modus off). Laeuft im Hauptthread vor dem Worker."""
     angezeigt = quelle.angezeigt()
-    if not quelle_freigegeben(quelle, angezeigt):  # dieselbe Pruefung wie im ersten Check des Soll-Eingangs
+    if not quelle_freigegeben(quelle, angezeigt):  # Modus off und Frostschutz-Stellung, wie im ersten Check des Soll-Eingangs
+        return
+    if angezeigt is None:  # unbekannt: weder die gemerkte Anzeige noch ein Blindschreiben
+        quelle.angleichen_offen = True
         return
     eingang.anzeige_abgleichen("start", bekannt=angezeigt)

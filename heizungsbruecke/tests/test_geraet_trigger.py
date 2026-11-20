@@ -968,6 +968,47 @@ def test_a_shown_value_equal_to_the_target_ends_the_owed_alignment_without_a_wri
     assert a.ha.writes == [] and quelle.angleichen_offen is False and a.store.value == 22.5
 
 
+class _HaOhneAnzeige(FakeHa):
+    """HA startet noch: die Soll-Entity ist nicht lesbar, bis `anzeige_da` gesetzt ist."""
+    anzeige_da = False
+
+    def get_state(self, entity_id):
+        if entity_id == SOLL and not self.anzeige_da:
+            raise RuntimeError("HA Core startet")
+        return super().get_state(entity_id)
+
+
+def _start_ohne_anzeige(tmp_path):
+    """Gemerkte Anzeige 18, geltendes Soll 21, Angleichen beim Start, HA noch nicht lesbar."""
+    TargetStore(tmp_path / "soll.json", 21.0, FakeClock(), lambda: "t").anzeige_merken(18.0)
+    ha = _HaOhneAnzeige()
+    quelle = geraet_trigger.HaSollQuelle(ha, SOLL)
+    return Aufbau(tmp_path, ha=ha, quelle=quelle, angleichen=True), quelle
+
+
+def test_the_start_alignment_writes_nothing_while_the_shown_value_is_unknown(tmp_path):
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    assert a.ha.writes == [] and quelle.angleichen_offen is True
+
+
+def test_the_start_alignment_owed_for_an_unknown_value_leaves_the_frost_stance_alone(tmp_path):
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    a.ha.anzeige_da = True
+    a.ha.states[SOLL] = 5.0
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [] and quelle.angleichen_offen is False
+
+
+def test_the_start_alignment_owed_for_an_unknown_value_is_written_once_the_value_is_known(tmp_path):
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    a.ha.anzeige_da = True
+    a.ha.states[SOLL] = 18.0
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, 21.0)] and quelle.angleichen_offen is False
+
+
 def test_without_a_target_entity_the_reconnect_reads_nothing_even_with_a_given_source(tmp_path):
     ha = FakeHa()
     quelle = geraet_trigger.HaSollQuelle(ha, SOLL)
