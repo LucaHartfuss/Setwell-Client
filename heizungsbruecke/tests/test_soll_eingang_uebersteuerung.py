@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fakes import FakeClock
 
-from smartheat_core import safety
+from smartheat_core import dateien, safety
 from smartheat_core.plan import (
     SOLL_ART_ABSENKUNG,
     SOLL_ART_AUFHEIZEN,
@@ -438,6 +438,25 @@ def test_leerstand_dritte_aenderung_in_der_kuehlen_phase_wird_eine_uebersteuerun
         _aendern(a, wert)
     assert a.beendet == [("leerstand", None, {"temp": 19.5, "bis": BIS}, "soll_entity", "nutzer")]
     assert a.store.uebersteuerung() == {"temp": 19.5, "bis": BIS} and a.store.value == 21.0
+
+
+def _speicher_voll(monkeypatch):
+    """Jedes Schreiben einer Datei scheitert (Datentraeger voll oder nur lesbar)."""
+    def voll(*args, **kwargs):
+        raise OSError(28, "No space left")
+
+    monkeypatch.setattr(dateien, "schreiben_json", voll)
+
+
+def test_leerstand_scheitert_das_speichern_zaehlt_jede_drehung_und_die_dritte_beendet_ihn(tmp_path, monkeypatch):
+    a = _leerstand(tmp_path)
+    _speicher_voll(monkeypatch)
+    for wert in (19.0, 20.0):
+        _aendern(a, wert)
+    assert len(a.gesendet) == 2 and a.store.uebersteuerung()["temp"] == 20.0  # die Drehungen gehen nicht verloren
+    _aendern(a, 22.0)
+    assert a.beendet == [("leerstand", 22.0, None, "soll_entity", "nutzer")]
+    assert a.store.leerstand_zaehler.anzahl() == 0  # das Ende beginnt ein neues Fenster, auch im Speicher
 
 
 @pytest.mark.parametrize("abstand,beendet", [(FENSTER - KNAPP, True), (FENSTER, False), (FENSTER + KNAPP, False)],

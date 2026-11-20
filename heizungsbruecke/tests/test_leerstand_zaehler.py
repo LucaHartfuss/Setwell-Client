@@ -115,3 +115,27 @@ def test_die_datei_ist_lesbar_und_ohne_tempdatei(tmp_path, uhr):
     _zaehler(tmp_path, uhr).eintragen()
     assert stat.S_IMODE(os.stat(tmp_path / "leerstand.json").st_mode) == 0o644
     assert not (tmp_path / "leerstand.json.tmp").exists()
+
+
+def _speicher_voll(monkeypatch):
+    """Jedes Schreiben einer Datei scheitert (Datentraeger voll oder nur lesbar)."""
+    def voll(*args, **kwargs):
+        raise OSError(28, "No space left")
+
+    monkeypatch.setattr("smartheat_runtime.leerstand_zaehler.dateien.schreiben_json", voll)
+
+
+def test_scheitert_das_speichern_zaehlt_der_zaehler_im_speicher_weiter(tmp_path, uhr, monkeypatch, caplog):
+    zaehler = _zaehler(tmp_path, uhr)
+    _speicher_voll(monkeypatch)
+    assert [zaehler.eintragen() for _ in range(3)] == [1, 2, 3]
+    assert zaehler.anzahl() == 3
+    assert "nicht gespeichert" in caplog.text and "2026" not in caplog.text
+
+
+def test_scheitert_das_speichern_leert_leeren_den_zaehler_im_speicher(tmp_path, uhr, monkeypatch):
+    zaehler = _zaehler(tmp_path, uhr)
+    zaehler.eintragen()
+    _speicher_voll(monkeypatch)
+    zaehler.leeren()
+    assert zaehler.anzahl() == 0 and zaehler.eintragen() == 1

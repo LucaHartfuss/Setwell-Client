@@ -332,8 +332,15 @@ class Device:
         return {kreis for kreis in roh if type(kreis) is int and wire.KREIS_MIN <= kreis <= wire.KREIS_MAX}
 
     def _leerstand_beendet_speichern(self) -> None:
-        """Unter der Sperre aufrufen."""
-        dateien.schreiben_json(self._dir / LEERSTAND_BEENDET_DATEI, sorted(self._leerstand_beendet), modus=dateien.LESBAR)
+        """Unter der Sperre aufrufen. Der Stand im Speicher gilt zuerst und immer: ein Speicherfehler (Datentraeger voll
+        oder nur lesbar) darf weder den Wunsch an den Server noch die Verarbeitung eines neuen Dokuments verhindern. Nach
+        einem Neustart gilt dann der Stand der Datei: ein neues Ende fehlt (der Leerstand des Servers gilt wieder), ein
+        Zuruecksetzen fehlt (das alte Ende gilt bis zum naechsten Dokument des Servers weiter)."""
+        try:
+            dateien.schreiben_json(self._dir / LEERSTAND_BEENDET_DATEI, sorted(self._leerstand_beendet),
+                                   modus=dateien.LESBAR)
+        except OSError as exc:
+            logger.warning("Ende des Leerstands nicht gespeichert (%s)", type(exc).__name__)
 
     def _kreis_eintrag(self, kreis: int) -> dict | None:
         inhalt = self.documents.inhalt(BEDIENUNG)
@@ -443,10 +450,7 @@ class Device:
                 self._abwesend_lokal[kreis] = None
             else:  # der Leerstand endet lokal, bis der Server ein neues Dokument schickt
                 self._leerstand_beendet.add(kreis)
-                try:
-                    self._leerstand_beendet_speichern()
-                except OSError as exc:  # das Ende gilt bis zum Neustart; der Wunsch an den Server geht trotzdem hinaus
-                    logger.warning("Ende des Leerstands nicht gespeichert (%s)", type(exc).__name__)
+                self._leerstand_beendet_speichern()  # scheitert die Datei, gilt das Ende bis zum Neustart
         self._inbox.put(("beenden", kreis, art, begrenzt, roh, uebersteuerung, herkunft, durch))
         return begrenzt
 

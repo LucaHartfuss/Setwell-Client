@@ -184,6 +184,20 @@ def test_ein_neues_dokument_mit_leerstand_setzt_das_lokale_ende_zurueck(tmp_path
     assert welt.device.bedienung()["kreise"][0]["leerstand"] == _LEERSTAND
 
 
+def test_scheitert_das_speichern_beim_neuen_dokument_gilt_der_leerstand_des_servers_und_der_host_erfaehrt_es(
+        tmp_path, monkeypatch, caplog):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.betriebsart_beenden(1, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    gemeldet = []
+    welt.host.bedienung_uebernommen = lambda neu: gemeldet.append(neu)
+    datei = welt.device._dir / device.LEERSTAND_BEENDET_DATEI
+    datei.unlink()
+    datei.mkdir()  # nur diese Datei ist nicht mehr zu schreiben (OSError)
+    welt.empfangen("down/operation", _leerstand_bedienung(4))
+    assert _soll_jetzt(welt) == (16.0, "leerstand") and len(gemeldet) == 1
+    assert "nicht gespeichert" in caplog.text and "2027" not in caplog.text
+
+
 def test_das_lokale_ende_betrifft_nur_den_eigenen_kreis(tmp_path):
     welt = _leerstand_welt(tmp_path)
     welt.empfangen("down/operation", _bedienung(version=4, kreise=[
