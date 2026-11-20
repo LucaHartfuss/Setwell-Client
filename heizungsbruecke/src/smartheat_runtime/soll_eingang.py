@@ -36,7 +36,11 @@ oder unbestaetigte eigene Schreibung); gegen Funklast schreibt es dasselbe Paar 
 einmal. Anlaesse: Wiedereinschalten, Ablauf der Uebersteuerung, Nachschreiben der Pruefung, Wunsch des Portals,
 Angleichen beim Start, Nachholen und jeder lokale Check, der das Geltende geaendert hat (`nach_check`; dort endet auch
 eine Uebersteuerung, wenn Away beginnt). Bewusste Ausnahmen mit eigener Begruendung: `_ueb_senden`, `_entprellt`,
-`_beenden_senden` und `ende_schreiben`. `portal_beim_start` nimmt eine Bedienung des Servers beim Start eines Hosts
+`_beenden_senden` und `ende_schreiben`. Nach dem Ende der Regelung (Soll-Ende, Ruhezustand, Abo-Ende, Kreis ausser
+Betrieb) schreibt der Abgleich nichts mehr und die Lesewege kennen keine Betriebsart: die Quelle zeigt den gemerkten
+Wunsch. Der Merker aus dem Soll-Ende faellt erst, wenn die Regelung wieder laeuft (Kreis zurueck in Betrieb); der naechste
+Check gleicht dann einmal an. Der erste Check nach dem Start gleicht nur an, wenn die Quelle etwas anderes zeigt als das
+Geltende und dieses nicht der blosse Wunsch ist. `portal_beim_start` nimmt eine Bedienung des Servers beim Start eines Hosts
 an und behaelt dabei eine laufende Uebersteuerung im Leerstand und in Away."""
 import logging
 from collections.abc import Callable
@@ -196,6 +200,7 @@ class SollEingang:
         self._abgleich_geplant = False  # ein wartender Anzeige-Abgleich ist eingeplant (eine Kette)
         self._abgleich_memo: tuple[float, float | None] | None = None  # (geltend, bekannt) der letzten eigenen Schreibung
         self._geltend_gesehen: float | None = None  # das geltende Soll beim letzten Abgleich (Hook nach dem Check)
+        self._stillgelegt = False  # das Soll-Ende kam: der Abgleich schreibt nichts, bis die Regelung wieder laeuft
         self._debouncer = Debouncer(worker, DEBOUNCE_KIND, entprellen_s, self._entprellt)
         worker.register(EV_TARGET_INPUT, self._on_target_input)  # nimmt danach einen unbestaetigten Befehl wieder auf
         worker.register(EV_SOLL_MODUS, self._on_mode)
@@ -241,8 +246,10 @@ class SollEingang:
         es schreibt wieder, wenn sich eines davon aendert oder die Pruefung der Meldung nachschreiben laesst
         (`nachschreiben`, hoechstens MAX_NACHSCHREIBEN). `einrichten`: die Quelle ist neu gekoppelt, sie bekommt das
         geltende Soll ohne Rueckblick. `gleiche_merken`: zeigt die Quelle das Geltende schon, wird es als Anzeige gemerkt
-        (nach dem Wiedereinschalten). True: geschrieben."""
-        if self._quelle is None:
+        (nach dem Wiedereinschalten). Nach dem Ende der Regelung (Merker aus dem Soll-Ende oder `regelung_beendet`) schreibt
+        er nichts: die Soll-Quelle zeigt den gemerkten Wunsch, und eine Betriebsart darf ihn nicht absenken. True:
+        geschrieben."""
+        if self._quelle is None or self._stillgelegt or self._worker.regelung_beendet():
             return False
         geltend = self.geltende_anzeige()
         self._geltend_gesehen = geltend
@@ -291,13 +298,28 @@ class SollEingang:
     def nach_check(self) -> None:
         """Nach jedem lokalen Check: Beginn und Ende von Leerstand und Away melden nur ihn. Beginnt Away, ist eine laufende
         Uebersteuerung aufgehoben (Away ignoriert sie). Hat sich das geltende Soll seit dem letzten Abgleich geaendert,
-        wird abgeglichen; sonst schreibt ein Check nie. Der erste Check merkt das Geltende nur (der Start gleicht selbst an)."""
+        wird abgeglichen; sonst schreibt ein Check nie. Nach dem Ende der Regelung schreibt er nichts; laeuft sie wieder
+        (Kreis zurueck in Betrieb), gleicht der naechste Check einmal an. Der erste Check gleicht nur an, wenn die Quelle
+        etwas anderes zeigt als das Geltende und das Geltende nicht der blosse Wunsch ist (ein Start ohne Angleichen, bei dem
+        eine Uebersteuerung in der Auszeit ablief, laesst das Thermostat sonst bis zum Leerstandsende auf ihrem Wert); den
+        Wunsch schreibt der Start selbst (Angleichen), nie dieser Check."""
+        if self._worker.regelung_beendet():
+            return
+        if self._stillgelegt:
+            self._stillgelegt = False
+            self._abgleich_memo = None
+            self._ablauf_planen()  # die Kette der Uebersteuerung war mit dem Ende der Regelung abgerissen
+            self.anzeige_abgleichen("wiederaufnahme")
+            return
         betriebsart = betriebsart_lesen(self._uebersteuerung)
         if betriebsart is not None and betriebsart.art == BETRIEBSART_ABWESEND and self._store.uebersteuerung() is not None:
             self._store.uebersteuerung_aufheben()
         geltend = self.geltende_anzeige()
         if self._geltend_gesehen is None:
             self._geltend_gesehen = geltend
+            if self._quelle is not None and not self._quelle.aus() and geltend != self._store.value \
+                    and self._bekannt() is not None:
+                self.anzeige_abgleichen("start")
         elif geltend != self._geltend_gesehen:
             self.anzeige_abgleichen("check")
 
@@ -345,6 +367,8 @@ class SollEingang:
         Anzeige-Abgleich live aus (nicht aus dem Stand des letzten Checks); er wartet auch bei offener Eingabe und bei
         Soll-Quelle aus (das Wiedereinschalten zeigt dann die geltende Anzeige)."""
         self._ablauf_geplant = False
+        if self._stillgelegt or self._worker.regelung_beendet():
+            return  # nach dem Ende der Regelung plant sich nichts neu ein (die Wiederaufnahme haengt die Kette wieder ein)
         if self._store.uebersteuerung() is not None:
             self._ablauf_planen()
             return
@@ -372,7 +396,8 @@ class SollEingang:
         bei Soll-Quelle aus (Modus off, Frostschutz-Stellung: die Quelle gehoert dem Kunden) und ohne Quelle. Bei einem
         offenen, noch nicht entprellten Wunsch (der Kunde dreht gerade; sein Wert gewinnt) wird es nach dem Entprellen
         nachgeholt. Erledigt meldet es EV_SOLL_ENDE_ERLEDIGT; bis dahin wiederholt es sich im Takt
-        SOLL_ENDE_WIEDERHOLUNG_S."""
+        SOLL_ENDE_WIEDERHOLUNG_S. Der Abgleich ist von hier an stillgelegt (`anzeige_abgleichen`)."""
+        self._stillgelegt = True
         if self._quelle is None or self._aus:
             self._ende_erledigt()
         elif self._wunsch_offen:

@@ -59,7 +59,7 @@ def _runtime(
     return SimpleNamespace(
         manifest=manifest, signals=ha_api, ha_api=ha_api, config=runtime_config(), store=store,
         states=values, clock=clock or time.monotonic, boost_mono_start=None, kaelteschutz_mono_start=None, soll_quelle_aus=False,
-        uhr_vertrauen=lambda: False, geltendes_soll=None,
+        uhr_vertrauen=lambda: False, geltendes_soll=None, idle=False,
         override=LeverPipeline(
             store, HaPlantBinding(ha_api, manifest, VAILLANT_MYPYLLANT), safety, **({} if clock is None else {"clock": clock}),
         ),

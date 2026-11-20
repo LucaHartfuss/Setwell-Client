@@ -63,6 +63,9 @@ class RegulationWorker:
         #: wird nach jedem lokalen Check aufgerufen (der Soll-Eingang gleicht die Anzeige der Soll-Quelle ab, wenn sich das
         #: geltende Soll geaendert hat); ohne Soll-Eingang ein No-op. Nur im Worker-Thread.
         self.anzeige_abgleichen: Callable[[], None] = lambda: None
+        #: Ist die Regelung beendet (Ruhezustand, Abo-Ende oder Kreis ausser Betrieb)? Dann schreibt der Soll-Eingang nichts
+        #: mehr an die Soll-Quelle: sie zeigt den gemerkten Wunsch. Vom Start der Laufzeit gesetzt; nur im Worker-Thread.
+        self.regelung_beendet: Callable[[], bool] = lambda: False
 
     def register(self, kind: str, handler: Handler) -> None:
         self._handlers[kind] = handler

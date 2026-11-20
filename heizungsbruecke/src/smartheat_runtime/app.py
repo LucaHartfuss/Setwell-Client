@@ -744,12 +744,20 @@ def _worker_lesewege(rt: Runtime) -> None:
     rt.worker.geltendes_soll = lambda: rt.geltendes_soll
     rt.worker.betriebsart = lambda: _betriebsart(rt)
     rt.worker.betriebsart_trotz_aus = lambda: _betriebsart(rt, auch_aus=True)
+    rt.worker.regelung_beendet = lambda: _regelung_beendet(rt)
+
+
+def _regelung_beendet(rt: Runtime) -> bool:
+    """Ist die Regelung beendet: Ruhezustand, Abo-Ende oder Kreis ausser Betrieb? Frisch gelesen. Danach zeigt die
+    Soll-Quelle den gemerkten Wunsch (nie weniger); weder eine Betriebsart noch ein Ablauf schreibt dort weiter."""
+    return rt.idle or rt.store.state.abo_finished or kreiszustand.ausser_betrieb(rt)
 
 
 def _betriebsart(rt: Runtime, *, auch_aus: bool = False) -> plan_quelle.Betriebsart | None:
     """Laeuft Leerstand oder Away am Kreis? Jeder Fehler der Eingabe oder der Rechnung heisst: keine Betriebsart (die
-    Eingabe am Thermostat laeuft dann den gewohnten Weg). Bei Soll-Quelle aus gibt es keine, ausser mit `auch_aus`."""
-    if testphase.aktiv(rt) or (rt.soll_quelle_aus and not auch_aus):
+    Eingabe am Thermostat laeuft dann den gewohnten Weg). Bei Soll-Quelle aus gibt es keine, ausser mit `auch_aus`;
+    nach dem Ende der Regelung auch nicht."""
+    if testphase.aktiv(rt) or (rt.soll_quelle_aus and not auch_aus) or _regelung_beendet(rt):
         return None
     try:
         return plan_quelle.betriebsart_lage(

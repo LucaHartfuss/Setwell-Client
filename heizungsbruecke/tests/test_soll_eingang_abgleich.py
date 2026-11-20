@@ -1,6 +1,7 @@
 """Der zentrale Anzeige-Abgleich des Soll-Eingangs mit der echten Verdrahtung der Laufzeit (Planrechnung des lokalen Checks,
 Lesewege des Workers, Wanduhr des Plans): das Thermostat bekommt nur das geltende Soll, und das nach jedem Anlass, der es
 aendert, aus den Lesewegen und nie aus dem zuletzt abgelegten geltenden Soll."""
+import dataclasses
 from datetime import UTC, datetime, timedelta
 
 from fakes import FakeClock
@@ -8,6 +9,7 @@ from test_regulation import RESTORE_POINT, WOCHENPLAN, _mit_plan, _runtime
 
 from smartheat_runtime import app
 from smartheat_runtime.soll_eingang import (
+    EV_SOLL_ENDE,
     EV_SOLL_QUELLE,
     SollEingang,
     UebersteuerungsWeg,
@@ -25,7 +27,7 @@ UEBERSTEUERUNG = {"temp": 19.0, "bis": UEB_BIS}
 
 class Quelle:
     def __init__(self, wert):
-        self.wert, self.geschrieben = wert, []
+        self.wert, self.geschrieben, self.ausgeschaltet = wert, [], False
 
     def schreiben(self, value):
         self.geschrieben.append(value)
@@ -35,7 +37,7 @@ class Quelle:
         return self.wert
 
     def aus(self):
-        return False
+        return self.ausgeschaltet
 
 
 class Aufbau:
@@ -53,7 +55,8 @@ class Aufbau:
         self.store = TargetStore(tmp_path / "soll.json", 21.0, self.uhr, lambda: self.eingabe["jetzt"].isoformat())
         if ueb is not None:
             self.store.uebersteuerung_setzen(ueb["temp"], ueb["bis"])
-        self.store.anzeige_merken(angezeigt)
+        if angezeigt is not None:
+            self.store.anzeige_merken(angezeigt)
         self.quelle = Quelle(angezeigt)
         if folgt:  # das Thermostat zeigt, was man ihm schreibt
             schreiben = self.quelle.schreiben
@@ -192,3 +195,113 @@ def test_eine_aenderung_des_geltenden_soll_waehrend_des_echo_fensters_wird_danac
     a.store.thermostat_pruefen(16.0)  # das Thermostat bestaetigt die Schreibung
     a.weiter(70)
     assert a.quelle.geschrieben == [16.0, 17.0]
+
+
+def _kreis_ausser_betrieb(a, ausser=True):
+    a.rt.config = dataclasses.replace(a.rt.config, zustand_source=lambda: "ausser_betrieb" if ausser else "in_betrieb")
+
+
+def _ende(a):
+    a.rt.worker.post(Event(EV_SOLL_ENDE))
+    a.rt.worker.run_pending()
+
+
+def test_ablauf_der_uebersteuerung_nach_dem_soll_ende_schreibt_nichts(make_store, monkeypatch, tmp_path):
+    """Nach dem Ende der Regelung zeigt die Soll-Quelle den gemerkten Wunsch (nie weniger); der Ablauf der Uebersteuerung
+    darf sie nicht auf die Leerstandstemperatur absenken, auch nicht unter dem Wert, den der Kunde danach einstellt."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND,
+                                                    "uebersteuerung": UEBERSTEUERUNG},
+               ueb=UEBERSTEUERUNG, angezeigt=19.0, folgt=True)
+    a.check()
+    _kreis_ausser_betrieb(a)
+    _ende(a)
+    assert a.quelle.geschrieben == [21.0]
+    a.quelle.wert = 23.0  # der Kunde dreht danach hoeher
+    a.store.thermostat_pruefen(23.0)
+    a.weiter(3700)  # die Uebersteuerung laeuft ab
+    a.check()
+    assert a.quelle.geschrieben == [21.0]
+
+
+def test_der_leerstand_beginnt_bei_ausser_betrieb_ohne_schreibung(make_store, monkeypatch, tmp_path):
+    kommend = {**LEERSTAND, "von": "2026-11-05T13:00:00Z"}
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": kommend})
+    _kreis_ausser_betrieb(a)
+    a.check()
+    a.weiter(3900)
+    a.check()
+    assert a.quelle.geschrieben == []
+
+
+def test_abo_ende_mit_laufender_uebersteuerung_im_leerstand_schreibt_nichts_weiter(make_store, monkeypatch, tmp_path):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND,
+                                                    "uebersteuerung": UEBERSTEUERUNG},
+               ueb=UEBERSTEUERUNG, angezeigt=19.0, folgt=True)
+    a.check()
+    a.rt.idle = True  # abo._enter_idle: nur die Trigger stehen, die Ereignisse der Uebersteuerung laufen weiter
+    a.rt.store.update(abo_finished=True)
+    _ende(a)
+    assert a.quelle.geschrieben == [21.0]
+    a.weiter(3700)
+    a.check()
+    a.eingang.anzeige_abgleichen("noch einmal")
+    assert a.quelle.geschrieben == [21.0]
+
+
+def test_ohne_ende_aber_im_ruhezustand_schreibt_der_ablauf_nichts(make_store, monkeypatch, tmp_path):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND,
+                                                    "uebersteuerung": UEBERSTEUERUNG},
+               ueb=UEBERSTEUERUNG, angezeigt=19.0)
+    a.check()
+    a.rt.idle = True
+    a.weiter(3700)
+    assert a.quelle.geschrieben == []
+
+
+def test_die_wiederaufnahme_gleicht_einmal_das_geltende_soll_an(make_store, monkeypatch, tmp_path):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND,
+                                                    "uebersteuerung": UEBERSTEUERUNG},
+               ueb=UEBERSTEUERUNG, angezeigt=19.0, folgt=True)
+    a.check()
+    _kreis_ausser_betrieb(a)
+    _ende(a)
+    a.weiter(3700)  # Uebersteuerung abgelaufen, Echo-Fenster vorbei
+    a.store.thermostat_pruefen(21.0)
+    assert a.quelle.geschrieben == [21.0]
+    _kreis_ausser_betrieb(a, False)  # der Kreis kehrt in den Betrieb zurueck
+    a.check()
+    assert a.quelle.geschrieben == [21.0, 16.0]
+    a.store.thermostat_pruefen(16.0)
+    a.weiter(100)
+    a.check()
+    assert a.quelle.geschrieben == [21.0, 16.0]
+
+
+def test_start_nach_ablauf_der_uebersteuerung_waehrend_der_auszeit_gleicht_im_leerstand_an(
+        make_store, monkeypatch, tmp_path):
+    """Dirty-Start: kein Angleichen aus einer Bedienung, die Uebersteuerung lief in der Auszeit ab, das Thermostat zeigt noch
+    ihren Wert; der erste Check gleicht auf die Leerstandstemperatur an."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=19.0)
+    a.check()
+    assert a.quelle.geschrieben == [16.0]
+
+
+def test_der_erste_check_schreibt_nie_den_blossen_wunsch_ueber_die_anzeige_des_kunden(make_store, monkeypatch, tmp_path):
+    """Ohne Betriebsart und ohne Uebersteuerung ist der Wunsch das Geltende; das Thermostat darf dann beim Start etwas
+    anderes zeigen (der Kunde hat es offline verstellt): kein ungebetenes Schreiben (das Gateway schrieb sonst 20,0)."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "manuell"}, angezeigt=22.0)
+    a.check()
+    assert a.quelle.geschrieben == []
+
+
+def test_der_erste_check_schreibt_nicht_bei_unbekannter_anzeige(make_store, monkeypatch, tmp_path):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=None)
+    a.check()
+    assert a.quelle.geschrieben == []
+
+
+def test_der_erste_check_schreibt_nicht_bei_ausgeschalteter_quelle(make_store, monkeypatch, tmp_path):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=19.0)
+    a.quelle.ausgeschaltet = True
+    a.check()
+    assert a.quelle.geschrieben == []
