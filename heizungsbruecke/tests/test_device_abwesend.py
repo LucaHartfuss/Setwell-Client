@@ -172,14 +172,14 @@ def test_die_lokale_wirkung_verdraengt_das_gespeicherte_dokument_nicht(tmp_path)
 
 def test_die_ablehnung_ist_ein_lokaler_hinweis_mit_festem_grund_und_schliesst_beim_naechsten_erfolg(tmp_path):
     welt = _welt(tmp_path)
-    assert wire.MELDUNGEN.count(device.ABWESEND_ABGELEHNT_KEY) == 0  # kein Draht-Key: nie eine Meldung an den Server
+    assert wire.MELDUNGEN.count("abwesend_abgelehnt") == 0  # kein Draht-Key: nie eine Meldung an den Server
     welt.device.abwesend_abgelehnt(device.ABGELEHNT_TEMP)
     welt.device.schritt()
     hinweis = _hinweis(welt)
     assert hinweis is not None
     assert (hinweis["code"], hinweis["params"], hinweis["stufe"]) == (
         "meldung.abwesend_abgelehnt", {"grund": "temp"}, "orange")
-    assert not any(m["key"] == device.ABWESEND_ABGELEHNT_KEY
+    assert not any(m["key"] == "abwesend_abgelehnt"
                    for sendung in welt.link.of("up/notifications") for m in sendung["items"])
     assert welt.device.abwesend_setzen(1, BIS, 16.0, None) is None
     welt.device.schritt()

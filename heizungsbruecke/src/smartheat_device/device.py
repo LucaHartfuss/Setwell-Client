@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from smartheat_core import config_check, kreisansicht, meldungen, safety
+from smartheat_core import config_check, dateien, kreisansicht, meldungen, safety
 from smartheat_core.logtext import lesbar
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_core.zeitquelle import echte_epoche, fachliche_epoche
@@ -49,10 +49,10 @@ SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
 #: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
 ENTFERNT_WIEDERHOLUNG_SECONDS = 60
-#: Lokaler Hinweis im Statusereignis an HA (kein Draht-Key, nie eine Meldung an den Server), wenn Away aus HA nicht
-#: uebernommen wurde (Parameter `grund`: einer der festen Codes unten).
-ABWESEND_ABGELEHNT_KEY = "abwesend_abgelehnt"
-#: Feste Gruende, nie ein Wert: Kreis ohne Bedienung, Rueckkehrzeit, Temperatur, Urheber, Leerstand, Ende ohne Away.
+#: Die Kreise mit lokal beendetem Leerstand (Datei im Geraeteordner).
+LEERSTAND_BEENDET_DATEI = "leerstand-beendet.json"
+#: Gruende des lokalen Hinweises `abwesend_abgelehnt` im Statusereignis an HA (kein Draht-Key, nie eine Meldung an den
+#: Server), wenn Away aus HA nicht uebernommen wurde. Feste Gruende, nie ein Wert: Kreis ohne Bedienung, Rueckkehrzeit, Temperatur, Urheber, Leerstand, Ende ohne Away.
 ABGELEHNT_KREIS = "kreis"
 ABGELEHNT_BIS = "bis"
 ABGELEHNT_TEMP = "temp"
@@ -153,6 +153,9 @@ class Device:
         self._abwesend_lokal: dict[int, dict | None] = {}
         self._abwesend_temp: dict[int, float] = {}  # zuletzt gewaehlte Abwesenheitstemperatur je Kreis
         self._abwesend_sperre = threading.Lock()  # Host-Thread (Rueckrufe) und Geraete-Thread
+        #: Kreise, deren Leerstand der Kunde am Thermostat beendet hat und der Server noch nicht bestaetigt hat; in einer Datei,
+        #: damit ein Neustart ohne Server nicht in den Leerstand zurueckfaellt (die dritte Aenderung hat ihn beendet).
+        self._leerstand_beendet: set[int] = self._leerstand_beendet_laden()
         self._bootstrap = bootstrap.Bootstrap(
             self._dir, lambda: self._client_for(self.identity), register_args=self._register_args,
             uhr_synchron=self._uhr_synchron, identity=lambda: self.identity, clock=clock)
@@ -293,13 +296,24 @@ class Device:
 
     def bedienung(self) -> dict | None:
         """Die Bedienung, wie sie jetzt gilt: das Dokument des Servers, darueber das Away, das HA lokal gesetzt oder
-        beendet hat und das der Server noch nicht bestaetigt hat. Das gespeicherte Dokument bleibt unveraendert."""
+        beendet hat, und das Ende des Leerstands am Thermostat, solange der Server sie noch nicht bestaetigt hat. Das
+        gespeicherte Dokument bleibt unveraendert."""
         inhalt = self.documents.inhalt(BEDIENUNG)
         with self._abwesend_sperre:
             lokal = dict(self._abwesend_lokal)
-        if not lokal or not isinstance(inhalt, dict) or not isinstance(kreise := inhalt.get("kreise"), list):
+            leerstand_beendet = set(self._leerstand_beendet)
+        if (not lokal and not leerstand_beendet) or not isinstance(inhalt, dict) \
+                or not isinstance(kreise := inhalt.get("kreise"), list):
             return inhalt
-        return {**inhalt, "kreise": [self._mit_abwesend(eintrag, lokal) for eintrag in kreise]}
+        return {**inhalt, "kreise": [self._mit_abwesend(self._ohne_leerstand(eintrag, leerstand_beendet), lokal)
+                                     for eintrag in kreise]}
+
+    @staticmethod
+    def _ohne_leerstand(eintrag, beendet: set[int]):
+        nummer = eintrag.get("kreis") if isinstance(eintrag, dict) else None
+        if type(nummer) is not int or nummer not in beendet or eintrag.get("modus") != "leerstand":
+            return eintrag
+        return {**eintrag, "modus": "manuell", "leerstand": None}
 
     @staticmethod
     def _mit_abwesend(eintrag, lokal: dict[int, dict | None]):
@@ -310,6 +324,16 @@ class Device:
         if abwesend is None:
             return {**eintrag, "modus": "manuell", "abwesend": None}
         return {**eintrag, "modus": "abwesend", "abwesend": dict(abwesend)}
+
+    def _leerstand_beendet_laden(self) -> set[int]:
+        roh = dateien.lesen_json(self._dir / LEERSTAND_BEENDET_DATEI)
+        if not isinstance(roh, list):
+            return set()
+        return {kreis for kreis in roh if type(kreis) is int and wire.KREIS_MIN <= kreis <= wire.KREIS_MAX}
+
+    def _leerstand_beendet_speichern(self) -> None:
+        """Unter der Sperre aufrufen."""
+        dateien.schreiben_json(self._dir / LEERSTAND_BEENDET_DATEI, sorted(self._leerstand_beendet), modus=dateien.LESBAR)
 
     def _kreis_eintrag(self, kreis: int) -> dict | None:
         inhalt = self.documents.inhalt(BEDIENUNG)
@@ -395,7 +419,8 @@ class Device:
         mit der Betriebsart null und dem Wert der Phase danach, `raum_soll` (Rueckgabe: sofort begrenzt) oder eine
         Uebersteuerung (kuehle Phase danach), in einem Wunsch, denn je Kreis haelt der Puffer nur einen. ValueError
         (nie mit Wert oder Zeit), wenn die Faehigkeit fehlt oder etwas nicht zum Vertrag passt; dann kommt nichts in die
-        Inbox. Das Ende von Away gilt lokal sofort (wie bei abwesend_beenden)."""
+        Inbox. Das Ende von Away und das von Leerstand gelten lokal sofort (Away wie bei abwesend_beenden); beide bleiben,
+        bis der Server ein neues Dokument schickt, das Ende des Leerstands auch ueber einen Neustart."""
         if not self.programm_faehig():
             raise ValueError("Faehigkeit programm nicht angeboten")
         if art not in ("leerstand", "abwesend"):
@@ -413,9 +438,12 @@ class Device:
             except (TypeError, ValueError):
                 raise ValueError("Uebersteuerung ohne gueltiges Ende") from None
             uebersteuerung = {"temp": float(uebersteuerung["temp"]), "bis": uebersteuerung["bis"]}
-        if art == "abwesend":
-            with self._abwesend_sperre:
+        with self._abwesend_sperre:
+            if art == "abwesend":
                 self._abwesend_lokal[kreis] = None
+            else:  # der Leerstand endet lokal, bis der Server ein neues Dokument schickt
+                self._leerstand_beendet.add(kreis)
+                self._leerstand_beendet_speichern()
         self._inbox.put(("beenden", kreis, art, begrenzt, roh, uebersteuerung, herkunft, durch))
         return begrenzt
 
@@ -810,6 +838,9 @@ class Device:
                 with self._abwesend_sperre:  # der Server hat gesprochen: sein Dokument gilt wieder allein
                     self._abwesend_lokal.clear()
                     self._abwesend_temp.clear()
+                    if self._leerstand_beendet:  # lehnt er das Ende ab, gilt sein Leerstand wieder
+                        self._leerstand_beendet.clear()
+                        self._leerstand_beendet_speichern()
                 self._host_rufen("bedienung_uebernommen", self.host.bedienung_uebernommen, neu)
         if (angebot := angebot_aus(art, body)) is not None:
             # dasselbe Angebot, das der Speicher merkt, auch aus einer abgelehnten Konfiguration (ein Update kann der
@@ -902,11 +933,20 @@ class Device:
             return commands.Failed("bereits_uebernommen")
         return commands.Done({})
 
+    def _wunsch_puffern(self, neu: wish.Wunsch) -> None:
+        """Der Puffer haelt je Kreis einen Wunsch: ein Folgewunsch uebernimmt das noch nicht bestaetigte Ende des Leerstands
+        (`leerstand: null`) des alten, statt es zu ueberschreiben."""
+        alt = self.wunsch_puffer.wunsch(neu.kreis)
+        if (alt is not None and alt.programm and "leerstand" in alt.programm and alt.programm["leerstand"] is None
+                and "leerstand" not in (neu.programm or {})):
+            neu = replace(neu, programm={**(neu.programm or {}), "leerstand": None})
+        self.wunsch_puffer.setzen(neu)
+
     def _wunsch(self, begrenzt: float, roh: float | None, herkunft: str | None, durch: str | None, kreis: int) -> None:
         # herkunft, durch und kreis hat Device.wunsch schon geprueft (wish.pruefen_herkunft, wish.pruefen_kreis)
         neu = wish.neu(begrenzt, roh, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall())
-        self.wunsch_puffer.setzen(neu)
+        self._wunsch_puffern(neu)
         self.documents.mark_dirty()
         meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
         self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
@@ -928,7 +968,7 @@ class Device:
         neu = wish.neu(None, None, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall(),
                        programm={"uebersteuerung": uebersteuerung})
-        self.wunsch_puffer.setzen(neu)
+        self._wunsch_puffern(neu)
         self.documents.mark_dirty()
         self._wunsch_senden()
 
@@ -942,7 +982,7 @@ class Device:
         neu = wish.neu(begrenzt, roh, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall(),
                        programm=programm)
-        self.wunsch_puffer.setzen(neu)
+        self._wunsch_puffern(neu)
         self.documents.mark_dirty()
         if art == "abwesend":
             self._abwesend_hinweis = None

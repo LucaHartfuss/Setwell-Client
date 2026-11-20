@@ -299,7 +299,8 @@ class SollEingang:
             if self._aus:
                 logger.info("Lokaler Wunsch verworfen: die Soll-Quelle ist aus (Spec 5c F/Q3)")
                 return
-            bis = self._kuehl_bis()
+            # In Leerstand und Away merkt die lokale Zahl nur den Wunsch fuer danach, auch bei laufender Uebersteuerung
+            bis = None if self._betriebsart_laeuft() else self._kuehl_bis()
             if bis is not None:
                 if self._ueb_eingabe(value, bis, herkunft, durch, thermostat=False):
                     self._debouncer.poke()
@@ -411,6 +412,10 @@ class SollEingang:
                 self._schreiben(begrenzt)
         except ValueError:
             logger.info("Ende von %s nicht an den Server gesendet (abgelehnt), der Wert gilt lokal", lage.art)
+
+    def _betriebsart_laeuft(self) -> bool:
+        weg = self._uebersteuerung
+        return weg is not None and weg.betriebsart is not None and weg.betriebsart() is not None
 
     def _kuehl_bis(self) -> str | None:
         """Ende der Uebersteuerung (naechster Planwechsel, UTC-Text), wenn eine Eingabe jetzt eine waere: Faehigkeit

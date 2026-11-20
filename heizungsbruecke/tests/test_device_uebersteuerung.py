@@ -1,9 +1,13 @@
 """Uebersteuerung der kuehlen Phase am Geraet: geht als Bedienwunsch mit programm (werte.uebersteuerung) zum Server, nur
 mit der Faehigkeit programm; Ablehnung als ValueError, keine Zeiten im Log."""
 import logging
+from datetime import UTC, datetime
 
 import pytest
 from device_helpers import World, _bedienung
+
+from smartheat_core import safety
+from smartheat_core.plan import soll_effektiv
 
 BIS = "2027-01-20T18:00:00Z"
 
@@ -114,6 +118,125 @@ def test_das_ende_ohne_faehigkeit_wird_abgelehnt_und_away_bleibt(tmp_path):
     assert welt.device.bedienung() == welt.device.documents.inhalt("bedienung")
     welt.device.schritt()
     assert welt.link.of("up/wish") == []
+
+
+_LEERSTAND = {"von": "2027-01-15T08:00:00Z", "bis": "2027-02-15T10:00:00Z", "temp": 16.0, "aufheizen_ab": None}
+_JETZT = datetime(2027, 1, 20, 12, 0, tzinfo=UTC)
+
+
+def _leerstand_welt(tmp_path, *, neu=False) -> World:
+    """Ein Geraet mit laufendem Leerstand (Bedienung Version 3); `neu`: dasselbe Verzeichnis, frischer Prozess."""
+    welt = World(tmp_path)
+    welt.host.faehigkeiten = lambda: {"drivers": ["simulation"], "zigbee": True, "programm": True}
+    welt.verbinden()
+    if not neu:
+        welt.empfangen("down/operation", _leerstand_bedienung(3))
+    return welt
+
+
+def _leerstand_bedienung(version: int) -> dict:
+    return _bedienung(version=version, kreise=[{
+        "kreis": 1, "modus": "leerstand", "raum_soll": 21.0, "wochenplan": None, "abwesend": None,
+        "leerstand": dict(_LEERSTAND), "uebersteuerung": None, "abwesend_temp_standard": None}])
+
+
+def _soll_jetzt(welt: World) -> tuple[float | None, str | None]:
+    eintrag = welt.device.bedienung()["kreise"][0]
+    erg = soll_effektiv(_JETZT, "Europe/Berlin", eintrag, {"absenkung_k": 3, "aufheizdauer_min": {"plan": 0, "weg": 0}},
+                        uhr_vertrauenswuerdig=True)
+    return erg.soll, erg.soll_art
+
+
+def test_das_ende_des_leerstands_gilt_lokal_sofort_ohne_antwort_des_servers(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    assert _soll_jetzt(welt) == (16.0, "leerstand")
+    welt.device.betriebsart_beenden(1, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    eintrag = welt.device.bedienung()["kreise"][0]
+    assert (eintrag["modus"], eintrag["leerstand"]) == ("manuell", None)
+    assert _soll_jetzt(welt) == (21.0, "wunsch")  # das Soll ohne Leerstand; den Wert 22 haelt der Soll-Speicher
+    assert welt.device.documents.inhalt("bedienung")["kreise"][0]["modus"] == "leerstand"  # das Dokument bleibt
+
+
+def test_das_lokale_ende_des_leerstands_ueberlebt_einen_neustart(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.betriebsart_beenden(1, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    neu = _leerstand_welt(tmp_path, neu=True)
+    assert _soll_jetzt(neu) == (21.0, "wunsch")
+    assert neu.device.bedienung()["kreise"][0]["leerstand"] is None
+
+
+def test_ein_neues_dokument_des_servers_beendet_das_lokale_ende_auch_nach_einem_neustart(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.betriebsart_beenden(1, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    neu = _leerstand_welt(tmp_path, neu=True)
+    neu.empfangen("down/operation", _leerstand_bedienung(4))  # der Server lehnt ab: der Leerstand gilt wieder
+    assert _soll_jetzt(neu) == (16.0, "leerstand")
+    spaeter = _leerstand_welt(tmp_path, neu=True)
+    assert _soll_jetzt(spaeter) == (16.0, "leerstand")
+
+
+def test_ein_neues_dokument_mit_leerstand_setzt_das_lokale_ende_zurueck(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.betriebsart_beenden(1, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    welt.empfangen("down/operation", _leerstand_bedienung(4))
+    assert _soll_jetzt(welt) == (16.0, "leerstand")
+    assert welt.device.bedienung()["kreise"][0]["leerstand"] == _LEERSTAND
+
+
+def test_das_lokale_ende_betrifft_nur_den_eigenen_kreis(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.empfangen("down/operation", _bedienung(version=4, kreise=[
+        {"kreis": 1, "modus": "leerstand", "raum_soll": 21.0, "wochenplan": None, "abwesend": None,
+         "leerstand": dict(_LEERSTAND), "uebersteuerung": None, "abwesend_temp_standard": None},
+        {"kreis": 2, "modus": "leerstand", "raum_soll": 20.0, "wochenplan": None, "abwesend": None,
+         "leerstand": dict(_LEERSTAND), "uebersteuerung": None, "abwesend_temp_standard": None}]))
+    welt.device.betriebsart_beenden(2, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    modi = [eintrag["modus"] for eintrag in welt.device.bedienung()["kreise"]]
+    assert modi == ["leerstand", "manuell"]
+
+
+@pytest.mark.parametrize("raum_soll,uebersteuerung", [(None, {"temp": 15.0, "bis": BIS}), (True, None)],
+                         ids=["unter_der_untergrenze", "kein_wert"])
+def test_ein_abgelehntes_ende_aendert_den_leerstand_lokal_nicht(tmp_path, raum_soll, uebersteuerung):
+    welt = _leerstand_welt(tmp_path)
+    with pytest.raises(ValueError):
+        welt.device.betriebsart_beenden(1, "leerstand", raum_soll, uebersteuerung, "soll_entity", None)
+    assert _soll_jetzt(welt) == (16.0, "leerstand")
+    assert _soll_jetzt(_leerstand_welt(tmp_path, neu=True)) == (16.0, "leerstand")
+
+
+def test_das_lokale_ende_haelt_die_grenzen_ein_auch_bei_zu_hohem_wunsch(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    begrenzt = welt.device.betriebsart_beenden(1, "leerstand", 40.0, None, "soll_entity", "nutzer")
+    assert begrenzt == safety.BEDIENBEREICH_MAX_C
+    welt.device.schritt()
+    assert welt.link.of("up/wish")[-1]["werte"]["raum_soll"] == safety.BEDIENBEREICH_MAX_C
+    assert _soll_jetzt(welt) == (21.0, "wunsch")
+
+
+def test_eine_folgedrehung_laesst_das_ende_des_leerstands_im_puffer_stehen(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.betriebsart_beenden(1, "leerstand", 22.0, None, "soll_entity", "nutzer")
+    welt.device.schritt()
+    welt.device.wunsch(23.0, herkunft="soll_entity", durch="nutzer")
+    welt.device.schritt()
+    assert welt.device.wunsch_puffer.wunsch(1).programm == {"leerstand": None}
+    assert welt.link.of("up/wish")[-1]["werte"] == {"raum_soll": 23.0, "leerstand": None}
+
+
+def test_eine_folgedrehung_in_der_kuehlen_phase_behaelt_das_ende_und_traegt_die_uebersteuerung(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.betriebsart_beenden(1, "leerstand", None, {"temp": 19.0, "bis": BIS}, "soll_entity", None)
+    welt.device.uebersteuerung_senden(1, 20.0, BIS, "soll_entity", None)
+    welt.device.schritt()
+    assert welt.device.wunsch_puffer.wunsch(1).programm == {"leerstand": None, "uebersteuerung": {"temp": 20.0, "bis": BIS}}
+
+
+def test_ohne_offenes_ende_ueberlebt_kein_leerstand_im_puffer(tmp_path):
+    welt = _leerstand_welt(tmp_path)
+    welt.device.wunsch(23.0, herkunft="soll_entity", durch="nutzer")
+    welt.device.schritt()
+    assert welt.device.wunsch_puffer.wunsch(1).programm is None
 
 
 def test_im_log_stehen_keine_zeiten_oder_werte(tmp_path, caplog):

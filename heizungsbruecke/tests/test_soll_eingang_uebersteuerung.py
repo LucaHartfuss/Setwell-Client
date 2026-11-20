@@ -749,6 +749,19 @@ def test_leerstand_uebersteuerung_haelt_vier_stunden_oder_bis_zum_ende_des_leers
     assert a.gesendet[0][1] == _zeit(a.jetzt + erwartet)
 
 
+def test_leerstand_die_lokale_zahl_aendert_eine_laufende_uebersteuerung_nicht_und_merkt_den_wunsch(tmp_path):
+    a = _leerstand(tmp_path, danach=KUEHL_DANACH)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+    ende = a.store.uebersteuerung()
+    assert ende is not None
+    a.lage = SollErgebnis(soll=19.0, soll_art=SOLL_ART_UEBERSTEUERT, naechster_wechsel=a.jetzt + UEBERSTEUERUNG_DAUER)
+    gesendet = list(a.gesendet)
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha", durch="nutzer")
+    assert a.store.uebersteuerung() == ende and a.gesendet == gesendet
+    assert a.wuensche == [(22.0, "ha", "nutzer")] and a.store.value == 22.0
+    assert a.store.leerstand_zaehler.anzahl() == 1  # die lokale Zahl zaehlt nicht
+
+
 def test_leerstand_ende_in_der_kuehlen_phase_ueber_dem_maximum_wird_begrenzt(tmp_path):
     a = _leerstand(tmp_path, danach=KUEHL_DANACH)
     for wert in (19.0, 20.0, 27.0):
