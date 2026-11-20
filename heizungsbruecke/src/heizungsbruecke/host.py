@@ -285,7 +285,7 @@ class HaHost:
             lage=worker.geltendes_soll, moeglich=geraet.programm_faehig,
             senden=lambda temp, bis, herkunft, durch: geraet.uebersteuerung_senden(
                 self.kreis, temp, bis, herkunft, durch),
-            betriebsart=worker.betriebsart,
+            betriebsart=worker.betriebsart, betriebsart_trotz_aus=worker.betriebsart_trotz_aus,
             beenden=lambda art, raum_soll, uebersteuerung, herkunft, durch: geraet.betriebsart_beenden(
                 self.kreis, art, raum_soll, uebersteuerung, herkunft, durch))
         client = geraet_trigger.build(

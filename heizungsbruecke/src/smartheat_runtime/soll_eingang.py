@@ -89,6 +89,9 @@ class UebersteuerungsWeg:
     moeglich: Callable[[], bool]
     #: Laeuft Leerstand oder Away (Betriebsart des Plans, auch unter einer Uebersteuerung)? None: weder noch.
     betriebsart: Callable[[], Betriebsart | None] | None = None
+    #: Wie `betriebsart`, aber auch bei Soll-Quelle aus: das Soll fuer das Wiedereinschalten, aus dem lokal geprueften
+    #: Dokument statt aus dem zuletzt abgelegten geltenden Soll (das ist bei Soll-Quelle aus leer).
+    betriebsart_trotz_aus: Callable[[], Betriebsart | None] | None = None
     #: `beenden(art, raum_soll, uebersteuerung, herkunft, durch)`: ein Wunsch, der die Betriebsart beendet und den Wert der
     #: Phase danach traegt (Wunsch oder Uebersteuerung); Rueckgabe: der begrenzte Wunsch oder None.
     beenden: Callable[[str, float | None, dict | None, str | None, str | None], float | None] | None = None
@@ -100,6 +103,10 @@ def geltende_anzeige(store: TargetStore, weg: UebersteuerungsWeg | None) -> floa
     ueb = store.uebersteuerung()
     if ueb is not None:
         return ueb["temp"]
+    lesen = None if weg is None else weg.betriebsart_trotz_aus or weg.betriebsart
+    betriebsart = lesen() if lesen is not None else None
+    if betriebsart is not None and betriebsart.soll is not None:
+        return betriebsart.soll  # live aus dem lokal geprueften Dokument, auch wenn das abgelegte Soll leer ist (Quelle aus)
     lage = weg.lage() if weg is not None else None
     if lage is not None and lage.soll is not None and lage.soll_art in (SOLL_ART_LEERSTAND, SOLL_ART_ABWESEND):
         return lage.soll
@@ -198,7 +205,10 @@ class SollEingang:
         if bool(self._aus) != vorher:
             if self._aus:
                 self._wunsch_verwerfen()  # Soll-Quelle aus ist kein Wunsch: auch ein offener nicht
-                self._store.anzeige_verwerfen()  # ausgeschaltet zeigt sie nur noch, was der Kunde dort einstellt
+                try:
+                    self._store.anzeige_verwerfen()  # ausgeschaltet zeigt sie nur noch, was der Kunde dort einstellt
+                except OSError as exc:  # das Ereignis und der Hinweis an den Host gehen trotzdem hinaus
+                    logger.warning("Gemerkte Anzeige nicht verworfen (%s)", type(exc).__name__)
             self._worker.post(Event(EV_SOLL_QUELLE, {"aus": bool(self._aus)}))
             self._soll_quelle_aus(bool(self._aus), self._store.value if self._aus else None)
         if grund == "modus" and war_aus and not self._aus:
@@ -404,8 +414,8 @@ class SollEingang:
         lage = weg.betriebsart()
         if lage is None:
             return False
-        aktuell = self._store.uebersteuerung()
-        neu = self._store.thermostat_pruefen(value, angezeigt=None if aktuell is None else aktuell["temp"])
+        # Was das Thermostat zeigt: die Uebersteuerung, sonst die Temperatur der Betriebsart (nicht der Wunsch)
+        neu = self._store.thermostat_pruefen(value, angezeigt=self.geltende_anzeige())
         if neu is None:
             return True
         self._herkunft = (herkunft, durch)
@@ -550,7 +560,7 @@ class SollEingang:
                 begrenzt = self._store.value
             if begrenzt != self._store.value:
                 self._store.begrenzen(begrenzt)
-                if not self._aus:
+                if not self._aus and not self._betriebsart_laeuft():
                     self._schreiben(begrenzt)
             elif lokal and not self._aus and not self._betriebsart_laeuft():
                 # In Leerstand und Away zeigt die Quelle deren Soll, bei laufender Uebersteuerung diese: der Wunsch gilt erst danach

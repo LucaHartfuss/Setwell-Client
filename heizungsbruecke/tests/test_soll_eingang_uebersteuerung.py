@@ -59,6 +59,7 @@ class Aufbau:
         self.betriebsart: Betriebsart | None = None
         self.lage = SollErgebnis(soll=18.0, soll_art=art, naechster_wechsel=wechsel)
         self.faehig, self.fehler = faehig, fehler
+        self.halbgrad = False
         self.beenden_ohne_wert = False  # der Geraetekern gibt zum Ende keinen begrenzten Wunsch zurueck
         self.worker.register(EV_LOCAL_CHECK, lambda event: self.checks.append(event.data))
         self.eingang = SollEingang(
@@ -77,6 +78,8 @@ class Aufbau:
 
     def _wunsch(self, value, herkunft, durch):
         self.wuensche.append((value, herkunft, durch))
+        if self.halbgrad:  # der Geraetekern rundet auf halbe Grad
+            value = round(value * 2) / 2
         return min(max(value, 15.0), 25.0)
 
     def _senden(self, temp, bis, herkunft, durch):
@@ -764,6 +767,24 @@ def test_leerstand_die_lokale_zahl_aendert_eine_laufende_uebersteuerung_nicht_un
     assert a.quelle.geschrieben == []  # die Quelle zeigt weiter die Uebersteuerung, nicht den Wunsch
 
 
+@pytest.mark.parametrize("art", ["leerstand", "abwesend"])
+def test_betriebsart_die_gerundete_lokale_zahl_wird_nicht_an_die_quelle_geschrieben(tmp_path, art):
+    a = Aufbau(tmp_path)
+    a.halbgrad = True
+    a.lage = SollErgebnis(soll=16.0, soll_art=art, naechster_wechsel=None)
+    a.betriebsart = Betriebsart(art, WARM_DANACH)
+    a.post(21.3, SOURCE_LOKAL, herkunft="ha", durch="nutzer")
+    assert a.store.value == 21.5  # der Wunsch gilt erst nach der Betriebsart
+    assert a.quelle.geschrieben == []
+
+
+def test_ohne_betriebsart_wird_die_gerundete_lokale_zahl_an_die_quelle_geschrieben(tmp_path):
+    a = Aufbau(tmp_path, art=SOLL_ART_WUNSCH, wechsel=None)
+    a.halbgrad = True
+    a.post(21.3, SOURCE_LOKAL, herkunft="ha", durch="nutzer")
+    assert a.store.value == 21.5 and a.quelle.geschrieben == [21.5]
+
+
 def test_leerstand_ende_in_der_kuehlen_phase_ueber_dem_maximum_wird_begrenzt(tmp_path):
     a = _leerstand(tmp_path, danach=KUEHL_DANACH)
     for wert in (19.0, 20.0, 27.0):
@@ -851,6 +872,37 @@ def test_leerstand_der_wechsel_auf_aus_verwirft_die_gemerkte_anzeige(tmp_path):
     a.modus("off")
     assert a.store.angezeigt_zuletzt is None
     assert TargetStore(tmp_path / "soll.json", 21.0, a.clock, lambda: a.jetzt.isoformat()).angezeigt_zuletzt is None
+
+
+def test_leerstand_ein_drehen_auf_den_wunsch_nach_der_frist_zaehlt_als_eingabe(tmp_path):
+    """Die Schreibung der 16 ging verloren, das Thermostat zeigt 19. Dreht der Kunde nach der Frist auf den Wunsch (21),
+    ist das seine Eingabe und kein alter Wert des Befehls: es wird nicht noch einmal 16 geschrieben."""
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    _ablaufen(a)
+    assert a.quelle.geschrieben == [16.0] and a.store.value == 21.0
+    a.weiter(timedelta(seconds=1900))
+    a.clock.advance(1900)
+    a.post(21.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+    assert a.quelle.geschrieben == [16.0]
+    assert a.store.leerstand_zaehler.anzahl() == 2 and len(a.gesendet) == 2
+
+
+def test_leerstand_eine_inzwischen_geaenderte_anzeige_wird_nicht_nachgeschrieben(tmp_path):
+    """Der Speicher sieht den verlorenen Befehl, doch die geltende Anzeige ist inzwischen eine andere (der Leerstand ist
+    vorbei): die alte Anzeige wird nicht mehr geschrieben."""
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    _ablaufen(a)
+    assert a.quelle.geschrieben == [16.0]
+    a.betriebsart = None
+    a.lage = SollErgebnis(soll=21.0, soll_art=SOLL_ART_WUNSCH, naechster_wechsel=None)
+    a.weiter(timedelta(seconds=1900))
+    a.clock.advance(1900)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.quelle.geschrieben == [16.0]
 
 
 def test_leerstand_eine_verlorene_schreibung_wird_hoechstens_dreimal_wiederholt(tmp_path):

@@ -57,6 +57,9 @@ class RegulationWorker:
         self.geltendes_soll: Callable[[], SollErgebnis | None] = lambda: None
         #: laeuft Leerstand oder Away (Betriebsart oder None), vom Start der Laufzeit gesetzt; nur im Worker-Thread lesen
         self.betriebsart: Callable[[], Betriebsart | None] = lambda: None
+        #: wie `betriebsart`, aber auch bei Soll-Quelle aus (das Wiedereinschalten braucht das Soll der Betriebsart, bevor
+        #: die Laufzeit die Quelle wieder als an kennt)
+        self.betriebsart_trotz_aus: Callable[[], Betriebsart | None] = lambda: None
 
     def register(self, kind: str, handler: Handler) -> None:
         self._handlers[kind] = handler

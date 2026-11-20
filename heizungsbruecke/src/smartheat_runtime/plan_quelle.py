@@ -70,11 +70,12 @@ def geltendes_soll(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: dat
 class Betriebsart:
     """Die laufende Betriebsart des Kreises (`leerstand` oder `abwesend`) und das Soll der Phase, die nach ihrem Ende gilt
     (Plan ohne Betriebsart und ohne Uebersteuerung). `bis`: das Ende des Leerstands (bei Away None); eine Uebersteuerung
-    im Leerstand reicht nicht darueber hinaus."""
+    im Leerstand reicht nicht darueber hinaus. `soll`: die Temperatur der Betriebsart selbst (ohne Uebersteuerung)."""
 
     art: str
     danach: SollErgebnis | None
     bis: datetime | None = None
+    soll: float | None = None
 
 
 _ZEIT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -108,7 +109,7 @@ def betriebsart_lage(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: d
     except ValueError:
         return None
     ende = _leerstand_ende(eingabe.bedienung) if laufend.soll_art == SOLL_ART_LEERSTAND else None
-    return Betriebsart(art=laufend.soll_art, danach=danach, bis=ende)
+    return Betriebsart(art=laufend.soll_art, danach=danach, bis=ende, soll=laufend.soll)
 
 
 def eingabe_des_geraets(geraet, kreis: int, speicher=None) -> PlanEingabe | None:

@@ -379,6 +379,28 @@ def test_jeder_wechsel_von_soll_quelle_aus_geht_als_ereignis_an_die_laufzeit(tmp
     assert gemeldet == [True, False]
 
 
+def test_soll_quelle_aus_geht_auch_bei_voller_platte_hinaus_ohne_werte_im_log(tmp_path, monkeypatch, caplog):
+    """Die gemerkte Anzeige zu verwerfen scheitert (Platte voll): das Ereignis und der Hinweis an den Host gehen trotzdem
+    hinaus, sonst bleibt der Host bei einer Quelle, die er fuer an haelt (S-14)."""
+    from smartheat_core import dateien
+
+    a = Aufbau(tmp_path)
+    gemeldet = []
+    a.worker.register(EV_SOLL_QUELLE, lambda event: gemeldet.append(event.data["aus"]))
+    a.store.anzeige_merken(21.0)
+
+    def voll(*args, **kwargs):
+        raise OSError(28, "No space left: 21.0")
+
+    monkeypatch.setattr(dateien, "schreiben_json", voll)
+    with caplog.at_level(logging.DEBUG):
+        a.worker.post(Event(EV_SOLL_MODUS, {"mode": "off"}))
+        a.worker.run_pending()
+
+    assert gemeldet == [True] and a.aus == [(True, 21.0)]
+    assert "No space" not in caplog.text and "21.0" not in caplog.text
+
+
 def test_die_laufzeit_merkt_soll_quelle_aus_aus_dem_ereignis():
     from types import SimpleNamespace
 

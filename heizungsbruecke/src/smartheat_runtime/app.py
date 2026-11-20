@@ -735,10 +735,17 @@ def _ursprung_melder(rt: Runtime, host: Host) -> Callable[[], None]:
     return melden
 
 
-def _betriebsart(rt: Runtime) -> plan_quelle.Betriebsart | None:
+def _worker_lesewege(rt: Runtime) -> None:
+    """Die Lesewege des Soll-Eingangs am Worker: geltendes Soll (kuehle Phase) und Betriebsart (Leerstand oder Away)."""
+    rt.worker.geltendes_soll = lambda: rt.geltendes_soll
+    rt.worker.betriebsart = lambda: _betriebsart(rt)
+    rt.worker.betriebsart_trotz_aus = lambda: _betriebsart(rt, auch_aus=True)
+
+
+def _betriebsart(rt: Runtime, *, auch_aus: bool = False) -> plan_quelle.Betriebsart | None:
     """Laeuft Leerstand oder Away am Kreis? Jeder Fehler der Eingabe oder der Rechnung heisst: keine Betriebsart (die
-    Eingabe am Thermostat laeuft dann den gewohnten Weg)."""
-    if testphase.aktiv(rt) or rt.soll_quelle_aus:
+    Eingabe am Thermostat laeuft dann den gewohnten Weg). Bei Soll-Quelle aus gibt es keine, ausser mit `auch_aus`."""
+    if testphase.aktiv(rt) or (rt.soll_quelle_aus and not auch_aus):
         return None
     try:
         return plan_quelle.betriebsart_lage(
@@ -974,8 +981,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     if rt.mqtt_client is not None:
         rt.mqtt_client.loop_start()
 
-    rt.worker.geltendes_soll = lambda: rt.geltendes_soll  # der Soll-Eingang erkennt daran die kuehle Phase
-    rt.worker.betriebsart = lambda: _betriebsart(rt)  # und Leerstand oder Away
+    _worker_lesewege(rt)  # der Soll-Eingang erkennt daran die kuehle Phase, Leerstand und Away
     rt.trigger_client = host.trigger_source(loaded.manifest, rt.worker)
     rt.trigger_client.start()
     if ausser and rt.store.state.soll_ende_offen:

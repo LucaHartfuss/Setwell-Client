@@ -105,6 +105,9 @@ class TargetStore:
         self._echo_until: float | None = None
         # (geschrieben, veraltete Werte, Frist) - nur im Speicher
         self._pending: tuple[float, frozenset[float], float] | None = None
+        #: Was das Thermostat vor dem offenen Schreibbefehl zeigte; nur dessen Meldung nach der Frist heisst "kam nicht an"
+        self._vorher: frozenset[float] = frozenset()
+        self._abweichend = False  # seit dem offenen Schreibbefehl kam eine andere Meldung als `_vorher` (nur im Speicher)
         self._versuche = 0  # Wiederholungen des offenen Schreibbefehls (nur im Speicher)
         self._nachschreiben: tuple[float, float] | None = None  # (geschrieben, gemeldet): erneut schreiben (nur im Speicher)
         self._before: float | None = None  # Wert vor der letzten Aenderung (= was das Thermostat noch zeigt)
@@ -145,13 +148,19 @@ class TargetStore:
         written = self.value if geschrieben is None else geschrieben
         if self._pending is not None and now < self._pending[2]:  # zweiter Befehl vor der Bestaetigung des ersten
             stale = self._pending[1] | {self._pending[0]}
-        elif written != self.value:
-            stale = frozenset({self.value})
+            vorher = self._vorher | {self._pending[0]}
         else:
-            stale = frozenset({self._before if self._before is not None else self.value})
+            self._abweichend = False
+            if written != self.value:  # Uebersteuerung, Leerstand: der Wunsch ist nur ein alter Wert des Befehls
+                stale = frozenset({self.value})
+                vorher = frozenset() if self._angezeigt is None else frozenset({self._angezeigt})
+            else:
+                stale = vorher = frozenset({self._before if self._before is not None else self.value})
         if veraltet is not None:
             stale |= {veraltet}
+            vorher |= {veraltet}
         self._pending = (written, stale - {written}, now + PENDING_SECONDS)
+        self._vorher = vorher - {written}
         self.anzeige_merken(written)
 
     def anzeige(self) -> float:
@@ -216,7 +225,7 @@ class TargetStore:
             if self._clock() >= until:
                 self._pending = None
                 if value != written:
-                    if value in stale and self._versuche < MAX_NACHSCHREIBEN:
+                    if value in self._vorher and not self._abweichend and self._versuche < MAX_NACHSCHREIBEN:
                         self._versuche += 1  # der Befehl kam nicht an: der alte Wert ist keine Eingabe des Kunden
                         self._nachschreiben = (written, value)
                         logger.info("Thermostat meldet nach Ablauf der Frist noch den alten Sollwert %.1f, der Befehl "
@@ -229,6 +238,7 @@ class TargetStore:
                 self.anzeige_merken(value)
                 return None
             elif value in stale:
+                self._abweichend = self._abweichend or value not in self._vorher
                 logger.info("Thermostat meldet noch einen alten Sollwert %.1f (Schreibbefehl offen), verworfen", value)
                 return None
             else:

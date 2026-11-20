@@ -11,6 +11,7 @@ from smartheat_runtime.soll_speicher import (
     BEDIENBEREICH_MIN,
     BEDIENBEREICH_STEP,
     ECHO_WINDOW_SECONDS,
+    MAX_NACHSCHREIBEN,
     PENDING_SECONDS,
     SOURCE_LOKAL,
     SOURCE_PORTAL,
@@ -328,6 +329,68 @@ def test_ein_zweiter_befehl_nach_genau_dreissig_minuten_erbt_die_alten_werte_nic
 
     assert store.apply_thermostat(20.0) is True  # kein alter Wert mehr, sondern eine Eingabe am Thermostat
     assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+
+
+def _leerstand_schreibung(tmp_path, clock):
+    """Wunsch 22, das Thermostat zeigt 19, im Leerstand wird 16 geschrieben: der Wunsch ist ein altes Soll des Befehls,
+    aber nicht das, was das Thermostat vorher zeigte."""
+    store = _store(tmp_path, clock, start=22.0)
+    store.anzeige_merken(19.0)
+    store.note_own_write(geschrieben=16.0)
+    return store
+
+
+def test_nach_der_frist_ist_ein_drehen_auf_den_wunsch_eine_eingabe_nicht_der_verlorene_befehl(tmp_path, clock):
+    store = _leerstand_schreibung(tmp_path, clock)
+    clock.advance(PENDING_SECONDS + 1)
+    assert store.thermostat_pruefen(22.0, angezeigt=16.0) == 22.0
+    assert store.nachschreiben_nehmen() is None
+
+
+def test_nach_der_frist_bleibt_die_alte_anzeige_ein_verlorener_befehl(tmp_path, clock):
+    store = _leerstand_schreibung(tmp_path, clock)
+    clock.advance(PENDING_SECONDS + 1)
+    assert store.thermostat_pruefen(19.0, angezeigt=16.0) is None
+    assert store.nachschreiben_nehmen() == (16.0, 19.0)
+
+
+def test_eine_abweichende_meldung_in_der_frist_macht_die_alte_anzeige_danach_zur_eingabe(tmp_path, clock):
+    store = _leerstand_schreibung(tmp_path, clock)
+    clock.advance(120)  # Echo-Fenster vorbei
+    assert store.thermostat_pruefen(22.0, angezeigt=16.0) is None  # der Wunsch in der Frist: alter Wert des Befehls
+    clock.advance(PENDING_SECONDS)
+    assert store.thermostat_pruefen(19.0, angezeigt=16.0) == 19.0  # das Thermostat hat sich inzwischen bewegt
+    assert store.nachschreiben_nehmen() is None
+
+
+def _verlorene_befehle(store, clock, wert, n):
+    """n verlorene Befehle in Folge: nach der Frist meldet das Thermostat weiter 20, der Aufrufer schreibt erneut."""
+    for _ in range(n):
+        clock.advance(PENDING_SECONDS + 1)
+        assert store.thermostat_pruefen(20.0) is None
+        assert store.nachschreiben_nehmen() == (wert, 20.0)
+        store.note_own_write(veraltet=20.0, geschrieben=wert, wiederholung=True)
+
+
+def test_nach_der_letzten_wiederholung_gilt_die_meldung_als_eingabe(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+    _verlorene_befehle(store, clock, 22.0, MAX_NACHSCHREIBEN)
+    clock.advance(PENDING_SECONDS + 1)
+    assert store.thermostat_pruefen(20.0) == 20.0
+    assert store.nachschreiben_nehmen() is None
+
+
+def test_ein_neuer_eigener_befehl_bekommt_alle_wiederholungen_wieder(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+    _verlorene_befehle(store, clock, 22.0, MAX_NACHSCHREIBEN)
+    clock.advance(PENDING_SECONDS + 1)
+    store.apply_portal(23.0)
+    store.note_own_write(veraltet=20.0)  # ein neuer Befehl, keine Wiederholung
+    _verlorene_befehle(store, clock, 23.0, MAX_NACHSCHREIBEN)
 
 
 def test_die_rueckgaben_der_eingaenge_sind_wahrheitswerte(tmp_path, clock):
