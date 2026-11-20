@@ -307,8 +307,9 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
         if not quelle.angleichen_offen:  # inzwischen angeglichen: der Wert ist eine Eingabe wie jeder andere
             eingabe(wert, durch)
             return
-        if eingang.aus or wert <= FROSTSCHUTZ_BIS:  # Soll-Quelle aus: wie bisher, der Soll-Eingang gleicht beim
-            quelle.angleichen_offen = False  # Wiedereinschalten an; Frostschutz bleibt unangetastet
+        if eingang.aus or eingang.stillgelegt or wert <= FROSTSCHUTZ_BIS:  # Soll-Quelle aus oder Regelung beendet: wie
+            quelle.angleichen_offen = False  # bisher, der Soll-Eingang gleicht beim Wiedereinschalten bzw. bei der
+            # Wiederaufnahme an (nichts steht mehr offen); Frostschutz bleibt unangetastet
             eingabe(wert, durch)
             return
         if wert == eingang.geltende_anzeige():  # zeigt das Soll doch (HA hat es trotz Fehler uebernommen)

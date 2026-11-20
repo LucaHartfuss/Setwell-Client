@@ -222,6 +222,12 @@ class SollEingang:
         """Soll-Quelle aus (Modus off oder Frostschutz-Stellung): kein Wunsch, keine Bedienung an die Quelle."""
         return bool(self._aus)
 
+    @property
+    def stillgelegt(self) -> bool:
+        """Die Regelung ist beendet (Merker aus dem Soll-Ende oder `regelung_beendet`): der Abgleich schreibt nichts, und
+        eine Drehung am Thermostat ist der Wunsch des Kunden."""
+        return self._stillgelegt or self._worker.regelung_beendet()
+
     def geltende_anzeige(self) -> float:
         return geltende_anzeige(self._store, self._uebersteuerung)
 
@@ -229,6 +235,9 @@ class SollEingang:
         if self._quelle is not None and self._quelle.schreiben(value):
             self._store.note_own_write(veraltet=veraltet, geschrieben=value, wiederholung=wiederholung)
             return True
+        # Gescheitert: der Merker einer frueheren Schreibung (geltend, bekannt) darf das Nachholen nicht mehr blockieren,
+        # sonst haengt die vermerkte Angleichung (das Nachschreiben je Befehl bleibt durch MAX_NACHSCHREIBEN begrenzt)
+        self._abgleich_memo = None
         return False
 
     def _bekannt(self) -> float | None:
@@ -255,7 +264,7 @@ class SollEingang:
         (nach dem Wiedereinschalten). Nach dem Ende der Regelung (Merker aus dem Soll-Ende oder `regelung_beendet`) schreibt
         er nichts: die Soll-Quelle zeigt den gemerkten Wunsch, und eine Betriebsart darf ihn nicht absenken. True:
         geschrieben."""
-        if self._quelle is None or self._stillgelegt or self._worker.regelung_beendet():
+        if self._quelle is None or self.stillgelegt:
             return False
         geltend = self.geltende_anzeige()
         self._geltend_gesehen = geltend
@@ -373,7 +382,7 @@ class SollEingang:
         Anzeige-Abgleich live aus (nicht aus dem Stand des letzten Checks); er wartet auch bei offener Eingabe und bei
         Soll-Quelle aus (das Wiedereinschalten zeigt dann die geltende Anzeige)."""
         self._ablauf_geplant = False
-        if self._stillgelegt or self._worker.regelung_beendet():
+        if self.stillgelegt:
             return  # nach dem Ende der Regelung plant sich nichts neu ein (die Wiederaufnahme haengt die Kette wieder ein)
         if self._store.uebersteuerung() is not None:
             self._ablauf_planen()
@@ -452,7 +461,7 @@ class SollEingang:
         if offen is None or self._aus or self._wunsch_offen or self._ueb_offen or self._beenden_offen is not None:
             return
         geschrieben, gemeldet = offen
-        if self._stillgelegt or self._worker.regelung_beendet():
+        if self.stillgelegt:
             # Nach dem Ende der Regelung gilt nur noch der gemerkte Wunsch, nie weniger: erneut schreibt es hoechstens die
             # Schreibung des Soll-Endes, und nur, wenn die Quelle weniger zeigt (nicht den Kunden); eine Frostschutz-Stellung
             # meldet das Thermostat als „aus“, das Nachschreiben kommt dann nicht bis hierher

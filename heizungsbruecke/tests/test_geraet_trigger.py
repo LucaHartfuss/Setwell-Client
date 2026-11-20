@@ -20,7 +20,7 @@ from smartheat_runtime.plan_quelle import Betriebsart
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT, UebersteuerungsWeg
-from smartheat_runtime.soll_speicher import TargetStore
+from smartheat_runtime.soll_speicher import PENDING_SECONDS, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
 CLIMATE = "climate.wohnzimmer_thermostat"
@@ -1007,6 +1007,49 @@ def test_the_start_alignment_owed_for_an_unknown_value_is_written_once_the_value
     a.client._on_connected()
     a.run()
     assert a.ha.writes == [(SOLL, 21.0)] and quelle.angleichen_offen is False
+
+
+def test_the_start_alignment_owed_at_the_end_of_the_regulation_is_dropped_and_a_turn_becomes_the_wish(tmp_path):
+    """Beim Start ist die Regelung schon beendet und HA unlesbar: das Angleichen bleibt als offen vermerkt, schreiben darf
+    es nicht. Die erste Lesung loescht den Vermerk (sonst bliebe er stehen), die Drehung des Kunden wird sein Wunsch, und
+    die Wiederaufnahme ueberschreibt ihn nicht."""
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    assert quelle.angleichen_offen is True
+    a.worker.regelung_beendet = lambda: True
+    a.ha.anzeige_da = True
+    a.ha.states[SOLL] = 19.0
+    a.client._on_connected()
+    a.run()
+    assert quelle.angleichen_offen is False and a.ha.writes == []
+    a.clock.advance(60)
+    a.run()
+    assert a.wuensche == [(19.0, "soll_entity", None)] and a.store.value == 19.0
+    a.worker.regelung_beendet = lambda: False  # die Regelung laeuft wieder
+    a.worker.anzeige_abgleichen()
+    a.run()
+    assert a.ha.writes == [] and a.store.value == 19.0
+
+
+def test_a_failed_resend_after_a_lost_write_does_not_leave_the_alignment_owed_forever(tmp_path):
+    """Leerstand 16, das Thermostat zeigt 21: der Abgleich schreibt 16, der Befehl geht verloren (es zeigt weiter 21). Das
+    Nachschreiben scheitert an HA und vermerkt das Angleichen als offen; das Nachholen mit 21 scheiterte am Merker der
+    ersten Schreibung (16, 21), und der Vermerk haengte."""
+    a, quelle = _mit_quelle(tmp_path)
+    lage = SollErgebnis(soll=16.0, soll_art="leerstand", naechster_wechsel=None)
+    a.ha.states[SOLL] = 21.0
+    eingang = a.worker.anzeige_abgleichen.__self__
+    eingang._uebersteuerung = _weg(lage)
+    assert eingang.anzeige_abgleichen("test") is True
+    assert a.ha.writes == [(SOLL, 16.0)]
+    a.ha.states[SOLL] = 21.0  # der Befehl kam nie an
+    a.ha.write_error = RuntimeError("HA Core startet")
+    assert eingang.anzeige_abgleichen("nachschreiben", bekannt=21.0, nachschreiben=True) is False
+    assert quelle.angleichen_offen is True
+    a.ha.write_error = None
+    a.clock.advance(PENDING_SECONDS + 1)  # der unbestaetigte Befehl ist verfallen
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, 16.0), (SOLL, 16.0)] and quelle.angleichen_offen is False
 
 
 def test_without_a_target_entity_the_reconnect_reads_nothing_even_with_a_given_source(tmp_path):

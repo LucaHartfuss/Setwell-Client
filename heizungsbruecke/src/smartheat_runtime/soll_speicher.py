@@ -359,8 +359,9 @@ class TargetStore:
     def _speichern(pfad: Path, inhalt) -> None:
         """Legt den Stand in einer Datei ab. Der Stand im Speicher gilt zuerst und immer: ein Speicherfehler (Datentraeger
         voll oder nur lesbar) darf weder ein Schreiben ans Thermostat noch das Soll-Ende verhindern. Nach einem Neustart
-        fehlt dann der gemerkte Stand; es gilt der Rueckfall bei unbekannter Anzeige (nichts blind schreiben, das Angleichen
-        holt es nach, sobald die Anzeige gelesen ist). Die Warnung nennt keine Werte."""
+        gilt der zuletzt gespeicherte Stand: eine schon aufgehobene Uebersteuerung kann wieder aufleben, begrenzt durch
+        ihre Grenzen und ihr `bis` (hoechstens 4 h); fehlt die gemerkte Anzeige, gilt der Rueckfall bei unbekannter
+        Anzeige (nichts blind schreiben, das Angleichen holt es nach). Die Warnung nennt keine Werte."""
         try:
             dateien.schreiben_json(pfad, inhalt, modus=dateien.LESBAR)
         except OSError as exc:

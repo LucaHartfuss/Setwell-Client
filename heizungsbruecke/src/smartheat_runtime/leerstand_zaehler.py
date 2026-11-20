@@ -65,8 +65,9 @@ class LeerstandZaehler:
     def _speichern(self, inhalt: list[str]) -> None:
         """Der Stand im Speicher gilt zuerst und immer: ein Speicherfehler (Datentraeger voll oder nur lesbar) darf weder
         eine Aenderung des Kunden noch das Ende des Leerstands verhindern. Nach einem Neustart fehlen dann die Aenderungen
-        seit dem letzten Speichern; das Fenster beginnt dort von vorn (der Leerstand endet spaeter, nie frueher). Die
-        Warnung nennt keine Werte."""
+        seit dem letzten Speichern; das Fenster beginnt dort von vorn (der Leerstand endet spaeter). Scheitert `leeren()`,
+        bleiben alte Eintraege in der Datei stehen: ein neuer Leerstand innerhalb von 24 h kann frueher enden. Die Folge
+        ist nur „waermer", nie unter einer Grenze. Die Warnung nennt keine Werte."""
         try:
             dateien.schreiben_json(self._path, inhalt, modus=dateien.LESBAR)
         except OSError as exc:
