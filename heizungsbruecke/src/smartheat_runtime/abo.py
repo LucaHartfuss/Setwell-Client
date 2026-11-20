@@ -5,7 +5,7 @@ from datetime import datetime
 
 from smartheat_core import meldungen, wallclock
 from smartheat_core.meldungen import Meldung
-from smartheat_runtime import entitlement
+from smartheat_runtime import entitlement, testphase
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.soll_eingang import EV_SOLL_ENDE
@@ -50,7 +50,7 @@ def enter_inactive(rt: Runtime, now: datetime) -> None:
         since, newly_set = now, True
     rt.store.update(abo_inactive_since=since)
     rt.store.set_delivery(replace(state.delivery, pending=None, notbetrieb=True))
-    if rt.mqtt_client is not None:
+    if rt.mqtt_client is not None and not testphase.aktiv(rt):  # die Testphase sendet weiter Raumwerte (app._on_telemetry)
         try:
             rt.mqtt_client.stop()
         except Exception:

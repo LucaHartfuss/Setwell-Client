@@ -563,15 +563,18 @@ def _on_connection_check(rt: Runtime, event: Event) -> None:
 def _on_telemetry(rt: Runtime, event: Event) -> None:
     rt.worker.schedule(rt.config.telemetry_interval, Event(EV_TELEMETRY))
     state = rt.store.state
-    ausser = kreiszustand.ausser_betrieb(rt)
-    if (state.abo_inactive_since is not None and not ausser) or rt.mqtt_client is None:
+    # Nur Raumwerte senden: ausser Betrieb und in der Testphase ohne Setwell, sobald das Freiabo abgelaufen ist. Der Server
+    # braucht dann den Fuehler, um den Kreis nach dem Ende ohne Wechsel in den Zustand zu setzen, den das Ende verlangt.
+    nur_raeume = (kreiszustand.ausser_betrieb(rt)
+                  or (testphase.aktiv(rt) and state.abo_inactive_since is not None))
+    if (state.abo_inactive_since is not None and not nur_raeume) or rt.mqtt_client is None:
         return
     if not rt.mqtt_client.is_connected():
         # Ohne Verbindung nicht publizieren: paho staute die Nachrichten unbegrenzt. Der
         # Server erkennt die Luecke ueber MAX_GAP.
         logger.debug("Telemetrie uebersprungen, keine MQTT-Verbindung")
         return
-    if ausser:
+    if nur_raeume:
         telemetry.run_telemetry_tick(
             rt.manifest, rt.signals, rt.mqtt_client, boost_active=False, failsafe_active=False,
             kreis=rt.config.kreis, nur_raeume=True,
@@ -632,7 +635,9 @@ def _on_mqtt_connected(rt: Runtime, event: Event) -> None:
     rt.connection_failing_queried_at = None
     if not status.flags.gestartet:
         status.update(gestartet=True)
-    if not kreiszustand.ausser_betrieb(rt):
+    # Ausser Betrieb und bei inaktivem Abo (die Testphase haelt dann den Kanal nur fuer Raumwerte offen) gibt es keine
+    # Zustellung.
+    if not kreiszustand.ausser_betrieb(rt) and rt.store.state.abo_inactive_since is None:
         ticks.deliver(rt, delivery.MqttConnected())
 
 
@@ -944,7 +949,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     melder = _ursprung_melder(rt, host)
     _register_handlers(rt, melder)
     abo_inactive = rt.store.state.abo_inactive_since is not None  # ausser Betrieb nie: Abo-Status oben ist unbekannt
-    if not abo_inactive:
+    if not abo_inactive or testphase.aktiv(rt):  # die Testphase sendet auch ohne Abo Raumwerte (_on_telemetry)
         rt.mqtt_client = mqtt_factory(rt.worker, rt.config.kreis)
     stale_notbetrieb = not abo_inactive and not ausser and _is_stale_notbetrieb(rt)
     if stale_notbetrieb:

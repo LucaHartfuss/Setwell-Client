@@ -23,6 +23,7 @@ from smartheat_core.safety import LocalSafety
 from smartheat_runtime import regulation
 from smartheat_runtime.backup_store import save_backup
 from smartheat_runtime.delivery import DeliveryState
+from smartheat_runtime.notifier import Notifier
 from smartheat_runtime.ports import SignalUngueltig
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.state import StateStore, StorageError
@@ -86,7 +87,21 @@ def _kreis(store, wall, clock, ist, *, soll=21.0, referenz=((1, 0.0),), beschrei
         uhr_vertrauen=lambda: False, geltendes_soll=None,
         config=runtime_config(referenzraeume=tuple(referenz)), werte=werte, raum_refs=raum_refs, wand=wall,
         override=LeverPipeline(store, HaPlantBinding(ha_api, manifest, beschreibung), SAFETY, clock=clock),
+        notifier=Notifier(store, _StummeSenke()), restore_failure_logged=False,
     )
+
+
+class _StummeSenke:
+    """Nimmt Meldungen an und verwirft sie: die Kreise von Hand pruefen die Meldungen nicht."""
+
+    def push(self, key, meldung, *, begleitet=False):
+        pass
+
+    def show(self, key, meldung):
+        pass
+
+    def withdraw(self, key):
+        pass
 
 
 def _neu(make_store, wall, clock, ist, *, soll=21.0, backup=None, **optionen):

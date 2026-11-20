@@ -8,6 +8,7 @@ import types
 from datetime import datetime
 
 import pytest
+from fakes import meldungs_text
 from runtime_helpers import (
     _abo_status,  # noqa: F401 - nur der Namensraum der Helfer
     _advance,
@@ -46,7 +47,8 @@ from test_runtime_testphase import (
     _zustand,
 )
 
-from smartheat_runtime import app, entitlement, kreiszustand
+from smartheat_core import wallclock
+from smartheat_runtime import abo, app, entitlement, kreiszustand
 from smartheat_runtime.backup_store import save_backup
 from smartheat_runtime.runtime import (
     EV_ACK_TIMEOUT,
@@ -60,6 +62,9 @@ from smartheat_runtime.soll_eingang import EV_SOLL_ENDE
 from smartheat_runtime.worker import Event
 
 AUSSER = "ausser_betrieb"
+TESTPHASE = "testphase_ohne"
+RESTORE_FAILED = meldungs_text("meldung.wiederherstellung_fehlgeschlagen")
+RESTORE_OK = meldungs_text("meldung.wiederherstellung_ok")
 TELEMETRIE_FELDER = {"kreis", "room_actual", "boost_active", "failsafe_active", "ts", "raeume"}
 
 
@@ -192,6 +197,32 @@ def test_scheitert_die_rueckstellung_bleibt_sie_offen_und_der_naechste_check_wie
     _check(env, bridge)
     assert env.ha.writes[danach:] == []  # erledigt: kein weiterer Versuch
     assert not bridge.store.state.abo_finished
+
+
+def test_eine_gescheiterte_rueckstellung_wird_genau_einmal_kritisch_gemeldet_und_die_entwarnung_folgt(env):
+    bridge = _lauf_mit_serverwerten(env)
+    env.ha.write_error = RuntimeError("HA nicht erreichbar")
+    _zustand(env, AUSSER)
+    for _ in range(4):  # mehrere Checks mit gescheitertem Versuch: die Meldung kommt nicht in jedem Takt
+        _check(env, bridge)
+        _advance(env, bridge, 15 * MINUTE)
+    assert env.ha.pushes.count(RESTORE_FAILED) == 1
+    assert bridge.store.state.notify_states.get("wiederherstellung") == "fehlgeschlagen"
+    assert bridge.store.state.notify_meldungen["wiederherstellung"]["code"] == "meldung.wiederherstellung_fehlgeschlagen"
+
+    env.ha.write_error = None
+    _check(env, bridge)
+    assert env.ha.pushes.count(RESTORE_FAILED) == 1 and env.ha.pushes.count(RESTORE_OK) == 1
+    assert "wiederherstellung" not in bridge.store.state.notify_states
+
+
+def test_eine_gelungene_rueckstellung_meldet_nichts(env):
+    bridge = _lauf_mit_serverwerten(env)
+    _zustand(env, AUSSER)
+    _check(env, bridge)
+    assert bridge.store.state.ausser_betrieb_rueckgestellt is True
+    assert RESTORE_FAILED not in env.ha.pushes and RESTORE_OK not in env.ha.pushes
+    assert "wiederherstellung" not in bridge.store.state.notify_states
 
 
 def test_altbestand_ohne_zustandsfeld_regelt(env):
@@ -479,14 +510,17 @@ def test_zwei_kreise_laufen_unabhaengig(tmp_path, wall, uhr):  # noqa: F811
 # --- kreiszustand.pruefen (reine Entscheidung, ohne Anlage) ---
 
 def _stub(zustand, *, abo_finished=False, rueckgestellt=False, restore_ok=True):
-    aufrufe, ereignisse = [], []
+    aufrufe, ereignisse, meldungen = [], [], []
     override = types.SimpleNamespace(restore_and_clear=lambda immer: aufrufe.append(immer) or restore_ok)
     state = types.SimpleNamespace(abo_finished=abo_finished, kaelteschutz_art=None,
                                   ausser_betrieb_rueckgestellt=rueckgestellt)
     store = types.SimpleNamespace(state=state, update=lambda **felder: state.__dict__.update(felder))
     rt = types.SimpleNamespace(
         config=types.SimpleNamespace(zustand_source=lambda: zustand), store=store, override=override,
-        zone_prepared=True, worker=types.SimpleNamespace(post=ereignisse.append), ereignisse=ereignisse)
+        zone_prepared=True, worker=types.SimpleNamespace(post=ereignisse.append), ereignisse=ereignisse,
+        notifier=types.SimpleNamespace(notify=lambda key, state, meldung, *, critical: meldungen.append((key, state, critical))),
+        restore_failure_logged=False)
+    rt.meldungen = meldungen
     return rt, aufrufe
 
 
@@ -615,6 +649,67 @@ def test_die_telemetrie_unterscheidet_ausser_betrieb_und_abo_ruhe(env, zustand, 
         assert len(neu) == 1 and set(neu[0]) == TELEMETRIE_FELDER
 
 
+def _telemetrie_nach(env, bridge, sekunden=300):
+    vorher = len(_mqtt(env).telemetry)
+    _advance(env, bridge, sekunden)
+    return _mqtt(env).telemetry[vorher:]
+
+
+def test_testphase_ohne_mit_inaktivem_abo_sendet_raumwerte_und_schreibt_nichts_an_die_hebel(env):
+    _quiet_backup(env)
+    env.abo["status"] = entitlement.INACTIVE
+    bridge = _start(env, zustand=TESTPHASE)
+    assert bridge.store.state.abo_inactive_since is not None
+    _check(env, bridge)  # die einmalige Rueckstellung auf die Ursprungswerte der Testphase ist erledigt
+    danach = len(env.ha.writes)
+
+    neu = _telemetrie_nach(env, bridge)
+    assert neu and all(set(satz) == TELEMETRIE_FELDER for satz in neu)
+    assert _mqtt(env).snapshots == []
+    _set_room_target(env, bridge, 20.0)  # ein Wunschwechsel loest weder Tick noch Schreiben aus
+    _telemetrie_nach(env, bridge)
+    assert _mqtt(env).snapshots == []
+    assert _hebel_schreibvorgaenge(env, danach) == []
+
+
+def test_testphase_ohne_mit_aktivem_abo_sendet_den_vollen_satz(env):
+    bridge = _lauf_mit_serverwerten(env)
+    _zustand(env, TESTPHASE)
+    _check(env, bridge)
+    neu = _telemetrie_nach(env, bridge)
+    assert neu and all(set(satz) != TELEMETRIE_FELDER for satz in neu)
+
+
+def test_das_abo_wird_in_der_testphase_zur_laufzeit_inaktiv_und_die_raumwerte_laufen_weiter(env):
+    bridge = _lauf_mit_serverwerten(env)
+    _zustand(env, TESTPHASE)
+    _check(env, bridge)
+    abo.enter_inactive(bridge, wallclock.now())
+    assert bridge.store.state.abo_inactive_since is not None
+    neu = _telemetrie_nach(env, bridge)
+    assert neu and all(set(satz) == TELEMETRIE_FELDER for satz in neu)
+
+
+def test_verlaesst_der_kreis_die_testphase_bei_inaktivem_abo_verstummt_er_wie_bisher(env):
+    _quiet_backup(env)
+    env.abo["status"] = entitlement.INACTIVE
+    bridge = _start(env, zustand=TESTPHASE)
+    assert _telemetrie_nach(env, bridge)
+    _zustand(env, BETRIEB)
+    _check(env, bridge)
+    assert _telemetrie_nach(env, bridge) == []
+    assert _telemetrie_nach(env, bridge) == [] and _mqtt(env).snapshots == []
+
+
+def test_der_verbindungsaufbau_stoesst_in_der_testphase_ohne_abo_keine_zustellung_an(env):
+    _quiet_backup(env)
+    env.abo["status"] = entitlement.INACTIVE
+    bridge = _start(env, zustand=TESTPHASE)
+    bridge.worker.post(Event(EV_MQTT_CONNECTED))
+    bridge.worker.run_pending()
+    assert _mqtt(env).snapshots == [] and bridge.store.state.delivery.pending is None
+
+
 def test_der_verbindungswaechter_legt_ausser_betrieb_keinen_pruef_tick_an(env, monkeypatch):
     bridge = _lauf_mit_serverwerten(env)
     _zustand(env, AUSSER)
@@ -713,6 +808,13 @@ def test_eine_gescheiterte_rueckstellung_setzt_den_merker_nicht():
     rt.store.state.soll_ende_offen = False
     kreiszustand.pruefen(rt)
     assert rt.store.state.soll_ende_offen is False and rt.ereignisse == []
+    assert rt.meldungen == [("wiederherstellung", "fehlgeschlagen", True)]  # eine kritische Meldung je Versuch
+
+
+def test_eine_gelungene_rueckstellung_meldet_keinen_fehlschlag():
+    rt, _ = _stub(AUSSER)
+    kreiszustand.pruefen(rt)
+    assert all(zustand != "fehlgeschlagen" for _, zustand, _ in rt.meldungen)
 
 
 CLIMATE_SOLL = "climate.wz::temperature"
