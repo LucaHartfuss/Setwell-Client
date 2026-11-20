@@ -1,7 +1,6 @@
 """Soll-Eingang mit der echten Verdrahtung der Laufzeit (Planrechnung des lokalen Checks, Lesewege des Workers): was die
 Soll-Quelle nach dem Wiedereinschalten zeigt, wenn Leerstand oder Away lief, als sie aus war."""
 from datetime import UTC, datetime
-from pathlib import Path
 
 from fakes import FakeClock
 from test_regulation import RESTORE_POINT, WOCHENPLAN, _mit_plan, _runtime
@@ -86,8 +85,28 @@ def test_wieder_an_ohne_betriebsart_zeigt_den_wunsch(make_store, monkeypatch, tm
     assert quelle.geschrieben == [21.0]
 
 
-def test_beide_hosts_verdrahten_den_lesezugriff_trotz_aus():
-    """Ohne ihn zeigt die Quelle nach dem Wiedereinschalten den Wunsch statt der Leerstandstemperatur."""
-    wurzel = Path(__file__).resolve().parents[2]
-    for datei in ("gateway/src/smartheat_gateway/host.py", "heizungsbruecke/src/heizungsbruecke/host.py"):
-        assert "betriebsart_trotz_aus=worker.betriebsart_trotz_aus" in (wurzel / datei).read_text(), datei
+def test_der_ha_host_liest_die_lesewege_des_workers_erst_beim_aufruf(env, monkeypatch):
+    """Die Laufzeit setzt die Lesewege am Worker vor dem Trigger, eine andere Reihenfolge darf sie nicht still auf die
+    Vorgabe (keine Betriebsart) festlegen; ohne den Lesezugriff trotz aus zeigt die Quelle nach dem Wiedereinschalten den
+    Wunsch statt der Leerstandstemperatur."""
+    from geraet_helpers import FakeGeraet, konfiguration_aus_optionen
+    from runtime_helpers import OPTIONS
+
+    from heizungsbruecke import geraet_trigger
+    from heizungsbruecke.host import HaHost
+    gebaut = {}
+    echt = geraet_trigger.build
+
+    def _bauen(*args, **kwargs):
+        gebaut.update(kwargs)
+        return echt(*args, **kwargs)
+
+    monkeypatch.setattr(geraet_trigger, "build", _bauen)
+    host = HaHost(FakeGeraet(konfiguration_aus_optionen(OPTIONS)), env.ha, clock=env.clock)
+    worker = RegulationWorker(env.clock)
+    host.trigger_source(host.load().manifest, worker)
+    lage, art, art_trotz_aus = object(), object(), object()
+    worker.geltendes_soll, worker.betriebsart = lambda: lage, lambda: art
+    worker.betriebsart_trotz_aus = lambda: art_trotz_aus
+    weg = gebaut["uebersteuerung"]
+    assert (weg.lage(), weg.betriebsart(), weg.betriebsart_trotz_aus()) == (lage, art, art_trotz_aus)

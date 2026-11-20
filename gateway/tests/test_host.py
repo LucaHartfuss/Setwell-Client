@@ -349,6 +349,30 @@ def test_the_counter_probe_starts_with_a_real_thermostat_and_creates_one_driver(
         f"zigbee:{SENSOR}:battery", f"zigbee:{THERMOSTAT}:battery_low"}
 
 
+def test_the_read_paths_of_the_target_input_follow_the_worker_set_after_the_trigger_source_is_built(
+        data_dir, clock, monkeypatch):
+    """Die Laufzeit setzt die Lesewege am Worker vor dem Trigger, eine andere Reihenfolge darf sie nicht still auf
+    die Vorgabe (keine Betriebsart) festlegen: der Soll-Eingang liest sie erst beim Aufruf."""
+    from smartheat_runtime.worker import RegulationWorker
+    _erzeugte_treiber(monkeypatch)
+    host, _ = _host_mit_z2m(data_dir, clock, konfiguration())
+    loaded = host.load()
+    gebaut = {}
+
+    def _quelle(*args, **kwargs):
+        gebaut.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(host_modul, "BusTriggerSource", _quelle)
+    worker = RegulationWorker(clock)
+    host.trigger_source(loaded.manifest, worker)
+    lage, art, art_trotz_aus = object(), object(), object()
+    worker.geltendes_soll, worker.betriebsart = lambda: lage, lambda: art
+    worker.betriebsart_trotz_aus = lambda: art_trotz_aus
+    weg = gebaut["uebersteuerung"]
+    assert (weg.lage(), weg.betriebsart(), weg.betriebsart_trotz_aus()) == (lage, art, art_trotz_aus)
+
+
 @pytest.mark.parametrize("ohne", ["unbekannt", "ohne_definition"])
 def test_a_thermostat_the_mirror_does_not_know_as_a_defined_device_starts_as_before(data_dir, clock, monkeypatch, ohne):
     erzeugt = _erzeugte_treiber(monkeypatch)

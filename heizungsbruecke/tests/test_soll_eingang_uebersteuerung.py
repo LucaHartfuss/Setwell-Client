@@ -891,7 +891,8 @@ def test_leerstand_ein_drehen_auf_den_wunsch_nach_der_frist_zaehlt_als_eingabe(t
 
 def test_leerstand_eine_inzwischen_geaenderte_anzeige_wird_nicht_nachgeschrieben(tmp_path):
     """Der Speicher sieht den verlorenen Befehl, doch die geltende Anzeige ist inzwischen eine andere (der Leerstand ist
-    vorbei): die alte Anzeige wird nicht mehr geschrieben."""
+    vorbei): die alte Anzeige wird nicht mehr geschrieben, stattdessen die geltende. Sonst bliebe das Thermostat auf dem
+    alten Wert, und dessen Wiederholung wuerde zum Wunsch."""
     a = _leerstand(tmp_path)
     a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
     a.quelle.wert = 19.0
@@ -902,6 +903,58 @@ def test_leerstand_eine_inzwischen_geaenderte_anzeige_wird_nicht_nachgeschrieben
     a.weiter(timedelta(seconds=1900))
     a.clock.advance(1900)
     a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.quelle.geschrieben == [16.0, 21.0]
+    assert a.store.leerstand_zaehler.anzahl() == 1  # die alte Meldung war keine Eingabe
+
+
+def test_leerstand_portal_wunsch_wird_nicht_an_das_thermostat_geschrieben(tmp_path):
+    """Der Wunsch gilt erst nach dem Leerstand: das Thermostat bekommt nur das geltende Soll."""
+    a = _leerstand(tmp_path)
+    a.store.anzeige_merken(LEERSTAND_LAGE.soll)  # das Thermostat zeigt die Leerstandstemperatur
+    a.post(22.0, SOURCE_PORTAL)
+    assert a.store.value == 22.0 and a.quelle.geschrieben == []
+
+
+def test_leerstand_portal_wunsch_laesst_eine_laufende_uebersteuerung_stehen(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    ueb = a.store.uebersteuerung()
+    assert ueb is not None
+    a.post(22.0, SOURCE_PORTAL)
+    assert a.store.value == 22.0 and a.store.uebersteuerung() == ueb and a.quelle.geschrieben == []
+
+
+@pytest.mark.parametrize("mit_uebersteuerung", [False, True], ids=["ohne", "mit"])
+def test_away_portal_wunsch_wird_nicht_an_das_thermostat_geschrieben(tmp_path, mit_uebersteuerung):
+    a = Aufbau(tmp_path)
+    a.lage = SollErgebnis(soll=17.0, soll_art="abwesend", naechster_wechsel=None)
+    a.betriebsart = Betriebsart("abwesend", WARM_DANACH)
+    ueb = None
+    if mit_uebersteuerung:
+        a.store.uebersteuerung_setzen(19.0, _zeit(a.jetzt + UEBERSTEUERUNG_DAUER))
+        ueb = a.store.uebersteuerung()
+    a.store.anzeige_merken(19.0 if mit_uebersteuerung else 17.0)  # das Thermostat zeigt das geltende Soll
+    a.post(22.0, SOURCE_PORTAL)
+    assert a.store.value == 22.0 and a.store.uebersteuerung() == ueb and a.quelle.geschrieben == []
+
+
+def test_portal_wunsch_hebt_die_uebersteuerung_der_kuehlen_phase_auf_und_schreibt_die_geltende_anzeige(tmp_path):
+    """Ausserhalb von Leerstand und Away gilt die neue Bedienung des Servers vor der lokalen Uebersteuerung: das Thermostat
+    zeigt danach den Wunsch."""
+    a = Aufbau(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.quelle.wert = 19.0
+    a.post(22.0, SOURCE_PORTAL)
+    assert a.store.uebersteuerung() is None and a.quelle.geschrieben == [22.0]
+
+
+def test_portal_wunsch_schreibt_die_geltende_anzeige_wenn_das_thermostat_etwas_anderes_zeigt(tmp_path):
+    """Der Leerstand laeuft, das Thermostat zeigt noch den Wunsch (die Rueckschreibung kam nie an): ein neuer Wunsch aus
+    dem Portal stellt es auf die Leerstandstemperatur, nicht auf den Wunsch."""
+    a = _leerstand(tmp_path)
+    a.quelle.wert = 21.0
+    a.post(22.0, SOURCE_PORTAL)
     assert a.quelle.geschrieben == [16.0]
 
 

@@ -282,10 +282,11 @@ class HaHost:
         quelle = HaSollQuelle(self._ha_api, self.soll_entity) if self.soll_entity else None
         anlagenkreise = frozenset(self._anlagenkreise())
         weg = UebersteuerungsWeg(
-            lage=worker.geltendes_soll, moeglich=geraet.programm_faehig,
+            # die Lesewege setzt die Laufzeit am Worker; gelesen wird erst beim Aufruf, nicht beim Bau
+            lage=lambda: worker.geltendes_soll(), moeglich=geraet.programm_faehig,
             senden=lambda temp, bis, herkunft, durch: geraet.uebersteuerung_senden(
                 self.kreis, temp, bis, herkunft, durch),
-            betriebsart=worker.betriebsart, betriebsart_trotz_aus=worker.betriebsart_trotz_aus,
+            betriebsart=lambda: worker.betriebsart(), betriebsart_trotz_aus=lambda: worker.betriebsart_trotz_aus(),
             beenden=lambda art, raum_soll, uebersteuerung, herkunft, durch: geraet.betriebsart_beenden(
                 self.kreis, art, raum_soll, uebersteuerung, herkunft, durch))
         client = geraet_trigger.build(

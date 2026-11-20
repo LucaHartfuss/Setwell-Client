@@ -332,22 +332,30 @@ class SollEingang:
         if offen is None or self._aus or self._wunsch_offen or self._ueb_offen or self._beenden_offen is not None:
             return
         geschrieben, gemeldet = offen
-        if geschrieben == self.geltende_anzeige():
+        geltend = self.geltende_anzeige()
+        if geschrieben == geltend:
             self._schreiben(geschrieben, veraltet=gemeldet, wiederholung=True)
+        else:
+            self._schreiben(geltend, veraltet=gemeldet)  # sonst bliebe der alte Wert stehen und seine Wiederholung wuerde zum Wunsch
 
     def _eingabe_verarbeiten(self, event: Event) -> None:
         value, source = event.data["value"], event.data["source"]
         herkunft, durch = event.data.get("herkunft"), event.data.get("durch")
         if source == SOURCE_PORTAL:
-            vorher = self._store.value
+            laeuft = self._betriebsart_laeuft()
+            ueb = self._store.uebersteuerung()
+            bezug = self._store.angezeigt_zuletzt  # was das Thermostat nach unserem Wissen zeigt; None: unbekannt
             if not self._store.apply_portal(value):
                 return
+            if laeuft and ueb is not None:  # in Leerstand und Away merkt das Portal nur den Wunsch fuer danach
+                self._store.uebersteuerung_setzen(ueb["temp"], ueb["bis"])
             self._wunsch_offen = self._lokal_offen = False  # die Bedienung des Servers gilt
             self._vor_wunsch = None
             self._ueb_offen, self._vor_ueb = False, None
             self._beenden_offen, self._beenden_wert = None, None
-            if not self._aus and self._store.value != vorher:
-                self._schreiben(self._store.value)
+            geltend = self.geltende_anzeige()  # nie der Wunsch allein: Leerstand, Away und Uebersteuerung gehen vor
+            if not self._aus and geltend != bezug:
+                self._schreiben(geltend, veraltet=bezug)
         elif source == SOURCE_LOKAL:
             if self._aus:
                 logger.info("Lokaler Wunsch verworfen: die Soll-Quelle ist aus (Spec 5c F/Q3)")

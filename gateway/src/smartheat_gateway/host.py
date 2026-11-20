@@ -243,10 +243,11 @@ class GatewayHost:
             self._bus, worker, self.mirror, self._store, thermostat=bindung.thermostat, sensor_ieees=sensor_ieees,
             daily_trigger_time=self._runtime_config.daily_trigger_time, wunsch=lambda wert: self._geraet.wunsch(wert, kreis=self.kreis),
             uebersteuerung=UebersteuerungsWeg(
-                lage=worker.geltendes_soll, moeglich=self._geraet.programm_faehig,
+                # die Lesewege setzt die Laufzeit am Worker; gelesen wird erst beim Aufruf, nicht beim Bau
+                lage=lambda: worker.geltendes_soll(), moeglich=self._geraet.programm_faehig,
                 senden=lambda temp, bis, herkunft, durch: self._geraet.uebersteuerung_senden(
                     self.kreis, temp, bis, herkunft, durch),
-                betriebsart=worker.betriebsart, betriebsart_trotz_aus=worker.betriebsart_trotz_aus,
+                betriebsart=lambda: worker.betriebsart(), betriebsart_trotz_aus=lambda: worker.betriebsart_trotz_aus(),
                 beenden=lambda art, raum_soll, uebersteuerung, herkunft, durch: self._geraet.betriebsart_beenden(
                     self.kreis, art, raum_soll, uebersteuerung, herkunft, durch)),
             soll_quelle_aus=self._geraet.soll_quelle_aus, clock=self._clock,
