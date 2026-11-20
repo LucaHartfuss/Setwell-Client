@@ -7,11 +7,23 @@ Eine lokale Eingabe gleicht die Soll-Quelle zusaetzlich an. Soll-Quelle aus (Mod
 FROSTSCHUTZ_BIS; ein unbrauchbarer Wert der Quelle setzt oder beendet das nicht): kein Wunsch, auch eine lokale
 Eingabe wird verworfen (5c F/Q3), Meldung ueber soll_quelle_aus, eine neue Bedienung wird nicht geschrieben; wieder an:
 das geltende Soll geht an die Quelle, sofern sie etwas anderes zeigt (Echo-Fenster, offener Schreibbefehl). Die
-Quelle selbst (Zigbee, HA-Entity) liefert der Host ueber SollQuelle."""
+Quelle selbst (Zigbee, HA-Entity) liefert der Host ueber SollQuelle.
+
+Uebersteuerung (mit `UebersteuerungsWeg`, nur mit der Faehigkeit programm): in der kuehlen Phase des Plans (Soll-Art
+Absenkung oder uebersteuert, mit naechstem Wechsel) ist eine Eingabe am Thermostat oder an der lokalen Zahl keine
+Aenderung des Wunsches, sondern eine Uebersteuerung bis zum naechsten Wechsel (dem Aufheizbeginn). Sie gilt sofort und
+lokal (Soll-Speicher), wird auf 16 °C (Absenk-Untergrenze) bis Bedienbereich-Maximum aus safety.py begrenzt und geht nach
+dem Entprellen einmal als Wunsch mit programm an den Server; scheitert der Versand, gilt sie trotzdem lokal. In jeder
+anderen Lage (warm, Aufheizen, ohne Plan, ohne Faehigkeit) bleibt es ein Wunsch wie bisher. Die Bedienung des Servers
+bleibt Sache des Servers: sie beendet die lokale Uebersteuerung."""
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC
 from typing import Protocol
 
+from smartheat_core.plan import SOLL_ART_ABSENKUNG, SOLL_ART_UEBERSTEUERT, SollErgebnis
+from smartheat_core.safety import ABSENK_UNTERGRENZE_C, BEDIENBEREICH_MAX_C
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime.debounce import Debouncer
 from smartheat_runtime.plausibility import ROOM_TEMP_RANGE, is_plausible
@@ -37,6 +49,18 @@ DEBOUNCE_KIND = "shg_target_debounce"
 #: Ein Soll bis zu diesem Wert ist die Frostschutz-Stellung der Soll-Quelle, kein Bedienwunsch.
 FROSTSCHUTZ_BIS = 7.0
 MODUS_AUS = "off"
+_ZEIT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+@dataclass(frozen=True)
+class UebersteuerungsWeg:
+    """Verdrahtung der Uebersteuerung durch den Host. `lage`: das geltende Soll des Kreises (None: unbekannt);
+    `senden(temp, bis, herkunft, durch)`: die Uebersteuerung als Wunsch mit programm an den Geraetekern (ValueError, wenn
+    er sie ablehnt); `moeglich`: das Geraet hat die Faehigkeit programm."""
+
+    lage: Callable[[], SollErgebnis | None]
+    senden: Callable[[float, str, str | None, str | None], None]
+    moeglich: Callable[[], bool]
 
 
 class SollQuelle(Protocol):
@@ -79,12 +103,18 @@ class SollEingang:
 
     def __init__(self, worker: RegulationWorker, store: TargetStore, quelle: SollQuelle | None, *,
                  wunsch: Callable[[float, str | None, str | None], float],
-                 soll_quelle_aus: Callable[[bool, float | None], None], entprellen_s: float) -> None:
+                 soll_quelle_aus: Callable[[bool, float | None], None], entprellen_s: float,
+                 uebersteuerung: UebersteuerungsWeg | None = None) -> None:
         self._worker, self._store, self._quelle = worker, store, quelle
         self._wunsch, self._soll_quelle_aus = wunsch, soll_quelle_aus
+        self._uebersteuerung = uebersteuerung
         self._aus: set[str] = set()  # Gruende: "modus", "frost"
         self._wunsch_offen = False
         self._lokal_offen = False
+        self._ueb_offen = False  # eine Uebersteuerung ist gesetzt, aber noch nicht entprellt und gesendet
+        self._ueb_roh: float | None = None  # der unbegrenzte Wert der Eingabe
+        self._ueb_lokal = False  # die Eingabe kam von der lokalen Zahl (die Quelle muss angeglichen werden)
+        self._vor_ueb: dict | None = None  # Uebersteuerung vor der ersten offenen Eingabe
         self._herkunft: tuple[str | None, str | None] = (None, None)
         self._vor_wunsch: tuple[float, str] | None = None  # Soll und Quelle vor dem ersten offenen Wunsch
         self._unbrauchbar_gemeldet: set[str] = set()  # Fehlerarten mit WARNING seit dem letzten brauchbaren Wert
@@ -103,7 +133,7 @@ class SollEingang:
 
     def _schreiben(self, value: float, veraltet: float | None = None) -> None:
         if self._quelle is not None and self._quelle.schreiben(value):
-            self._store.note_own_write(veraltet=veraltet)
+            self._store.note_own_write(veraltet=veraltet, geschrieben=value)
 
     def _setze_aus(self, grund: str, aus: bool) -> None:
         vorher = bool(self._aus)
@@ -134,6 +164,13 @@ class SollEingang:
     def _wunsch_verwerfen(self) -> None:
         if self._wunsch_offen and self._vor_wunsch is not None:
             self._store.wiederherstellen(*self._vor_wunsch)
+        if self._ueb_offen:
+            if self._vor_ueb is not None:
+                self._store.uebersteuerung_setzen(self._vor_ueb["temp"], self._vor_ueb["bis"])
+            else:
+                self._store.uebersteuerung_aufheben()
+        self._ueb_offen = False
+        self._vor_ueb = None
         self._wunsch_offen = self._lokal_offen = False
         self._vor_wunsch = None
         if self._ende_wartet:
@@ -188,11 +225,17 @@ class SollEingang:
                 return
             self._wunsch_offen = self._lokal_offen = False  # die Bedienung des Servers gilt
             self._vor_wunsch = None
+            self._ueb_offen, self._vor_ueb = False, None
             if not self._aus and self._store.value != vorher:
                 self._schreiben(self._store.value)
         elif source == SOURCE_LOKAL:
             if self._aus:
                 logger.info("Lokaler Wunsch verworfen: die Soll-Quelle ist aus (Spec 5c F/Q3)")
+                return
+            bis = self._kuehl_bis()
+            if bis is not None:
+                if self._ueb_eingabe(value, bis, herkunft, durch, thermostat=False):
+                    self._debouncer.poke()
                 return
             if not self._store.apply_lokal(value):
                 return
@@ -211,8 +254,15 @@ class SollEingang:
                 return
             self._unbrauchbar_gemeldet.clear()
             self._setze_aus("frost", False)
+            if self._aus:
+                return
+            bis = self._kuehl_bis()
+            if bis is not None:
+                if self._ueb_eingabe(value, bis, herkunft, durch, thermostat=True):
+                    self._debouncer.poke()
+                return
             vor_wunsch = (self._store.value, self._store.source)
-            if self._aus or not self._store.apply_thermostat(value):
+            if not self._store.apply_thermostat(value):
                 return
             if not self._wunsch_offen:
                 self._vor_wunsch = vor_wunsch
@@ -220,6 +270,60 @@ class SollEingang:
             self._lokal_offen = False
             self._herkunft = (herkunft, durch)
         self._debouncer.poke()
+
+    def _kuehl_bis(self) -> str | None:
+        """Ende der Uebersteuerung (naechster Planwechsel, UTC-Text), wenn eine Eingabe jetzt eine waere: Faehigkeit
+        programm, kein offener Wunsch, Plan in der kuehlen Phase (Absenkung oder uebersteuert) mit naechstem Wechsel.
+        Sonst None: die Eingabe ist ein Wunsch wie bisher."""
+        weg = self._uebersteuerung
+        if weg is None or self._wunsch_offen or not weg.moeglich():
+            return None
+        lage = weg.lage()
+        if (lage is None or lage.soll_art not in (SOLL_ART_ABSENKUNG, SOLL_ART_UEBERSTEUERT)
+                or lage.naechster_wechsel is None):
+            return None
+        return lage.naechster_wechsel.astimezone(UTC).strftime(_ZEIT_FORMAT)
+
+    def _ueb_eingabe(self, value: object, bis: str, herkunft: str | None, durch: str | None, *,
+                     thermostat: bool) -> bool:
+        """Eine Eingabe in der kuehlen Phase wird zur lokalen Uebersteuerung (auf die Grenzen aus safety.py begrenzt).
+        False: keine Eingabe des Kunden (Echo, Wiederholung, unplausibel)."""
+        aktuell = self._store.uebersteuerung()
+        if thermostat:
+            neu = self._store.thermostat_pruefen(value, angezeigt=None if aktuell is None else aktuell["temp"])
+            if neu is None:
+                return False
+        else:
+            if not is_plausible(value, ROOM_TEMP_RANGE):
+                logger.warning("Lokale Wunschtemperatur unplausibel, verworfen")
+                return False
+            neu = float(value)  # type: ignore[arg-type]
+            if aktuell is not None and aktuell["temp"] == neu and aktuell["bis"] == bis:
+                return False
+        if not self._ueb_offen:
+            self._vor_ueb = aktuell
+        self._ueb_offen = True
+        self._ueb_roh, self._ueb_lokal = neu, not thermostat
+        self._store.uebersteuerung_setzen(min(max(neu, ABSENK_UNTERGRENZE_C), BEDIENBEREICH_MAX_C), bis)
+        self._herkunft = (herkunft, durch)
+        return True
+
+    def _ueb_senden(self) -> None:
+        """Nach dem Entprellen: die Quelle zeigt die (begrenzte) Uebersteuerung, der Server bekommt sie als Wunsch mit
+        programm. Lehnt der Geraetekern ab (Notbetrieb, kein Vertragswert), gilt sie trotzdem lokal."""
+        self._ueb_offen, self._vor_ueb = False, None
+        aktuell = self._store.uebersteuerung()
+        if aktuell is None:
+            return
+        temp = aktuell["temp"]
+        if (self._ueb_lokal or temp != self._ueb_roh) and not self._aus:
+            self._schreiben(temp)
+        if self._uebersteuerung is not None:
+            herkunft, durch = self._herkunft
+            try:
+                self._uebersteuerung.senden(temp, aktuell["bis"], herkunft, durch)
+            except ValueError:
+                logger.info("Uebersteuerung nicht an den Server gesendet (abgelehnt), sie gilt lokal")
 
     def _unbrauchbar_melden(self, value: object) -> None:
         """Je Fehlerart eine WARNING bis zum naechsten brauchbaren Wert, danach DEBUG: das Gateway reicht jede
@@ -239,6 +343,8 @@ class SollEingang:
                        "bis zu einem brauchbaren Wert", art)
 
     def _entprellt(self) -> None:
+        if self._ueb_offen:
+            self._ueb_senden()
         if self._wunsch_offen:
             lokal = self._lokal_offen
             herkunft, durch = self._herkunft

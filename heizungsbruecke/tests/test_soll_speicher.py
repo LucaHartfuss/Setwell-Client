@@ -333,3 +333,85 @@ def test_die_rueckgaben_der_eingaenge_sind_wahrheitswerte(tmp_path, clock):
     assert store.apply_thermostat(22.0) is False  # veralteter Wert bei offenem Befehl
     assert store.apply_thermostat(23.0) is False  # bestaetigt
     assert store.apply_thermostat(23.0) is False  # geltendes Soll
+
+
+# --- ganzzahliges Thermostat zeigt den eigenen Schreibwert gerundet zurueck ---
+
+def test_halbes_grad_am_ganzzahligen_thermostat_ist_echo_und_keine_aenderung(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)
+    store.note_own_write()
+    clock.advance(ECHO_WINDOW_SECONDS + 1)
+    assert store.apply_thermostat(21.0) is False  # gerundeter Schreibwert
+    assert (store.value, store.source) == (20.5, SOURCE_PORTAL)
+    assert store.apply_thermostat(21.0) is False  # Wiederholung desselben gerundeten Werts
+    assert (store.value, store.source) == (20.5, SOURCE_PORTAL)
+    assert store.apply_thermostat(22.0) is True  # eine echte Drehung gilt
+    assert (store.value, store.source) == (22.0, SOURCE_THERMOSTAT)
+
+
+def test_ein_voller_grad_nach_dem_halben_ist_eine_aenderung_ohne_vorheriges_echo(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)  # nie geschrieben: das Thermostat ist nicht als ganzzahlig bekannt
+    assert store.apply_thermostat(21.0) is True
+    assert store.value == 21.0
+
+
+def test_thermostat_pruefen_gibt_den_wert_ohne_den_speicher_zu_aendern(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.thermostat_pruefen(22.0) == 22.0
+    assert (store.value, store.source) == (20.0, SOURCE_PORTAL)
+    assert store.thermostat_pruefen(20.0) is None  # geltendes Soll
+    assert store.thermostat_pruefen(40.0) is None  # unplausibel
+    store.apply_portal(22.0)
+    store.note_own_write()
+    assert store.thermostat_pruefen(19.0) is None  # Echo-Fenster
+
+
+# --- Uebersteuerung der kuehlen Phase: lokal, ueberlebt den Neustart ---
+
+BIS = "2026-01-15T22:00:00Z"
+
+
+def test_uebersteuerung_uebersteht_den_neustart_und_laesst_den_wunsch_stehen(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.uebersteuerung() is None
+    store.uebersteuerung_setzen(18.5, BIS)
+    assert store.uebersteuerung() == {"temp": 18.5, "bis": BIS}
+    assert (store.value, store.source) == (20.0, SOURCE_PORTAL)
+    neu = _store(tmp_path, clock)
+    assert neu.uebersteuerung() == {"temp": 18.5, "bis": BIS}
+    assert (neu.value, neu.source) == (20.0, SOURCE_PORTAL)
+
+
+def test_abgelaufene_oder_kaputte_uebersteuerung_gilt_nicht(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, "2026-01-15T06:00:00Z")  # jetzt (07:00 UTC) schon vorbei
+    assert store.uebersteuerung() is None
+    store.uebersteuerung_setzen(18.5, BIS)
+    (tmp_path / "runtime" / "room_target.uebersteuerung.json").write_text("{kaputt")
+    assert _store(tmp_path, clock).uebersteuerung() is None
+
+
+def test_uebersteuerung_aufheben_loescht_auch_die_gespeicherte(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, BIS)
+    store.uebersteuerung_aufheben()
+    assert store.uebersteuerung() is None
+    assert _store(tmp_path, clock).uebersteuerung() is None
+    store.uebersteuerung_aufheben()  # ohne Uebersteuerung: nichts zu tun
+
+
+def test_eine_neue_bedienung_vom_portal_beendet_die_lokale_uebersteuerung(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, BIS)
+    assert store.apply_portal(21.0) is True
+    assert store.uebersteuerung() is None
+
+
+def test_die_uebersteuerung_liegt_wie_der_wunsch_lesbar_und_atomar(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, BIS)
+    datei = tmp_path / "runtime" / "room_target.uebersteuerung.json"
+    assert stat.S_IMODE(os.stat(datei).st_mode) == 0o644
+    assert not (tmp_path / "runtime" / "room_target.uebersteuerung.json.tmp").exists()

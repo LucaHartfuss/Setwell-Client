@@ -6,13 +6,20 @@ Ereignis smartheat_wunsch): nur Plausibilitaet 5-35 °C, kein Clamp (den Bedienb
 Geraetekerns). Nach eigenem Schreiben an die Soll-Quelle gelten deren Meldungen ECHO_WINDOW_SECONDS lang als Echo;
 meldet sie das geltende Soll, aendert sich nichts (auch nicht die Quelle); ebenso, wenn der Server das geltende Soll
 bestaetigt. Ein offener Schreibbefehl (PENDING_SECONDS) verwirft verspaetete Meldungen des alten Werts, bis
-die Quelle den geschriebenen Wert meldet; jeder andere Wert gilt als Eingabe an der Quelle.
+die Quelle den geschriebenen Wert meldet; jeder andere Wert gilt als Eingabe an der Quelle. Ein ganzzahliges Thermostat
+zeigt einen halben Grad gerundet zurueck: der gerundete Schreibwert gilt als Bestaetigung, auch wiederholt, und ist keine
+Eingabe.
+
+Die Uebersteuerung der kuehlen Phase (Temperatur und Ende) liegt lokal in einer eigenen Datei neben dem Wunsch
+(<name>.uebersteuerung.json) und uebersteht einen Neustart; der Wunsch bleibt dabei unveraendert. Abgelaufen oder
+beschaedigt gilt sie als nicht gesetzt.
 
 Die Laufzeit importiert smartheat_device nicht (tests/test_runtime_purity.py); der Bedienbereich steht deshalb hier
 und der Geraetekern (documents.py) nutzt diese Funktion; die Gleichheit der Grenzen mit dem Vertrag
 (smartheat_device.wire.RAUM_SOLL_*) sichert test_soll_speicher.py."""
 import logging
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 
 from smartheat_core import dateien
@@ -90,6 +97,9 @@ class TargetStore:
         # (geschrieben, veraltete Werte, Frist) - nur im Speicher
         self._pending: tuple[float, frozenset[float], float] | None = None
         self._before: float | None = None  # Wert vor der letzten Aenderung (= was das Thermostat noch zeigt)
+        self._gerundet: float | None = None  # ganzzahlige Anzeige des halben Grads, die das Thermostat zeigt (nur im Speicher)
+        self._ueb_path = path.with_name(path.stem + ".uebersteuerung.json")
+        self._ueb = self._ueb_lesen(dateien.lesen_json(self._ueb_path))
         stored = dateien.lesen_json(path)
         if isinstance(stored, dict) and is_plausible(stored.get("value"), ROOM_TEMP_RANGE) and stored.get("source") in _SOURCES:
             self.value, self.source = float(stored["value"]), stored["source"]
@@ -103,20 +113,26 @@ class TargetStore:
             return False
         if float(value) == self.value:  # Bestaetigung des geltenden Solls: die Quelle bleibt
             return False
+        self.uebersteuerung_aufheben()  # eine neue Bedienung des Servers gilt vor der lokalen Uebersteuerung
         return self._set(float(value), SOURCE_PORTAL)
 
-    def note_own_write(self, veraltet: float | None = None) -> None:
+    def note_own_write(self, veraltet: float | None = None, geschrieben: float | None = None) -> None:
         """veraltet: was das Thermostat zuletzt gemeldet hat, falls bekannt (Wiedereinschalten: der Wert vor dem
-        Ausschalten, nicht unbedingt der vorige Wert des Speichers); gilt zusaetzlich als alter Wert."""
+        Ausschalten, nicht unbedingt der vorige Wert des Speichers); gilt zusaetzlich als alter Wert. geschrieben: der
+        geschriebene Wert, wenn er nicht der Wunsch ist (Uebersteuerung); dann zeigte das Thermostat zuvor den Wunsch."""
         now = self._clock()
         self._echo_until = now + ECHO_WINDOW_SECONDS
+        self._gerundet = None
+        written = self.value if geschrieben is None else geschrieben
         if self._pending is not None and now < self._pending[2]:  # zweiter Befehl vor der Bestaetigung des ersten
             stale = self._pending[1] | {self._pending[0]}
+        elif written != self.value:
+            stale = frozenset({self.value})
         else:
             stale = frozenset({self._before if self._before is not None else self.value})
         if veraltet is not None:
             stale |= {veraltet}
-        self._pending = (self.value, stale - {self.value}, now + PENDING_SECONDS)
+        self._pending = (written, stale - {written}, now + PENDING_SECONDS)
 
     def echo_rest(self) -> float:
         """Sekunden, die das Echo-Fenster nach dem eigenen Schreiben noch laeuft (0 = keins)."""
@@ -125,31 +141,57 @@ class TargetStore:
         return max(self._echo_until - self._clock(), 0.0)
 
     def apply_thermostat(self, value) -> bool:
+        neu = self.thermostat_pruefen(value)
+        return neu is not None and self._set(neu, SOURCE_THERMOSTAT)
+
+    def thermostat_pruefen(self, value, *, angezeigt: float | None = None) -> float | None:
+        """Der Wert, wenn die Meldung des Thermostats eine Eingabe des Kunden ist (kein Echo, keine Bestaetigung, kein
+        veralteter Wert, nicht der angezeigte Wert, plausibel), sonst None. Fuehrt die Buchfuehrung zum Echo und zum
+        offenen Schreibbefehl, aendert aber den Wunsch nicht: ihn setzt der Aufrufer (`apply_thermostat`) oder nicht
+        (Uebersteuerung). `angezeigt`: was das Thermostat zeigt, wenn es nicht der Wunsch ist (Uebersteuerung)."""
         if self._echo_until is not None and self._clock() < self._echo_until:
-            if self._pending is not None and is_plausible(value, ROOM_TEMP_RANGE) and float(value) == self._pending[0]:
+            if self._pending is not None and is_plausible(value, ROOM_TEMP_RANGE) and self._bestaetigt(float(value)):
                 self._pending = None  # Bestaetigung im Echo-Fenster schliesst den offenen Befehl trotzdem
-            return False
+            return None
         if not is_plausible(value, ROOM_TEMP_RANGE):
             logger.warning("Wunschtemperatur %r vom Thermostat unplausibel, verworfen", value)
-            return False
+            return None
         value = float(value)
         if self._pending is not None:
             written, stale, until = self._pending
             if self._clock() >= until:
                 self._pending = None
-                if value != written:
+                if not self._bestaetigt(value, written):
                     logger.warning("Thermostat hat das Soll %.1f nicht bestaetigt, sein Wert %.1f gilt", written, value)
             elif value == written:
                 self._pending = None
-                return False
+                return None
             elif value in stale:
                 logger.info("Thermostat meldet noch einen alten Sollwert %.1f (Schreibbefehl offen), verworfen", value)
-                return False
+                return None
+            elif self._bestaetigt(value, written):
+                self._pending = None
+                return None
             else:
                 self._pending = None
-        if value == self.value:  # Thermostat meldet das geltende Soll (Echo, Wiederholung): keine Aenderung
-            return False
-        return self._set(value, SOURCE_THERMOSTAT)
+        if value == (self.value if angezeigt is None else angezeigt) or value == self._gerundet:
+            return None  # angezeigtes Soll (Echo, Wiederholung), auch gerundet angezeigt
+        return value
+
+    def _bestaetigt(self, value: float, written: float | None = None) -> bool:
+        """Der Schreibwert (`written`, sonst der des offenen Befehls) kommt zurueck, exakt oder von einem ganzzahligen
+        Thermostat gerundet (halbes Grad, hoechstens 0,5 K daneben); die gerundete Anzeige wird gemerkt, damit ihre
+        Wiederholung keine Eingabe ist."""
+        if written is None:
+            if self._pending is None:
+                return False
+            written = self._pending[0]
+        if value == written:
+            return True
+        if written != round(written) and value == round(value) and abs(value - written) <= 0.5:
+            self._gerundet = value
+            return True
+        return False
 
     def apply_lokal(self, value) -> bool:
         """Lokale Eingabe (HA: Wunschtemperatur-Entity der Integration): gilt sofort, ohne Echo-Pruefung
@@ -173,10 +215,49 @@ class TargetStore:
             return False
         self._before = self.value
         self.value, self.source = value, source
+        self._gerundet = None
         self._write()
         if self._on_change is not None:
             self._on_change()
         return True
+
+    def uebersteuerung(self) -> dict | None:
+        """Die lokale Uebersteuerung {temp, bis} oder None (nicht gesetzt, abgelaufen). `bis`: UTC-Zeitpunkt als Text."""
+        if self._ueb is not None and self._abgelaufen(self._ueb["bis"]):
+            self.uebersteuerung_aufheben()
+        return dict(self._ueb) if self._ueb is not None else None
+
+    def uebersteuerung_setzen(self, temp: float, bis: str) -> None:
+        """Uebersteuerung der kuehlen Phase bis `bis`; der Aufrufer hat Temperatur und Ende geprueft. Der Wunsch
+        bleibt unveraendert."""
+        self._ueb = {"temp": float(temp), "bis": bis}
+        dateien.schreiben_json(self._ueb_path, self._ueb, modus=dateien.LESBAR)
+
+    def uebersteuerung_aufheben(self) -> None:
+        if self._ueb is None:
+            return
+        self._ueb = None
+        dateien.schreiben_json(self._ueb_path, None, modus=dateien.LESBAR)
+
+    def _abgelaufen(self, bis: str) -> bool:
+        try:
+            return datetime.fromisoformat(bis) <= datetime.fromisoformat(self._now_iso())
+        except ValueError:
+            return True
+
+    def _ueb_lesen(self, stored) -> dict | None:
+        """Gespeicherte Uebersteuerung, wenn sie Form hat und noch nicht abgelaufen ist; sonst None (kein Absturz)."""
+        if not isinstance(stored, dict) or not is_plausible(stored.get("temp"), ROOM_TEMP_RANGE):
+            return None
+        bis = stored.get("bis")
+        if not isinstance(bis, str):
+            return None
+        try:
+            if datetime.fromisoformat(bis).utcoffset() is None:
+                return None
+        except ValueError:
+            return None
+        return {"temp": float(stored["temp"]), "bis": bis}
 
     def _write(self) -> None:
         dateien.schreiben_json(self._path, {"value": self.value, "source": self.source, "ts": self._now_iso()},
