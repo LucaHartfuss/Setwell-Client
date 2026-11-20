@@ -174,13 +174,17 @@ def test_abgleich_greift_auf_die_gemerkte_anzeige_zurueck_wenn_die_quelle_keine_
     (True, 21.0, 21.0),
     (True, 19.0, None),
     (False, 19.0, None),
-], ids=["ohne_merken_gleich", "merken_gleich", "merken_abweichend", "ohne_merken_abweichend"])
+    (None, 21.0, None),
+], ids=["ohne_merken_gleich", "merken_gleich", "merken_abweichend", "ohne_merken_abweichend", "standard_gleich"])
 def test_gleiche_anzeige_wird_nur_auf_verlangen_gemerkt(tmp_path, merken, quelle, erwartet):
     a = _einfach(tmp_path)
     a.quelle.wert = quelle
     a.quelle.schreiben = lambda wert: False  # die Quelle ist nicht schreibbar: gemerkt wird nur, was sie schon zeigt
     assert a.store.angezeigt_zuletzt is None
-    a.eingang.anzeige_abgleichen("test", gleiche_merken=merken)
+    if merken is None:  # ohne Angabe wird nicht gemerkt
+        a.eingang.anzeige_abgleichen("test")
+    else:
+        a.eingang.anzeige_abgleichen("test", gleiche_merken=merken)
     assert a.store.angezeigt_zuletzt == erwartet
 
 
