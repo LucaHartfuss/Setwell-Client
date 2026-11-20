@@ -730,6 +730,26 @@ def test_eine_verspaetete_serverantwort_bewegt_in_der_testphase_ohne_abo_keinen_
     assert {hebel: env.ha.states[hebel] for hebel in HEBEL} == {hebel: vorher[hebel] for hebel in HEBEL}
 
 
+def test_auch_mit_offenem_alten_tick_wird_die_antwort_in_der_testphase_ohne_abo_nur_quittiert(env):
+    """Die zweite Sperre allein: bliebe der alte Tick offen (als haette `enter_inactive` ihn nicht geleert), nimmt die
+    Testphase die passende Antwort trotzdem nur an und schreibt nichts."""
+    bridge = _lauf_mit_serverwerten(env)
+    _set_room_target(env, bridge, 22.0)  # ein offener Tick
+    seq = _mqtt(env).snapshots[-1]["seq"]
+    offen = bridge.store.state.delivery.pending
+    assert offen is not None
+    _zustand(env, TESTPHASE)
+    _check(env, bridge)
+    abo.enter_inactive(bridge, wallclock.now())
+    bridge.store.set_delivery(dataclasses.replace(bridge.store.state.delivery, pending=offen))
+    danach, vorher = len(env.ha.writes), dict(env.ha.states)
+
+    _answer(env, bridge, seq, curve=1.3, shift=24.0)  # passt zum offenen Tick
+    assert _hebel_schreibvorgaenge(env, danach) == []
+    assert {hebel: env.ha.states[hebel] for hebel in HEBEL} == {hebel: vorher[hebel] for hebel in HEBEL}
+    assert bridge.store.state.delivery.pending is None  # quittiert, nicht ausgefuehrt
+
+
 def test_mit_dem_fristende_der_testphase_ohne_abo_ist_der_kanal_gestoppt_und_es_gehen_keine_raumwerte_mehr_raus(env, monkeypatch):
     _quiet_backup(env)
     env.abo["status"] = entitlement.INACTIVE
