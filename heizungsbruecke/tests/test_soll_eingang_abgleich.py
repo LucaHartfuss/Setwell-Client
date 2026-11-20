@@ -518,3 +518,46 @@ def test_nach_dem_ende_schreibt_das_nachschreiben_nicht_die_geschriebene_ueberst
     a.rt.worker.post(Event("shg_target_input", {"value": 21.0, "source": "thermostat"}))
     a.rt.worker.run_pending()
     assert a.quelle.geschrieben == [23.0]
+
+
+def _speicher_voll(monkeypatch):
+    """Jedes Schreiben einer Datei scheitert (Datentraeger voll oder nur lesbar)."""
+    def voll(*args, **kwargs):
+        raise OSError(28, "No space left")
+
+    monkeypatch.setattr(dateien, "schreiben_json", voll)
+
+
+def test_scheitert_jedes_speichern_wird_das_soll_ende_trotzdem_geschrieben_und_erledigt_gemeldet(
+        make_store, monkeypatch, tmp_path):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "manuell"}, ueb=UEBERSTEUERUNG, angezeigt=19.0, folgt=True)
+    erledigt = []
+    a.rt.worker.register(EV_SOLL_ENDE_ERLEDIGT, lambda event: erledigt.append(event))
+    _speicher_voll(monkeypatch)
+    _kreis_ausser_betrieb(a)
+    _ende(a)
+    assert a.quelle.geschrieben == [21.0] and len(erledigt) == 1
+    assert a.store.uebersteuerung() is None and a.store.angezeigt_zuletzt == 21.0
+
+
+def test_scheitert_jedes_speichern_gleicht_der_betrieb_trotzdem_an(make_store, monkeypatch, tmp_path):
+    """Die Uebersteuerung laeuft ab, die Platte ist voll: die Leerstandstemperatur geht trotzdem an das Thermostat."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND,
+                                                    "uebersteuerung": UEBERSTEUERUNG},
+               ueb=UEBERSTEUERUNG, angezeigt=19.0, folgt=True)
+    a.check()
+    _speicher_voll(monkeypatch)
+    a.weiter(3700)
+    assert a.quelle.geschrieben == [16.0] and a.store.uebersteuerung() is None and a.store.angezeigt_zuletzt == 16.0
+
+
+def test_scheitert_das_speichern_gilt_der_stand_im_speicher_und_die_aenderung_wird_gemeldet(
+        make_store, monkeypatch, tmp_path):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "manuell"}, angezeigt=None)
+    gemeldet = []
+    a.store._on_change = lambda: gemeldet.append(a.store.value)
+    _speicher_voll(monkeypatch)
+    a.store.uebersteuerung_setzen(19.0, UEB_BIS)
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": UEB_BIS}
+    assert a.store.apply_portal(22.0, uebersteuerung_behalten=True) is True
+    assert a.store.value == 22.0 and gemeldet == [22.0]

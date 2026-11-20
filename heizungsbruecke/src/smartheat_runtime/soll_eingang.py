@@ -342,10 +342,7 @@ class SollEingang:
         if bool(self._aus) != vorher:
             if self._aus:
                 self._wunsch_verwerfen()  # Soll-Quelle aus ist kein Wunsch: auch ein offener nicht
-                try:
-                    self._store.anzeige_verwerfen()  # ausgeschaltet zeigt sie nur noch, was der Kunde dort einstellt
-                except OSError as exc:  # das Ereignis und der Hinweis an den Host gehen trotzdem hinaus
-                    logger.warning("Gemerkte Anzeige nicht verworfen (%s)", type(exc).__name__)
+                self._store.anzeige_verwerfen()  # ausgeschaltet zeigt sie nur noch, was der Kunde dort einstellt
             self._worker.post(Event(EV_SOLL_QUELLE, {"aus": bool(self._aus)}))
             self._soll_quelle_aus(bool(self._aus), self._store.value if self._aus else None)
         if grund == "modus" and war_aus and not self._aus:
@@ -409,10 +406,7 @@ class SollEingang:
         Uebersteuerung ist mit dem Ende aufgehoben (im Speicher in einem Schritt): sie gehoert zur Regelung, die endet,
         und kein Nachschreiben darf sie danach noch einmal an die Quelle bringen."""
         self._stillgelegt = True
-        try:
-            self._store.uebersteuerung_aufheben()  # im Speicher zuerst: scheitert nur die Datei, gilt sie trotzdem als aufgehoben
-        except OSError as exc:  # das Soll-Ende selbst darf daran nicht scheitern
-            logger.warning("Uebersteuerung nicht aufgehoben (%s)", type(exc).__name__)
+        self._store.uebersteuerung_aufheben()  # im Speicher zuerst: scheitert nur die Datei, gilt sie trotzdem als aufgehoben
         if self._quelle is None or self._aus:
             self._ende_erledigt()
         elif self._wunsch_offen:

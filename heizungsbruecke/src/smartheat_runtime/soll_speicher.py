@@ -188,14 +188,14 @@ class TargetStore:
         if self._angezeigt is None:
             return
         self._angezeigt = None
-        dateien.schreiben_json(self._angezeigt_path, {"temp": None}, modus=dateien.LESBAR)
+        self._speichern(self._angezeigt_path, {"temp": None})
 
     def anzeige_merken(self, wert: float) -> None:
         """Das Thermostat zeigt `wert` (angenommene Eingabe des Kunden): eine Wiederholung ist keine Eingabe mehr."""
         if wert == self._angezeigt:
             return
         self._angezeigt = wert
-        dateien.schreiben_json(self._angezeigt_path, {"temp": wert}, modus=dateien.LESBAR)
+        self._speichern(self._angezeigt_path, {"temp": wert})
 
     def echo_rest(self) -> float:
         """Sekunden, die das Echo-Fenster nach dem eigenen Schreiben noch laeuft (0 = keins)."""
@@ -313,13 +313,13 @@ class TargetStore:
         """Uebersteuerung der kuehlen Phase bis `bis`; der Aufrufer hat Temperatur und Ende geprueft. Der Wunsch
         bleibt unveraendert."""
         self._ueb = {"temp": float(temp), "bis": bis}
-        dateien.schreiben_json(self._ueb_path, self._ueb, modus=dateien.LESBAR)
+        self._speichern(self._ueb_path, self._ueb)
 
     def uebersteuerung_aufheben(self) -> None:
         if self._ueb is None:
             return
         self._ueb = None
-        dateien.schreiben_json(self._ueb_path, None, modus=dateien.LESBAR)
+        self._speichern(self._ueb_path, None)
 
     def jetzt(self) -> datetime:
         """Die Wanduhr des Speichers (mit Zeitzone); fuer Fristen, die einen Neustart ueberstehen muessen."""
@@ -353,5 +353,15 @@ class TargetStore:
         return None
 
     def _write(self) -> None:
-        dateien.schreiben_json(self._path, {"value": self.value, "source": self.source, "ts": self._now_iso()},
-                               modus=dateien.LESBAR)
+        self._speichern(self._path, {"value": self.value, "source": self.source, "ts": self._now_iso()})
+
+    @staticmethod
+    def _speichern(pfad: Path, inhalt) -> None:
+        """Legt den Stand in einer Datei ab. Der Stand im Speicher gilt zuerst und immer: ein Speicherfehler (Datentraeger
+        voll oder nur lesbar) darf weder ein Schreiben ans Thermostat noch das Soll-Ende verhindern. Nach einem Neustart
+        fehlt dann der gemerkte Stand; es gilt der Rueckfall bei unbekannter Anzeige (nichts blind schreiben, das Angleichen
+        holt es nach, sobald die Anzeige gelesen ist). Die Warnung nennt keine Werte."""
+        try:
+            dateien.schreiben_json(pfad, inhalt, modus=dateien.LESBAR)
+        except OSError as exc:
+            logger.warning("Zustand %s nicht gespeichert (%s)", pfad.name, type(exc).__name__)
