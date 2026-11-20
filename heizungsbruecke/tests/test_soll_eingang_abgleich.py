@@ -4,6 +4,7 @@ aendert, aus den Lesewegen und nie aus dem zuletzt abgelegten geltenden Soll."""
 import dataclasses
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fakes import FakeClock
 from test_regulation import RESTORE_POINT, WOCHENPLAN, _mit_plan, _runtime
 
@@ -305,3 +306,177 @@ def test_der_erste_check_schreibt_nicht_bei_ausgeschalteter_quelle(make_store, m
     a.quelle.ausgeschaltet = True
     a.check()
     assert a.quelle.geschrieben == []
+
+
+def test_der_erste_check_ueberschreibt_die_frostschutz_stellung_nicht(make_store, monkeypatch, tmp_path):
+    """HA-Start im Leerstand: das Thermostat zeigt live 5 Grad (Frostschutz-Stellung, gehoert dem Kunden); der erste Check
+    kommt vor dem Lesen des Solls und darf sie nicht auf die Leerstandstemperatur anheben. Danach greift `aus`."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=5.0)
+    a.check()
+    assert a.quelle.geschrieben == []
+    a.rt.worker.post(Event("shg_target_input", {"value": 5.0, "source": "thermostat"}))
+    a.rt.worker.run_pending()
+    a.check()
+    assert a.eingang.aus and a.quelle.geschrieben == []
+
+
+def test_der_erste_check_schreibt_nicht_aus_der_gemerkten_anzeige_bei_leerem_spiegel(make_store, monkeypatch, tmp_path):
+    """Gateway-Start: der Spiegel ist leer (die Live-Anzeige unbekannt), die gemerkte Anzeige ist noch die der Uebersteuerung.
+    Ein Rueckfall auf die gemerkte Anzeige schriebe auf ein Thermostat, das nichts gemeldet hat."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=19.0)
+    a.quelle.wert = None  # gemerkt 19, live unbekannt
+    a.check()
+    assert a.quelle.geschrieben == []
+
+
+def _leerstand_ende(make_store, monkeypatch, tmp_path, *, angezeigt=21.0, mit_ende=False):
+    """Leerstand (16 Grad) bei Wunsch 21, danach ist der Kreis ausser Betrieb: ohne Sperre ergaebe jeder Weg etwas anderes
+    als den gemerkten Wunsch (Leerstandstemperatur oder Wunsch statt dem, was die Quelle zeigt)."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=angezeigt)
+    a.check()
+    a.weiter(100)
+    a.geschrieben_vorher = list(a.quelle.geschrieben)
+    _kreis_ausser_betrieb(a)
+    if mit_ende:
+        _ende(a)
+    return a
+
+
+def test_nach_dem_ende_schreibt_das_nachschreiben_nur_die_schreibung_des_soll_endes(make_store, monkeypatch, tmp_path):
+    """Das Soll-Ende schreibt den Wunsch 21 ueber die Leerstandstemperatur 16; der Befehl geht verloren, das Thermostat
+    meldet nach der Frist weiter 16: einmal noch den Wunsch, nie die Leerstandstemperatur."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=16.0)
+    a.check()
+    _kreis_ausser_betrieb(a)
+    _ende(a)
+    assert a.quelle.geschrieben == [21.0]
+    a.weiter(1900)
+    a.rt.worker.post(Event("shg_target_input", {"value": 16.0, "source": "thermostat"}))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == [21.0, 21.0]
+
+
+@pytest.mark.parametrize("beendet", [False, True])
+def test_nach_dem_ende_schreibt_das_nachschreiben_nicht_unter_den_stand_des_thermostats(
+        make_store, monkeypatch, tmp_path, beendet):
+    """Der Wunsch 21 ging verloren, das Thermostat steht noch auf 23: in Betrieb schreibt das Nachschreiben ihn noch
+    einmal, nach dem Ende der Regelung nicht (es senkte den Wert, den das Thermostat zeigt)."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "manuell"}, angezeigt=23.0)
+    a.store.note_own_write(veraltet=23.0)
+    if beendet:
+        _kreis_ausser_betrieb(a)
+    a.weiter(1900)
+    a.rt.worker.post(Event("shg_target_input", {"value": 23.0, "source": "thermostat"}))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == ([] if beendet else [21.0])
+
+
+@pytest.mark.parametrize("beendet", [False, True])
+def test_nach_dem_ende_schreibt_das_nachschreiben_nichts_unter_dem_wunsch(make_store, monkeypatch, tmp_path, beendet):
+    """Eine Schreibung der Leerstandstemperatur ging verloren, die Regelung endet: das Nachschreiben bringt sie nicht mehr
+    (in Betrieb schreibt es sie noch einmal)."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND}, angezeigt=21.0)
+    a.check()  # schreibt 16, das Thermostat meldet weiter 21
+    assert a.quelle.geschrieben == [16.0]
+    if beendet:
+        _kreis_ausser_betrieb(a)
+    a.weiter(1900)
+    a.rt.worker.post(Event("shg_target_input", {"value": 21.0, "source": "thermostat"}))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == ([16.0] if beendet else [16.0, 16.0])
+
+
+def test_nach_dem_ende_schreibt_ein_portal_wunsch_nichts(make_store, monkeypatch, tmp_path):
+    a = _leerstand_ende(make_store, monkeypatch, tmp_path, angezeigt=16.0, mit_ende=True)
+    vorher = list(a.quelle.geschrieben)
+    a.rt.worker.post(Event("shg_target_input", {"value": 22.0, "source": SOURCE_PORTAL}))
+    a.rt.worker.run_pending()
+    assert a.store.value == 22.0 and a.quelle.geschrieben == vorher
+
+
+def test_nach_dem_ende_schreibt_das_wiedereinschalten_nichts(make_store, monkeypatch, tmp_path):
+    a = _leerstand_ende(make_store, monkeypatch, tmp_path, angezeigt=16.0)
+    for modus in ("off", "heat"):
+        a.rt.worker.post(Event("shg_soll_modus", {"mode": modus}))
+        a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == a.geschrieben_vorher
+
+
+def test_nach_dem_ende_schreibt_der_wartende_abgleich_nichts(make_store, monkeypatch, tmp_path):
+    a = _leerstand_ende(make_store, monkeypatch, tmp_path, angezeigt=16.0)
+    a.rt.worker.post(Event("shg_anzeige_abgleich"))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == a.geschrieben_vorher
+
+
+@pytest.mark.parametrize("mit_ende", [True, False])
+def test_nach_dem_ende_plant_das_ende_einer_neuen_uebersteuerung_nichts_ein(make_store, monkeypatch, tmp_path, mit_ende):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND},
+               ueb=UEBERSTEUERUNG, angezeigt=19.0)
+    a.check()
+    _kreis_ausser_betrieb(a)
+    if mit_ende:
+        _ende(a)
+    geplant = []
+    plan = a.rt.worker.schedule
+    a.rt.worker.schedule = lambda sekunden, event: (geplant.append(event.kind), plan(sekunden, event))[1]
+    a.store.uebersteuerung_setzen(20.0, "2026-11-05T15:00:00Z")  # nach dem Ende gesetzt, nicht durch die Regelung
+    a.weiter(3700)  # das alte Ende der Uebersteuerung faellt
+    assert "shg_ueb_ablauf" not in geplant
+
+
+def test_die_stilllegung_endet_erst_mit_dem_check_nach_der_wiederaufnahme(make_store, monkeypatch, tmp_path):
+    """Der Kreis laeuft wieder, aber noch kein Check: ein Portal-Wunsch schreibt nichts; der naechste Check gleicht einmal an."""
+    a = _leerstand_ende(make_store, monkeypatch, tmp_path, angezeigt=16.0, mit_ende=True)
+    a.quelle.wert = 21.0  # das Thermostat zeigt den Wunsch des Soll-Endes
+    _kreis_ausser_betrieb(a, False)
+    a.rt.idle = True  # die Regelung ruht weiter, ohne dass ein neues Soll-Ende kaeme
+    a.check()  # waehrend der Ruhe: aendert nichts an der Stilllegung
+    a.rt.idle = False
+    vorher = list(a.quelle.geschrieben)
+    a.rt.worker.post(Event("shg_target_input", {"value": 22.0, "source": SOURCE_PORTAL}))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == vorher
+    a.weiter(1900)  # Echo-Fenster der Schreibung des Soll-Endes vorbei: auch der wartende Abgleich schreibt nichts
+    assert a.quelle.geschrieben == vorher
+    a.check()
+    assert a.quelle.geschrieben == [*vorher, 16.0]
+
+
+@pytest.mark.parametrize("zustand", ["ausser_betrieb", "ruhezustand", "abo_ende"])
+def test_nach_dem_ende_der_regelung_kennen_die_lesewege_keine_betriebsart(make_store, monkeypatch, tmp_path, zustand):
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "leerstand", "leerstand": LEERSTAND})
+    assert a.rt.worker.betriebsart() is not None and a.rt.worker.betriebsart_trotz_aus() is not None
+    if zustand == "ausser_betrieb":
+        _kreis_ausser_betrieb(a)
+    elif zustand == "ruhezustand":
+        a.rt.idle = True
+    else:
+        a.rt.store.update(abo_finished=True)
+    assert a.rt.worker.betriebsart() is None and a.rt.worker.betriebsart_trotz_aus() is None
+    assert a.eingang.geltende_anzeige() == 21.0
+
+
+def test_nach_dem_ende_ist_eine_lokale_eingabe_ein_gewoehnlicher_wunsch(make_store, monkeypatch, tmp_path):
+    """Ohne Betriebsart (Leerstand wuerde laufen) geht die lokale Zahl als Wunsch an die Quelle."""
+    a = _leerstand_ende(make_store, monkeypatch, tmp_path, angezeigt=16.0)
+    a.rt.worker.post(Event("shg_target_input", {"value": 22.0, "source": "lokal"}))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben[-1:] == [22.0] and a.store.value == 22.0
+
+
+def test_nach_dem_ende_wird_die_uebersteuerung_aufgehoben_und_das_nachschreiben_schreibt_sie_nicht(
+        make_store, monkeypatch, tmp_path):
+    """Die Uebersteuerung 19 geht verloren, die Regelung endet, nach der Frist meldet das Thermostat wieder 22: der
+    Wunsch gilt, die abgelaufene Uebersteuerung darf nicht noch einmal geschrieben werden."""
+    a = Aufbau(make_store, monkeypatch, tmp_path, {"modus": "manuell"}, angezeigt=22.0)
+    a.store.apply_portal(22.0)
+    a.store.uebersteuerung_setzen(19.0, UEB_BIS)
+    a.check()  # der erste Check schreibt die Uebersteuerung; der Befehl geht verloren (die Anzeige bleibt 22)
+    assert a.quelle.geschrieben == [19.0]
+    _kreis_ausser_betrieb(a)
+    _ende(a)
+    a.weiter(1900)  # die Frist des Schreibbefehls ist vorbei
+    a.rt.worker.post(Event("shg_target_input", {"value": 22.0, "source": "thermostat"}))
+    a.rt.worker.run_pending()
+    assert a.quelle.geschrieben == [19.0] and a.store.uebersteuerung() is None

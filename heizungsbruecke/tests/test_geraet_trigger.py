@@ -712,6 +712,19 @@ def _weg(lage):
                               betriebsart=betriebsart, betriebsart_trotz_aus=betriebsart)
 
 
+@pytest.mark.parametrize("beendet", [False, True])
+def test_the_owed_alignment_is_not_written_after_the_regulation_ended(tmp_path, beendet):
+    """Leerstand laeuft (16), die Angleichung scheiterte; das Lesen beim Verbinden holt sie nach: nach dem Ende der
+    Regelung schreibt der Anlass nichts (die Quelle zeigt den gemerkten Wunsch)."""
+    a = Aufbau(tmp_path, uebersteuerung=_weg(SollErgebnis(soll=16.0, soll_art="leerstand", naechster_wechsel=None)))
+    _portal_waehrend_ha_down(a)
+    a.worker.regelung_beendet = lambda: beendet
+    a.ha.write_error = None
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == ([] if beendet else [(SOLL, 16.0)])
+
+
 def test_the_owed_alignment_writes_a_running_override_not_the_wish(tmp_path):
     a = Aufbau(tmp_path, speicher_uhr=lambda: "2026-01-15T20:00:00+00:00",
                uebersteuerung=_weg(SollErgebnis(soll=19.0, soll_art="uebersteuert", naechster_wechsel=None)))

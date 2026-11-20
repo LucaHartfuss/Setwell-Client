@@ -170,6 +170,12 @@ def ende_schreiben(wunsch: float, quelle: SollQuelle, *,
     return True
 
 
+def quelle_freigegeben(quelle: SollQuelle, angezeigt: float | None) -> bool:
+    """Darf die Regelung der Quelle beim Angleichen etwas schreiben? Nicht bei Modus off und nicht in der Frostschutz-
+    Stellung (bis FROSTSCHUTZ_BIS): beides gehoert dem Kunden. Fuer das Angleichen beim Start und den ersten Check."""
+    return not quelle.aus() and not (angezeigt is not None and angezeigt <= FROSTSCHUTZ_BIS)
+
+
 class SollEingang:
     """Nur im Worker-Thread."""
 
@@ -317,9 +323,12 @@ class SollEingang:
         geltend = self.geltende_anzeige()
         if self._geltend_gesehen is None:
             self._geltend_gesehen = geltend
-            if self._quelle is not None and not self._quelle.aus() and geltend != self._store.value \
-                    and self._bekannt() is not None:
-                self.anzeige_abgleichen("start")
+            if self._quelle is not None and geltend != self._store.value:
+                # Nur die Live-Anzeige zaehlt (kein Rueckfall auf die gemerkte): dieser Check laeuft vor dem Lesen des Solls,
+                # eine Frostschutz-Stellung oder ein leerer Spiegel darf nicht ueberschrieben werden
+                live = self._quelle.angezeigt()
+                if live is not None and quelle_freigegeben(self._quelle, live):
+                    self.anzeige_abgleichen("start", bekannt=live)
         elif geltend != self._geltend_gesehen:
             self.anzeige_abgleichen("check")
 
@@ -396,8 +405,11 @@ class SollEingang:
         bei Soll-Quelle aus (Modus off, Frostschutz-Stellung: die Quelle gehoert dem Kunden) und ohne Quelle. Bei einem
         offenen, noch nicht entprellten Wunsch (der Kunde dreht gerade; sein Wert gewinnt) wird es nach dem Entprellen
         nachgeholt. Erledigt meldet es EV_SOLL_ENDE_ERLEDIGT; bis dahin wiederholt es sich im Takt
-        SOLL_ENDE_WIEDERHOLUNG_S. Der Abgleich ist von hier an stillgelegt (`anzeige_abgleichen`)."""
+        SOLL_ENDE_WIEDERHOLUNG_S. Der Abgleich ist von hier an stillgelegt (`anzeige_abgleichen`). Eine laufende
+        Uebersteuerung ist mit dem Ende aufgehoben (im Speicher in einem Schritt): sie gehoert zur Regelung, die endet,
+        und kein Nachschreiben darf sie danach noch einmal an die Quelle bringen."""
         self._stillgelegt = True
+        self._store.uebersteuerung_aufheben()
         if self._quelle is None or self._aus:
             self._ende_erledigt()
         elif self._wunsch_offen:
@@ -443,6 +455,13 @@ class SollEingang:
         if offen is None or self._aus or self._wunsch_offen or self._ueb_offen or self._beenden_offen is not None:
             return
         geschrieben, gemeldet = offen
+        if self._stillgelegt or self._worker.regelung_beendet():
+            # Nach dem Ende der Regelung gilt nur noch der gemerkte Wunsch, nie weniger: erneut schreibt es hoechstens die
+            # Schreibung des Soll-Endes, und nur, wenn die Quelle weniger zeigt (nicht den Kunden); eine Frostschutz-Stellung
+            # meldet das Thermostat als „aus“, das Nachschreiben kommt dann nicht bis hierher
+            if geschrieben == self._store.value and gemeldet < geschrieben:
+                self._schreiben(geschrieben, veraltet=gemeldet, wiederholung=True)
+            return
         if geschrieben == self.geltende_anzeige():
             self._schreiben(geschrieben, veraltet=gemeldet, wiederholung=True)
         else:  # sonst bliebe der alte Wert stehen und seine Wiederholung wuerde zum Wunsch

@@ -27,6 +27,7 @@ from smartheat_runtime.soll_eingang import (
     FROSTSCHUTZ_BIS,
     SollEingang,
     UebersteuerungsWeg,
+    quelle_freigegeben,
 )
 from smartheat_runtime.soll_speicher import KREIS, SOURCE_LOKAL, SOURCE_THERMOSTAT, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
@@ -499,21 +500,16 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
     worker.register(EV_SOLL_WACHE, on_wache)
     worker.schedule(wache_s, Event(EV_SOLL_WACHE))
     if angleichen and quelle is not None and soll_entity is not None and climate:
-        _start_angleichen(ha_api, eingang, quelle, soll_entity)
+        _start_angleichen(eingang, quelle)
     return client
 
 
-def _start_angleichen(ha_api, eingang: SollEingang, quelle: HaSollQuelle, entity_id: str) -> None:
+def _start_angleichen(eingang: SollEingang, quelle: HaSollQuelle) -> None:
     """"Bedienung angleichen" beim Start (Gateway: `_on_angleichen`): Thermostat, HA und Portal zeigen denselben Wert, ueber
     den Anzeige-Abgleich des Soll-Eingangs. Nicht bei Modus off und nicht in der Frostschutz-Stellung (bis FROSTSCHUTZ_BIS:
     Soll-Quelle aus, beim Wiedereinschalten gleicht der Soll-Eingang an). Scheitert das Schreiben, holt der Trigger es beim
     Verbinden nach (`quelle.angleichen_offen`). Laeuft im Hauptthread vor dem Worker."""
-    try:
-        if ha_api.get_raw_state(entity_id) == "off":
-            return
-    except Exception as error:
-        logger.warning("HVAC-Modus der Soll-Entity nicht gelesen (%s)", type(error).__name__)
     angezeigt = quelle.angezeigt()
-    if angezeigt is not None and angezeigt <= FROSTSCHUTZ_BIS:
+    if not quelle_freigegeben(quelle, angezeigt):  # dieselbe Pruefung wie im ersten Check des Soll-Eingangs
         return
     eingang.anzeige_abgleichen("start", bekannt=angezeigt)
