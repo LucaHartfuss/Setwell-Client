@@ -16,6 +16,7 @@ from heizungsbruecke.push_stand import FRIST_SECONDS as FRIST_PUSH_SECONDS
 from heizungsbruecke.push_stand import PushStand
 from smartheat_core.plan import SollErgebnis
 from smartheat_runtime.dokument_config import ConfigError
+from smartheat_runtime.plan_quelle import Betriebsart
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
 from smartheat_runtime.soll_eingang import EV_TARGET_INPUT, UebersteuerungsWeg
@@ -704,7 +705,11 @@ def test_a_portal_operation_whose_alignment_failed_survives_the_reconnect(tmp_pa
 
 
 def _weg(lage):
-    return UebersteuerungsWeg(lage=lambda: lage, senden=lambda temp, bis, herkunft, durch: None, moeglich=lambda: True)
+    """Lesewege wie in der Laufzeit: Leerstand oder Away laeuft mit der Temperatur der Lage."""
+    betriebsart = (lambda: Betriebsart(lage.soll_art, None, soll=lage.soll)) if lage.soll_art in ("leerstand", "abwesend") \
+        else None
+    return UebersteuerungsWeg(lage=lambda: lage, senden=lambda temp, bis, herkunft, durch: None, moeglich=lambda: True,
+                              betriebsart=betriebsart, betriebsart_trotz_aus=betriebsart)
 
 
 def test_the_owed_alignment_writes_a_running_override_not_the_wish(tmp_path):
@@ -1009,7 +1014,7 @@ def test_a_new_own_write_moves_the_reread_behind_its_window_plus_one_second(tmp_
     a.soll_aenderung(22.5)  # Nachlesen geplant fuer +61
     a.run()
     a.clock.advance(0.5)
-    _portal_schreiben(a, 23.0)  # neues Fenster bis +61,5
+    a.store.note_own_write(veraltet=22.5, geschrieben=23.0)  # neues Fenster bis +61,5 (der Abgleich schriebe erst danach)
     a.clock.advance(59.5)  # +61: das geplante Nachlesen ist faellig, das Fenster laeuft noch 0,5 s
     a.run()
     assert gelesen == []
@@ -1031,7 +1036,7 @@ def test_a_second_window_is_reread_again_after_the_first_reread(tmp_path):
     a.clock.advance(61)
     a.run()
     assert gelesen == [SOLL]
-    _portal_schreiben(a, 23.0)
+    a.store.note_own_write(veraltet=22.5, geschrieben=23.0)
     a.clock.advance(5)
     a.soll_aenderung(23.0)
     a.run()

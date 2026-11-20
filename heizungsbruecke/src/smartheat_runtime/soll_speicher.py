@@ -125,13 +125,17 @@ class TargetStore:
             self.value, self.source = float(start_value), SOURCE_PORTAL
             self._write()
 
-    def apply_portal(self, value) -> bool:
+    def apply_portal(self, value, *, uebersteuerung_behalten: bool = False) -> bool:
+        """Die Bedienung des Servers. Sie beendet die lokale Uebersteuerung, ausser der Aufrufer behaelt sie (Leerstand:
+        dort merkt das Portal nur den Wunsch fuer danach). Die Uebersteuerung wird dann gar nicht angefasst: es gibt kein
+        Fenster, in dem sie geloescht, aber noch nicht wieder gesetzt ist."""
         if not is_valid_portal_target(value):
             logger.warning("Wunschtemperatur %r aus dem Portal verworfen (erlaubt 15-25 °C in 0,5-K-Schritten)", value)
             return False
         if float(value) == self.value:  # Bestaetigung des geltenden Solls: die Quelle bleibt
             return False
-        self.uebersteuerung_aufheben()  # eine neue Bedienung des Servers gilt vor der lokalen Uebersteuerung
+        if not uebersteuerung_behalten:
+            self.uebersteuerung_aufheben()  # eine neue Bedienung des Servers gilt vor der lokalen Uebersteuerung
         return self._set(float(value), SOURCE_PORTAL)
 
     def note_own_write(self, veraltet: float | None = None, geschrieben: float | None = None, *,
@@ -198,6 +202,14 @@ class TargetStore:
         if self._echo_until is None:
             return 0.0
         return max(self._echo_until - self._clock(), 0.0)
+
+    def schreibung_rest(self) -> float:
+        """Sekunden, bis eine eigene Schreibung als erledigt gilt: Echo-Fenster und unbestaetigter Schreibbefehl (das
+        Thermostat hat ihn nicht gemeldet, bis zur Frist). 0: nichts offen."""
+        rest = self.echo_rest()
+        if self._pending is not None:
+            rest = max(rest, self._pending[2] - self._clock())
+        return max(rest, 0.0)
 
     def apply_thermostat(self, value) -> bool:
         neu = self.thermostat_pruefen(value)

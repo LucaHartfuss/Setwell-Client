@@ -219,7 +219,7 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
           push_stand: PushStand | None = None, uhr: Callable[[], float] = time.monotonic,
           abwesend_setzen: AbwesendSetzen | None = None, abwesend_beenden: AbwesendBeenden | None = None,
           abwesend_abgelehnt: Callable[[str], None] | None = None,
-          uebersteuerung: UebersteuerungsWeg | None = None,
+          uebersteuerung: UebersteuerungsWeg | None = None, angleichen: bool = False,
           wanduhr: Callable[[], datetime] = wallclock.now) -> HaTriggerClient:
     """integration_stand: nimmt das Lebenszeichen der Integration (Ereignis smartheat_integration, anlagenweit) auf, nach
     der monotonen uhr; nur der Client, der ihn bekommt, abonniert das Ereignis (ohne Stand gibt es kein Abonnement).
@@ -310,12 +310,10 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
             quelle.angleichen_offen = False  # Wiedereinschalten an; Frostschutz bleibt unangetastet
             eingabe(wert, durch)
             return
-        soll = eingang.geltende_anzeige()  # Uebersteuerung, Leerstand und Abwesenheit gelten vor dem Wunsch
-        if wert == soll:  # zeigt das Soll doch (HA hat es trotz Fehler uebernommen)
+        if wert == eingang.geltende_anzeige():  # zeigt das Soll doch (HA hat es trotz Fehler uebernommen)
             quelle.angleichen_offen = False
             return
-        if quelle.schreiben(soll):
-            store.note_own_write(veraltet=wert, geschrieben=soll)
+        eingang.anzeige_abgleichen("nachholen", bekannt=wert)
 
     def modus(mode) -> None:
         if isinstance(mode, str) and mode not in _MODI_OHNE_AUSSAGE:
@@ -500,4 +498,22 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
 
     worker.register(EV_SOLL_WACHE, on_wache)
     worker.schedule(wache_s, Event(EV_SOLL_WACHE))
+    if angleichen and quelle is not None and soll_entity is not None and climate:
+        _start_angleichen(ha_api, eingang, quelle, soll_entity)
     return client
+
+
+def _start_angleichen(ha_api, eingang: SollEingang, quelle: HaSollQuelle, entity_id: str) -> None:
+    """"Bedienung angleichen" beim Start (Gateway: `_on_angleichen`): Thermostat, HA und Portal zeigen denselben Wert, ueber
+    den Anzeige-Abgleich des Soll-Eingangs. Nicht bei Modus off und nicht in der Frostschutz-Stellung (bis FROSTSCHUTZ_BIS:
+    Soll-Quelle aus, beim Wiedereinschalten gleicht der Soll-Eingang an). Scheitert das Schreiben, holt der Trigger es beim
+    Verbinden nach (`quelle.angleichen_offen`). Laeuft im Hauptthread vor dem Worker."""
+    try:
+        if ha_api.get_raw_state(entity_id) == "off":
+            return
+    except Exception as error:
+        logger.warning("HVAC-Modus der Soll-Entity nicht gelesen (%s)", type(error).__name__)
+    angezeigt = quelle.angezeigt()
+    if angezeigt is not None and angezeigt <= FROSTSCHUTZ_BIS:
+        return
+    eingang.anzeige_abgleichen("start", bekannt=angezeigt)

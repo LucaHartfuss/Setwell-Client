@@ -16,6 +16,7 @@ from smartheat_core.plan import SollErgebnis
 from smartheat_runtime import app, aufraeumen
 from smartheat_runtime.app import StartFailure
 from smartheat_runtime.notifier import Notifier
+from smartheat_runtime.plan_quelle import Betriebsart
 from smartheat_runtime.ports import SourceUnavailable
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT
@@ -141,8 +142,9 @@ def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gesp
     host = HaHost(geraet, env.ha, clock=env.clock)
     loaded = host.load()
     worker = RegulationWorker(env.clock)
-    if lage is not None:
+    if lage is not None:  # die Lesewege der Laufzeit: Leerstand oder Away laeuft mit dieser Temperatur
         worker.geltendes_soll = lambda: lage
+        worker.betriebsart = worker.betriebsart_trotz_aus = lambda: Betriebsart(lage.soll_art, None, soll=lage.soll)
     client = host.trigger_source(loaded.manifest, worker)
     return host, geraet, worker, client
 
@@ -183,6 +185,19 @@ def test_a_running_override_is_written_at_start_not_the_wish(env):
     assert env.ha.writes == [(CLIMATE_SOLL, 19.0)] and host.store.value == 21.5
     _erstes_lesen(env, worker, client, angezeigt=19.5)
     assert geraet.wuensche == [] and host.store.value == 21.5
+
+
+def test_an_operation_that_arrived_during_a_restart_keeps_a_running_override_in_a_vacancy(env):
+    """Im Leerstand merkt die Bedienung des Servers nur den Wunsch fuer danach: die Uebersteuerung bleibt, das Thermostat
+    zeigt sie weiter (die Lesewege des Workers gelten erst bei trigger_source, nicht beim Laden)."""
+    pfad = config.room_target_path(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    ueb = {"temp": 19.0, "bis": "2099-01-01T00:00:00Z"}
+    pfad.with_name(pfad.stem + ".uebersteuerung.json").write_text(json.dumps(ueb))
+    lage = SollErgebnis(soll=16.0, soll_art="leerstand", naechster_wechsel=None)
+    host, _, _, _ = _climate_start(env, angezeigt=19.0, bedienung=bedienung_inhalt(22.0), lage=lage,
+                                   gespeichert={"value": 19.5, "source": "portal", "ts": "x"})
+    assert host.store.value == 22.0 and host.store.uebersteuerung() == ueb and env.ha.writes == []
 
 
 def test_a_failed_start_alignment_is_done_again_on_connect(env):

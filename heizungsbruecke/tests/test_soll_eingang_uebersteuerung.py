@@ -1,6 +1,7 @@
 """Soll-Eingang in der kuehlen Phase: eine Aenderung am Thermostat oder an der lokalen Zahl ist dort eine Uebersteuerung
 bis zum Aufheizbeginn, sonst ein Wunsch (Spec Betriebsarten 7)."""
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -66,8 +67,16 @@ class Aufbau:
             self.worker, self.store, self.quelle, wunsch=self._wunsch, soll_quelle_aus=lambda aus, wirksam: None,
             entprellen_s=entprellen_s,
             uebersteuerung=UebersteuerungsWeg(lage=lambda: self.lage, senden=self._senden, moeglich=lambda: self.faehig,
-                                              betriebsart=lambda: self.betriebsart, beenden=self._beenden)
+                                              betriebsart=self._betriebsart_lesen, beenden=self._beenden)
             if weg else None)
+
+    def _betriebsart_lesen(self) -> Betriebsart | None:
+        """Der Lesepfad der Laufzeit: die Betriebsart mit ihrer eigenen Temperatur (hier aus `lage`, wenn der Test sie
+        nicht selbst setzt)."""
+        b = self.betriebsart
+        if b is not None and b.soll is None and self.lage is not None and self.lage.soll_art == b.art:
+            return replace(b, soll=self.lage.soll)
+        return b
 
     def _beenden(self, art, raum_soll, uebersteuerung, herkunft, durch):
         self.beendet.append((art, raum_soll, uebersteuerung, herkunft, durch))
@@ -811,7 +820,8 @@ def test_geltende_anzeige_in_einer_betriebsart_ohne_uebersteuerung_ist_ihr_soll(
     a.betriebsart = Betriebsart(art, WARM_DANACH)
     assert a.eingang.geltende_anzeige() == soll and a.store.value == 21.0
     a.store.uebersteuerung_setzen(19.0, BIS)
-    assert a.eingang.geltende_anzeige() == 19.0  # eine laufende Uebersteuerung gilt vor der Betriebsart
+    # eine laufende Uebersteuerung gilt vor dem Leerstand, nicht vor Away (dort ist sie aufgehoben)
+    assert a.eingang.geltende_anzeige() == (19.0 if art == "leerstand" else soll)
 
 
 @pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
@@ -911,6 +921,7 @@ def test_leerstand_portal_wunsch_wird_nicht_an_das_thermostat_geschrieben(tmp_pa
     """Der Wunsch gilt erst nach dem Leerstand: das Thermostat bekommt nur das geltende Soll."""
     a = _leerstand(tmp_path)
     a.store.anzeige_merken(LEERSTAND_LAGE.soll)  # das Thermostat zeigt die Leerstandstemperatur
+    a.quelle.wert = LEERSTAND_LAGE.soll
     a.post(22.0, SOURCE_PORTAL)
     assert a.store.value == 22.0 and a.quelle.geschrieben == []
 
@@ -934,7 +945,8 @@ def test_away_portal_wunsch_wird_nicht_an_das_thermostat_geschrieben(tmp_path, m
     if mit_uebersteuerung:
         a.store.uebersteuerung_setzen(19.0, _zeit(a.jetzt + UEBERSTEUERUNG_DAUER))
         ueb = a.store.uebersteuerung()
-    a.store.anzeige_merken(19.0 if mit_uebersteuerung else 17.0)  # das Thermostat zeigt das geltende Soll
+    a.store.anzeige_merken(17.0)  # das Thermostat zeigt das geltende Soll (in Away gilt keine Uebersteuerung)
+    a.quelle.wert = 17.0
     a.post(22.0, SOURCE_PORTAL)
     assert a.store.value == 22.0 and a.store.uebersteuerung() == ueb and a.quelle.geschrieben == []
 

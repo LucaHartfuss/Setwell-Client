@@ -60,6 +60,9 @@ class RegulationWorker:
         #: wie `betriebsart`, aber auch bei Soll-Quelle aus (das Wiedereinschalten braucht das Soll der Betriebsart, bevor
         #: die Laufzeit die Quelle wieder als an kennt)
         self.betriebsart_trotz_aus: Callable[[], Betriebsart | None] = lambda: None
+        #: wird nach jedem lokalen Check aufgerufen (der Soll-Eingang gleicht die Anzeige der Soll-Quelle ab, wenn sich das
+        #: geltende Soll geaendert hat); ohne Soll-Eingang ein No-op. Nur im Worker-Thread.
+        self.anzeige_abgleichen: Callable[[], None] = lambda: None
 
     def register(self, kind: str, handler: Handler) -> None:
         self._handlers[kind] = handler

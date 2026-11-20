@@ -472,6 +472,10 @@ def _run_local_check(rt: Runtime, fehler_text: str) -> None:
         logger.exception(fehler_text)
     else:
         rt.local_check_data_fault_logged = False
+    try:
+        rt.worker.anzeige_abgleichen()  # Beginn und Ende von Leerstand und Away melden nur der Check
+    except Exception:
+        logger.exception("Anzeige-Abgleich nach dem lokalen Check fehlgeschlagen")
 
 
 def _on_local_check(rt: Runtime, event: Event) -> None:

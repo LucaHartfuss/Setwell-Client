@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from smartheat_core import wallclock
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_gateway.bus import Bus
-from smartheat_gateway.thermostat_profil import ThermostatProfil, modus_setzen, profil, soll_und_heizen
+from smartheat_gateway.thermostat_profil import ThermostatProfil, modus_setzen, profil
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
@@ -88,6 +88,8 @@ class _ZigbeeQuelle:
 
     def __init__(self, mirror: ZigbeeMirror, ieee: str, store: TargetStore) -> None:
         self._mirror, self._ieee, self._store = mirror, ieee, store
+        #: nur waehrend des Einrichtens eines neu gekoppelten Thermostats: sein "aus" ist noch der Zustand der Kopplung
+        self.einrichten = False
 
     def profil(self) -> ThermostatProfil | None:
         device = self._mirror.device(self._ieee)
@@ -101,7 +103,7 @@ class _ZigbeeQuelle:
         return payload.get("system_mode") == MODUS_AUS or (ist_endliche_zahl(soll) and soll <= FROSTSCHUTZ_BIS)
 
     def schreiben(self, value: float) -> bool:
-        if self.aus():  # Pruefung vor jedem Schreiben, auch wenn der Soll-Eingang "aus" noch nicht kennt
+        if not self.einrichten and self.aus():  # Pruefung vor jedem Schreiben, auch wenn der Soll-Eingang "aus" noch nicht kennt
             logger.info("Thermostat %s zeigt aus oder Frostschutz: Soll nicht geschrieben", self._ieee)
             return False
         p = self.profil()
@@ -255,19 +257,21 @@ class BusTriggerSource:
         if self._eingang.aus:
             logger.info("Thermostat %s aus oder in Frostschutz-Stellung: kein Angleichen beim Start", self._thermostat)
             return
-        angezeigt = self._quelle.angezeigt()
-        soll = self._eingang.geltende_anzeige()  # Uebersteuerung, Leerstand und Abwesenheit gelten vor dem Wunsch
-        if self._quelle.schreiben(soll):
-            self._store.note_own_write(veraltet=angezeigt, geschrieben=soll)
+        # Uebersteuerung, Leerstand und Abwesenheit gelten vor dem Wunsch; geschrieben wird nur bei Abweichung
+        self._eingang.anzeige_abgleichen("start")
 
     def _on_thermostat_soll(self, event: Event) -> None:
         assert self._quelle is not None and self._thermostat is not None
         p = self._quelle.profil()
         if p is None:
             return
-        soll = self._eingang.geltende_anzeige()
-        soll_und_heizen(self._mirror, self._thermostat, p, soll)
-        self._store.note_own_write(geschrieben=soll)
+        # neu gekoppelt: das geltende Soll ohne Rueckblick, dann heizen (je eine Nachricht)
+        self._quelle.einrichten = True
+        try:
+            self._eingang.anzeige_abgleichen("einrichten", einrichten=True)
+        finally:
+            self._quelle.einrichten = False
+        self._mirror.set(self._thermostat, p.heizen)
 
     def _on_daily(self, event: Event) -> None:
         self._worker.post_coalesced(EV_LOCAL_CHECK, room_target_fired=False)

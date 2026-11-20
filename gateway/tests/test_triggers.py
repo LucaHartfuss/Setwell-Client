@@ -21,7 +21,7 @@ from smartheat_gateway.triggers import (
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
-from smartheat_runtime.soll_eingang import EV_SOLL_QUELLE, FROSTSCHUTZ_BIS, UebersteuerungsWeg
+from smartheat_runtime.soll_eingang import EV_SOLL_QUELLE, FROSTSCHUTZ_BIS, Betriebsart, UebersteuerungsWeg
 from smartheat_runtime.soll_speicher import TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
@@ -931,7 +931,11 @@ def test_start_aligns_a_running_override_not_the_wish(tmp_path, clock):
 
 
 def _weg(lage):
-    return UebersteuerungsWeg(lage=lambda: lage, senden=lambda temp, bis, herkunft, durch: None, moeglich=lambda: True)
+    """Lesewege wie in der Laufzeit: Leerstand oder Away laeuft mit der Temperatur der Lage."""
+    betriebsart = (lambda: Betriebsart(lage.soll_art, None, soll=lage.soll)) if lage.soll_art in ("leerstand", "abwesend") \
+        else None
+    return UebersteuerungsWeg(lage=lambda: lage, senden=lambda temp, bis, herkunft, durch: None, moeglich=lambda: True,
+                              betriebsart=betriebsart, betriebsart_trotz_aus=betriebsart)
 
 
 @pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
