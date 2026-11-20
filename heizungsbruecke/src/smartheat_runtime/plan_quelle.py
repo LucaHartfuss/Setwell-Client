@@ -7,7 +7,7 @@ keine Planeingabe, und das Soll ist der Wunsch wie ohne Plan."""
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from smartheat_core import kreisansicht
 from smartheat_core.plan import SOLL_ART_ABWESEND, SOLL_ART_LEERSTAND, SOLL_ART_WUNSCH, SollErgebnis, soll_effektiv
@@ -69,10 +69,25 @@ def geltendes_soll(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: dat
 @dataclass(frozen=True)
 class Betriebsart:
     """Die laufende Betriebsart des Kreises (`leerstand` oder `abwesend`) und das Soll der Phase, die nach ihrem Ende gilt
-    (Plan ohne Betriebsart und ohne Uebersteuerung)."""
+    (Plan ohne Betriebsart und ohne Uebersteuerung). `bis`: das Ende des Leerstands (bei Away None); eine Uebersteuerung
+    im Leerstand reicht nicht darueber hinaus."""
 
     art: str
     danach: SollErgebnis | None
+    bis: datetime | None = None
+
+
+_ZEIT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _leerstand_ende(bedienung: Mapping) -> datetime | None:
+    """Das Ende des Leerstands aus dem Bedienungsdokument (UTC-Text); None, wenn es fehlt oder unbrauchbar ist."""
+    leerstand = bedienung.get("leerstand")
+    text = leerstand.get("bis") if isinstance(leerstand, Mapping) else None
+    try:
+        return datetime.strptime(text, _ZEIT_FORMAT).replace(tzinfo=UTC) if isinstance(text, str) else None
+    except ValueError:
+        return None
 
 
 def betriebsart_lage(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: datetime, *,
@@ -92,7 +107,8 @@ def betriebsart_lage(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: d
                                eingabe.konfiguration, uhr_vertrauenswuerdig=True, soll_quelle_aus=False)
     except ValueError:
         return None
-    return Betriebsart(art=laufend.soll_art, danach=danach)
+    ende = _leerstand_ende(eingabe.bedienung) if laufend.soll_art == SOLL_ART_LEERSTAND else None
+    return Betriebsart(art=laufend.soll_art, danach=danach, bis=ende)
 
 
 def eingabe_des_geraets(geraet, kreis: int, speicher=None) -> PlanEingabe | None:

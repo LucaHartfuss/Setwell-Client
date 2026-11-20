@@ -821,6 +821,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
@@ -1049,6 +1052,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 22.0
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
@@ -1194,6 +1200,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 22.0
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -1381,6 +1390,9 @@
      "trigger": "target_change"
     }
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
@@ -1542,6 +1554,9 @@
      "seq": "00000000-0000-0000-0000-000000000005",
      "trigger": "target_change"
     }
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -1812,6 +1827,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
@@ -2062,6 +2080,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.0
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -2318,6 +2339,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.0
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -2601,6 +2625,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -3715,6 +3742,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -3954,6 +3984,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -4327,6 +4360,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -4569,6 +4605,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -4728,6 +4767,9 @@
     "failsafe_active": true,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -4958,6 +5000,9 @@
     "failsafe_active": true,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -5228,6 +5273,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -5453,6 +5501,9 @@
     "failsafe_active": true,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",

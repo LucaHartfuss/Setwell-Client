@@ -169,6 +169,19 @@ def test_a_thermostat_change_during_the_addon_pause_is_overwritten_at_start(env)
     assert geraet.wuensche == [] and host.store.value == 21.5
 
 
+def test_a_running_override_is_written_at_start_not_the_wish(env):
+    """Eine Uebersteuerung, die den Neustart ueberlebt hat, zeigt das Thermostat: der Start schreibt sie, nicht den
+    Wunsch (sonst zaehlte die naechste Meldung als Aenderung des Kunden)."""
+    pfad = config.room_target_path(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    pfad.with_name(pfad.stem + ".uebersteuerung.json").write_text(json.dumps({"temp": 19.0, "bis": "2099-01-01T00:00:00Z"}))
+    host, geraet, worker, client = _climate_start(env, angezeigt=7.5 + 12.0, bedienung=bedienung_inhalt(21.5),
+                                                  gespeichert={"value": 21.5, "source": "portal", "ts": "x"})
+    assert env.ha.writes == [(CLIMATE_SOLL, 19.0)] and host.store.value == 21.5
+    _erstes_lesen(env, worker, client, angezeigt=19.5)
+    assert geraet.wuensche == [] and host.store.value == 21.5
+
+
 def test_a_failed_start_alignment_is_done_again_on_connect(env):
     """Scheitert das Angleichen beim Start (HA lehnt ab), holt das erste Verbinden es nach, statt den
     alten Wert der Entity als Wunsch zu nehmen."""

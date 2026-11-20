@@ -23,14 +23,20 @@ und zweite ist eine Uebersteuerung fuer 4 h (nach dem Plan hoechstens bis zum En
 Gezaehlt wird nur, was `TargetStore.thermostat_pruefen` als Eingabe des Kunden durchlaesst (kein Echo eigener
 Schreibvorgaenge, keine Wiederholung der Anzeige), einmal je entprellter Drehung. Das Ende geht nach dem Entprellen mit
 dem letzten Wert als ein Wunsch an den Server (`programm` mit Betriebsart null; war die Phase danach kuehl, mit der
-Uebersteuerung bis zum Aufheizbeginn). Die lokale Zahl und der Wunsch des Portals beenden nichts."""
+Uebersteuerung bis zum Aufheizbeginn). Die lokale Zahl und der Wunsch des Portals beenden nichts.
+
+Anzeige des Thermostats: eine Meldung, die das Thermostat schon zeigt, ist nie eine Aenderung des Kunden. Dazu merkt der
+Speicher die zuletzt angenommene oder geschriebene Anzeige. Laeuft eine Uebersteuerung des Leerstands ab, schreibt die
+Laufzeit die Leerstandstemperatur an die Soll-Quelle zurueck (ein eigener Schreibvorgang mit der alten Anzeige als
+veraltetem Wert); beim Angleichen (Wiedereinschalten) gilt die laufende Uebersteuerung vor dem Wunsch. Die
+Uebersteuerung im Leerstand reicht hoechstens bis zu dessen Ende."""
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Protocol
 
-from smartheat_core.plan import SOLL_ART_ABSENKUNG, SOLL_ART_UEBERSTEUERT, SollErgebnis
+from smartheat_core.plan import SOLL_ART_ABSENKUNG, SOLL_ART_LEERSTAND, SOLL_ART_UEBERSTEUERT, SollErgebnis
 from smartheat_core.safety import ABSENK_UNTERGRENZE_C, BEDIENBEREICH_MAX_C
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime.debounce import Debouncer
@@ -55,6 +61,9 @@ EV_SOLL_ENDE_ERLEDIGT = "shg_soll_ende_erledigt"
 #: Wiederholung eines Soll-Endes, das noch nicht gelang (Anzeige unbekannt oder Schreiben gescheitert).
 EV_SOLL_ENDE_WIEDERHOLEN = "shg_soll_ende_wiederholen"
 SOLL_ENDE_WIEDERHOLUNG_S = 60.0
+#: Das Ende einer Uebersteuerung (Wanduhr des Speichers): danach geht die Leerstandstemperatur an die Soll-Quelle zurueck.
+EV_UEB_ABLAUF = "shg_ueb_ablauf"
+UEB_ABLAUF_PUFFER_S = 1.0
 DEBOUNCE_KIND = "shg_target_debounce"
 #: Ein Soll bis zu diesem Wert ist die Frostschutz-Stellung der Soll-Quelle, kein Bedienwunsch.
 FROSTSCHUTZ_BIS = 7.0
@@ -139,11 +148,14 @@ class SollEingang:
         self._unbrauchbar_gemeldet: set[str] = set()  # Fehlerarten mit WARNING seit dem letzten brauchbaren Wert
         self._ende_wartet = False  # ein Soll-Ende kam bei offenem Wunsch: nach dem Entprellen nachholen
         self._ende_geplant = False  # eine Wiederholung des Soll-Endes ist eingeplant (eine Kette)
+        self._ablauf_geplant = False  # das Ende der Uebersteuerung ist eingeplant (eine Kette)
         self._debouncer = Debouncer(worker, DEBOUNCE_KIND, entprellen_s, self._entprellt)
         worker.register(EV_TARGET_INPUT, self._on_target_input)
         worker.register(EV_SOLL_MODUS, self._on_mode)
         worker.register(EV_SOLL_ENDE, self._on_ende)
         worker.register(EV_SOLL_ENDE_WIEDERHOLEN, self._on_ende_wiederholen)
+        worker.register(EV_UEB_ABLAUF, self._on_ueb_ablauf)
+        self._ablauf_planen()  # eine Uebersteuerung, die den Neustart ueberlebt hat
 
     @property
     def aus(self) -> bool:
@@ -176,9 +188,43 @@ class SollEingang:
         if self._quelle is None:
             return
         angezeigt = self._quelle.angezeigt()
-        if angezeigt == self._store.value:
+        soll = self._store.anzeige()  # eine laufende Uebersteuerung gilt vor dem Wunsch
+        if angezeigt == soll:
             return
-        self._schreiben(self._store.value, veraltet=angezeigt)
+        self._schreiben(soll, veraltet=angezeigt)
+
+    def _ablauf_planen(self) -> None:
+        """Plant das Ende der laufenden Uebersteuerung ein (eine Kette; ohne Uebersteuerung nichts)."""
+        ueb = self._store.uebersteuerung()
+        if self._ablauf_geplant or ueb is None:
+            return
+        try:
+            rest = (datetime.fromisoformat(ueb["bis"]) - self._store.jetzt()).total_seconds()
+        except (ValueError, TypeError):
+            return
+        self._ablauf_geplant = True
+        self._worker.schedule(max(rest, 0.0) + UEB_ABLAUF_PUFFER_S, Event(EV_UEB_ABLAUF))
+
+    def _on_ueb_ablauf(self, event: Event) -> None:
+        """Die Uebersteuerung ist abgelaufen: im Leerstand zeigt die Soll-Quelle wieder die Leerstandstemperatur. Ohne das
+        zeigte das Thermostat weiter den Wert des Kunden, und jede Wiederholung der Meldung sah aus wie eine neue Aenderung.
+        Laeuft noch eine (neu gesetzt), wird erneut eingeplant; bei Soll-Quelle aus oder offener Eingabe des Kunden
+        bleibt die Quelle, wie sie ist."""
+        self._ablauf_geplant = False
+        if self._store.uebersteuerung() is not None:
+            self._ablauf_planen()
+            return
+        weg = self._uebersteuerung
+        if (self._quelle is None or weg is None or self._aus or self._wunsch_offen or self._ueb_offen
+                or self._beenden_offen is not None):
+            return
+        lage = weg.lage()
+        if lage is None or lage.soll_art != SOLL_ART_LEERSTAND or lage.soll is None:
+            return
+        angezeigt = self._quelle.angezeigt()
+        if angezeigt == lage.soll:
+            return
+        self._schreiben(lage.soll, veraltet=angezeigt if angezeigt is not None else self._store.angezeigt_zuletzt)
 
     def _wunsch_verwerfen(self) -> None:
         if self._wunsch_offen and self._vor_wunsch is not None:
@@ -325,8 +371,12 @@ class SollEingang:
         if beendet:
             self._beenden_offen, self._beenden_wert = lage, neu
         else:
-            bis = (self._store.jetzt() + UEBERSTEUERUNG_DAUER).astimezone(UTC).strftime(_ZEIT_FORMAT)
-            self._ueb_eingabe(neu, bis, herkunft, durch, thermostat=True, geprueft=neu)
+            ende = self._store.jetzt() + UEBERSTEUERUNG_DAUER
+            if lage.bis is not None:  # der Plan verwirft eine Uebersteuerung, die ueber das Ende des Leerstands reicht
+                ende = min(ende, lage.bis)
+            self._ueb_eingabe(neu, ende.astimezone(UTC).strftime(_ZEIT_FORMAT), herkunft, durch, thermostat=True,
+                              geprueft=neu)
+            self._ablauf_planen()
         self._debouncer.poke()
         return True
 
@@ -347,6 +397,7 @@ class SollEingang:
                     and danach.naechster_wechsel is not None:
                 bis = danach.naechster_wechsel.astimezone(UTC).strftime(_ZEIT_FORMAT)
                 temp = min(max(wert, ABSENK_UNTERGRENZE_C), BEDIENBEREICH_MAX_C)
+                self._store.anzeige_merken(wert)  # das Thermostat zeigt den Wert der letzten Drehung
                 self._store.uebersteuerung_setzen(temp, bis)
                 weg.beenden(lage.art, None, {"temp": temp, "bis": bis}, herkunft, durch)
                 if temp != wert:  # ein ausgeschaltetes Thermostat verwirft das offene Ende (`_wunsch_verwerfen`)
@@ -385,6 +436,7 @@ class SollEingang:
                 value, angezeigt=None if aktuell is None else aktuell["temp"])
             if neu is None:
                 return False
+            self._store.anzeige_merken(neu)
         else:
             if not is_plausible(value, ROOM_TEMP_RANGE):
                 logger.warning("Lokale Wunschtemperatur unplausibel, verworfen")

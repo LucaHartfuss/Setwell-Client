@@ -332,12 +332,13 @@ class HaHost:
         except Exception as error:
             logger.warning("HVAC-Modus der Soll-Entity nicht gelesen (%s)", type(error).__name__)
         angezeigt = quelle.angezeigt()
-        if angezeigt == self.store.value:
+        soll = self.store.anzeige()  # eine laufende Uebersteuerung gilt vor dem Wunsch
+        if angezeigt == soll:
             return
         if angezeigt is not None and angezeigt <= FROSTSCHUTZ_BIS:
             return  # Frostschutz-Stellung ist ebenfalls "Soll-Quelle aus" (SollEingang)
-        if quelle.schreiben(self.store.value):
-            self.store.note_own_write(veraltet=angezeigt)
+        if quelle.schreiben(soll):
+            self.store.note_own_write(veraltet=angezeigt, geschrieben=soll)
 
     def _raum_changed(self) -> None:
         if self.raum is not None:

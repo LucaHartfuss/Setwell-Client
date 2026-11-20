@@ -272,6 +272,14 @@ def test_ohne_vertrauenswuerdige_uhr_ohne_wunsch_und_ohne_eingabe_gibt_es_keine_
     assert betriebsart_lage(None, 21.0, _zeit("2026-11-05T12:00:00Z"), uhr_vertrauenswuerdig=True) is None
 
 
+def test_im_leerstand_traegt_die_betriebsart_sein_ende_und_bei_away_keines():
+    leerstand = _betriebsart("2026-11-05T12:00:00Z", modus="leerstand", leerstand=LEERSTAND)
+    away = _betriebsart("2026-11-05T12:00:00Z", modus="abwesend", abwesend=ABWESEND)
+
+    assert leerstand.bis == datetime(2026, 11, 20, 10, 0, tzinfo=UTC)
+    assert away.art == "abwesend" and away.bis is None
+
+
 def test_unbrauchbare_dokumentwerte_geben_keine_betriebsart_statt_eines_fehlers():
     eingabe = PlanEingabe(zone="Nirgendwo/Fern", bedienung={"modus": "leerstand", "leerstand": LEERSTAND},
                           konfiguration={})

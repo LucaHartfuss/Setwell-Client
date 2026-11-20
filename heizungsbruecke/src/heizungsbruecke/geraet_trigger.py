@@ -310,11 +310,12 @@ def build(manifest, ha_api, worker: RegulationWorker, store: TargetStore, soll_r
             quelle.angleichen_offen = False  # Wiedereinschalten an; Frostschutz bleibt unangetastet
             eingabe(wert, durch)
             return
-        if wert == store.value:  # zeigt das Soll doch (HA hat es trotz Fehler uebernommen)
+        soll = store.anzeige()  # eine laufende Uebersteuerung gilt vor dem Wunsch
+        if wert == soll:  # zeigt das Soll doch (HA hat es trotz Fehler uebernommen)
             quelle.angleichen_offen = False
             return
-        if quelle.schreiben(store.value):
-            store.note_own_write(veraltet=wert)
+        if quelle.schreiben(soll):
+            store.note_own_write(veraltet=wert, geschrieben=soll)
 
     def modus(mode) -> None:
         if isinstance(mode, str) and mode not in _MODI_OHNE_AUSSAGE:

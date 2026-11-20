@@ -652,3 +652,107 @@ def test_beenden_senden_ohne_offenes_ende_tut_nichts(tmp_path):
     angefangen.eingang._beenden_senden()
     assert a.beendet == [] and ohne_weg.beendet == [] and angefangen.beendet == []
     assert angefangen.store.value == 21.0 and angefangen.eingang._beenden_offen is None
+
+
+# Anzeige des Thermostats nach Ablauf und Neustart, Ende des Leerstands, obere Klemmung
+
+def _ablaufen(a: Aufbau, dauer: timedelta = UEBERSTEUERUNG_DAUER + 5 * KNAPP) -> None:
+    """Die Uebersteuerung laeuft ab: Wanduhr des Speichers und Uhr des Workers laufen um `dauer` weiter."""
+    a.weiter(dauer)
+    a.clock.advance(dauer.total_seconds())
+    a.worker.run_pending()
+
+
+def test_leerstand_nach_ablauf_zaehlt_die_wiederholte_anzeige_nicht_als_aenderung(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.weiter(UEBERSTEUERUNG_DAUER + KNAPP)  # abgelaufen, das Thermostat zeigt weiter 19
+    assert a.store.uebersteuerung() is None
+    a.clock.advance(120)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.leerstand_zaehler.anzahl() == 1 and len(a.gesendet) == 1 and a.store.uebersteuerung() is None
+
+
+def test_leerstand_nach_ablauf_schreibt_die_leerstandstemperatur_an_die_quelle_zurueck(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.quelle.geschrieben == []
+    _ablaufen(a)
+    assert a.quelle.geschrieben == [LEERSTAND_LAGE.soll]
+
+
+def test_leerstand_das_echo_des_zurueckschreibens_und_die_alte_anzeige_zaehlen_nicht(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    _ablaufen(a)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # verspaetete Meldung des alten Werts im Echo-Fenster
+    a.post(LEERSTAND_LAGE.soll, SOURCE_THERMOSTAT, herkunft="soll_entity")  # Echo des Zurueckschreibens
+    a.clock.advance(120)
+    a.post(LEERSTAND_LAGE.soll, SOURCE_THERMOSTAT, herkunft="soll_entity")  # Wiederholung nach dem Echo-Fenster
+    assert a.store.leerstand_zaehler.anzahl() == 1 and len(a.gesendet) == 1 and a.beendet == []
+
+
+def test_leerstand_zurueckschreiben_nur_im_leerstand_und_nicht_bei_laufender_uebersteuerung(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.lage = SollErgebnis(soll=21.0, soll_art=SOLL_ART_WUNSCH, naechster_wechsel=None)  # Leerstand inzwischen beendet
+    _ablaufen(a)
+    assert a.quelle.geschrieben == []
+    (tmp_path / "zweite").mkdir()
+    b = _leerstand(tmp_path / "zweite")
+    b.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    _aendern(b, 20.0, timedelta(hours=3))  # neue Uebersteuerung: die erste ist nicht das Ende
+    _ablaufen(b, timedelta(hours=1, seconds=2))
+    assert b.quelle.geschrieben == [] and b.store.uebersteuerung() is not None
+    _ablaufen(b, timedelta(hours=3))
+    assert b.quelle.geschrieben == [LEERSTAND_LAGE.soll]
+
+
+def test_leerstand_nach_neustart_nach_ablauf_zaehlt_die_wiederholte_anzeige_nicht(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    b = Aufbau(tmp_path)  # Neustart nach Ablauf: nichts ist mehr gesetzt, das Thermostat zeigt 19
+    b.jetzt = a.jetzt + UEBERSTEUERUNG_DAUER + KNAPP
+    b.lage, b.betriebsart = LEERSTAND_LAGE, Betriebsart("leerstand", WARM_DANACH)
+    b.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert b.store.uebersteuerung() is None and b.gesendet == [] and b.store.leerstand_zaehler.anzahl() == 1
+
+
+def test_leerstand_nach_neustart_mit_laufender_uebersteuerung_wird_sie_spaeter_zurueckgeschrieben(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    b = Aufbau(tmp_path)
+    b.jetzt = a.jetzt + timedelta(hours=1)
+    b.lage, b.betriebsart = LEERSTAND_LAGE, Betriebsart("leerstand", WARM_DANACH)
+    b.worker.run_pending()
+    assert b.quelle.geschrieben == []
+    _ablaufen(b)
+    assert b.quelle.geschrieben == [LEERSTAND_LAGE.soll]
+
+
+def test_leerstand_uebersteuerung_endet_mit_dem_leerstand(tmp_path):
+    a = _leerstand(tmp_path)
+    a.betriebsart = Betriebsart("leerstand", WARM_DANACH, bis=a.jetzt + timedelta(hours=1))
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": _zeit(a.jetzt + timedelta(hours=1))}
+
+
+@pytest.mark.parametrize("rest,erwartet", [(UEBERSTEUERUNG_DAUER - KNAPP, UEBERSTEUERUNG_DAUER - KNAPP),
+                                           (UEBERSTEUERUNG_DAUER, UEBERSTEUERUNG_DAUER),
+                                           (UEBERSTEUERUNG_DAUER + KNAPP, UEBERSTEUERUNG_DAUER)],
+                         ids=["knapp_davor", "genau_vier_stunden", "knapp_danach"])
+def test_leerstand_uebersteuerung_haelt_vier_stunden_oder_bis_zum_ende_des_leerstands(tmp_path, rest, erwartet):
+    a = _leerstand(tmp_path)
+    a.betriebsart = Betriebsart("leerstand", WARM_DANACH, bis=a.jetzt + rest)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": _zeit(a.jetzt + erwartet)}
+    assert a.gesendet[0][1] == _zeit(a.jetzt + erwartet)
+
+
+def test_leerstand_ende_in_der_kuehlen_phase_ueber_dem_maximum_wird_begrenzt(tmp_path):
+    a = _leerstand(tmp_path, danach=KUEHL_DANACH)
+    for wert in (19.0, 20.0, 27.0):
+        _aendern(a, wert)
+    oben = safety.BEDIENBEREICH_MAX_C
+    assert a.beendet == [("leerstand", None, {"temp": oben, "bis": BIS}, "soll_entity", "nutzer")]
+    assert a.store.uebersteuerung() == {"temp": oben, "bis": BIS} and a.quelle.geschrieben == [oben]

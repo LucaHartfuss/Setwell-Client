@@ -1,3 +1,4 @@
+import json
 import math
 import time
 from datetime import UTC, datetime, timedelta, timezone
@@ -846,7 +847,7 @@ def test_a_w100_showing_the_rounded_target_lifts_the_frost_position(mit_w100, ca
 ALTER = {"frisch": 0.0, "drei Stunden alt": 3 * 3600.0, "ohne last_seen": None}
 
 
-def _neustart(tmp_path, clock, *, zustand=None, alter=0.0, w100=False, soll=22.0, schlaeft=False):
+def _neustart(tmp_path, clock, *, zustand=None, alter=0.0, w100=False, soll=22.0, schlaeft=False, ueb=None):
     """Prozessstart wie nach einem Neustart: Zigbee2MQTT hat den Zustand des Thermostats vorher retained gemeldet
     (Broker-Replay beim Abonnieren, keine Hooks); alter None = Meldung ohne last_seen. Danach die Laufzeit mit
     Angleichen beim Start."""
@@ -871,7 +872,10 @@ def _neustart(tmp_path, clock, *, zustand=None, alter=0.0, w100=False, soll=22.0
         welt.wuensche.append(value)
         return min(25.0, max(15.0, value))
 
-    welt.store = TargetStore(tmp_path / "room_target.json", soll, clock, lambda: "ts")
+    if ueb is not None:  # eine Uebersteuerung, die den Neustart ueberlebt hat (Wanduhr vor ihrem Ende)
+        (tmp_path / "room_target.uebersteuerung.json").write_text(json.dumps(ueb))
+    welt.store = TargetStore(tmp_path / "room_target.json", soll, clock,
+                             (lambda: "ts") if ueb is None else (lambda: "2026-01-15T20:00:00+00:00"))
     welt.trigger = BusTriggerSource(bus, worker, mirror, welt.store, thermostat=ieee, sensor_ieees=(SENSOR,),
                                     daily_trigger_time=None, wunsch=wunsch, clock=clock, angleichen=True,
                                     soll_quelle_aus=lambda aus, wirksam: welt.aus.append((aus, wirksam)))
@@ -908,6 +912,13 @@ def test_start_aligns_a_thermostat_whose_last_known_state_is_on(tmp_path, clock,
     clock.advance(ROOM_TARGET_DEBOUNCE_SECONDS + 1)
     welt.worker.run_pending()
     assert welt.wuensche == [] and welt.store.value == 22.0
+
+
+def test_start_aligns_a_running_override_not_the_wish(tmp_path, clock):
+    """Bei laufender Uebersteuerung zeigt das Thermostat sie: der Start gleicht sie an, nicht den Wunsch."""
+    zustand = {"system_mode": "heat", "occupied_heating_setpoint": 7.5, "local_temperature": 20.0}
+    welt = _neustart(tmp_path, clock, zustand=zustand, ueb={"temp": 19.0, "bis": "2026-01-15T22:00:00Z"})
+    assert _sollwerte(welt) == [19.0] and welt.store.value == 22.0
 
 
 def test_start_without_a_known_state_aligns_with_the_first_report(tmp_path, clock):

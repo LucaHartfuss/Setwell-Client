@@ -14,6 +14,10 @@ Die Uebersteuerung der kuehlen Phase (Temperatur und Ende) liegt lokal in einer 
 (<name>.uebersteuerung.json) und uebersteht einen Neustart; der Wunsch bleibt dabei unveraendert. Abgelaufen oder
 beschaedigt gilt sie als nicht gesetzt.
 
+Die zuletzt angenommene oder geschriebene Anzeige des Thermostats liegt in <name>.angezeigt.json und uebersteht
+ebenfalls einen Neustart. Gegen sie wird eine Meldung verglichen: ein Wert, den das Thermostat schon zeigt (auch nach dem
+Ablauf der Uebersteuerung oder nach einem Neustart), ist nie eine Eingabe des Kunden.
+
 Die Laufzeit importiert smartheat_device nicht (tests/test_runtime_purity.py); der Bedienbereich steht deshalb hier
 und der Geraetekern (documents.py) nutzt diese Funktion; die Gleichheit der Grenzen mit dem Vertrag
 (smartheat_device.wire.RAUM_SOLL_*) sichert test_soll_speicher.py."""
@@ -101,6 +105,8 @@ class TargetStore:
         self._gerundet: float | None = None  # ganzzahlige Anzeige des halben Grads, die das Thermostat zeigt (nur im Speicher)
         self._ueb_path = path.with_name(path.stem + ".uebersteuerung.json")
         self._ueb = self._ueb_lesen(dateien.lesen_json(self._ueb_path))
+        self._angezeigt_path = path.with_name(path.stem + ".angezeigt.json")
+        self._angezeigt = self._angezeigt_lesen(dateien.lesen_json(self._angezeigt_path))
         #: Die Aenderungen des Kunden im Leerstand (24-h-Fenster), neben dem Wunsch gespeichert.
         self.leerstand_zaehler = LeerstandZaehler(path.with_name(path.stem + ".leerstand.json"), now_iso)
         stored = dateien.lesen_json(path)
@@ -136,6 +142,24 @@ class TargetStore:
         if veraltet is not None:
             stale |= {veraltet}
         self._pending = (written, stale - {written}, now + PENDING_SECONDS)
+        self.anzeige_merken(written)
+
+    def anzeige(self) -> float:
+        """Was das Thermostat zeigen soll: die laufende Uebersteuerung, sonst der Wunsch."""
+        ueb = self.uebersteuerung()
+        return self.value if ueb is None else ueb["temp"]
+
+    @property
+    def angezeigt_zuletzt(self) -> float | None:
+        """Die zuletzt angenommene oder geschriebene Anzeige des Thermostats (None: noch keine bekannt)."""
+        return self._angezeigt
+
+    def anzeige_merken(self, wert: float) -> None:
+        """Das Thermostat zeigt `wert` (angenommene Eingabe des Kunden): eine Wiederholung ist keine Eingabe mehr."""
+        if wert == self._angezeigt:
+            return
+        self._angezeigt = wert
+        dateien.schreiben_json(self._angezeigt_path, {"temp": wert}, modus=dateien.LESBAR)
 
     def echo_rest(self) -> float:
         """Sekunden, die das Echo-Fenster nach dem eigenen Schreiben noch laeuft (0 = keins)."""
@@ -145,7 +169,10 @@ class TargetStore:
 
     def apply_thermostat(self, value) -> bool:
         neu = self.thermostat_pruefen(value)
-        return neu is not None and self._set(neu, SOURCE_THERMOSTAT)
+        if neu is None:
+            return False
+        self.anzeige_merken(neu)
+        return self._set(neu, SOURCE_THERMOSTAT)
 
     def thermostat_pruefen(self, value, *, angezeigt: float | None = None) -> float | None:
         """Der Wert, wenn die Meldung des Thermostats eine Eingabe des Kunden ist (kein Echo, keine Bestaetigung, kein
@@ -168,13 +195,15 @@ class TargetStore:
                     logger.warning("Thermostat hat das Soll %.1f nicht bestaetigt, sein Wert %.1f gilt", written, value)
             elif value == written:
                 self._pending = None
+                self.anzeige_merken(value)
                 return None
             elif value in stale:
                 logger.info("Thermostat meldet noch einen alten Sollwert %.1f (Schreibbefehl offen), verworfen", value)
                 return None
             else:
                 self._pending = None
-        if value == (self.value if angezeigt is None else angezeigt) or value == self._gerundet:
+        bezug = self.value if angezeigt is None else angezeigt
+        if value in (bezug, self._angezeigt, self._gerundet):
             return None  # angezeigtes Soll (Echo, Wiederholung), auch gerundet angezeigt
         return value
 
@@ -262,6 +291,13 @@ class TargetStore:
         except ValueError:
             return None
         return {"temp": float(stored["temp"]), "bis": bis}
+
+    @staticmethod
+    def _angezeigt_lesen(stored) -> float | None:
+        """Gemerkte Anzeige, wenn plausibel; sonst None (kein Absturz bei beschaedigter Datei)."""
+        if isinstance(stored, dict) and is_plausible(stored.get("temp"), ROOM_TEMP_RANGE):
+            return float(stored["temp"])
+        return None
 
     def _write(self) -> None:
         dateien.schreiben_json(self._path, {"value": self.value, "source": self.source, "ts": self._now_iso()},
