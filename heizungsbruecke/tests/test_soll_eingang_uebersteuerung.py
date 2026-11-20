@@ -59,6 +59,7 @@ class Aufbau:
         self.betriebsart: Betriebsart | None = None
         self.lage = SollErgebnis(soll=18.0, soll_art=art, naechster_wechsel=wechsel)
         self.faehig, self.fehler = faehig, fehler
+        self.beenden_ohne_wert = False  # der Geraetekern gibt zum Ende keinen begrenzten Wunsch zurueck
         self.worker.register(EV_LOCAL_CHECK, lambda event: self.checks.append(event.data))
         self.eingang = SollEingang(
             self.worker, self.store, self.quelle, wunsch=self._wunsch, soll_quelle_aus=lambda aus, wirksam: None,
@@ -69,7 +70,7 @@ class Aufbau:
 
     def _beenden(self, art, raum_soll, uebersteuerung, herkunft, durch):
         self.beendet.append((art, raum_soll, uebersteuerung, herkunft, durch))
-        return None if raum_soll is None else min(max(raum_soll, 15.0), 25.0)
+        return None if raum_soll is None or self.beenden_ohne_wert else min(max(raum_soll, 15.0), 25.0)
 
     def weiter(self, dauer: timedelta) -> None:
         self.jetzt += dauer
@@ -537,3 +538,117 @@ def test_ohne_weg_fuer_die_betriebsart_bleibt_es_ein_wunsch(tmp_path):
     a = Aufbau(tmp_path, weg=False)
     a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
     assert a.wuensche == [(22.0, "soll_entity", None)]
+
+
+# Das Ende bei offener Drehung, Schreiben an die Quelle und Absicherung des Sendens
+
+UEBERSTEUERT_LAGE = SollErgebnis(soll=19.0, soll_art=SOLL_ART_UEBERSTEUERT, naechster_wechsel=AUFHEIZBEGINN)
+
+
+def _gesendet_und_entprellt(a: Aufbau, werte: tuple[float, ...]) -> None:
+    for wert in werte:
+        _aendern(a, wert)
+        a.entprellen()
+
+
+@pytest.mark.parametrize("lage", [LEERSTAND_LAGE, UEBERSTEUERT_LAGE], ids=["leerstand", "uebersteuert"])
+def test_leerstand_ende_nimmt_den_letzten_wert_der_drehung_und_zaehlt_sie_einmal(tmp_path, lage):
+    a = _leerstand(tmp_path, entprellen_s=10.0)
+    a.lage = lage  # mit Uebersteuerung gilt die kuehle Phase, die Eingabe waere sonst eine weitere Uebersteuerung
+    _gesendet_und_entprellt(a, (19.0, 20.0))
+    _aendern(a, 22.0)
+    a.post(22.5, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+    a.post(21.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")  # das angezeigte Soll: keine Eingabe
+    assert a.store.leerstand_zaehler.anzahl() == 3
+    a.entprellen()
+    assert a.beendet == [("leerstand", 22.5, None, "soll_entity", "nutzer")]
+    assert len(a.gesendet) == 2 and a.store.value == 22.5
+
+
+def test_leerstand_ende_bei_offenem_wunsch_laeuft_den_gewohnten_weg(tmp_path):
+    a = Aufbau(tmp_path, art=SOLL_ART_WUNSCH, wechsel=None, entprellen_s=10.0)
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")  # Wunsch offen, noch kein Leerstand
+    a.lage, a.betriebsart = LEERSTAND_LAGE, Betriebsart("leerstand", WARM_DANACH)
+    a.post(23.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+    a.entprellen()
+    assert a.wuensche == [(23.0, "soll_entity", "nutzer")] and a.beendet == []
+    assert a.store.leerstand_zaehler.anzahl() == 0
+
+
+def test_leerstand_bestaetigung_eines_eigenen_schreibvorgangs_ist_keine_eingabe_auch_mit_uebersteuerung(tmp_path):
+    a = _leerstand(tmp_path)
+    a.lage = UEBERSTEUERT_LAGE
+    a.store.uebersteuerung_setzen(19.0, BIS)
+    a.store.note_own_write(geschrieben=22.0)
+    a.clock.advance(120)  # Echo-Fenster vorbei, der Schreibbefehl noch offen
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+    assert a.gesendet == [] and a.beendet == [] and a.store.uebersteuerung() == {"temp": 19.0, "bis": BIS}
+    assert a.store.leerstand_zaehler.anzahl() == 0
+
+
+def test_leerstand_uebersteuerung_im_bereich_wird_nicht_an_die_quelle_zurueckgeschrieben(tmp_path):
+    a = _leerstand(tmp_path)
+    _aendern(a, 19.0)
+    assert a.quelle.geschrieben == []
+
+
+def test_leerstand_ende_in_der_kuehlen_phase_im_bereich_schreibt_nichts_zurueck(tmp_path):
+    a = _leerstand(tmp_path, danach=KUEHL_DANACH)
+    for wert in (19.0, 20.0, 19.5):
+        _aendern(a, wert)
+    assert a.quelle.geschrieben == []
+
+
+def test_leerstand_ende_in_der_kuehlen_phase_unter_der_untergrenze_schreibt_den_begrenzten_wert_zurueck(tmp_path):
+    a = _leerstand(tmp_path, danach=KUEHL_DANACH)
+    for wert in (19.0, 20.0, safety.ABSENK_UNTERGRENZE_C - 1.0):
+        _aendern(a, wert)
+    untergrenze = safety.ABSENK_UNTERGRENZE_C
+    assert a.beendet == [("leerstand", None, {"temp": untergrenze, "bis": BIS}, "soll_entity", "nutzer")]
+    assert a.store.uebersteuerung() == {"temp": untergrenze, "bis": BIS}
+    assert a.quelle.geschrieben == [untergrenze]
+
+
+def test_leerstand_ende_in_der_warmen_phase_im_bereich_schreibt_nichts_zurueck(tmp_path):
+    a = _leerstand(tmp_path)
+    for wert in (19.0, 20.0, 22.0):
+        _aendern(a, wert)
+    assert a.quelle.geschrieben == [] and a.store.value == 22.0
+
+
+def test_leerstand_ende_in_der_warmen_phase_ueber_der_begrenzung_schreibt_den_begrenzten_wert_zurueck(tmp_path):
+    a = _leerstand(tmp_path)
+    for wert in (19.0, 20.0, 27.0):
+        _aendern(a, wert)
+    assert a.beendet == [("leerstand", 27.0, None, "soll_entity", "nutzer")]
+    assert a.store.value == 25.0 and a.quelle.geschrieben == [25.0]
+
+
+def test_leerstand_ende_ohne_begrenzten_wunsch_vom_geraetekern_laesst_den_wert_stehen(tmp_path):
+    a = _leerstand(tmp_path)
+    a.beenden_ohne_wert = True
+    for wert in (19.0, 20.0, 27.0):
+        _aendern(a, wert)
+    assert a.store.value == 27.0 and a.quelle.geschrieben == []
+
+
+@pytest.mark.parametrize("wert,danach", [(27.0, WARM_DANACH), (15.0, KUEHL_DANACH)])
+def test_leerstand_thermostat_aus_verwirft_das_offene_ende_und_schreibt_nichts(tmp_path, wert, danach):
+    a = _leerstand(tmp_path, danach=danach, entprellen_s=10.0)
+    _gesendet_und_entprellt(a, (19.0, 20.0))
+    _aendern(a, wert)
+    a.modus("off")
+    a.entprellen()
+    assert a.beendet == [] and a.quelle.geschrieben == [] and a.store.value == 21.0
+
+
+def test_beenden_senden_ohne_offenes_ende_tut_nichts(tmp_path):
+    a = _leerstand(tmp_path)
+    a.eingang._beenden_senden()  # kein Ende vorgemerkt
+    ohne_weg = Aufbau(tmp_path / "ohne", weg=False)
+    ohne_weg.eingang._beenden_senden()
+    angefangen = Aufbau(tmp_path / "wert")
+    angefangen.eingang._beenden_offen = Betriebsart("leerstand", WARM_DANACH)  # vorgemerkt ohne Wert
+    angefangen.eingang._beenden_senden()
+    assert a.beendet == [] and ohne_weg.beendet == [] and angefangen.beendet == []
+    assert angefangen.store.value == 21.0 and angefangen.eingang._beenden_offen is None

@@ -349,7 +349,7 @@ class SollEingang:
                 temp = min(max(wert, ABSENK_UNTERGRENZE_C), BEDIENBEREICH_MAX_C)
                 self._store.uebersteuerung_setzen(temp, bis)
                 weg.beenden(lage.art, None, {"temp": temp, "bis": bis}, herkunft, durch)
-                if temp != wert and not self._aus:
+                if temp != wert:  # ein ausgeschaltetes Thermostat verwirft das offene Ende (`_wunsch_verwerfen`)
                     self._schreiben(temp)
                 return
             self._store.uebersteuerung_aufheben()
@@ -357,8 +357,7 @@ class SollEingang:
             begrenzt = weg.beenden(lage.art, wert, None, herkunft, durch)
             if begrenzt is not None and begrenzt != self._store.value:
                 self._store.begrenzen(begrenzt)
-                if not self._aus:
-                    self._schreiben(begrenzt)
+                self._schreiben(begrenzt)
         except ValueError:
             logger.info("Ende von %s nicht an den Server gesendet (abgelehnt), der Wert gilt lokal", lage.art)
 
