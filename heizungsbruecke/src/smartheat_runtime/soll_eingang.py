@@ -15,7 +15,15 @@ Aenderung des Wunsches, sondern eine Uebersteuerung bis zum naechsten Wechsel (d
 lokal (Soll-Speicher), wird auf 16 °C (Absenk-Untergrenze) bis Bedienbereich-Maximum aus safety.py begrenzt und geht nach
 dem Entprellen einmal als Wunsch mit programm an den Server; scheitert der Versand, gilt sie trotzdem lokal. In jeder
 anderen Lage (warm, Aufheizen, ohne Plan, ohne Faehigkeit) bleibt es ein Wunsch wie bisher. Die Bedienung des Servers
-bleibt Sache des Servers: sie beendet die lokale Uebersteuerung."""
+bleibt Sache des Servers: sie beendet die lokale Uebersteuerung.
+
+Leerstand und Away (mit `UebersteuerungsWeg.betriebsart` und `beenden`, nur mit der Faehigkeit programm): eine Eingabe
+am Thermostat in Away beendet Away. Im Leerstand zaehlt `LeerstandZaehler` die Aenderungen des Kunden in 24 h: die erste
+und zweite ist eine Uebersteuerung fuer 4 h (nach dem Plan hoechstens bis zum Ende des Leerstands), die dritte beendet ihn.
+Gezaehlt wird nur, was `TargetStore.thermostat_pruefen` als Eingabe des Kunden durchlaesst (kein Echo eigener
+Schreibvorgaenge, keine Wiederholung der Anzeige), einmal je entprellter Drehung. Das Ende geht nach dem Entprellen mit
+dem letzten Wert als ein Wunsch an den Server (`programm` mit Betriebsart null; war die Phase danach kuehl, mit der
+Uebersteuerung bis zum Aufheizbeginn). Die lokale Zahl und der Wunsch des Portals beenden nichts."""
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +34,8 @@ from smartheat_core.plan import SOLL_ART_ABSENKUNG, SOLL_ART_UEBERSTEUERT, SollE
 from smartheat_core.safety import ABSENK_UNTERGRENZE_C, BEDIENBEREICH_MAX_C
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_runtime.debounce import Debouncer
+from smartheat_runtime.leerstand_zaehler import BEENDEN_AB, UEBERSTEUERUNG_DAUER
+from smartheat_runtime.plan_quelle import Betriebsart
 from smartheat_runtime.plausibility import ROOM_TEMP_RANGE, is_plausible
 from smartheat_runtime.runtime import EV_LOCAL_CHECK
 from smartheat_runtime.soll_speicher import SOURCE_LOKAL, SOURCE_PORTAL, TargetStore
@@ -49,6 +59,7 @@ DEBOUNCE_KIND = "shg_target_debounce"
 #: Ein Soll bis zu diesem Wert ist die Frostschutz-Stellung der Soll-Quelle, kein Bedienwunsch.
 FROSTSCHUTZ_BIS = 7.0
 MODUS_AUS = "off"
+BETRIEBSART_LEERSTAND = "leerstand"
 _ZEIT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -61,6 +72,11 @@ class UebersteuerungsWeg:
     lage: Callable[[], SollErgebnis | None]
     senden: Callable[[float, str, str | None, str | None], None]
     moeglich: Callable[[], bool]
+    #: Laeuft Leerstand oder Away (Betriebsart des Plans, auch unter einer Uebersteuerung)? None: weder noch.
+    betriebsart: Callable[[], Betriebsart | None] | None = None
+    #: `beenden(art, raum_soll, uebersteuerung, herkunft, durch)`: ein Wunsch, der die Betriebsart beendet und den Wert der
+    #: Phase danach traegt (Wunsch oder Uebersteuerung); Rueckgabe: der begrenzte Wunsch oder None.
+    beenden: Callable[[str, float | None, dict | None, str | None, str | None], float | None] | None = None
 
 
 class SollQuelle(Protocol):
@@ -115,6 +131,9 @@ class SollEingang:
         self._ueb_roh: float | None = None  # der unbegrenzte Wert der Eingabe
         self._ueb_lokal = False  # die Eingabe kam von der lokalen Zahl (die Quelle muss angeglichen werden)
         self._vor_ueb: dict | None = None  # Uebersteuerung vor der ersten offenen Eingabe
+        # Eine Aenderung beendet Leerstand oder Away; sie wird nach dem Entprellen mit dem letzten Wert gesendet
+        self._beenden_offen: Betriebsart | None = None
+        self._beenden_wert: float | None = None
         self._herkunft: tuple[str | None, str | None] = (None, None)
         self._vor_wunsch: tuple[float, str] | None = None  # Soll und Quelle vor dem ersten offenen Wunsch
         self._unbrauchbar_gemeldet: set[str] = set()  # Fehlerarten mit WARNING seit dem letzten brauchbaren Wert
@@ -171,6 +190,7 @@ class SollEingang:
                 self._store.uebersteuerung_aufheben()
         self._ueb_offen = False
         self._vor_ueb = None
+        self._beenden_offen, self._beenden_wert = None, None
         self._wunsch_offen = self._lokal_offen = False
         self._vor_wunsch = None
         if self._ende_wartet:
@@ -226,6 +246,7 @@ class SollEingang:
             self._wunsch_offen = self._lokal_offen = False  # die Bedienung des Servers gilt
             self._vor_wunsch = None
             self._ueb_offen, self._vor_ueb = False, None
+            self._beenden_offen, self._beenden_wert = None, None
             if not self._aus and self._store.value != vorher:
                 self._schreiben(self._store.value)
         elif source == SOURCE_LOKAL:
@@ -256,6 +277,8 @@ class SollEingang:
             self._setze_aus("frost", False)
             if self._aus:
                 return
+            if self._betriebsart_eingabe(value, herkunft, durch):
+                return
             bis = self._kuehl_bis()
             if bis is not None:
                 if self._ueb_eingabe(value, bis, herkunft, durch, thermostat=True):
@@ -271,6 +294,74 @@ class SollEingang:
             self._herkunft = (herkunft, durch)
         self._debouncer.poke()
 
+    def _betriebsart_eingabe(self, value: object, herkunft: str | None, durch: str | None) -> bool:
+        """Eine Eingabe am Thermostat, solange Leerstand oder Away laeuft (nur mit der Faehigkeit programm; die lokale Zahl
+        merkt dort nur den Wunsch). Away endet mit jeder Aenderung. Im Leerstand ist die erste und zweite Aenderung im
+        24-h-Fenster eine Uebersteuerung fuer UEBERSTEUERUNG_DAUER, die dritte beendet ihn. Gezaehlt wird, was der Speicher
+        als Eingabe des Kunden durchlaesst (kein Echo eigener Schreibvorgaenge), einmal je entprellter Drehung. True: die
+        Eingabe ist hier behandelt (auch verworfen), False: sie laeuft den gewohnten Weg."""
+        weg = self._uebersteuerung
+        if weg is None or weg.betriebsart is None or weg.beenden is None or not weg.moeglich():
+            return False
+        if self._beenden_offen is not None:  # dieselbe Drehung: der letzte Wert gilt
+            neu = self._store.thermostat_pruefen(value)
+            if neu is not None:
+                self._beenden_wert, self._herkunft = neu, (herkunft, durch)
+                self._debouncer.poke()
+            return True
+        if self._wunsch_offen:
+            return False
+        lage = weg.betriebsart()
+        if lage is None:
+            return False
+        aktuell = self._store.uebersteuerung()
+        neu = self._store.thermostat_pruefen(value, angezeigt=None if aktuell is None else aktuell["temp"])
+        if neu is None:
+            return True
+        self._herkunft = (herkunft, durch)
+        beendet = lage.art != BETRIEBSART_LEERSTAND
+        if lage.art == BETRIEBSART_LEERSTAND and not self._ueb_offen:
+            beendet = self._store.leerstand_zaehler.eintragen() >= BEENDEN_AB
+        if beendet:
+            self._beenden_offen, self._beenden_wert = lage, neu
+        else:
+            bis = (self._store.jetzt() + UEBERSTEUERUNG_DAUER).astimezone(UTC).strftime(_ZEIT_FORMAT)
+            self._ueb_eingabe(neu, bis, herkunft, durch, thermostat=True, geprueft=neu)
+        self._debouncer.poke()
+        return True
+
+    def _beenden_senden(self) -> None:
+        """Nach dem Entprellen: die Betriebsart endet, der Wert folgt der Phase danach (warm oder ohne Plan: Wunsch, kuehl:
+        Uebersteuerung bis zum Aufheizbeginn). Lehnt der Geraetekern ab, gilt der Wert lokal trotzdem."""
+        lage, wert = self._beenden_offen, self._beenden_wert
+        self._beenden_offen, self._beenden_wert = None, None
+        weg = self._uebersteuerung
+        if lage is None or wert is None or weg is None or weg.beenden is None:
+            return
+        herkunft, durch = self._herkunft
+        danach = lage.danach
+        if lage.art == BETRIEBSART_LEERSTAND:
+            self._store.leerstand_zaehler.leeren()
+        try:
+            if danach is not None and danach.soll_art in (SOLL_ART_ABSENKUNG, SOLL_ART_UEBERSTEUERT) \
+                    and danach.naechster_wechsel is not None:
+                bis = danach.naechster_wechsel.astimezone(UTC).strftime(_ZEIT_FORMAT)
+                temp = min(max(wert, ABSENK_UNTERGRENZE_C), BEDIENBEREICH_MAX_C)
+                self._store.uebersteuerung_setzen(temp, bis)
+                weg.beenden(lage.art, None, {"temp": temp, "bis": bis}, herkunft, durch)
+                if temp != wert and not self._aus:
+                    self._schreiben(temp)
+                return
+            self._store.uebersteuerung_aufheben()
+            self._store.apply_thermostat(wert)
+            begrenzt = weg.beenden(lage.art, wert, None, herkunft, durch)
+            if begrenzt is not None and begrenzt != self._store.value:
+                self._store.begrenzen(begrenzt)
+                if not self._aus:
+                    self._schreiben(begrenzt)
+        except ValueError:
+            logger.info("Ende von %s nicht an den Server gesendet (abgelehnt), der Wert gilt lokal", lage.art)
+
     def _kuehl_bis(self) -> str | None:
         """Ende der Uebersteuerung (naechster Planwechsel, UTC-Text), wenn eine Eingabe jetzt eine waere: Faehigkeit
         programm, kein offener Wunsch, Plan in der kuehlen Phase (Absenkung oder uebersteuert) mit naechstem Wechsel.
@@ -285,12 +376,14 @@ class SollEingang:
         return lage.naechster_wechsel.astimezone(UTC).strftime(_ZEIT_FORMAT)
 
     def _ueb_eingabe(self, value: object, bis: str, herkunft: str | None, durch: str | None, *,
-                     thermostat: bool) -> bool:
+                     thermostat: bool, geprueft: float | None = None) -> bool:
         """Eine Eingabe in der kuehlen Phase wird zur lokalen Uebersteuerung (auf die Grenzen aus safety.py begrenzt).
-        False: keine Eingabe des Kunden (Echo, Wiederholung, unplausibel)."""
+        False: keine Eingabe des Kunden (Echo, Wiederholung, unplausibel). `geprueft`: der Wert, den der Speicher schon als
+        Eingabe des Kunden durchgelassen hat."""
         aktuell = self._store.uebersteuerung()
         if thermostat:
-            neu = self._store.thermostat_pruefen(value, angezeigt=None if aktuell is None else aktuell["temp"])
+            neu = geprueft if geprueft is not None else self._store.thermostat_pruefen(
+                value, angezeigt=None if aktuell is None else aktuell["temp"])
             if neu is None:
                 return False
         else:
@@ -343,6 +436,8 @@ class SollEingang:
                        "bis zu einem brauchbaren Wert", art)
 
     def _entprellt(self) -> None:
+        if self._beenden_offen is not None:
+            self._beenden_senden()
         if self._ueb_offen:
             self._ueb_senden()
         if self._wunsch_offen:

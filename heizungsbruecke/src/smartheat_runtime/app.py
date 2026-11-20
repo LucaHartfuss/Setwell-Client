@@ -29,6 +29,7 @@ from smartheat_runtime import (
     erzeugerstoerung,
     kontingent,
     kreiszustand,
+    plan_quelle,
     regulation,
     roles,
     room_sensors,
@@ -734,6 +735,20 @@ def _ursprung_melder(rt: Runtime, host: Host) -> Callable[[], None]:
     return melden
 
 
+def _betriebsart(rt: Runtime) -> plan_quelle.Betriebsart | None:
+    """Laeuft Leerstand oder Away am Kreis? Jeder Fehler der Eingabe oder der Rechnung heisst: keine Betriebsart (die
+    Eingabe am Thermostat laeuft dann den gewohnten Weg)."""
+    if testphase.aktiv(rt) or rt.soll_quelle_aus:
+        return None
+    try:
+        return plan_quelle.betriebsart_lage(
+            rt.config.plan_source(), rt.store.state.stable_target, wallclock.now(),
+            uhr_vertrauenswuerdig=rt.uhr_vertrauen())
+    except Exception as fehler:
+        logger.warning("Betriebsart nicht berechenbar (%s)", type(fehler).__name__)
+        return None
+
+
 # --- Boot ---
 
 def _prime(rt: Runtime) -> None:
@@ -960,6 +975,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
         rt.mqtt_client.loop_start()
 
     rt.worker.geltendes_soll = lambda: rt.geltendes_soll  # der Soll-Eingang erkennt daran die kuehle Phase
+    rt.worker.betriebsart = lambda: _betriebsart(rt)  # und Leerstand oder Away
     rt.trigger_client = host.trigger_source(loaded.manifest, rt.worker)
     rt.trigger_client.start()
     if ausser and rt.store.state.soll_ende_offen:

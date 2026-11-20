@@ -212,6 +212,9 @@ class FakeGeraet:
     def uebersteuerung_senden(self, kreis, temp, bis, herkunft, durch):
         raise ValueError("keine Faehigkeit programm")
 
+    def betriebsart_beenden(self, kreis, art, raum_soll, uebersteuerung, herkunft, durch):
+        raise ValueError("keine Faehigkeit programm")
+
     def ursprungswerte_merken(self, werte, kreis=1):
         self.gemeldet.append(werte)
         self.gemeldet_kreise.append(kreis)

@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+from datetime import datetime
 
 import pytest
 
@@ -489,3 +490,18 @@ def test_die_uebersteuerung_liegt_wie_der_wunsch_lesbar_und_atomar(tmp_path, clo
     datei = tmp_path / "runtime" / "room_target.uebersteuerung.json"
     assert stat.S_IMODE(os.stat(datei).st_mode) == 0o644
     assert not (tmp_path / "runtime" / "room_target.uebersteuerung.json.tmp").exists()
+
+
+def test_ein_ende_ohne_zeitzone_gilt_als_abgelaufen_statt_abzustuerzen(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._abgelaufen("2099-01-01T00:00:00") is True
+    assert store._abgelaufen("2099-01-01T00:00:00Z") is False
+    assert store._abgelaufen("gestern") is True
+
+
+def test_der_speicher_haelt_den_zaehler_der_leerstand_aenderungen_neben_dem_wunsch(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.leerstand_zaehler.eintragen() == 1
+    assert _store(tmp_path, clock).leerstand_zaehler.anzahl() == 1  # dieselbe Datei nach dem Neustart
+    assert (tmp_path / "runtime" / "room_target.leerstand.json").exists()
+    assert store.jetzt() == datetime.fromisoformat("2026-01-15T08:00:00+01:00")

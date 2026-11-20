@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from smartheat_core import dateien
+from smartheat_runtime.leerstand_zaehler import LeerstandZaehler
 from smartheat_runtime.plausibility import ROOM_TEMP_RANGE, is_plausible
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,8 @@ class TargetStore:
         self._gerundet: float | None = None  # ganzzahlige Anzeige des halben Grads, die das Thermostat zeigt (nur im Speicher)
         self._ueb_path = path.with_name(path.stem + ".uebersteuerung.json")
         self._ueb = self._ueb_lesen(dateien.lesen_json(self._ueb_path))
+        #: Die Aenderungen des Kunden im Leerstand (24-h-Fenster), neben dem Wunsch gespeichert.
+        self.leerstand_zaehler = LeerstandZaehler(path.with_name(path.stem + ".leerstand.json"), now_iso)
         stored = dateien.lesen_json(path)
         if isinstance(stored, dict) and is_plausible(stored.get("value"), ROOM_TEMP_RANGE) and stored.get("source") in _SOURCES:
             self.value, self.source = float(stored["value"]), stored["source"]
@@ -236,10 +239,14 @@ class TargetStore:
         self._ueb = None
         dateien.schreiben_json(self._ueb_path, None, modus=dateien.LESBAR)
 
+    def jetzt(self) -> datetime:
+        """Die Wanduhr des Speichers (mit Zeitzone); fuer Fristen, die einen Neustart ueberstehen muessen."""
+        return datetime.fromisoformat(self._now_iso())
+
     def _abgelaufen(self, bis: str) -> bool:
         try:
             return datetime.fromisoformat(bis) <= datetime.fromisoformat(self._now_iso())
-        except ValueError:
+        except (ValueError, TypeError):  # TypeError: ein Ende ohne Zeitzone ist nicht vergleichbar
             return True
 
     def _ueb_lesen(self, stored) -> dict | None:

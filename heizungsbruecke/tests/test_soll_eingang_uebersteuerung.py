@@ -1,7 +1,7 @@
 """Soll-Eingang in der kuehlen Phase: eine Aenderung am Thermostat oder an der lokalen Zahl ist dort eine Uebersteuerung
 bis zum Aufheizbeginn, sonst ein Wunsch (Spec Betriebsarten 7)."""
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,10 +15,12 @@ from smartheat_core.plan import (
     SOLL_ART_WUNSCH,
     SollErgebnis,
 )
+from smartheat_runtime.leerstand_zaehler import FENSTER, UEBERSTEUERUNG_DAUER
 from smartheat_runtime.runtime import EV_LOCAL_CHECK
 from smartheat_runtime.soll_eingang import (
     EV_SOLL_MODUS,
     EV_TARGET_INPUT,
+    Betriebsart,
     SollEingang,
     UebersteuerungsWeg,
 )
@@ -50,17 +52,27 @@ class Aufbau:
                  fehler=None, entprellen_s=0.0):
         self.clock = FakeClock()
         self.worker = RegulationWorker(self.clock)
-        self.store = TargetStore(tmp_path / "soll.json", 21.0, self.clock, lambda: "2026-01-15T20:00:00+00:00")
+        self.jetzt = datetime(2026, 1, 15, 20, 0, tzinfo=UTC)  # die Wanduhr des Speichers
+        self.store = TargetStore(tmp_path / "soll.json", 21.0, self.clock, lambda: self.jetzt.isoformat())
         self.quelle = Quelle()
-        self.wuensche, self.gesendet, self.checks = [], [], []
+        self.wuensche, self.gesendet, self.checks, self.beendet = [], [], [], []
+        self.betriebsart: Betriebsart | None = None
         self.lage = SollErgebnis(soll=18.0, soll_art=art, naechster_wechsel=wechsel)
         self.faehig, self.fehler = faehig, fehler
         self.worker.register(EV_LOCAL_CHECK, lambda event: self.checks.append(event.data))
         self.eingang = SollEingang(
             self.worker, self.store, self.quelle, wunsch=self._wunsch, soll_quelle_aus=lambda aus, wirksam: None,
             entprellen_s=entprellen_s,
-            uebersteuerung=UebersteuerungsWeg(lage=lambda: self.lage, senden=self._senden,
-                                              moeglich=lambda: self.faehig) if weg else None)
+            uebersteuerung=UebersteuerungsWeg(lage=lambda: self.lage, senden=self._senden, moeglich=lambda: self.faehig,
+                                              betriebsart=lambda: self.betriebsart, beenden=self._beenden)
+            if weg else None)
+
+    def _beenden(self, art, raum_soll, uebersteuerung, herkunft, durch):
+        self.beendet.append((art, raum_soll, uebersteuerung, herkunft, durch))
+        return None if raum_soll is None else min(max(raum_soll, 15.0), 25.0)
+
+    def weiter(self, dauer: timedelta) -> None:
+        self.jetzt += dauer
 
     def _wunsch(self, value, herkunft, durch):
         self.wuensche.append((value, herkunft, durch))
@@ -353,3 +365,175 @@ def test_die_quelle_wird_nur_nach_einer_lokalen_eingabe_angeglichen(tmp_path):
     a.clock.advance(120)  # Echo-Fenster vorbei
     a.post(20.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # am Thermostat gedreht: es zeigt den Wert schon
     assert a.store.uebersteuerung()["temp"] == 20.0 and a.quelle.geschrieben == [22.0]
+
+
+# Leerstand und Away am Thermostat (Spec Betriebsarten 6 und 7)
+
+WARM_DANACH = SollErgebnis(soll=21.0, soll_art=SOLL_ART_WUNSCH, naechster_wechsel=None)
+KUEHL_DANACH = SollErgebnis(soll=18.0, soll_art=SOLL_ART_ABSENKUNG, naechster_wechsel=AUFHEIZBEGINN)
+LEERSTAND_LAGE = SollErgebnis(soll=16.0, soll_art="leerstand", naechster_wechsel=None)
+KNAPP = timedelta(seconds=1)
+
+
+def _zeit(wert: datetime) -> str:
+    return wert.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _leerstand(tmp_path, *, danach=WARM_DANACH, **extra) -> Aufbau:
+    a = Aufbau(tmp_path, **extra)
+    a.lage = LEERSTAND_LAGE
+    a.betriebsart = Betriebsart("leerstand", danach)
+    return a
+
+
+def _aendern(a: Aufbau, wert: float, abstand: timedelta = timedelta(minutes=10)) -> None:
+    a.weiter(abstand)
+    a.clock.advance(120)  # Echo-Fenster vorbei: eine echte Drehung
+    a.post(wert, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+
+
+def test_leerstand_erste_aenderung_ist_eine_uebersteuerung_von_vier_stunden(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+    bis = _zeit(a.jetzt + UEBERSTEUERUNG_DAUER)
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": bis}
+    assert a.gesendet == [(19.0, bis, "soll_entity", "nutzer")]
+    assert a.beendet == [] and a.wuensche == [] and a.store.leerstand_zaehler.anzahl() == 1
+
+
+def test_leerstand_zweite_aenderung_ist_wieder_eine_uebersteuerung(tmp_path):
+    a = _leerstand(tmp_path)
+    _aendern(a, 19.0)
+    _aendern(a, 20.0)
+    assert a.store.uebersteuerung() == {"temp": 20.0, "bis": _zeit(a.jetzt + UEBERSTEUERUNG_DAUER)}
+    assert len(a.gesendet) == 2 and a.beendet == [] and a.store.leerstand_zaehler.anzahl() == 2
+
+
+def test_leerstand_dritte_aenderung_beendet_ihn_und_der_wert_gilt_als_wunsch_in_der_warmen_phase(tmp_path):
+    a = _leerstand(tmp_path)
+    for wert in (19.0, 20.0, 22.0):
+        _aendern(a, wert)
+    assert a.beendet == [("leerstand", 22.0, None, "soll_entity", "nutzer")]
+    assert len(a.gesendet) == 2  # nur die ersten beiden waren Uebersteuerungen
+    assert a.store.value == 22.0 and a.store.uebersteuerung() is None
+    assert a.store.leerstand_zaehler.anzahl() == 0  # das Ende beginnt ein neues Fenster
+
+
+def test_leerstand_dritte_aenderung_in_der_kuehlen_phase_wird_eine_uebersteuerung_bis_zum_aufheizbeginn(tmp_path):
+    a = _leerstand(tmp_path, danach=KUEHL_DANACH)
+    for wert in (19.0, 20.0, 19.5):
+        _aendern(a, wert)
+    assert a.beendet == [("leerstand", None, {"temp": 19.5, "bis": BIS}, "soll_entity", "nutzer")]
+    assert a.store.uebersteuerung() == {"temp": 19.5, "bis": BIS} and a.store.value == 21.0
+
+
+@pytest.mark.parametrize("abstand,beendet", [(FENSTER - KNAPP, True), (FENSTER, False), (FENSTER + KNAPP, False)],
+                         ids=["knapp_davor", "genau_am_ende", "knapp_danach"])
+def test_leerstand_die_erste_aenderung_zaehlt_bis_zum_ende_des_fensters(tmp_path, abstand, beendet):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    _aendern(a, 20.0, timedelta(hours=1))
+    _aendern(a, 22.0, abstand - timedelta(hours=1))
+    assert bool(a.beendet) is beendet
+
+
+@pytest.mark.parametrize("nach,noch_da", [(UEBERSTEUERUNG_DAUER - KNAPP, True), (UEBERSTEUERUNG_DAUER, False)],
+                         ids=["knapp_davor", "am_ende"])
+def test_leerstand_uebersteuerung_gilt_vier_stunden_nicht_laenger(tmp_path, nach, noch_da):
+    a = _leerstand(tmp_path)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.weiter(nach)
+    assert (a.store.uebersteuerung() is not None) is noch_da
+
+
+def test_leerstand_ein_eigener_schreibvorgang_und_sein_echo_zaehlen_nicht(tmp_path):
+    a = _leerstand(tmp_path)
+    a.store.note_own_write(geschrieben=16.0)  # die Regelung hat die Leerstandstemperatur geschrieben
+    a.post(16.0, SOURCE_THERMOSTAT, herkunft="soll_entity")  # ihr Echo
+    assert a.store.leerstand_zaehler.anzahl() == 0 and a.gesendet == [] and a.beendet == []
+
+
+def test_leerstand_dieselbe_anzeige_ein_zweites_mal_ist_keine_neue_aenderung(tmp_path):
+    a = _leerstand(tmp_path)
+    _aendern(a, 19.0)
+    _aendern(a, 19.0)  # das Thermostat meldet denselben Wert erneut
+    assert a.store.leerstand_zaehler.anzahl() == 1 and len(a.gesendet) == 1
+
+
+def test_leerstand_eine_drehung_ueber_mehrere_meldungen_zaehlt_einmal(tmp_path):
+    a = _leerstand(tmp_path, entprellen_s=10.0)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    a.post(19.5, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.store.leerstand_zaehler.anzahl() == 1 and a.gesendet == []
+    a.entprellen()
+    assert [g[0] for g in a.gesendet] == [19.5] and a.store.leerstand_zaehler.anzahl() == 1
+
+
+def test_leerstand_das_fenster_ueberlebt_einen_neustart(tmp_path):
+    a = _leerstand(tmp_path)
+    _aendern(a, 19.0)
+    _aendern(a, 20.0)
+    b = Aufbau(tmp_path)  # derselbe Speicherort, neuer Eingang
+    b.jetzt = a.jetzt
+    b.lage, b.betriebsart = LEERSTAND_LAGE, Betriebsart("leerstand", WARM_DANACH)
+    _aendern(b, 22.0)
+    assert b.beendet == [("leerstand", 22.0, None, "soll_entity", "nutzer")]
+
+
+def test_leerstand_ohne_zaehlbare_aenderung_der_lokalen_zahl_gilt_der_wunsch_fuer_danach(tmp_path):
+    a = _leerstand(tmp_path)
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha", durch="nutzer")
+    assert a.wuensche == [(22.0, "ha", "nutzer")]
+    assert a.store.leerstand_zaehler.anzahl() == 0 and a.beendet == [] and a.store.uebersteuerung() is None
+
+
+def test_away_jede_aenderung_am_thermostat_beendet_es(tmp_path):
+    a = Aufbau(tmp_path)
+    a.lage = SollErgebnis(soll=17.0, soll_art="abwesend", naechster_wechsel=None)
+    a.betriebsart = Betriebsart("abwesend", WARM_DANACH)
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity", durch="nutzer")
+    assert a.beendet == [("abwesend", 22.0, None, "soll_entity", "nutzer")]
+    assert a.store.value == 22.0 and a.store.leerstand_zaehler.anzahl() == 0
+    assert a.gesendet == [] and a.wuensche == []
+
+
+def test_away_in_der_kuehlen_phase_danach_wird_die_aenderung_eine_uebersteuerung(tmp_path):
+    a = Aufbau(tmp_path)
+    a.lage = SollErgebnis(soll=17.0, soll_art="abwesend", naechster_wechsel=None)
+    a.betriebsart = Betriebsart("abwesend", KUEHL_DANACH)
+    a.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.beendet == [("abwesend", None, {"temp": 19.0, "bis": BIS}, "soll_entity", None)]
+    assert a.store.uebersteuerung() == {"temp": 19.0, "bis": BIS}
+
+
+def test_away_die_lokale_zahl_beendet_es_nicht(tmp_path):
+    a = Aufbau(tmp_path)
+    a.lage = SollErgebnis(soll=17.0, soll_art="abwesend", naechster_wechsel=None)
+    a.betriebsart = Betriebsart("abwesend", WARM_DANACH)
+    a.post(22.0, SOURCE_LOKAL, herkunft="ha")
+    assert a.beendet == [] and a.wuensche == [(22.0, "ha", None)]
+
+
+@pytest.mark.parametrize("art", ["leerstand", "abwesend"])
+def test_ohne_faehigkeit_programm_bleibt_es_ein_wunsch(tmp_path, art):
+    a = Aufbau(tmp_path, faehig=False)
+    a.lage = LEERSTAND_LAGE
+    a.betriebsart = Betriebsart(art, WARM_DANACH)
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.wuensche == [(22.0, "soll_entity", None)] and a.beendet == [] and a.gesendet == []
+    assert a.store.leerstand_zaehler.anzahl() == 0
+
+
+def test_ohne_leerstand_und_ohne_away_bleibt_das_verhalten_wie_bisher(tmp_path):
+    a = Aufbau(tmp_path, art=SOLL_ART_WUNSCH, wechsel=None)
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.wuensche == [(22.0, "soll_entity", None)] and a.beendet == [] and a.store.leerstand_zaehler.anzahl() == 0
+    kuehl = Aufbau(tmp_path / "kuehl")
+    kuehl.post(19.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert kuehl.gesendet == [(19.0, BIS, "soll_entity", None)] and kuehl.beendet == []
+
+
+def test_ohne_weg_fuer_die_betriebsart_bleibt_es_ein_wunsch(tmp_path):
+    a = Aufbau(tmp_path, weg=False)
+    a.post(22.0, SOURCE_THERMOSTAT, herkunft="soll_entity")
+    assert a.wuensche == [(22.0, "soll_entity", None)]

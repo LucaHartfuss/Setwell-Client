@@ -292,7 +292,10 @@ class HaHost:
             uebersteuerung=UebersteuerungsWeg(
                 lage=worker.geltendes_soll, moeglich=geraet.programm_faehig,
                 senden=lambda temp, bis, herkunft, durch: geraet.uebersteuerung_senden(
-                    self.kreis, temp, bis, herkunft, durch)),
+                    self.kreis, temp, bis, herkunft, durch),
+                betriebsart=worker.betriebsart,
+                beenden=lambda art, raum_soll, uebersteuerung, herkunft, durch: geraet.betriebsart_beenden(
+                    self.kreis, art, raum_soll, uebersteuerung, herkunft, durch)),
             anlagenkreise=anlagenkreise,
             # das Lebenszeichen der Integration gilt der Anlage: nur der Client des kleinsten Kreises abonniert es
             integration_stand=geraet.integration_stand if self.kreis == min(anlagenkreise) else None,

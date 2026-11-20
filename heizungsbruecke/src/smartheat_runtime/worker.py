@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import NoReturn
 
 from smartheat_core.plan import SollErgebnis
+from smartheat_runtime.plan_quelle import Betriebsart
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,8 @@ class RegulationWorker:
         #: das geltende Soll des Kreises (SollErgebnis oder None), vom Start der Laufzeit gesetzt; der Soll-Eingang
         #: prueft damit, ob eine Eingabe eine Uebersteuerung der kuehlen Phase ist. Nur im Worker-Thread lesen.
         self.geltendes_soll: Callable[[], SollErgebnis | None] = lambda: None
+        #: laeuft Leerstand oder Away (Betriebsart oder None), vom Start der Laufzeit gesetzt; nur im Worker-Thread lesen
+        self.betriebsart: Callable[[], Betriebsart | None] = lambda: None
 
     def register(self, kind: str, handler: Handler) -> None:
         self._handlers[kind] = handler

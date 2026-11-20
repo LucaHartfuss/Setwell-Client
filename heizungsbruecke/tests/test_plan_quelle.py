@@ -5,7 +5,13 @@ from datetime import UTC, datetime
 import pytest
 
 from smartheat_core.plan import SollErgebnis
-from smartheat_runtime.plan_quelle import PlanEingabe, eingabe_des_geraets, geltendes_soll, plan_eingabe
+from smartheat_runtime.plan_quelle import (
+    PlanEingabe,
+    betriebsart_lage,
+    eingabe_des_geraets,
+    geltendes_soll,
+    plan_eingabe,
+)
 
 JETZT = datetime(2026, 11, 2, 23, 30, tzinfo=UTC)
 PLAN = [{"tag": tag, "warm_ab": "06:30", "kuehl_ab": "22:30"} for tag in range(1, 8)]
@@ -211,3 +217,63 @@ def test_uebersteuerung_im_leerstand_endet_nach_vier_stunden_und_laengere_gilt_n
                                                                            _zeit("2026-11-20T10:00:00Z"))
     assert im_leerstand("2026-11-05T12:00:00Z", "2026-11-05T16:00:01Z") == (16.0, "leerstand",
                                                                            _zeit("2026-11-20T10:00:00Z"))
+
+
+def _betriebsart(jetzt, vertrauen=True, wunsch=21.0, **bedienung):
+    konfiguration = {"zeitzone": "Europe/Berlin",
+                     "kreise": [{"kreis": 1, "absenkung_k": 3, "aufheizdauer_min": {"plan": 0, "weg": 0}}]}
+    dokument = {"kreise": [{"kreis": 1, "modus": "manuell", "wochenplan": PLAN, **bedienung}]}
+    return betriebsart_lage(plan_eingabe(konfiguration, dokument, 1), wunsch, _zeit(jetzt),
+                            uhr_vertrauenswuerdig=vertrauen)
+
+
+LEERSTAND = {"von": "2026-11-01T00:00:00Z", "bis": "2026-11-20T10:00:00Z", "temp": 16.0, "aufheizen_ab": None}
+ABWESEND = {"bis": "2026-11-20T10:00:00Z", "temp": 16.0, "aufheizen_ab": None}
+
+
+def test_im_leerstand_ist_die_betriebsart_leerstand_und_danach_gilt_der_plan():
+    warm = _betriebsart("2026-11-05T12:00:00Z", modus="leerstand", leerstand=LEERSTAND)
+    kuehl = _betriebsart("2026-11-05T22:00:00Z", modus="leerstand", leerstand=LEERSTAND)
+
+    assert warm.art == "leerstand" and (warm.danach.soll, warm.danach.soll_art) == (21.0, "wunsch")
+    assert kuehl.art == "leerstand" and (kuehl.danach.soll, kuehl.danach.soll_art) == (18.0, "absenkung")
+    assert kuehl.danach.naechster_wechsel is not None
+
+
+def test_in_away_ist_die_betriebsart_abwesend():
+    away = _betriebsart("2026-11-05T12:00:00Z", modus="abwesend", abwesend=ABWESEND)
+
+    assert away.art == "abwesend" and away.danach.soll_art == "wunsch"
+
+
+def test_eine_uebersteuerung_im_leerstand_aendert_die_betriebsart_nicht():
+    ueber = {"temp": 19.0, "bis": "2026-11-05T16:00:00Z"}
+    lage = _betriebsart("2026-11-05T12:00:00Z", modus="leerstand", leerstand=LEERSTAND, uebersteuerung=ueber)
+
+    assert lage.art == "leerstand" and lage.danach.soll_art == "wunsch"
+
+
+@pytest.mark.parametrize("jetzt, bedienung", [
+    ("2026-11-05T12:00:00Z", {}),  # kein Leerstand, kein Away
+    ("2026-11-05T22:00:00Z", {}),  # kuehle Phase des Plans allein
+    ("2026-10-30T12:00:00Z", {"modus": "leerstand", "leerstand": LEERSTAND}),  # vor dem Beginn
+    ("2026-11-21T12:00:00Z", {"modus": "abwesend", "abwesend": ABWESEND}),  # nach dem Ende
+    ("2026-11-05T12:00:00Z", {"modus": "manuell", "leerstand": LEERSTAND}),  # Modus nicht Leerstand
+])
+def test_ohne_laufende_betriebsart_gibt_es_keine(jetzt, bedienung):
+    assert _betriebsart(jetzt, **bedienung) is None
+
+
+def test_ohne_vertrauenswuerdige_uhr_ohne_wunsch_und_ohne_eingabe_gibt_es_keine_betriebsart():
+    leerstand = {"modus": "leerstand", "leerstand": LEERSTAND}
+
+    assert _betriebsart("2026-11-05T12:00:00Z", vertrauen=False, **leerstand) is None
+    assert _betriebsart("2026-11-05T12:00:00Z", wunsch=None, **leerstand) is None
+    assert betriebsart_lage(None, 21.0, _zeit("2026-11-05T12:00:00Z"), uhr_vertrauenswuerdig=True) is None
+
+
+def test_unbrauchbare_dokumentwerte_geben_keine_betriebsart_statt_eines_fehlers():
+    eingabe = PlanEingabe(zone="Nirgendwo/Fern", bedienung={"modus": "leerstand", "leerstand": LEERSTAND},
+                          konfiguration={})
+
+    assert betriebsart_lage(eingabe, 21.0, _zeit("2026-11-05T12:00:00Z"), uhr_vertrauenswuerdig=True) is None

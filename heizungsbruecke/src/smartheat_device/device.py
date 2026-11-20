@@ -389,6 +389,36 @@ class Device:
             raise ValueError("Uebersteuerung ohne gueltiges Ende") from None
         self._inbox.put(("uebersteuerung", kreis, {"temp": float(temp), "bis": bis}, herkunft, durch))
 
+    def betriebsart_beenden(self, kreis: int, art: str, raum_soll: float | None, uebersteuerung: dict | None,
+                            herkunft: str | None, durch: str | None) -> float | None:
+        """Eine Eingabe des Kunden am Thermostat beendet Leerstand oder Away (Worker-Thread des Kreises): ein Bedienwunsch
+        mit der Betriebsart null und dem Wert der Phase danach, `raum_soll` (Rueckgabe: sofort begrenzt) oder eine
+        Uebersteuerung (kuehle Phase danach), in einem Wunsch, denn je Kreis haelt der Puffer nur einen. ValueError
+        (nie mit Wert oder Zeit), wenn die Faehigkeit fehlt oder etwas nicht zum Vertrag passt; dann kommt nichts in die
+        Inbox. Das Ende von Away gilt lokal sofort (wie bei abwesend_beenden)."""
+        if not self.programm_faehig():
+            raise ValueError("Faehigkeit programm nicht angeboten")
+        if art not in ("leerstand", "abwesend"):
+            raise ValueError("Betriebsart unbekannt")
+        if (raum_soll is None) == (uebersteuerung is None):
+            raise ValueError("Ende einer Betriebsart braucht genau einen Wert")
+        wish.pruefen_herkunft(herkunft, durch)
+        wish.pruefen_kreis(kreis)
+        begrenzt, roh = wish.begrenzen(raum_soll) if raum_soll is not None else (None, None)
+        if uebersteuerung is not None:
+            if not safety.uebersteuerung_temperatur_gueltig(uebersteuerung.get("temp")):
+                raise ValueError("Uebersteuerung ausserhalb der Grenzen")
+            try:
+                datetime.strptime(uebersteuerung.get("bis"), _ZEIT_FORMAT)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                raise ValueError("Uebersteuerung ohne gueltiges Ende") from None
+            uebersteuerung = {"temp": float(uebersteuerung["temp"]), "bis": uebersteuerung["bis"]}
+        if art == "abwesend":
+            with self._abwesend_sperre:
+                self._abwesend_lokal[kreis] = None
+        self._inbox.put(("beenden", kreis, art, begrenzt, roh, uebersteuerung, herkunft, durch))
+        return begrenzt
+
     def abwesend_abgelehnt(self, grund: str) -> None:
         """Hinweis `abwesend_abgelehnt` mit dem festen Grund; er schliesst beim naechsten angenommenen Away."""
         self._inbox.put(("abwesend_hinweis", meldungen.neu("meldung.abwesend_abgelehnt", grund=grund)))
@@ -480,6 +510,8 @@ class Device:
             self._abwesend_wunsch(*item[1:])
         elif quelle == "uebersteuerung":
             self._uebersteuerung_wunsch(*item[1:])
+        elif quelle == "beenden":
+            self._beenden_wunsch(*item[1:])
         elif quelle == "eigene":
             self._eigene_meldung(item[1], item[2])
         elif quelle == "abwesend_hinweis":
@@ -898,6 +930,25 @@ class Device:
                        programm={"uebersteuerung": uebersteuerung})
         self.wunsch_puffer.setzen(neu)
         self.documents.mark_dirty()
+        self._wunsch_senden()
+
+    def _beenden_wunsch(self, kreis: int, art: str, begrenzt: float | None, roh: float | None,
+                        uebersteuerung: dict | None, herkunft: str | None, durch: str | None) -> None:
+        """Das Ende von Leerstand oder Away als ein Bedienwunsch: die Betriebsart null, dazu der Wunsch oder die
+        Uebersteuerung der Phase danach."""
+        programm: dict = {art: None}
+        if uebersteuerung is not None:
+            programm["uebersteuerung"] = uebersteuerung
+        neu = wish.neu(begrenzt, roh, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
+                       uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall(),
+                       programm=programm)
+        self.wunsch_puffer.setzen(neu)
+        self.documents.mark_dirty()
+        if art == "abwesend":
+            self._abwesend_hinweis = None
+        if begrenzt is not None:
+            meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
+            self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from smartheat_core import kreisansicht
-from smartheat_core.plan import SOLL_ART_WUNSCH, SollErgebnis, soll_effektiv
+from smartheat_core.plan import SOLL_ART_ABWESEND, SOLL_ART_LEERSTAND, SOLL_ART_WUNSCH, SollErgebnis, soll_effektiv
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,35 @@ def geltendes_soll(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: dat
     except ValueError as fehler:
         logger.warning("Plan nicht berechenbar (%s), es gilt der Wunsch", type(fehler).__name__)
         return nur_wunsch
+
+
+@dataclass(frozen=True)
+class Betriebsart:
+    """Die laufende Betriebsart des Kreises (`leerstand` oder `abwesend`) und das Soll der Phase, die nach ihrem Ende gilt
+    (Plan ohne Betriebsart und ohne Uebersteuerung)."""
+
+    art: str
+    danach: SollErgebnis | None
+
+
+def betriebsart_lage(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: datetime, *,
+                     uhr_vertrauenswuerdig: bool) -> Betriebsart | None:
+    """Laeuft jetzt Leerstand oder Away (auch unter einer Uebersteuerung)? Dann die Art und das Soll danach, sonst None.
+    Ohne Planeingabe, ohne Wunsch, ohne vertrauenswuerdige Uhr oder bei unbrauchbaren Dokumentwerten gibt es keine
+    Betriebsart: die Eingabe laeuft den gewohnten Weg."""
+    if eingabe is None or wunsch is None or uhr_vertrauenswuerdig is not True:
+        return None
+    ohne_ueb = {schluessel: wert for schluessel, wert in eingabe.bedienung.items() if schluessel != "uebersteuerung"}
+    try:
+        laufend = soll_effektiv(jetzt, eingabe.zone, {**ohne_ueb, "raum_soll": wunsch}, eingabe.konfiguration,
+                                uhr_vertrauenswuerdig=True, soll_quelle_aus=False)
+        if laufend.soll_art not in (SOLL_ART_LEERSTAND, SOLL_ART_ABWESEND):
+            return None
+        danach = soll_effektiv(jetzt, eingabe.zone, {**ohne_ueb, "raum_soll": wunsch, "modus": "wunsch"},
+                               eingabe.konfiguration, uhr_vertrauenswuerdig=True, soll_quelle_aus=False)
+    except ValueError:
+        return None
+    return Betriebsart(art=laufend.soll_art, danach=danach)
 
 
 def eingabe_des_geraets(geraet, kreis: int, speicher=None) -> PlanEingabe | None:
