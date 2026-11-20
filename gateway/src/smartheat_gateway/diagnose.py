@@ -4,11 +4,12 @@ auf diesem Port; der Gesundheitsserver (nur_health, nur Loopback des Hosts) blei
 keine Version. Zeigt den Zustand des Geraetekerns (wie die LED), die Seriennummer, Hinweise des Dienstes
 (Befehl hinweis), eigene Meldungen (Wunsch begrenzt, Soll-Quelle aus), eine abgelehnte Konfiguration und, solange das
 Gateway nicht uebernommen ist (Anzeige.code_zeigen) und nach einem Knopfdruck das Code-Fenster (15 min) offen ist,
-Geraete-ID und Uebernahme-Code (kein QR-Code, kein Portal-Link mit Code, GW 7.1) - nur lokal; sonst nach einem Druck den Hinweis "keine Verbindung"
+Geraete-ID und Uebernahme-Code (kein QR-Code und kein Portal-Link mit dem Code) - nur lokal; sonst nach einem Druck den Hinweis "keine Verbindung"
 bzw. "uebernommen". Dauerhaft, auch ohne Fenster, zeigt die Tabelle im Stand uebernommen die Zeile "uebernommen" und
 die Maske der Adresse des Kontos (`a***@e***.com`, nie die volle Adresse), solange das Geraet eine hat.
 Bei offener Anmeldung beim Hersteller (`anmeldung`) zeigt die Seite hinter der Sitzung den Abschnitt "Anmelden beim Hersteller"
-mit der Adresse (geheimer state; nur in dieser Antwort, nie im Zustand, in diagnostics oder im Log).
+mit der Adresse als Link und als QR-Code (Inline-SVG; geheimer state; nur in dieser Antwort, nie im Zustand, in
+diagnostics oder im Log).
 Die festen Texte stehen in lokale_texte.json (de, en); Accept-Language waehlt nur zwischen den beiden (sonst en) und wird nie ausgegeben.
 Den Uebernahmestand meldet der Server (claim_state, new_claim_code); bis dahin gilt der Stand des Bootstraps. /healthz
 fuer den Updater.
@@ -28,6 +29,8 @@ import threading
 import urllib.parse
 from collections.abc import Callable, Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import segno
 
 from smartheat_gateway import lokale_texte
 from smartheat_gateway.anmeldung import Zugang
@@ -128,6 +131,14 @@ def _hinweis_text(hinweis: dict, texte: dict[str, str]) -> str:
     return str(code)
 
 
+def _qr_svg(url: str) -> str:
+    """Die Adresse als Inline-SVG, offline erzeugt (kein Bild per URL, kein Titel, kein Skript, kein Stil-Element: die
+    Seite braucht keine Lockerung). Fehlerkorrektur `l`: der Code steht auf einem Bildschirm, nicht auf Papier; die
+    Adresse mit state, Challenge und redirect_uri ist rund 300 Zeichen lang, und `l` haelt sie bei Version 11 (69
+    Modulen) statt 13 (77) bei `m`, also mit groesseren Modulen und besser lesbar aus dem Abstand."""
+    return segno.make(url, error="l").svg_inline(scale=4, border=4, dark="#000", light="#fff")
+
+
 def render_html(data: dict, sprache: str = lokale_texte.STANDARD) -> str:
     """Die Seite in `sprache` (de oder en, sonst die Standardsprache); alle festen Texte stehen in lokale_texte.json."""
     sprache = sprache if sprache in lokale_texte.SPRACHEN else lokale_texte.STANDARD
@@ -173,7 +184,9 @@ def render_html(data: dict, sprache: str = lokale_texte.STANDARD) -> str:
     if isinstance(data.get("anmelde_url"), str) and data["anmelde_url"]:
         hersteller = (f"<h2>{html.escape(t['abschnitt.anmelden'])}</h2><p>{html.escape(t['text.anmelden'])}</p>"
                       f'<p><a href="{html.escape(data["anmelde_url"])}" rel="noreferrer noopener">'
-                      f"{html.escape(t['link.anmelden'])}</a></p>")
+                      f"{html.escape(t['link.anmelden'])}</a></p>"
+                      f'<div role="img" aria-label="{html.escape(t["alt.anmelden_qr"])}">'
+                      f"{_qr_svg(data['anmelde_url'])}</div>")
     titel = html.escape(t["titel"])
     return (
         f'<!doctype html><html lang="{sprache}"><head><meta charset="utf-8">'

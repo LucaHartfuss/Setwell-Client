@@ -1,11 +1,14 @@
-"""Abschnitt "Anmelden beim Hersteller" der LAN-Seite: der Link mit state und Challenge erscheint nur hinter der Sitzung,
-nur bei offener Anmeldung, mit no-store, und nie im Auszug fuer diagnostics, im Ergebnis oder im Log."""
+"""Abschnitt "Anmelden beim Hersteller" der LAN-Seite: der Link mit state und Challenge und der QR-Code derselben Adresse
+erscheinen nur hinter der Sitzung, nur bei offener Anmeldung, mit no-store, und nie im Auszug fuer diagnostics, im
+Ergebnis oder im Log."""
+import html
 import http.client
 import json
 import logging
 from pathlib import Path
 
 import pytest
+import segno
 
 from smartheat_gateway import lokale_texte
 from smartheat_gateway.anmeldung import Zugang
@@ -60,8 +63,49 @@ def test_the_section_shows_the_link_escaped_in_both_languages():
         t = lokale_texte.alle(sprache)
         assert t["abschnitt.anmelden"] in seite and t["text.anmelden"] in seite
         assert 'href="' + URL.replace("&", "&amp;") + '"' in seite
-        assert "<svg" not in seite and "<img" not in seite  # kein QR-Code
+        assert "<img" not in seite  # der QR-Code ist ein Inline-SVG, kein Bild
         assert "noreferrer" in seite
+        assert t["alt.anmelden_qr"] in seite
+
+
+def _erwartetes_svg(url: str) -> str:
+    return segno.make(url, error="l").svg_inline(scale=4, border=4, dark="#000", light="#fff")
+
+
+def test_the_section_shows_a_qr_code_with_the_same_url_next_to_the_link():
+    seite = render_html({**SNAPSHOT, "anmelde_url": URL}, "de")
+    assert _erwartetes_svg(URL) in seite
+    assert seite.index("<svg") > seite.index("<a href=")  # der Link bleibt daneben stehen
+    assert 'aria-label="' + html.escape(lokale_texte.alle("de")["alt.anmelden_qr"]) + '"' in seite
+    assert 'aria-label="' + html.escape(lokale_texte.alle("en")["alt.anmelden_qr"]) + '"' in render_html(
+        {**SNAPSHOT, "anmelde_url": URL}, "en")
+
+
+def test_the_qr_code_is_self_contained():
+    svg = _erwartetes_svg(URL)
+    seite = render_html({**SNAPSHOT, "anmelde_url": URL}, "de")
+    inline = seite[seite.index("<svg"):seite.index("</svg>") + len("</svg>")]
+    assert inline == svg
+    for verboten in ("<script", "xlink:href", "http://", "https://", "<image", "<use", "<style", "onload"):
+        assert verboten not in inline
+
+
+def test_a_long_url_still_fits_into_one_qr_code():
+    lang = URL + "&redirect_uri=" + "x" * 400
+    assert _erwartetes_svg(lang) in render_html({**SNAPSHOT, "anmelde_url": lang}, "de")
+
+
+def test_the_qr_code_is_only_served_with_a_session_and_an_open_login(server_mit_anmeldung):
+    port = server_mit_anmeldung(lambda: URL)
+    status, koerper, kopf = _get(port, "/")
+    assert status == 200 and _erwartetes_svg(URL) in koerper and kopf["Cache-Control"] == "no-store"
+    assert "<svg" not in _get(port, "/", cookie=None)[1]
+    assert "<svg" not in _get(port, "/", cookie="shg_sitzung=falsch")[1]
+    assert "<svg" not in _get(port, "/healthz")[1]
+    offen = server_mit_anmeldung(lambda: None)
+    assert "<svg" not in _get(offen, "/")[1]
+    health = server_mit_anmeldung(lambda: URL, nur_health=True)
+    assert "<svg" not in _get(health, "/", cookie=None)[1]
 
 
 def test_a_hostile_url_is_escaped():

@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Der Abschnitt „Anmelden beim Hersteller“ der LAN-Seite zeigt neben dem Link einen QR-Code derselben Adresse
+  (Inline-SVG, offline mit `segno` 1.6.6 erzeugt, gepinnt in der Lock). Er erscheint unter denselben Bedingungen wie der
+  Link: nur mit Sitzung, nur bei offener Anmeldung, `no-store`, nie in `diagnostics` oder im Log.
+
 - Werks-Image: `/etc/hostname` fehlt jetzt wirklich (Hook `postbuild40-hostname` nach bdebstrap). Vorher schrieb
   bdebstrap die Datei nach dem Layer-Hook neu; die Rootfs-Pruefung brach den Bau ab.
 
