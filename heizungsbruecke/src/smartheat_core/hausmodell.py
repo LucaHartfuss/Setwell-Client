@@ -195,3 +195,103 @@ def anlage_schritt(
     zustand.room += (power - house.h * (zustand.room - outdoor) + house.gains + sonne) * DT / house.capacity
     gemessen = None if rng is None else zustand.room + rng.gauss(0, NOISE_K)
     return Anlagenschritt(flow, geliefert, burner_on, power, gemessen)
+
+
+@dataclass(frozen=True)
+class Kreis:
+    """Ein Heizkreis am Erzeuger: hebel = (Steigung, Verschiebung, Heizgrenze), target = Mindestvorlauf und Raum-Soll
+    der Regelung (wie bei `anlage_schritt`), raeume = der Referenzraum zuerst, danach null oder mehr Kontrollraeume
+    (jeder ein `House`, ein Kopf ueber `valve_offset_k`). mischer = der Kreis hat einen eigenen Mischer und faehrt
+    seinen eigenen Vorlauf; ohne Mischer bekommt er den Vorlauf des Erzeugers."""
+    hebel: tuple[float, float, float]
+    target: float
+    raeume: tuple[House, ...]
+    mischer: bool = False
+
+
+@dataclass
+class KreisZustand:
+    """Veraenderlicher Zustand eines Kreises: Raumtemperatur je Raum (gleiche Reihenfolge wie `Kreis.raeume`) und der
+    Heizbetrieb (Hysterese an der Heizgrenze des Kreises)."""
+    raeume: list[float]
+    heating: bool = False
+
+
+@dataclass
+class ErzeugerZustand:
+    """Veraenderlicher Zustand des Erzeugers: die Kreise und die Zaehler des Brenners, die dem Erzeuger gehoeren
+    (Startwerte wie bei `Anlagenzustand`)."""
+    kreise: list[KreisZustand]
+    burner_hours: float = 5000.0
+    burner_starts: int = 20000
+    burner_was_on: bool = False
+
+
+class RaumSchritt(NamedTuple):
+    leistung: float  # Heizleistung des Heizkoerpers nach Ventil in W
+    gemessen: float | None  # Raumfuehler mit Rauschen; None ohne Zufallsfolge
+
+
+class KreisSchritt(NamedTuple):
+    flow: float  # Vorlauf-Soll des Kreises (0 ohne eigene Anforderung oder in der Warmwasserpause)
+    geliefert: bool  # der Kreis bekommt Heizwaerme (Anforderung und keine Stoerung)
+    raeume: tuple[RaumSchritt, ...]
+
+
+class Erzeugerschritt(NamedTuple):
+    flow: float  # Erzeugervorlauf: die groesste Anforderung aller Kreise (0 ohne Anforderung)
+    geliefert: bool  # der Erzeuger liefert Heizwaerme
+    brenner: bool  # Brenner laeuft (Heizwaerme oder Warmwasser im Sommerbetrieb)
+    kreise: tuple[KreisSchritt, ...]
+
+
+def erzeuger_schritt(
+    zustand: ErzeugerZustand, kreise: tuple[Kreis, ...] | list[Kreis], erzeuger: Erzeuger, outdoor: float,
+    sonne: float, hour: float, betrieb_flags: Betriebsflags, rng: random.Random | None,
+) -> Erzeugerschritt:
+    """Ein 5-min-Schritt eines Erzeugers mit mehreren Kreisen; veraendert zustand. Jeder Kreis fordert wie bei
+    `anlage_schritt` seinen Vorlauf (Hysterese an seiner Heizgrenze, Kurve, nie unter seinem Mindestvorlauf); der
+    Erzeuger faehrt die groesste Anforderung. Ein anfordernder Kreis ohne Mischer bekommt den Erzeugervorlauf, einer mit
+    Mischer seinen eigenen (hoechstens den des Erzeugers); ein Kreis ohne eigene Anforderung bekommt keinen Vorlauf.
+    Modellgrenze: das setzt eine eigene Pumpe oder ein Zonenventil je Kreis voraus. Bei einer gemeinsamen Pumpe ohne
+    Zonenventil wuerde ein Kreis ohne eigene Anforderung trotzdem durchstroemt und ueberheizt; das bildet das Modell
+    nicht ab.
+    Warmwasserpause, Brennerstunden und -starts gelten einmal je Schritt fuer den Erzeuger. Die Raeume tauschen keine
+    Waerme aus; jeder rechnet seine eigene Raumgleichung. rng wird je Raum einmal gezogen (Kreise und Raeume in der
+    Reihenfolge der Eingabe), ohne rng bleibt gemessen None."""
+    hot_water = any(low <= hour < high for low, high in DHW_HOURS)
+    anforderungen = []
+    for kreis, kreis_zustand in zip(kreise, zustand.kreise, strict=True):
+        curve, shift, heat_limit = kreis.hebel
+        if kreis_zustand.heating and outdoor >= heat_limit:
+            kreis_zustand.heating = False
+        elif not kreis_zustand.heating and outdoor < heat_limit - HYSTERESIS_K:
+            kreis_zustand.heating = True
+        anforderungen.append(
+            max(erzeuger.flow(curve, shift, outdoor, kreis.target), kreis.target)
+            if kreis_zustand.heating and not hot_water else 0.0)
+    erzeuger_flow = max(anforderungen, default=0.0)
+    geliefert = erzeuger_flow > 0 and betrieb_flags.liefert
+    burner_on = geliefert or (hot_water and betrieb_flags.warmwasser_brenner)
+    if burner_on:
+        zustand.burner_hours += DT / 3600
+        if not zustand.burner_was_on:
+            zustand.burner_starts += 1
+    zustand.burner_was_on = burner_on
+    kreis_schritte = []
+    for kreis, kreis_zustand, anforderung in zip(kreise, zustand.kreise, anforderungen, strict=True):
+        flow = 0.0
+        if anforderung > 0:
+            flow = min(anforderung, erzeuger_flow) if kreis.mischer else erzeuger_flow
+        kreis_geliefert = flow > 0 and betrieb_flags.liefert
+        raum_schritte = []
+        for index, (house, room) in enumerate(zip(kreis.raeume, kreis_zustand.raeume, strict=True)):
+            power = house.radiator(flow, room) if kreis_geliefert else 0.0
+            if house.valve_offset_k is not None and power > 0:
+                power *= min(max(house.soll + house.valve_offset_k + 0.5 - room, 0.0), 1.0)
+            room += (power - house.h * (room - outdoor) + house.gains + sonne) * DT / house.capacity
+            kreis_zustand.raeume[index] = room
+            gemessen = None if rng is None else room + rng.gauss(0, NOISE_K)
+            raum_schritte.append(RaumSchritt(power, gemessen))
+        kreis_schritte.append(KreisSchritt(flow, kreis_geliefert, tuple(raum_schritte)))
+    return Erzeugerschritt(erzeuger_flow, geliefert, burner_on, tuple(kreis_schritte))

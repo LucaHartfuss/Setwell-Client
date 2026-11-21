@@ -2,7 +2,8 @@
 Anlagenzustand in /data/sim/plant.json (schreibt nur die Laufzeit, writer=True; der Heizkreis n > 0 hat plant-<n>.json),
 Fehlerinjektion in /data/sim/control.json (bei jeder Abfrage gelesen; `heizkreise: 2` macht auch den zweiten Kreis der
 Erkennung schreibbar). Das Haus rechnet der Hausmodell-Kern (`smartheat_core/hausmodell.py`, Haus H1) in 5-min-Schritten
-der monotonen Uhr; die Tageszeit bestimmt die Lieferung nicht (feste Stunde ausserhalb der Warmwasserpausen). Die
+der monotonen Uhr; alle Heizkreise eines Anlagenverzeichnisses haben je ihren Raum und teilen einen Erzeuger (Vorlauf,
+Brennerstunden), der im Prozess nur einmal je Schritt rechnet; die Kreisdateien halten nur die Hebel je Kreis. Die Tageszeit bestimmt die Lieferung nicht (feste Stunde ausserhalb der Warmwasserpausen). Die
 fachliche Zeit (`wall`, Vorgabe `zeitquelle.fachliche_epoche`) bestimmt nur den Tagesgang der Aussentemperatur und die
 Wartezeit, bis ein geschriebener Hebel sichtbar wird; ein Sprung der Wanduhr ruehrt den Raum nicht an."""
 import logging
@@ -10,6 +11,7 @@ import math
 import random
 import threading
 import time
+import weakref
 from collections.abc import Mapping
 
 from smartheat_core import dateien, hausmodell
@@ -88,6 +90,92 @@ def _pruefe_zahlen(parameter: Mapping) -> None:
             raise ValueError(f"{key} muss eine endliche Zahl sein")
 
 
+class _GemeinsamerErzeuger:
+    """Der Erzeuger einer simulierten Anlage mit allen seinen Heizkreisen: ein Zustand (Brennerzaehler, Heizbetrieb und
+    Raum je Kreis), eine Uhr und eine Zufallsfolge, damit der Erzeuger je 5-min-Schritt nur einmal rechnet, gleich welcher
+    Kreis ihn abfragt. Die Kreise melden ihre Eingaben bei der eigenen Abfrage; bis dahin gelten die letzten. Alle Zugriffe
+    unter `lock`."""
+
+    def __init__(self, erzeuger: hausmodell.Erzeuger, seed) -> None:
+        self.erzeuger = erzeuger
+        self.lock = threading.RLock()
+        self.beginnen(seed)
+
+    def beginnen(self, seed) -> None:
+        self.zustand = hausmodell.ErzeugerZustand(kreise=[], burner_hours=START_BRENNERSTUNDEN)
+        self.nummern: list[int] = []  # Reihenfolge wie in zustand.kreise
+        self.besitzer: dict[int, object] = {}
+        self.eingaben: dict[int, hausmodell.Kreis] = {}
+        self.letzter: hausmodell.Erzeugerschritt | None = None
+        self.letzte_zeit: float | None = None
+        self.rest = 0.0  # Sekunden seit dem letzten vollen Schritt, noch nicht gerechnet
+        self.zufall = random.Random(seed)
+
+    def beitreten(self, kreis: int, marke: object, raum_start: float, seed) -> None:
+        """Ein Treiber uebernimmt den Kreis. Ein neuer Treiber fuer einen Kreis, den ein anderer Treiber hielt (Wiederaufnahme
+        des Hosts), beginnt mit frischem Raum; ist es der einzige Kreis, beginnt auch der Erzeuger neu, wie vor dem
+        gemeinsamen Erzeuger jeder Treiber."""
+        if kreis in self.besitzer and len(self.nummern) == 1:
+            self.beginnen(seed)
+        raum = hausmodell.KreisZustand([raum_start])
+        if kreis in self.besitzer:
+            self.zustand.kreise[self.nummern.index(kreis)] = raum
+            self.letzter = None
+        else:
+            self.nummern.append(kreis)
+            self.zustand.kreise.append(raum)
+        self.besitzer[kreis] = marke
+
+    def rechne(self, jetzt: float, wall: float, aussen, rauschen: bool, flags: hausmodell.Betriebsflags) -> None:
+        """Rechnet die vollen 5-min-Schritte seit der letzten Abfrage irgendeines Kreises (der Rest bleibt fuer die naechste
+        liegen, hoechstens ein Tag je Abfrage). Wie viele Schritte laufen, bestimmt allein die monotone Uhr; die
+        Aussentemperatur jedes Schritts folgt dem Tagesgang zu dessen Ende auf der fachlichen Zeit (`wall` ist das Ende
+        des Rechenfensters, der Rest liegt dahinter)."""
+        if self.letzte_zeit is not None:
+            self.rest += max(jetzt - self.letzte_zeit, 0.0)
+        self.letzte_zeit = jetzt
+        schritte = int(self.rest // hausmodell.DT)
+        self.rest -= schritte * hausmodell.DT
+        ende_letzter = wall - self.rest
+        gerechnet = min(schritte, hausmodell.STEPS_PER_DAY)
+        kreise = [self.eingaben[nummer] for nummer in self.nummern]
+        for k in range(gerechnet):
+            self.letzter = hausmodell.erzeuger_schritt(
+                self.zustand, kreise, self.erzeuger, aussen(ende_letzter - (gerechnet - 1 - k) * hausmodell.DT), 0.0,
+                KERN_STUNDE, flags, self.zufall if rauschen else None)
+
+    def kreis_schritt(self, kreis: int) -> hausmodell.KreisSchritt | None:
+        """Der letzte Schritt des Kreises; None, solange seit seinem Beitritt keiner lief."""
+        index = self.nummern.index(kreis)
+        return self.letzter.kreise[index] if self.letzter is not None and index < len(self.letzter.kreise) else None
+
+    def fremde_anforderung(self, kreis: int, outdoor: float) -> float:
+        """Die groesste aktuelle Anforderung der heizenden Nachbarkreise: ein Kreis ohne Mischer faehrt den Vorlauf des
+        Erzeugers, und der ist mindestens diese."""
+        return max((max(self.erzeuger.flow(eingabe.hebel[0], eingabe.hebel[1], outdoor, eingabe.target), eingabe.target)
+                    for nummer, eingabe in self.eingaben.items()
+                    if nummer != kreis and self.zustand.kreise[self.nummern.index(nummer)].heating), default=0.0)
+
+    def raum(self, kreis: int) -> float:
+        return self.zustand.kreise[self.nummern.index(kreis)].raeume[0]
+
+
+# Ein Erzeuger je Anlagenverzeichnis und Hebelsatz im Prozess: alle Kreise-Treiber eines Gateways laufen in einem Prozess
+# (GatewayAnlagenHost). Er lebt so lange, wie ein Treiber ihn haelt.
+_ERZEUGER_JE_ANLAGE: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+_ERZEUGER_JE_ANLAGE_LOCK = threading.Lock()
+
+
+def _gemeinsamer_erzeuger(sim_dir, lever_set_id: str, seed) -> _GemeinsamerErzeuger:
+    schluessel = (str(sim_dir), lever_set_id)
+    with _ERZEUGER_JE_ANLAGE_LOCK:
+        gemeinsam = _ERZEUGER_JE_ANLAGE.get(schluessel)
+        if gemeinsam is None:
+            gemeinsam = _GemeinsamerErzeuger(ERZEUGER[lever_set_id], seed)
+            _ERZEUGER_JE_ANLAGE[schluessel] = gemeinsam
+        return gemeinsam
+
+
 class SimulationDriver:
     driver_id = "simulation"
     kind = KIND_LOCAL
@@ -117,12 +205,8 @@ class SimulationDriver:
         self.physical_writes = 0
         self._cache: dict[str, float | str] = {}
         self._cache_at: float | None = None
-        self._zustand = hausmodell.Anlagenzustand(
-            room=float(self._p["raum_start"]), burner_hours=START_BRENNERSTUNDEN)
-        self._last_model: float | None = None
-        self._rest = 0.0  # Sekunden seit dem letzten vollen Schritt, noch nicht gerechnet
-        self._letzter: hausmodell.Anlagenschritt | None = None
-        self._random = random.Random(self._p["seed"])
+        self._gemeinsam = _gemeinsamer_erzeuger(paths.sim_dir, self.lever_set_id, self._p["seed"])
+        self._marke = object()  # wer den Kreis im gemeinsamen Erzeuger haelt
         self._lock = threading.RLock()  # Thread-Vertrag wie die Cloud-Treiber
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -192,18 +276,21 @@ class SimulationDriver:
         # Ohne Liefer-Signal lernt der Server nicht; `keine_waerme` in der Steuerdatei bildet einen
         # Waermeausfall nach.
         flags = hausmodell.Betriebsflags(liefert=not control.get("keine_waerme"))
-        erzeuger = ERZEUGER[self.lever_set_id]
-        gemessen = self._rechne(now, wall, erzeuger, hebel, mindestvorlauf, flags)
+        gemeinsam = self._gemeinsam
+        with gemeinsam.lock:
+            gemessen, schritt, brennerstunden = self._rechne(now, wall, hebel, mindestvorlauf, flags)
+            fremd = gemeinsam.fremde_anforderung(self._heizkreis, outdoor)
         # Sollvorlauf aus den aktuellen Hebeln (wie der Kern ihn im Heizbetrieb bildet); geliefert wird, wenn die Anlage
-        # weder ausgefallen ist noch im letzten Schritt ohne Heizbetrieb war.
-        flow = max(erzeuger.flow(hebel[0], hebel[1], outdoor, mindestvorlauf), mindestvorlauf)
-        delivers = flags.liefert and (self._letzter is None or self._letzter.geliefert)
+        # weder ausgefallen ist noch im letzten Schritt dieses Kreises ohne Heizbetrieb war. Der gelieferte Vorlauf ist
+        # der des Erzeugers: mindestens die Anforderung eines heizenden Nachbarkreises.
+        flow = max(gemeinsam.erzeuger.flow(hebel[0], hebel[1], outdoor, mindestvorlauf), mindestvorlauf)
+        delivers = flags.liefert and (schritt is None or schritt.geliefert)
         cache: dict[str, float | str] = {LEVER_ROLES[lever]: value for lever, value in levers.items()}
         cache.update({key: plant["hilfswerte"].get(key, START_AUX[key]) for key in self.description.aux_originals})
         cache.update({
             "outdoor_temp": round(outdoor, 2), "flow_setpoint": round(flow, 1),
-            "flow_temperature": round(flow, 1) if delivers else 29.5,
-            "room_temperature": round(gemessen, 2), "generator_hours": round(self._zustand.burner_hours, 3),
+            "flow_temperature": round(max(flow, fremd), 1) if delivers else 29.5,
+            "room_temperature": round(gemessen, 2), "generator_hours": round(brennerstunden, 3),
         })
         self._cache, self._cache_at = cache, now
 
@@ -217,28 +304,25 @@ class SimulationDriver:
         hebel = (levers.get("curve", START_LEVERS["curve"]), verschiebung, levers.get("heat_limit", START_LEVERS["heat_limit"]))
         return hebel, levers.get("min_flow", raum_soll)
 
-    def _rechne(self, jetzt, wall, erzeuger, hebel, mindestvorlauf, flags) -> float:
-        """Rechnet die vollen 5-min-Schritte seit der letzten Abfrage (der Rest bleibt fuer die naechste liegen, hoechstens
-        ein Tag je Abfrage) und liefert den Fuehlerwert des Raums. Wie viele Schritte laufen, bestimmt allein die
-        monotone Uhr; die Aussentemperatur jedes Schritts folgt dem Tagesgang zu dessen Ende auf der fachlichen Zeit
-        (`wall` ist das Ende des Rechenfensters, der Rest liegt dahinter)."""
-        if self._last_model is not None:
-            self._rest += max(jetzt - self._last_model, 0.0)
-        self._last_model = jetzt
-        schritte = int(self._rest // hausmodell.DT)
-        self._rest -= schritte * hausmodell.DT
+    def _rechne(self, jetzt, wall, hebel, mindestvorlauf, flags) -> tuple[float, hausmodell.KreisSchritt | None, float]:
+        """Traegt die Eingaben dieses Kreises in den gemeinsamen Erzeuger ein, laesst ihn bis `jetzt` rechnen und liefert
+        den Fuehlerwert des Raums dieses Kreises, dessen letzten Schritt und die Brennerstunden des Erzeugers. Ein Kreis,
+        der neu dazukommt, bekommt vorher nichts nachgerechnet: erst rechnen die bisherigen Kreise bis `jetzt`, dann tritt er
+        mit dem Startraum bei. Der Aufrufer haelt `gemeinsam.lock`."""
+        gemeinsam, kreis = self._gemeinsam, self._heizkreis
         rauschen = float(self._p["rauschen"])
-        ende_letzter = wall - self._rest
-        gerechnet = min(schritte, hausmodell.STEPS_PER_DAY)
-        for k in range(gerechnet):
-            aussen = self._outdoor(ende_letzter - (gerechnet - 1 - k) * hausmodell.DT)
-            self._letzter = hausmodell.anlage_schritt(
-                self._zustand, hausmodell.HOUSES[KERN_HAUS], erzeuger, hebel, aussen, 0.0, KERN_STUNDE, mindestvorlauf, flags,
-                self._random if rauschen else None)
-        if not rauschen or self._letzter is None or self._letzter.gemessen is None:
-            return self._zustand.room
-        # Der Kern rauscht mit fester Staerke; `rauschen` skaliert diese Abweichung.
-        return self._zustand.room + (self._letzter.gemessen - self._zustand.room) * rauschen / hausmodell.NOISE_K
+        if gemeinsam.besitzer.get(kreis) is not self._marke:
+            if gemeinsam.nummern and gemeinsam.nummern != [kreis]:  # ein einzelner Kreis beginnt neu, ihm wird nichts nachgerechnet
+                gemeinsam.rechne(jetzt, wall, self._outdoor, bool(rauschen), flags)
+            gemeinsam.beitreten(kreis, self._marke, float(self._p["raum_start"]), self._p["seed"])
+        gemeinsam.eingaben[kreis] = hausmodell.Kreis(hebel, mindestvorlauf, (hausmodell.HOUSES[KERN_HAUS],))
+        gemeinsam.rechne(jetzt, wall, self._outdoor, bool(rauschen), flags)
+        raum, schritt = gemeinsam.raum(kreis), gemeinsam.kreis_schritt(kreis)
+        gemessen = schritt.raeume[0].gemessen if schritt is not None else None
+        if rauschen and gemessen is not None:
+            # Der Kern rauscht mit fester Staerke; `rauschen` skaliert diese Abweichung.
+            raum += (gemessen - raum) * rauschen / hausmodell.NOISE_K
+        return raum, schritt, gemeinsam.zustand.burner_hours
 
     def _outdoor(self, wall: float) -> float:
         hours = (wall / 3600.0) % 24
