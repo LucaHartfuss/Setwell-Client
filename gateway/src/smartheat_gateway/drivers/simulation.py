@@ -52,7 +52,7 @@ SIM_SCHRITTE = {
 # fuer Weishaupt gibt es dort noch keine gemessenen Werte, es rechnet mit a = b = 1 (Platzhalterphysik).
 ERZEUGER = {
     "vaillant_vrc720": hausmodell.Potenzgesetz(a=2.54, b=0.78),
-    "viessmann_vicare": hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0),
+    "viessmann_vicare": hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0, room_step=1.0),
     "weishaupt_wwp": hausmodell.Potenzgesetz(a=1.0, b=1.0),
     "weishaupt_wwp_basis": hausmodell.Potenzgesetz(a=1.0, b=1.0),
 }

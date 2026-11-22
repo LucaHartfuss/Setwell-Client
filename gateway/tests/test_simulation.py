@@ -159,7 +159,7 @@ WALL = 12 * 3600.0  # feste Wanduhr; mit aussen_amplitude 0 ist die Aussentemper
 AUSSEN = 5.0
 SCHRITT = hausmodell.DT
 # Viessmann Gas mit den Werten des Servermodells (`ViessmannModel`).
-VIESSMANN_GAS = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0)
+VIESSMANN_GAS = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0, room_step=1.0)
 # Abbildung Hebel -> Kern je Hebelsatz: (geschriebene Hebel, Erzeuger (a, b) oder fertiger Erzeuger, (Steigung, Verschiebung,
 # Heizgrenze), Mindestvorlauf). Heizgrenze 16 und Steigung 1 gelten, wo der Hebelsatz den Hebel nicht hat.
 ABBILDUNG = {
