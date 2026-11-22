@@ -116,11 +116,13 @@ class ViessmannPolynom:
     derselben Rechenfolge wie das Viessmann-Modell des Servers (`ViessmannModel.flow`). Die Hebel bedeuten hier:
     Steigung = c (Heizkurven-Steigung), Verschiebung = N (das Niveau der Heizkurve, eine reine Parallelverschiebung
     des Vorlaufs), Heizgrenze nur fuer die Hysterese der Anlage (die Formel kennt keine). R ist das Raum-Soll und
-    kommt als target; ohne es ist die Formel nicht definiert. Gas und Waermepumpe unterscheiden sich in c0 und offset."""
+    kommt als target, auf die Stufe room_step gerundet wie der Server es sendet (aus 20,5 wird 20); ohne es ist die
+    Formel nicht definiert. Gas und Waermepumpe unterscheiden sich in c0 und offset."""
     c0: float
     c1: float
     c2: float
     offset: float
+    room_step: float = 1.0
 
     def _poly(self, delta: float) -> float:
         return self.c0 + self.c1 * delta + self.c2 * delta ** 2
@@ -128,6 +130,7 @@ class ViessmannPolynom:
     def flow(self, curve: float, shift: float, outdoor: float, target: float | None = None) -> float:
         if target is None:
             raise ValueError("Viessmann-Formel braucht das Raum-Soll (target)")
+        target = round(round(target / self.room_step) * self.room_step, 6)  # die Anlage rechnet mit dem gesendeten R
         delta = outdoor - target
         return target + shift + self.offset - curve * delta * self._poly(delta)
 
