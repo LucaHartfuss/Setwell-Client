@@ -14,6 +14,7 @@ und die Laufzeit liefe nach zwei Ack-Timeouts in den Notbetrieb."""
 import functools
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -235,9 +236,13 @@ def driver_login(ctx: Kontext, payload: dict) -> Outcome:
     if type(driver).login_kind is None:
         raise DriverError("login_nicht_noetig")
 
-    def anmelden() -> Done:
+    def anmelden() -> Done | Failed:
         if phase == "begin":
-            return Done(driver.login_begin(payload))
+            ergebnis = driver.login_begin(payload)
+            state_hash = ergebnis.get("state_hash")
+            if not isinstance(state_hash, str) or not re.fullmatch(wire.STATE_HASH_MUSTER, state_hash):
+                return Failed("login_fehlgeschlagen")  # der Hash geht nicht an den Server, wenn er nicht dem Vertrag gleicht
+            return Done(ergebnis)
         driver.login_finish(payload)
         return Done({})
 
