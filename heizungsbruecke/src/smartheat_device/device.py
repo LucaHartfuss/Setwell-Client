@@ -166,6 +166,7 @@ class Device:
         self._rettung = False
         self._code_frei_ab = 0.0  # fruehestens dann meldet _code_erneuern wieder (Takt-Uhr)
         self._code_fehler = 0
+        self._code_angenommen = False  # der Server kennt den Hash des Codes im Speicher (nach register bzw. Annahme)
         self._kanaele: dict[int, RuntimeChannel] = {}  # je Kreis ein Kanal ueber denselben Link
         self._eigene: dict[str, meldungen.Meldung] = {}  # eigene Meldungen des Geraets: key -> Meldung
         self._abwesend_hinweis: meldungen.Meldung | None = None  # lokal, nie an den Server (nur im Statusereignis an HA)
@@ -601,22 +602,22 @@ class Device:
         if zugang is None:
             if not self._bootstrap.faellig():
                 return
-            if not identity.code_gueltig(self.identity.claim_code):
-                # nie registriert: der Server kennt keinen Hash, die erste Anmeldung meldet gleich den neuen Code
-                self.identity = identity.save_claim_code(self._dir, self.identity, identity.new_claim_code())
             faehigkeiten, gescheitert = self._host_wert("faehigkeiten", self.host.faehigkeiten)
             if gescheitert:
                 return  # Registrierung verschieben, der naechste Takt versucht es erneut (ohne Backoff)
             zugang = self._bootstrap.holen(rettung=False, register_args=self._register_args(faehigkeiten))
             if zugang is None:
                 return
+            # Die erste Anmeldung meldet den Code im Speicher gleich mit; der Server hat ihn mit der Antwort.
+            self._code_angenommen = True
         self._link_starten(zugang)
 
     def _code_erneuern(self) -> None:
-        """Ein Code alter Form ist beim Server nur als Hash bekannt; ein registriertes, nicht uebernommenes Geraet
-        meldet den neuen Code ueber register (neuer_uebernahme_code). Eigene Pause, damit ein erreichbarer Server den
-        Bootstrap-Backoff nicht berührt und ein ausfallender nicht jeden Takt gefragt wird."""
-        if identity.code_gueltig(self.identity.claim_code) or self._clock() < self._code_frei_ab:
+        """Nach jedem Start kennt der Server nur den Hash des Codes vom letzten Start; ein registriertes, nicht
+        uebernommenes Geraet meldet den neuen Code im Speicher ueber register (neuer_uebernahme_code), bis der Server
+        ihn angenommen hat. Eigene Pause, damit ein erreichbarer Server den Bootstrap-Backoff nicht beruehrt und ein
+        ausfallender nicht jeden Takt gefragt wird."""
+        if self._code_angenommen or self._clock() < self._code_frei_ab:
             return
         if bootstrap.device_state(self._dir) == "uebernommen":  # braucht den Code nicht
             self._code_frei_ab = self._clock() + bootstrap.RETRY_MAX_SECONDS
@@ -632,7 +633,7 @@ class Device:
                 bootstrap.RETRY_MAX_SECONDS, bootstrap.RETRY_MIN_SECONDS * 2 ** min(self._code_fehler - 1, 5))
             return
         self._code_fehler = 0
-        if ergebnis != "neu":  # uebernommen oder gesperrt: der Code bleibt alt, also nicht jeden Takt neu fragen
+        if ergebnis != "neu":  # uebernommen oder gesperrt: kein Code beim Server, also nicht jeden Takt neu fragen
             self._code_frei_ab = self._clock() + bootstrap.RETRY_MAX_SECONDS
 
     def _link_starten(self, zugang: bootstrap.Zugang) -> None:
@@ -915,9 +916,10 @@ class Device:
 
     def neuer_uebernahme_code(self) -> str:
         """Neuer Uebernahme-Code: erst beim Server melden (register mit neuem Code-Hash; der Server uebernimmt ihn nur
-        fuer ein nicht uebernommenes Geraet), dann speichern. "neu" = gespeichert, "keine_verbindung" = der Server
-        hat den Hash nicht angenommen (der alte Code bleibt), "uebernommen" = das Geraet ist uebernommen. Nur im
-        Geraete-Thread (Befehl new_claim_code, Rueckruf des Hosts); blockiert fuer die Dauer der Anfrage."""
+        fuer ein nicht uebernommenes Geraet), dann gilt er (nur im Speicher, nie in einer Datei). "neu" = angenommen,
+        "keine_verbindung" = der Server hat den Hash nicht angenommen (der bisherige Code bleibt), "uebernommen" = das
+        Geraet ist uebernommen. Nur im Geraete-Thread (Befehl new_claim_code, Rueckruf des Hosts); blockiert fuer die
+        Dauer der Anfrage."""
         code = identity.new_claim_code()
         kandidat = replace(self.identity, claim_code=code)
         try:
@@ -928,8 +930,15 @@ class Device:
         bootstrap.device_state_speichern(self._dir, antwort.device_state)
         if antwort.device_state != "nicht_uebernommen":
             return "uebernommen"
-        self.identity = identity.save_claim_code(self._dir, self.identity, code)
+        self.identity = kandidat
+        self._code_angenommen = True
         return "neu"
+
+    @property
+    def uebernahme_code(self) -> str | None:
+        """Der Uebernahme-Code, sobald der Server dessen Hash kennt, sonst None: kein Host zeigt einen Code, der beim
+        Server noch nicht gilt."""
+        return self.identity.claim_code if self._code_angenommen else None
 
     def _new_claim_code(self, payload: dict) -> commands.Outcome:
         """Befehl new_claim_code (HA und Server): dieselbe Methode wie der Knopfdruck des Gateways."""

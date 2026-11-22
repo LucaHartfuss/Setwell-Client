@@ -803,7 +803,7 @@ def test_new_claim_code_only_while_not_claimed(tmp_path):
     world.empfangen("down/command", _command("new_claim_code", "c1"))
     new = world.device.identity.claim_code
     assert new != old and world.client.idents[-1].claim_code == new
-    assert identity.load_or_create(world.dir).claim_code == new
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     world.empfangen("down/command", _command("new_claim_code", "c2"))
     results = world.link.of("up/result")
     assert results[0]["ok"] is True and results[1]["error"]["grund"] == "bereits_uebernommen"
@@ -811,28 +811,31 @@ def test_new_claim_code_only_while_not_claimed(tmp_path):
 
 
 def test_neuer_uebernahme_code_meldet_neu_uebernommen_und_keine_verbindung(tmp_path):
-    """Die Methode, die auch der Knopfdruck des Gateways ruft: gespeichert wird nur bei "neu"."""
+    """Die Methode, die auch der Knopfdruck des Gateways ruft: der neue Code gilt nur bei "neu"."""
     world = World(tmp_path)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang),
                                        bootstrap.Unavailable("register: HTTP 503"),
                                        bootstrap.Antwort("uebernommen", world.zugang)]
     world.verbinden()
     alt = world.device.identity.claim_code
+    assert world.device.uebernahme_code is None
     assert world.device.neuer_uebernahme_code() == "neu"
     neu = world.device.identity.claim_code
-    assert neu != alt and identity.load_or_create(world.dir).claim_code == neu
+    assert neu != alt and world.device.uebernahme_code == neu
     assert world.device.neuer_uebernahme_code() == "keine_verbindung"
-    assert world.device.identity.claim_code == neu and identity.load_or_create(world.dir).claim_code == neu
+    assert world.device.identity.claim_code == neu
     assert world.device.neuer_uebernahme_code() == "uebernommen"
-    assert world.device.identity.claim_code == neu and identity.load_or_create(world.dir).claim_code == neu
+    assert world.device.identity.claim_code == neu
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     assert bootstrap.device_state(world.dir) == "uebernommen"
 
 
-ALTER_CODE = "ABCDEFGHIJKL"  # Form aelterer Staende: zu kurz
+ALTER_CODE = "ABCDEFGHIJKLMNOP"  # Inhalt einer Code-Datei aelterer Staende; der Server kennt dessen Hash
 
 
-def _welt_mit_altem_code(tmp_path, *, state=None, **kwargs):
-    """Eine Welt, deren Code-Datei die alte Form hat; state: gespeicherter Uebernahmestand (nur mit Zugang)."""
+def _welt_nach_neustart(tmp_path, *, state=None, **kwargs):
+    """Eine Welt, deren Ordner noch eine Code-Datei aelterer Staende hat (der Start loescht sie); state: gespeicherter
+    Uebernahmestand (nur mit Zugang)."""
     geraete_dir = tmp_path / device.DEVICE_DIR
     identity.load_or_create(geraete_dir)
     (geraete_dir / identity.CLAIM_CODE_FILE).write_text(ALTER_CODE)
@@ -843,93 +846,116 @@ def _welt_mit_altem_code(tmp_path, *, state=None, **kwargs):
 
 
 def _hash_stimmt(world, ident):
-    return (identity.code_gueltig(ident.claim_code) and ident.claim_code != ALTER_CODE
+    """Der gemeldete Code ist der im Speicher, und er ist ein anderer als der der alten Datei."""
+    return (ident.claim_code != ALTER_CODE
             and wire.claim_code_hash(ident.device_id, ident.claim_code)
             == wire.claim_code_hash(world.device.identity.device_id, world.device.identity.claim_code))
 
 
-def test_ein_registriertes_geraet_meldet_den_neuen_code_statt_ihn_nur_zu_speichern(tmp_path):
-    """Code alter Form, Zugang vorhanden, nicht uebernommen: register mit dem Hash des neuen Codes, erst danach
-    gespeichert; der Zugang bleibt, der Link steht."""
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
-    assert world.device.identity.claim_code == ALTER_CODE  # beim Laden nicht ueberschrieben
+def test_der_start_loescht_die_alte_code_datei_und_der_code_ist_ein_anderer(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="uebernommen")
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
+    assert world.device.identity.claim_code != ALTER_CODE
+    world.device.schritt()
+    assert sorted(p.name for p in world.dir.iterdir() if "claim" in p.name) == []
+
+
+def test_ein_registriertes_geraet_meldet_nach_dem_start_den_neuen_code_und_zeigt_ihn_erst_danach(tmp_path):
+    """Der Server kennt nach dem Start den Hash des alten Codes: ein nicht uebernommenes, registriertes Geraet meldet
+    den Code im Speicher ueber register; bis der Server ihn angenommen hat, gibt das Geraet keinen Code heraus."""
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
+    assert world.device.uebernahme_code is None
     world.device.schritt()
     assert [call[0] for call in world.client.calls] == ["register"]
-    gemeldet = world.client.idents[-1]
-    assert _hash_stimmt(world, gemeldet)
-    assert world.device.identity.claim_code == gemeldet.claim_code
-    assert identity.load_or_create(world.dir).claim_code == gemeldet.claim_code
+    assert _hash_stimmt(world, world.client.idents[-1])
+    assert world.device.uebernahme_code == world.device.identity.claim_code
     assert bootstrap.laden(world.dir) == world.zugang and world.link.started
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     world.device.schritt()
     assert len(world.client.calls) == 1  # fertig, kein zweites register
 
 
-def test_ein_gescheitertes_melden_laesst_den_alten_code_und_wird_mit_pause_wiederholt(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+def test_ein_gescheitertes_melden_zeigt_keinen_code_und_wird_mit_pause_wiederholt(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Unavailable("register: HTTP 503"),
                                        bootstrap.Antwort("nicht_uebernommen", world.zugang)]
     world.device.schritt()
     assert len(world.client.calls) == 1
-    assert world.device.identity.claim_code == ALTER_CODE
-    assert identity.load_or_create(world.dir).claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
     world.device.schritt()
     assert len(world.client.calls) == 1  # Pause: nicht jeder Takt
     world.clock.now += bootstrap.RETRY_MAX_SECONDS
     world.device.schritt()
     assert len(world.client.calls) == 2
-    neu = world.client.idents[-1].claim_code
-    assert identity.code_gueltig(neu) and neu != ALTER_CODE
-    assert world.device.identity.claim_code == neu == identity.load_or_create(world.dir).claim_code
+    assert _hash_stimmt(world, world.client.idents[-1])
+    assert world.device.uebernahme_code == world.device.identity.claim_code
 
 
-def test_ein_uebernommenes_geraet_mit_altem_code_meldet_nichts(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, state="uebernommen")
+def test_ein_uebernommenes_geraet_meldet_nach_dem_start_nichts(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="uebernommen")
     for _ in range(3):
         world.device.schritt()
         world.clock.now += bootstrap.RETRY_MAX_SECONDS
     assert world.client.calls == []
-    assert world.device.identity.claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
 
 
-def test_die_antwort_uebernommen_beendet_das_melden_ohne_den_code_zu_speichern(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+def test_die_antwort_uebernommen_beendet_das_melden_und_gibt_keinen_code_frei(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Antwort("uebernommen", world.zugang)]
     for _ in range(3):
         world.device.schritt()
         world.clock.now += bootstrap.RETRY_MAX_SECONDS
     assert len(world.client.calls) == 1
     assert bootstrap.device_state(world.dir) == "uebernommen"
-    assert world.device.identity.claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
 
 
 def test_ein_gesperrtes_geraet_fragt_den_server_nicht_in_jedem_takt(tmp_path):
-    """Antwortet der Server mit einem Stand ausser nicht_uebernommen und uebernommen (gesperrt), bleibt der alte Code
+    """Antwortet der Server mit einem Stand ausser nicht_uebernommen und uebernommen (gesperrt), gibt es keinen Code
     und das Geraet fragt erst nach der langen Pause wieder, nicht in jedem Takt."""
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Antwort("gesperrt", world.zugang),
                                        bootstrap.Antwort("gesperrt", world.zugang)]
     for _ in range(5):
         world.device.schritt()
         world.clock.now += bootstrap.RETRY_MIN_SECONDS
     assert len(world.client.calls) == 1
-    assert world.device.identity.claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
     world.clock.now += bootstrap.RETRY_MAX_SECONDS
     world.device.schritt()
     assert len(world.client.calls) == 2
 
 
-def test_ein_geraet_ohne_zugang_und_mit_altem_code_registriert_sich_gleich_mit_einem_neuen(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, access=False)
+def test_ein_geraet_ohne_zugang_meldet_den_code_mit_der_ersten_registrierung(tmp_path):
+    world = _welt_nach_neustart(tmp_path, access=False)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
     world.device.schritt()
     assert [call[0] for call in world.client.calls] == ["register"]
-    gemeldet = world.client.idents[-1]
-    assert identity.code_gueltig(gemeldet.claim_code) and gemeldet.claim_code != ALTER_CODE
-    assert world.device.identity.claim_code == gemeldet.claim_code
-    assert identity.load_or_create(world.dir).claim_code == gemeldet.claim_code
+    assert _hash_stimmt(world, world.client.idents[-1])
+    assert world.device.uebernahme_code == world.device.identity.claim_code
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     world.device.schritt()
     assert len(world.client.calls) == 1
+
+
+def test_eine_gescheiterte_erste_registrierung_gibt_keinen_code_frei(tmp_path):
+    world = _welt_nach_neustart(tmp_path, access=False)
+    world.client.script["register"] = [bootstrap.Unavailable("register: HTTP 503")]
+    world.device.schritt()
+    assert world.device.uebernahme_code is None
+
+
+def test_der_code_gelangt_in_kein_log(tmp_path, caplog):
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
+    world.client.script["register"] = [bootstrap.Unavailable("register: HTTP 503"),
+                                       bootstrap.Antwort("nicht_uebernommen", world.zugang)]
+    with caplog.at_level("DEBUG"):
+        world.device.schritt()
+        world.clock.now += bootstrap.RETRY_MAX_SECONDS
+        world.device.schritt()
+    assert world.device.identity.claim_code not in caplog.text and ALTER_CODE not in caplog.text
 
 
 @pytest.mark.parametrize(("ergebnis", "antwort"), [
@@ -2404,7 +2430,7 @@ def test_a_new_claim_code_the_server_cannot_be_told_about_fails_intern(tmp_path)
     world.verbinden()
     world.empfangen("down/command", _command("new_claim_code", "c1"))
     assert world.link.of("up/result")[-1]["error"] == {"grund": "intern"}
-    assert world.device.identity.claim_code == alt and identity.load_or_create(world.dir).claim_code == alt
+    assert world.device.identity.claim_code == alt and world.device.uebernahme_code is None
 
 
 def test_a_wish_with_a_synchronised_clock_says_so(tmp_path):

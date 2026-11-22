@@ -26,6 +26,7 @@ class FakeDevice:
         self.code_ergebnis = "neu"  # Antwort von neuer_uebernahme_code
         self.code_aufrufe = 0
         self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKLMNOP")
+        self.uebernahme_code = "ABCDEFGHIJKLMNOP"
         self.documents = SimpleNamespace(
             aktuell=lambda art: SimpleNamespace(dirty=self.dirty) if self.bed is not None else None)
 

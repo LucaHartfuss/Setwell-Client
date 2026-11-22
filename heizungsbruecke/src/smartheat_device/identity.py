@@ -1,6 +1,7 @@
 """Identitaet des Geraets: Signierschluessel ECDSA P-256 (Geraete-ID und
 signierte Bootstrap-Anfragen), eigener TLS-Schluessel fuer das MQTT-Zertifikat (CSR mit CN = Geraete-ID) und
-Uebernahme-Code (16 Zeichen Base32, 80 Bit), alle unter <daten>/device/ (0600). Den Verschluesselungsschluessel enc_key.pem erzeugt das Geraet nicht; eine
+Uebernahme-Code (16 Zeichen Base32, 80 Bit). Die Schluessel liegen unter <daten>/device/ (0600), der Code nur im Speicher:
+jeder Start erzeugt einen neuen, eine alte Datei claim_code wird geloescht, ohne sie zu lesen. Den Verschluesselungsschluessel enc_key.pem erzeugt das Geraet nicht; eine
 vorhandene Datei bleibt liegen und wird nicht gelesen. Geraete-ID = shg- + die ersten 16
 Zeichen von Base32(SHA-256(DER-SPKI)) in Kleinbuchstaben (unveraendert). boot_id: neu je Prozessstart (Erkennung doppelt
 laufender Geraete). Schluessel und Code erscheinen nie in einem Log (Regel 6)."""
@@ -10,7 +11,7 @@ import logging
 import secrets
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cryptography import x509
@@ -23,8 +24,7 @@ from smartheat_device import nachrichten, wire
 
 KEY_FILE = "key.pem"
 TLS_KEY_FILE = "tls_key.pem"
-CLAIM_CODE_FILE = "claim_code"
-_CODE_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+CLAIM_CODE_FILE = "claim_code"  # nur noch zum Loeschen einer Datei aelterer Staende
 #: 10 Zufallsbytes = 80 Bit = genau 16 Base32-Zeichen ohne Auffuellung.
 _CODE_BYTES = wire.CLAIM_CODE_CHARS * 5 // 8
 
@@ -72,30 +72,19 @@ def new_claim_code(randbytes: Callable[[int], bytes] = secrets.token_bytes) -> s
     return base64.b32encode(randbytes(_CODE_BYTES)).decode()
 
 
-def code_gueltig(code: str) -> bool:
-    return len(code) == wire.CLAIM_CODE_CHARS and set(code) <= _CODE_ALPHABET
-
-
 def load_or_create(device_dir: Path, randbytes: Callable[[int], bytes] = secrets.token_bytes) -> Identity:
+    """Schluessel aus den Dateien (oder neu), der Uebernahme-Code nie: er entsteht bei jedem Start neu im Speicher und
+    steht in keiner Datei. Eine Datei aelterer Staende wird geloescht, ohne sie zu lesen."""
     signing = _key(device_dir / KEY_FILE)
     tls = _key(device_dir / TLS_KEY_FILE)
-    code_path = device_dir / CLAIM_CODE_FILE
     try:
-        code = code_path.read_text().strip()
-        if not code_gueltig(code):
-            # Behalten: der Server kennt nur den Hash dieses Codes. Das Geraet meldet einen neuen Code erst beim
-            # Server und speichert ihn nach der Annahme (Device), nie vorher.
-            logger.warning("Uebernahme-Code hat nicht die vorgesehene Form (aelterer Stand); er wird beim Server erneuert")
+        (device_dir / CLAIM_CODE_FILE).unlink()
+        logger.info("Alte Datei %s geloescht: der Uebernahme-Code liegt nur noch im Speicher", CLAIM_CODE_FILE)
     except FileNotFoundError:
-        code = new_claim_code(randbytes)
-        dateien.schreiben_text(code_path, code, modus=dateien.PRIVAT)
-    return Identity(device_id_for(signing.public_key()), signing, tls, code)
-
-
-def save_claim_code(device_dir: Path, ident: Identity, code: str) -> Identity:
-    """Neuer Uebernahme-Code (Befehl new_claim_code): erst gespeichert, wenn der Server ihn angenommen hat."""
-    dateien.schreiben_text(device_dir / CLAIM_CODE_FILE, code, modus=dateien.PRIVAT)
-    return replace(ident, claim_code=code)
+        pass
+    except OSError as error:
+        logger.warning("Alte Datei %s nicht geloescht (%s)", CLAIM_CODE_FILE, type(error).__name__)
+    return Identity(device_id_for(signing.public_key()), signing, tls, new_claim_code(randbytes))
 
 
 def _base64url_ohne_padding(daten: bytes) -> str:

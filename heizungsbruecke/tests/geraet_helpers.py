@@ -301,6 +301,7 @@ class FakeDevice:
         self.konf, self.bed = konfiguration, bedienung
         self.order = order if order is not None else []
         self.identity = SimpleNamespace(device_id=DEVICE_ID, claim_code=CLAIM_CODE)
+        self.uebernahme_code = CLAIM_CODE
         self.programm_faehig = lambda: False
         self.documents = SimpleNamespace(aktuell=lambda art: (
             Dokument(art, 1, self.konf) if art == "konfiguration" and self.konf is not None else None))

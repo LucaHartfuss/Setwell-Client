@@ -55,7 +55,7 @@ def seite(geraet, device) -> dict:
     Hinweis des letzten Drucks ohne Code (code_hinweis: keine_verbindung, uebernommen)."""
     data = geraet.snapshot()
     sichtbar = geraet.code_sichtbar()
-    data["code"] = device.identity.claim_code if device is not None and sichtbar else None
+    data["code"] = device.uebernahme_code if device is not None and sichtbar else None
     data["geraet"] = device.identity.device_id if device is not None and sichtbar else None
     data["code_hinweis"] = geraet.code_hinweis()
     anzeige = geraet.letzte_anzeige

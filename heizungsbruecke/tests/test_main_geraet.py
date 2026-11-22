@@ -483,6 +483,8 @@ def test_vorbereiten_wires_device_and_host_without_starting_the_device(geraet_en
     """_vorbereiten: aufraeumen, Geraete-Host, Geraetekern, verdrahten; der Geraete-Thread startet erst in laufen."""
     geraet, device, status = main_module._vorbereiten(geraet_env.ha, FakeSupervisor(), "https://labor.example.test")
     assert geraet.device is device and device.host is geraet and geraet.status_sink is status
+    assert geraet.claim_code() is None  # beim Server noch nicht angenommen
+    device._code_angenommen = True
     assert geraet.claim_code() == device.identity.claim_code
     assert geraet.start_markierung is None  # keine Markierung: nichts zurueckzusetzen
 
