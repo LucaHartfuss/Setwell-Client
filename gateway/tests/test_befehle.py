@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ from smartheat_device.hintergrund import HINTERGRUND_NAME
 from smartheat_gateway import befehle
 from smartheat_gateway.drivers.base import DriverError
 from smartheat_gateway.drivers.simulation import SimulationDriver
+from smartheat_gateway.drivers.vicare_cloud.driver import ViCareCloudDriver
 from smartheat_gateway.paths import Paths
 from smartheat_gateway.quota import QuotaExhausted
 from smartheat_gateway.zigbee import ZigbeeMirror
@@ -530,6 +532,20 @@ def test_driver_login_begin_returns_only_the_state_hash_and_refuses_foreign_para
         with pytest.raises(DriverError) as abgelehnt:
             befehle.driver_login(ctx, {**begin, **fremd})
         assert abgelehnt.value.grund == "login_fehlgeschlagen"
+
+
+def test_driver_login_begin_sends_a_state_hash_that_matches_the_contract_pattern(vicare_kontext):
+    ctx, server, clock = vicare_kontext
+    done = befehle.driver_login(ctx, {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER})
+    assert isinstance(done, Done) and re.fullmatch(wire.STATE_HASH_MUSTER, done.result["state_hash"])
+
+
+@pytest.mark.parametrize("hash_", ["a" * 63, "a" * 65, "A" * 64, "g" * 64, "", None, 7])
+def test_driver_login_begin_with_a_malformed_state_hash_fails_without_sending_it(vicare_kontext, monkeypatch, hash_):
+    ctx, server, clock = vicare_kontext
+    monkeypatch.setattr(ViCareCloudDriver, "login_begin", lambda self, params: {"state_hash": hash_})
+    ergebnis = befehle.driver_login(ctx, {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER})
+    assert ergebnis == Failed("login_fehlgeschlagen")
 
 
 def test_driver_login_finish_with_a_wrong_code_or_without_an_open_login_is_refused(vicare_kontext):

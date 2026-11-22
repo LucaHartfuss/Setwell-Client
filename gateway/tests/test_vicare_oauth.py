@@ -13,6 +13,7 @@ import pytest
 import requests
 from fake_vicare.server import GOOD_CODE, FakeVicare
 
+from smartheat_device import wire
 from smartheat_gateway.drivers.vicare_cloud import oauth
 
 
@@ -570,7 +571,7 @@ def test_missing_parameters_are_refused(tmp_path):
 def test_begin_returns_only_the_hash_of_the_state_and_the_url_carries_challenge_and_state(tmp_path):
     tokens = store(tmp_path, "http://iam.test")
     ergebnis = tokens.anmeldung_beginnen(GUTE_PARAMS)
-    assert set(ergebnis) == {"state_hash"} and re.fullmatch(r"[0-9a-f]{64}", ergebnis["state_hash"])
+    assert set(ergebnis) == {"state_hash"} and re.fullmatch(wire.STATE_HASH_MUSTER, ergebnis["state_hash"])
     url = tokens.offene_anmeldung()
     assert url.startswith("http://iam.test/idp/v3/authorize?") or url.startswith(
         "https://iam.viessmann-climatesolutions.com/idp/v3/authorize?")
