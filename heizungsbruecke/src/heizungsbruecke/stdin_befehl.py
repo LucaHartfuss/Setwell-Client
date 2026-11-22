@@ -3,7 +3,8 @@ HA-Eintrag, schreibt die Integration `entfernen <geraet_id>` an das Add-on; das 
 sign_off ab. Hat der Nutzer dabei gewaehlt, das Geraet aus dem Konto zu loesen, schreibt sie `entfernen <geraet_id>
 freigeben`; das Geraet meldet sich ab und gibt danach die Wahl an den Server weiter. Beginnt die Einrichtung per
 Geraetecode, schreibt sie `nachweis <geraet_id>`; das Add-on antwortet mit dem Ereignis smartheat_nachweis
-(geraet_nachweis). Erlaubt sind genau diese drei Formen mit der eigenen Geraete-ID;
+(geraet_nachweis). Braucht der Nutzer den Uebernahme-Code, schreibt sie `code <geraet_id>`; das Add-on legt dann einen
+neuen Code an und zeigt ihn eine Stunde lang in der Discovery. Erlaubt sind genau diese vier Formen mit der eigenen Geraete-ID;
 jede andere Zeile (fremde ID, unbekannt,
 zu lang, kein UTF-8) endet in genau einer WARNING mit dem Grund, nie mit dem Zeileninhalt (der Absender ist nicht
 vertrauenswuerdig und der Inhalt koennte Zugangsdaten tragen). Reine Standardbibliothek; der Zeilenleser laeuft in
@@ -20,7 +21,8 @@ logger = logging.getLogger(__name__)
 BEFEHL_ENTFERNEN = "entfernen"
 BEFEHL_NACHWEIS = "nachweis"
 BEFEHL_FREIGEBEN = "freigeben"  # nur als Zusatz von entfernen
-BEFEHLE = (BEFEHL_ENTFERNEN, BEFEHL_NACHWEIS)
+BEFEHL_CODE = "code"
+BEFEHLE = (BEFEHL_ENTFERNEN, BEFEHL_NACHWEIS, BEFEHL_CODE)
 ZEILE_FORMAT = "{befehl} {geraet_id}\n"
 ZEILE_FORMAT_FREIGEBEN = "{befehl} {geraet_id} {zusatz}\n"
 #: Laengste Zeile in Bytes ohne Zeilenende; laengere werden verworfen (gueltige Zeilen sind ASCII und kuerzer).
@@ -62,9 +64,9 @@ def _rest_verwerfen(quelle: BinaryIO) -> None:
 
 
 def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachweis: Callable[[], None],
-          freigeben: Callable[[], None]) -> None:
+          freigeben: Callable[[], None], code: Callable[[], None]) -> None:
     """Zeilen aus quelle lesen bis EOF (still) oder bis ein Lesefehler (eine WARNING mit der Fehlerart); jede Zeile
-    wird geprueft, ein Treffer ruft entfernen(), freigeben() (entfernen mit Zusatz) bzw. nachweis()."""
+    wird geprueft, ein Treffer ruft entfernen(), freigeben() (entfernen mit Zusatz), nachweis() bzw. code()."""
     try:
         while True:
             zeile = quelle.readline(ZEILE_MAX + 1)
@@ -90,6 +92,8 @@ def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachw
                 freigeben()
             elif befehl == BEFEHL_NACHWEIS:
                 nachweis()
+            elif befehl == BEFEHL_CODE:
+                code()
             else:
                 logger.warning("stdin: Zeile verworfen (%s)", grund)
     except (OSError, ValueError) as error:
@@ -97,8 +101,8 @@ def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachw
 
 
 def starten(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachweis: Callable[[], None],
-            freigeben: Callable[[], None]) -> threading.Thread:
-    thread = threading.Thread(target=lesen, args=(quelle, geraet_id, entfernen, nachweis, freigeben), name="stdin",
-                              daemon=True)
+            freigeben: Callable[[], None], code: Callable[[], None]) -> threading.Thread:
+    thread = threading.Thread(target=lesen, args=(quelle, geraet_id, entfernen, nachweis, freigeben, code),
+                              name="stdin", daemon=True)
     thread.start()
     return thread

@@ -41,6 +41,7 @@ WEG_JE_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vic
 UHR_CACHE_SECONDS = 60
 AUTO_UPDATE_CACHE_SECONDS = 60
 INVENTUR_SECONDS = 120
+CODE_FRIST_SECONDS = 3600  # so lange nach der Annahme des Hashs steht der Uebernahme-Code in der Discovery
 _FREMD = ("zigbee_permit_join", "zigbee_devices", "driver_login")
 #: Schluessel der Meldung zur veralteten Integration (Kennung der Persistent Notification in HA).
 INTEGRATION_VERALTET = "integration_veraltet"
@@ -72,6 +73,7 @@ class HaDeviceHost(GeraetHostBasis):
         self.status_sink: GeraetStatus | None = None  # StatusSink der Laufzeit und Anzeige (__main__.verdrahten)
         self.discovery: Discovery | None = None  # Supervisor-Meldung (__main__.verdrahten)
         self.claim_code: Callable[[], str | None] = lambda: None  # Uebernahme-Code des Geraets (__main__.verdrahten)
+        self._code_ab: float | None = None  # monotone Zeit, zu der der Server den angeforderten Code-Hash annahm
         self.runtime_status_event: dict | None = None  # letztes Status-Ereignis der Laufzeit (laufzeit_merken)
         self.integration_stand = IntegrationStand()  # Lebenszeichen der Integration (geraet_trigger.build)
         self._integration_veraltet_offen = False  # Meldung zur veralteten Integration in HA offen (_integration_pruefen)
@@ -219,7 +221,7 @@ class HaDeviceHost(GeraetHostBasis):
             zustand = "gesperrt" if anzeige.zustand == "gesperrt" else anzeige.device_state
             try:
                 self.discovery.aktualisieren(self.device.identity.device_id, zustand,
-                                             self.claim_code() if anzeige.code_zeigen else None)
+                                             self.claim_code() if anzeige.code_zeigen and self._code_gilt() else None)
             except Exception as error:
                 logger.warning("Discovery nicht aktualisiert (%s)", type(error).__name__)
         try:
@@ -230,6 +232,26 @@ class HaDeviceHost(GeraetHostBasis):
             self._push_pruefen()
         except Exception as error:
             logger.warning("Meldung zum Push nicht gesetzt (%s)", type(error).__name__)
+
+    def _code_gilt(self) -> bool:
+        """Der angeforderte Uebernahme-Code darf in die Discovery: hoechstens CODE_FRIST_SECONDS nach der Annahme."""
+        return self._code_ab is not None and self._clock() - self._code_ab <= CODE_FRIST_SECONDS
+
+    def code_anfordern(self) -> None:
+        """Die Integration verlangt den Uebernahme-Code (stdin-Befehl `code`): ein neuer Code wird beim Server
+        angemeldet, und erst nach dessen Annahme steht er fuer CODE_FRIST_SECONDS in der Discovery (der naechste Takt
+        meldet ihn, nach Ablauf meldet der Takt wieder ohne). Nur fuer ein nicht uebernommenes Geraet; sonst und bei
+        Ablehnung bleibt die Discovery ohne Code. Geraete-Thread (Device.im_geraete_thread); blockiert fuer die Dauer
+        der Anfrage. Nie den Code ins Log."""
+        anzeige = self.letzte_anzeige
+        if self.device is None or anzeige is None or anzeige.device_state != "nicht_uebernommen":
+            logger.info("Uebernahme-Code angefordert: das Geraet ist nicht im Zustand nicht_uebernommen, ignoriert")
+            return
+        ergebnis = self.device.neuer_uebernahme_code()
+        if ergebnis != "neu":
+            logger.info("Uebernahme-Code angefordert: nicht angelegt (%s)", ergebnis)
+            return
+        self._code_ab = self._clock()
 
     def _push_pruefen(self) -> None:
         """Je (Stufe, Kreis) eine Geraete-Meldung: offen, solange die Integration binnen der Frist einen Push-Eintrag

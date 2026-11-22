@@ -213,7 +213,7 @@ def test_start_without_document_waits_unconfigured_and_reports_through_the_devic
     assert typ == "smartheat_status" and event["schema"] == 4
     assert event["geraet_id"] == DEVICE_ID and event["geraet_zustand"] == "nicht_uebernommen"
     assert CLAIM_CODE not in json.dumps(event)
-    assert supervisor.gemeldet == [{"geraet_id": DEVICE_ID, "zustand": "nicht_uebernommen", "claim_code": CLAIM_CODE}]
+    assert supervisor.gemeldet == [{"geraet_id": DEVICE_ID, "zustand": "nicht_uebernommen"}]  # Code nur auf Anforderung
 
 
 def test_an_operation_while_idle_is_not_posted_to_the_worker(geraet_env, caplog):
@@ -424,6 +424,14 @@ def test_stdin_anhaengen_reicht_entfernen_mit_freigeben_als_lokal_freigeben_an(g
     quelle = io.BytesIO(f"entfernen {DEVICE_ID} freigeben\nentfernen shg-bbbbbbbbbbbbbbbb freigeben\n".encode())
     main_module.stdin_anhaengen(geraet, device, quelle, geraet_env.ha).join(timeout=2)
     assert device.aufgaben == [geraet.lokal_freigeben]
+
+
+def test_stdin_anhaengen_reicht_code_als_code_anfordern_im_geraete_thread_an(geraet_env):
+    device = FakeDevice()
+    geraet, _ = _verdrahtet(geraet_env, device)
+    quelle = io.BytesIO(f"code {DEVICE_ID}\ncode shg-bbbbbbbbbbbbbbbb\n".encode())
+    main_module.stdin_anhaengen(geraet, device, quelle, geraet_env.ha).join(timeout=2)
+    assert device.aufgaben == [geraet.code_anfordern]
 
 
 def test_main_haengt_stdin_vor_laufen_an(geraet_env, monkeypatch):

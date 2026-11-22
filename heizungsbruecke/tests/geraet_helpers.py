@@ -393,6 +393,12 @@ class Device:
         self.wunsch_kreise = []
         self.meldungen = []
         self.documents = self
+        self.code_ergebnis = "neu"  # Antwort von neuer_uebernahme_code
+        self.code_aufrufe = 0
+
+    def neuer_uebernahme_code(self):
+        self.code_aufrufe += 1
+        return self.code_ergebnis
 
     def update_noetig_kritisch(self):
         return self.kritisch

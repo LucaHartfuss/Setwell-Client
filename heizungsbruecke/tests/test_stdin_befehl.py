@@ -25,7 +25,8 @@ def _befehle(caplog, daten: bytes) -> tuple[list[str], list[logging.LogRecord]]:
     gerufen = []
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         stdin_befehl.lesen(io.BytesIO(daten), EIGEN, lambda: gerufen.append("entfernen"),
-                           lambda: gerufen.append("nachweis"), lambda: gerufen.append("freigeben"))
+                           lambda: gerufen.append("nachweis"), lambda: gerufen.append("freigeben"),
+                           lambda: gerufen.append("code"))
     return gerufen, [r for r in caplog.records if r.name == LOGGER and r.levelno >= logging.WARNING]
 
 
@@ -149,7 +150,7 @@ def test_eof_beendet_den_thread_still(caplog):
     gerufen = []
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         thread = stdin_befehl.starten(io.BytesIO(b""), EIGEN, lambda: gerufen.append(1), lambda: gerufen.append(2),
-                                       lambda: gerufen.append(3))
+                                       lambda: gerufen.append(3), lambda: gerufen.append(4))
         thread.join(timeout=2)
     assert not thread.is_alive()
     assert thread.daemon and thread.name == "stdin"
@@ -159,7 +160,8 @@ def test_eof_beendet_den_thread_still(caplog):
 
 def test_der_thread_ruft_den_rueckruf_fuer_die_eigene_zeile():
     gerufen = threading.Event()
-    thread = stdin_befehl.starten(io.BytesIO(b"entfernen shg-aaaaaaaaaaaaaaaa\n"), EIGEN, gerufen.set, lambda: None, lambda: None)
+    thread = stdin_befehl.starten(io.BytesIO(b"entfernen shg-aaaaaaaaaaaaaaaa\n"), EIGEN, gerufen.set, lambda: None, lambda: None,
+                                    lambda: None)
     thread.join(timeout=2)
     assert gerufen.is_set()
 
@@ -177,7 +179,7 @@ def test_ein_lesefehler_beendet_den_thread_mit_einer_warnung(caplog, fehler):
     gerufen = []
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         thread = stdin_befehl.starten(_Kaputt(fehler), EIGEN, lambda: gerufen.append(1), lambda: gerufen.append(2),
-                                       lambda: gerufen.append(3))
+                                       lambda: gerufen.append(3), lambda: gerufen.append(4))
         thread.join(timeout=2)
     assert not thread.is_alive()
     assert gerufen == []
@@ -194,7 +196,7 @@ def test_ein_blockierter_stdin_thread_verhindert_kein_sauberes_ende():
     skript = (
         "import time\n"
         "from heizungsbruecke import __main__ as m, stdin_befehl\n"
-        f"stdin_befehl.starten(m.stdin_quelle(), {EIGEN!r}, lambda: None, lambda: None, lambda: None)\n"
+        f"stdin_befehl.starten(m.stdin_quelle(), {EIGEN!r}, lambda: None, lambda: None, lambda: None, lambda: None)\n"
         "time.sleep(0.2)\n"
         "raise SystemExit(0)\n"
     )
@@ -244,3 +246,24 @@ def test_die_befehlswoerter_sind_verschieden_und_das_zeilenformat_gilt_fuer_beid
     assert stdin_befehl.BEFEHL_NACHWEIS == "nachweis" and stdin_befehl.BEFEHL_ENTFERNEN == "entfernen"
     assert stdin_befehl.ZEILE_FORMAT.format(befehl=stdin_befehl.BEFEHL_NACHWEIS, geraet_id=EIGEN) == f"nachweis {EIGEN}\n"
     assert len(f"nachweis {EIGEN}") <= stdin_befehl.ZEILE_MAX
+
+
+# --- Befehl code ---
+
+
+def test_die_code_zeile_mit_der_eigenen_id_ruft_nur_den_code_rueckruf(caplog):
+    gerufen, warnungen = _befehle(caplog, b"code shg-aaaaaaaaaaaaaaaa\n\n")
+    assert gerufen == ["code"]
+    assert warnungen == []
+
+
+def test_die_code_zeile_einer_fremden_id_ruft_nichts_und_nennt_die_id_nicht(caplog):
+    gerufen, warnungen = _befehle(caplog, b"code shg-bbbbbbbbbbbbbbbb\n")
+    assert gerufen == []
+    assert len(warnungen) == 1 and "andere_geraete_id" in warnungen[0].getMessage()
+    assert "shg-bbbbbbbbbbbbbbbb" not in caplog.text
+
+
+def test_das_codewort_und_das_zeilenformat():
+    assert stdin_befehl.BEFEHL_CODE == "code"
+    assert stdin_befehl.ZEILE_FORMAT.format(befehl=stdin_befehl.BEFEHL_CODE, geraet_id=EIGEN) == f"code {EIGEN}\n"
