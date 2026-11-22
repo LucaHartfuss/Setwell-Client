@@ -3,6 +3,7 @@ BindingDescription wie der HA-Pfad, liefert die Pflicht-Rollen seines Hebelsatze
 Vertrag. G4 ergaenzt PARAMETERS um seine Treiber."""
 import pytest
 from bindung_beispiele import BINDINGS
+from conftest import ANMELDE_PARAMETER
 from fake_vicare.server import DEVICE, GATEWAY, GOOD_CODE, INSTALLATION, FakeVicare
 
 from smartheat_device import wire
@@ -21,7 +22,6 @@ PARAMETERS = {
     "vicare_cloud": [{**PARAMETER_BASIS}],
 }
 CASES = [(driver_id, parameter) for driver_id in DRIVERS for parameter in PARAMETERS[driver_id]]
-REDIRECT = "https://portal.test/oauth/callback"
 
 
 @pytest.fixture
@@ -37,9 +37,8 @@ def driver(request, data_dir, clock, monkeypatch):
     instance = create(driver_id, parameter, Paths(data_dir), clock=clock, writer=True,
                       description=BINDINGS[parameter["lever_set"]])
     if server is not None:
-        instance.login_begin({"phase": "begin", "driver_id": driver_id, "client_id": "c", "redirect_uri": REDIRECT,
-                              "scope": "x"})
-        instance.login_finish({"phase": "finish", "driver_id": driver_id, "code": GOOD_CODE, "redirect_uri": REDIRECT})
+        instance.login_begin({"phase": "begin", "driver_id": driver_id, **ANMELDE_PARAMETER})
+        instance.login_finish({"phase": "finish", "driver_id": driver_id, "code": GOOD_CODE})
     instance.poll_once()
     yield instance
     if server is not None:

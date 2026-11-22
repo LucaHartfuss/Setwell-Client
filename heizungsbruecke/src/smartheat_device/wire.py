@@ -256,7 +256,7 @@ COMMANDS: dict[str, Command] = {
     "zigbee_devices": Command((), ("devices",), 60, ("zigbee_nicht_bereit",)),
     "driver_login": Command(
         ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code"),
-        ("code_challenge", "code_challenge_method"), 120,
+        ("state_hash",), 120,
         ("treiber_unbekannt", "login_nicht_noetig", "login_fehlgeschlagen", "anlage_nicht_erreichbar"),
     ),
     "inventory": Command(("stunden",), (), None,
@@ -273,8 +273,10 @@ COMMANDS: dict[str, Command] = {
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
-    "finish": ("phase", "driver_id", "code", "redirect_uri"),
+    "finish": ("phase", "driver_id", "code"),
 }
+#: Form von `state_hash` im Ergebnis von `driver_login begin` (SHA-256 des `state`, den nur das Geraet und der Browser kennen).
+STATE_HASH_MUSTER = r"[0-9a-f]{64}"
 #: Ergebnisse von `weg_pruefen`.
 WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
 #: Laengste Zeichenkette von `claim_state.konto_hinweis` (die Maske ist kuerzer; laenger lehnt der Server ab, das Geraet liest sie nicht).

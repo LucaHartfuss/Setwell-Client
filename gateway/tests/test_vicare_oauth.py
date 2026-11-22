@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 import threading
 from unittest import mock
@@ -36,22 +37,11 @@ def test_the_challenge_is_the_s256_hash_of_a_valid_verifier():
 def test_login_roundtrip_stores_tokens_privately_and_never_returns_them(fake, tmp_path):
     server, base = fake
     tokens = store(tmp_path, base)
-    challenge = tokens.begin("client-x", "https://portal.test/oauth/callback")
-    assert len(challenge) == 43
-    assert tokens.finish(GOOD_CODE, "https://portal.test/oauth/callback") is None
+    assert set(tokens.anmeldung_beginnen(GUTE_PARAMS)) == {"state_hash"}
+    assert tokens.anmeldung_abschliessen(GOOD_CODE) is None
     assert tokens.logged_in() and tokens.access_token()
     assert stat.S_IMODE(os.stat(tmp_path / "vicare.json").st_mode) == 0o600
     assert "pending" not in json.loads((tmp_path / "vicare.json").read_text())  # Verifier nach dem Tausch weg
-
-
-def test_finish_without_begin_or_with_a_wrong_redirect_is_refused(fake, tmp_path):
-    server, base = fake
-    tokens = store(tmp_path, base)
-    with pytest.raises(oauth.NotLoggedIn):
-        tokens.finish(GOOD_CODE, "https://portal.test/oauth/callback")
-    tokens.begin("client-x", "https://portal.test/oauth/callback")
-    with pytest.raises(oauth.NotLoggedIn):
-        tokens.finish(GOOD_CODE, "https://evil.test/oauth/callback")
 
 
 def test_the_code_exchange_sends_the_matching_verifier_client_and_redirect(fake, tmp_path):
@@ -64,12 +54,13 @@ def test_the_code_exchange_sends_the_matching_verifier_client_and_redirect(fake,
         return requests.post(url, data=data, timeout=timeout)
 
     tokens = store(tmp_path, base, post=spy)
-    challenge = tokens.begin("client-x", "https://portal.test/cb")
-    tokens.finish(GOOD_CODE, "https://portal.test/cb")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    challenge = _abfrage(tokens.offene_anmeldung() or "")["code_challenge"]
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     url, form = sent[0]
     assert url == base + "/idp/v3/token"
     assert form["grant_type"] == "authorization_code" and form["code"] == GOOD_CODE
-    assert form["client_id"] == "client-x" and form["redirect_uri"] == "https://portal.test/cb"
+    assert form["client_id"] == GUTE_PARAMS["client_id"] and form["redirect_uri"] == PORTAL_REDIRECT
     digest = hashlib.sha256(form["code_verifier"].encode()).digest()
     assert base64.urlsafe_b64encode(digest).rstrip(b"=").decode() == challenge
 
@@ -77,9 +68,9 @@ def test_the_code_exchange_sends_the_matching_verifier_client_and_redirect(fake,
 def test_a_bad_code_is_a_login_rejection_with_a_customer_text(fake, tmp_path):
     server, base = fake
     tokens = store(tmp_path, base)
-    tokens.begin("client-x", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     with pytest.raises(oauth.LoginRejected) as error:
-        tokens.finish("falsch", "r")
+        tokens.anmeldung_abschliessen("falsch")
     assert "Anmeld" in error.value.text and "falsch" not in error.value.text
 
 
@@ -87,10 +78,10 @@ def test_the_pending_login_expires_after_ten_minutes(fake, tmp_path):
     server, base = fake
     now = [1000.0]
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("client-x", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     now[0] += 601
     with pytest.raises(oauth.NotLoggedIn):
-        tokens.finish(GOOD_CODE, "r")
+        tokens.anmeldung_abschliessen(GOOD_CODE)
 
 
 def test_the_access_token_is_renewed_shortly_before_it_expires(fake, tmp_path):
@@ -98,8 +89,8 @@ def test_the_access_token_is_renewed_shortly_before_it_expires(fake, tmp_path):
     now = [1_000_000.0]
     server._clock = lambda: now[0]
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     first = tokens.access_token()
     now[0] += 3600 - 30
     assert tokens.access_token() != first and server.tokens_issued == 2
@@ -111,8 +102,8 @@ def test_two_processes_renewing_at_once_share_one_refresh(fake, tmp_path):
     now = [2_000_000.0]
     server._clock = lambda: now[0]
     first = store(tmp_path, base, wall=lambda: now[0])
-    first.begin("c", "r")
-    first.finish(GOOD_CODE, "r")
+    first.anmeldung_beginnen(GUTE_PARAMS)
+    first.anmeldung_abschliessen(GOOD_CODE)
     now[0] += 3600 + 1
     second = store(tmp_path, base, wall=lambda: now[0])  # zweite Instanz = zweiter Prozess, gleiche Datei
     results, errors = [], []
@@ -136,8 +127,8 @@ def test_invalid_grant_clears_the_tokens_and_marks_the_login_expired(fake, tmp_p
     now = [3_000_000.0]
     server._clock = lambda: now[0]
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     server.control({"invalid_grant": True})
     now[0] += 3601
     with pytest.raises(oauth.NotLoggedIn):
@@ -154,8 +145,8 @@ def test_an_unreachable_iam_is_not_a_logout(fake, tmp_path):
     now = [4_000_000.0]
     server._clock = lambda: now[0]
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     server.stop()
     now[0] += 3601
     with pytest.raises(oauth.TokenUnavailable):
@@ -178,8 +169,8 @@ def test_a_rate_limited_or_failing_iam_is_not_a_logout(fake, tmp_path):
             return {}
 
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     tokens._post = lambda *a, **k: Response(status[0])
     now[0] += 3601
     for code in (429, 408, 500, 503):
@@ -197,8 +188,8 @@ def test_other_client_errors_on_refresh_are_not_a_logout(fake, tmp_path, status,
     now = [5_500_000.0]
     server._clock = lambda: now[0]
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     before = (tmp_path / "vicare.json").read_bytes()
 
     class Response:
@@ -221,8 +212,8 @@ def test_invalid_grant_with_400_or_401_is_a_logout(fake, tmp_path, status):
     now = [5_600_000.0]
     server._clock = lambda: now[0]
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
 
     class Response:
         status_code = status
@@ -242,8 +233,8 @@ def test_a_malformed_token_response_is_not_a_logout(fake, tmp_path):
     now = [6_000_000.0]
     server._clock = lambda: now[0]
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
 
     class Garbage:
         status_code = 200
@@ -261,8 +252,8 @@ def test_a_malformed_token_response_is_not_a_logout(fake, tmp_path):
 def test_force_refresh_renews_a_fresh_token(fake, tmp_path):
     server, base = fake
     tokens = store(tmp_path, base)
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     first = tokens.access_token()
     assert tokens.access_token() == first and server.tokens_issued == 1
     assert tokens.access_token(force_refresh=True) != first and server.tokens_issued == 2
@@ -273,13 +264,13 @@ def test_a_refresh_during_a_new_login_keeps_the_pending_login_alive(fake, tmp_pa
     vorbereiteten PKCE-Zustand nicht loeschen; nur der erfolgreiche Tausch entfernt ihn."""
     server, base = fake
     tokens = store(tmp_path, base)
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
-    tokens.begin("c", "r")  # erneute Anmeldung, das alte Token ist noch gueltig
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)  # erneute Anmeldung, das alte Token ist noch gueltig
     before = tokens.access_token()
     assert tokens.access_token(force_refresh=True) != before  # die Erneuerung laeuft dazwischen
     assert "pending" in json.loads((tmp_path / "vicare.json").read_text())
-    assert tokens.finish(GOOD_CODE, "r") is None
+    assert tokens.anmeldung_abschliessen(GOOD_CODE) is None
     assert tokens.logged_in() and "pending" not in json.loads((tmp_path / "vicare.json").read_text())
 
 
@@ -300,11 +291,11 @@ def test_a_pending_login_survives_a_revoked_refresh_token(tmp_path):
 
     tokens = oauth.TokenStore(tmp_path / "vicare.json", wall=lambda: 5000.0, iam="https://iam.test", post=post)
     tokens._save({"client_id": "c", "access_token": "a1", "refresh_token": "r1", "expires_at": 9e9})
-    tokens.begin("c", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     with pytest.raises(oauth.NotLoggedIn):
         tokens.access_token(force_refresh=True)
     assert tokens.expired() and "pending" in json.loads((tmp_path / "vicare.json").read_text())
-    assert tokens.finish("code-vom-portal", "r") is None
+    assert tokens.anmeldung_abschliessen("code-vom-portal") is None
     assert tokens.logged_in() and not tokens.expired()
 
 
@@ -339,9 +330,9 @@ def test_a_token_lifetime_beyond_float_range_is_an_unusable_response_not_a_logou
 @pytest.mark.parametrize("huge", [10**400, -10**400], ids=["gross-positiv", "gross-negativ"])
 def test_a_login_with_a_token_lifetime_beyond_float_range_is_not_stored(tmp_path, huge):
     tokens = _tokens_with_stub(tmp_path, {"access_token": "a2", "refresh_token": "r2", "expires_in": huge})
-    tokens.begin("c", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     with pytest.raises(oauth.TokenUnavailable):
-        tokens.finish("code", "r")
+        tokens.anmeldung_abschliessen("code")
     assert not tokens.logged_in()
 
 
@@ -356,12 +347,12 @@ def test_an_expiry_beyond_float_range_in_the_token_file_means_renew(tmp_path, hu
 @pytest.mark.parametrize("huge", [10**400, -10**400], ids=["gross-positiv", "gross-negativ"])
 def test_a_pending_login_with_a_creation_time_beyond_float_range_is_refused(tmp_path, huge):
     tokens = _tokens_with_stub(tmp_path, {"access_token": "a2", "refresh_token": "r2", "expires_in": 3600})
-    tokens.begin("c", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     data = json.loads((tmp_path / "vicare.json").read_text())
     data["pending"]["created"] = huge
     tokens._save(data)
     with pytest.raises(oauth.NotLoggedIn):
-        tokens.finish("code", "r")
+        tokens.anmeldung_abschliessen("code")
 
 
 def _antwort_text(expires_in: str) -> str:
@@ -396,21 +387,21 @@ def test_a_login_with_a_token_lifetime_of_zero_or_less_is_not_stored(tmp_path, c
     caplog.set_level(logging.WARNING)
     for lebensdauer in ("0", "-1", "-0.5"):
         tokens, _ = _tokens_mit_antwort(tmp_path, _antwort_text(lebensdauer))
-        tokens.begin("c", "r")
+        tokens.anmeldung_beginnen(GUTE_PARAMS)
         with pytest.raises(oauth.TokenUnavailable):
-            tokens.finish("code", "r")
+            tokens.anmeldung_abschliessen("code")
         assert not tokens.logged_in(), lebensdauer
     assert "unbrauchbare Antwort" in caplog.text
 
 
 def test_a_token_lifetime_of_one_second_is_taken_and_a_missing_one_means_an_hour(tmp_path):
     tokens, _ = _tokens_mit_antwort(tmp_path, '{"access_token": "a2", "refresh_token": "r2", "expires_in": 1}')
-    tokens.begin("c", "r")
-    tokens.finish("code", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen("code")
     assert json.loads((tmp_path / "vicare.json").read_text())["expires_at"] == 5001.0
     tokens, _ = _tokens_mit_antwort(tmp_path, '{"access_token": "a3", "refresh_token": "r3"}')
-    tokens.begin("c", "r")
-    tokens.finish("code", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen("code")
     assert json.loads((tmp_path / "vicare.json").read_text())["expires_at"] == 8600.0
 
 
@@ -431,10 +422,10 @@ def test_expires_in_as_nan_or_infinity_in_the_json_text_is_an_unusable_response(
 def test_a_login_with_expires_in_as_nan_or_infinity_is_not_stored(tmp_path, caplog, nicht_endlich):
     tokens, post = _tokens_mit_antwort(tmp_path, _antwort_text(nicht_endlich))
     assert not tokens.logged_in()  # frischer Store: vorher kein Token
-    tokens.begin("c", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     caplog.set_level(logging.WARNING)
     with pytest.raises(oauth.TokenUnavailable):
-        tokens.finish("code", "r")
+        tokens.anmeldung_abschliessen("code")
     assert "unbrauchbare Antwort" in caplog.text and post.call_count == 1
     assert not tokens.logged_in()
     assert "access_token" not in json.loads((tmp_path / "vicare.json").read_text())  # nur der vorbereitete Zustand
@@ -452,14 +443,14 @@ def test_expires_at_as_nan_or_infinity_in_the_token_file_means_renew(tmp_path, n
 @pytest.mark.parametrize("nicht_endlich", ["NaN", "Infinity", "-Infinity"])
 def test_created_as_nan_or_infinity_in_the_token_file_makes_the_pending_login_void(tmp_path, nicht_endlich):
     tokens, post = _tokens_mit_antwort(tmp_path, '{"access_token": "a2", "refresh_token": "r2", "expires_in": 3600}')
-    tokens.begin("c", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     daten = json.loads((tmp_path / "vicare.json").read_text())
     daten["pending"]["created"] = 0
     (tmp_path / "vicare.json").write_text(
         json.dumps(daten).replace('"created": 0', '"created": ' + nicht_endlich))
     assert '"created": ' + nicht_endlich in (tmp_path / "vicare.json").read_text()
     with pytest.raises(oauth.NotLoggedIn):
-        tokens.finish("code", "r")
+        tokens.anmeldung_abschliessen("code")
     assert post.call_count == 0 and not tokens.logged_in()
 
 
@@ -476,19 +467,19 @@ def test_no_secret_reaches_logs_or_exception_texts(fake, tmp_path, caplog):
     server._clock = lambda: now[0]
     caplog.set_level(logging.DEBUG)
     tokens = store(tmp_path, base, wall=lambda: now[0])
-    challenge = tokens.begin("c", "r")
+    ergebnis = tokens.anmeldung_beginnen(GUTE_PARAMS)
     verifier = json.loads((tmp_path / "vicare.json").read_text())["pending"]["verifier"]
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     stored = json.loads((tmp_path / "vicare.json").read_text())
     secrets_seen = [verifier, stored["access_token"], stored["refresh_token"]]
     server.control({"invalid_grant": True})
     now[0] += 3601
     with pytest.raises(oauth.NotLoggedIn) as error:
         tokens.access_token()
-    tokens.begin("c", "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
     with pytest.raises(oauth.LoginRejected) as rejected:
-        tokens.finish(GOOD_CODE, "r")
-    texts = [caplog.text, str(error.value), rejected.value.text, challenge]
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+    texts = [caplog.text, str(error.value), rejected.value.text, str(ergebnis)]
     for secret in secrets_seen:
         assert all(secret not in text for text in texts)
     assert GOOD_CODE not in caplog.text
@@ -497,8 +488,8 @@ def test_no_secret_reaches_logs_or_exception_texts(fake, tmp_path, caplog):
 def test_forget_removes_everything_and_the_test_endpoints_need_the_flag(fake, tmp_path, monkeypatch):
     server, base = fake
     tokens = store(tmp_path, base)
-    tokens.begin("c", "r")
-    tokens.finish(GOOD_CODE, "r")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
     tokens.forget()
     assert not tokens.logged_in() and not (tmp_path / "vicare.json").exists()
     monkeypatch.setenv("SHG_VICARE_IAM_BASE", "http://evil.test")
@@ -506,3 +497,200 @@ def test_forget_removes_everything_and_the_test_endpoints_need_the_flag(fake, tm
     assert oauth.iam_base() == "https://iam.viessmann-climatesolutions.com"
     monkeypatch.setenv("SHG_TEST_ENDPOINTS", "1")
     assert oauth.iam_base() == "http://evil.test"
+
+
+# --- Anmeldung im Geraet: Gerät erzeugt Challenge und state, der Server liefert nur die Parameter ---
+
+PORTAL_REDIRECT = "https://portal.setwell.de/oauth/callback"
+GUTE_PARAMS = {"client_id": "0123456789abcdef0123456789abcdef", "redirect_uri": PORTAL_REDIRECT,
+               "scope": "IoT User offline_access"}
+
+
+@pytest.fixture(autouse=True)
+def _portal_des_baus(monkeypatch):
+    """Der Portal-Host kommt aus dem signierten Bau (`install.sh` -> gateway.env -> Compose), nicht vom Server."""
+    monkeypatch.setenv("SHG_PORTAL_BASE_URL", "https://portal.setwell.de")
+
+
+@pytest.mark.parametrize("wert", [None, "", "http://portal.setwell.de", "portal.setwell.de"])
+def test_without_an_https_portal_of_the_build_every_begin_is_refused(tmp_path, monkeypatch, wert):
+    if wert is None:
+        monkeypatch.delenv("SHG_PORTAL_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("SHG_PORTAL_BASE_URL", wert)
+    tokens = store(tmp_path, "http://iam.test")
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_beginnen(GUTE_PARAMS)
+    assert tokens.offene_anmeldung() is None
+
+
+def test_the_redirect_follows_the_portal_of_the_build_not_a_fixed_host(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHG_PORTAL_BASE_URL", "https://portal.labor.setwell.de/")
+    tokens = store(tmp_path, "http://iam.test")
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_beginnen(GUTE_PARAMS)
+    labor = {**GUTE_PARAMS, "redirect_uri": "https://portal.labor.setwell.de/oauth/callback"}
+    assert set(tokens.anmeldung_beginnen(labor)) == {"state_hash"}
+
+
+def _abfrage(url: str) -> dict:
+    from urllib.parse import parse_qs, urlsplit
+    return {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+
+
+@pytest.mark.parametrize("aenderung", [
+    {"redirect_uri": "https://evil.test/oauth/callback"},
+    {"redirect_uri": "https://portal.setwell.de/anderer/pfad"},
+    {"redirect_uri": "https://portal.setwell.de.evil.test/oauth/callback"},
+    {"redirect_uri": "http://portal.setwell.de/oauth/callback"},
+    {"redirect_uri": PORTAL_REDIRECT + "?x=1"},
+    {"scope": "IoT User offline_access admin"},
+    {"scope": "admin"},
+    {"client_id": "kurz"},
+    {"client_id": "a b c d e f g h i j"},
+    {"client_id": "x" * 200},
+    {"client_id": 7},
+    {"scope": None},
+])
+def test_foreign_host_scope_or_bad_client_id_is_refused_and_nothing_is_stored(tmp_path, aenderung):
+    tokens = store(tmp_path, "http://iam.test")
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_beginnen({**GUTE_PARAMS, **aenderung})
+    assert tokens.offene_anmeldung() is None
+    assert not (tmp_path / "vicare.json").exists()
+
+
+def test_missing_parameters_are_refused(tmp_path):
+    tokens = store(tmp_path, "http://iam.test")
+    for fehlt in GUTE_PARAMS:
+        with pytest.raises(oauth.LoginRejected):
+            tokens.anmeldung_beginnen({k: v for k, v in GUTE_PARAMS.items() if k != fehlt})
+
+
+def test_begin_returns_only_the_hash_of_the_state_and_the_url_carries_challenge_and_state(tmp_path):
+    tokens = store(tmp_path, "http://iam.test")
+    ergebnis = tokens.anmeldung_beginnen(GUTE_PARAMS)
+    assert set(ergebnis) == {"state_hash"} and re.fullmatch(r"[0-9a-f]{64}", ergebnis["state_hash"])
+    url = tokens.offene_anmeldung()
+    assert url.startswith("http://iam.test/idp/v3/authorize?") or url.startswith(
+        "https://iam.viessmann-climatesolutions.com/idp/v3/authorize?")
+    abfrage = _abfrage(url)
+    assert abfrage["client_id"] == GUTE_PARAMS["client_id"] and abfrage["redirect_uri"] == PORTAL_REDIRECT
+    assert abfrage["scope"] == GUTE_PARAMS["scope"] and abfrage["response_type"] == "code"
+    assert abfrage["code_challenge_method"] == "S256"
+    assert hashlib.sha256(abfrage["state"].encode()).hexdigest() == ergebnis["state_hash"]
+    pending = json.loads((tmp_path / "vicare.json").read_text())["pending"]
+    assert abfrage["code_challenge"] == base64.urlsafe_b64encode(
+        hashlib.sha256(pending["verifier"].encode()).digest()).rstrip(b"=").decode()
+    text = json.dumps(ergebnis)
+    assert pending["verifier"] not in text and abfrage["state"] not in text and abfrage["code_challenge"] not in text
+
+
+def test_the_authorize_address_follows_the_test_endpoint_only_with_the_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHG_VICARE_IAM_BASE", "http://iam.test")
+    monkeypatch.setenv("SHG_TEST_ENDPOINTS", "1")
+    tokens = oauth.TokenStore(tmp_path / "vicare.json")
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    assert tokens.offene_anmeldung().startswith("http://iam.test/idp/v3/authorize?")
+    monkeypatch.delenv("SHG_TEST_ENDPOINTS")
+    assert tokens.offene_anmeldung().startswith("https://iam.viessmann-climatesolutions.com/idp/v3/authorize?")
+
+
+def test_every_begin_makes_a_fresh_state_and_verifier(tmp_path):
+    tokens = store(tmp_path, "http://iam.test")
+    erster = tokens.anmeldung_beginnen(GUTE_PARAMS)["state_hash"]
+    url_1 = tokens.offene_anmeldung()
+    zweiter = tokens.anmeldung_beginnen(GUTE_PARAMS)["state_hash"]
+    url_2 = tokens.offene_anmeldung()
+    assert erster != zweiter
+    assert _abfrage(url_1)["state"] != _abfrage(url_2)["state"]
+    assert _abfrage(url_1)["code_challenge"] != _abfrage(url_2)["code_challenge"]
+
+
+def test_no_url_after_the_deadline(tmp_path):
+    now = [1000.0]
+    tokens = store(tmp_path, "http://iam.test", wall=lambda: now[0])
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    now[0] += oauth.PENDING_SECONDS
+    assert tokens.offene_anmeldung() is not None
+    now[0] += 1
+    assert tokens.offene_anmeldung() is None
+
+
+def test_finish_takes_redirect_and_client_from_the_open_login_and_exchanges_the_code(fake, tmp_path):
+    server, base = fake
+    sent = []
+    real = requests.post
+
+    def post(url, **kw):
+        sent.append(kw["data"])
+        return real(url, **kw)
+
+    tokens = store(tmp_path, base, post=post)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    verifier = json.loads((tmp_path / "vicare.json").read_text())["pending"]["verifier"]
+    assert tokens.anmeldung_abschliessen(GOOD_CODE) is None
+    assert tokens.logged_in() and tokens.access_token()
+    assert sent[0]["redirect_uri"] == PORTAL_REDIRECT and sent[0]["client_id"] == GUTE_PARAMS["client_id"]
+    assert sent[0]["code_verifier"] == verifier and sent[0]["code"] == GOOD_CODE
+    assert "pending" not in json.loads((tmp_path / "vicare.json").read_text())
+    assert tokens.offene_anmeldung() is None
+
+
+def test_finish_without_an_open_login_or_after_the_deadline_is_refused(fake, tmp_path):
+    server, base = fake
+    now = [1000.0]
+    tokens = store(tmp_path, base, wall=lambda: now[0])
+    with pytest.raises(oauth.NotLoggedIn):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    now[0] += oauth.PENDING_SECONDS + 1
+    with pytest.raises(oauth.NotLoggedIn):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+    assert not tokens.logged_in()
+
+
+def test_the_open_login_is_used_once_even_when_the_exchange_fails(fake, tmp_path):
+    server, base = fake
+    tokens = store(tmp_path, base)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_abschliessen("falscher-code")
+    assert tokens.offene_anmeldung() is None
+    with pytest.raises(oauth.NotLoggedIn):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+
+
+def test_the_open_login_is_gone_also_when_the_iam_is_unreachable(tmp_path):
+    def post(*args, **kw):
+        raise requests.ConnectionError("weg")
+
+    tokens = store(tmp_path, "http://iam.test", post=post)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    with pytest.raises(oauth.TokenUnavailable):
+        tokens.anmeldung_abschliessen(GOOD_CODE)
+    assert tokens.offene_anmeldung() is None
+
+
+def test_a_failed_new_login_keeps_an_existing_one(fake, tmp_path):
+    server, base = fake
+    tokens = store(tmp_path, base)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    tokens.anmeldung_abschliessen(GOOD_CODE)
+    alt = tokens.access_token()
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_abschliessen("falscher-code")
+    assert tokens.logged_in() and tokens.access_token() == alt
+
+
+def test_state_verifier_and_url_never_reach_the_log(fake, tmp_path, caplog):
+    server, base = fake
+    caplog.set_level(logging.DEBUG)
+    tokens = store(tmp_path, base)
+    tokens.anmeldung_beginnen(GUTE_PARAMS)
+    url = tokens.offene_anmeldung()
+    verifier = json.loads((tmp_path / "vicare.json").read_text())["pending"]["verifier"]
+    with pytest.raises(oauth.LoginRejected):
+        tokens.anmeldung_abschliessen("falscher-code")
+    assert _abfrage(url)["state"] not in caplog.text and verifier not in caplog.text and url not in caplog.text
