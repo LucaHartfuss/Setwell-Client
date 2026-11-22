@@ -2,6 +2,9 @@
 
 ## Unveroeffentlicht
 
+- Der Uebernahme-Code erscheint erst nach dem Knopfdruck am Geraet und liegt nur im Speicher; nach einem Neustart gibt
+  es einen neuen Code, eine alte Datei `claim_code` wird beim Start geloescht.
+
 - Der Abschnitt „Anmelden beim Hersteller“ der LAN-Seite zeigt neben dem Link einen QR-Code derselben Adresse
   (Inline-SVG, offline mit `segno` 1.6.6 erzeugt, gepinnt in der Lock). Er erscheint unter denselben Bedingungen wie der
   Link: nur mit Sitzung, nur bei offener Anmeldung, `no-store`, nie in `diagnostics` oder im Log.

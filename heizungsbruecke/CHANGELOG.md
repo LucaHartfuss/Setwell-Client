@@ -5,6 +5,9 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Der Übernahme-Code erscheint erst, wenn die Einrichtung ihn anfordert, und gilt eine Stunde; nach einem Neustart gibt
+  es einen neuen Code.
+
 - Das Gerät nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
   (`smartheat_device/anker.pem`, aktiver Schlüssel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
   loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Kälteschutz laufen unverändert
