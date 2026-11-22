@@ -249,7 +249,7 @@ def test_beide_gruende_gehoeren_zu_den_gruenden_des_vertrags():
     ({"versatz_k": float("nan")}, "versatz_k"),
     ({"versatz_k": 10**400}, "versatz_k"),  # JSON kennt beliebig grosse Ganzzahlen: kein OverflowError
     ({"raum": 0}, "raum"),
-    ({"fuehler": ["a"] * 9}, "fuehler"),
+    ({"fuehler": ["a"] * 4}, "fuehler"),
 ])
 def test_ungueltige_raeume_werden_abgelehnt(raum, feld):
     kreis = _kreis_ohne_raum(_gw_kreis(1), **raum)
@@ -263,15 +263,18 @@ def test_ein_kreis_braucht_mindestens_einen_referenzfuehler():
     kreis = _gw_kreis(1)
     kreis["raeume"][0]["rolle"] = "kontroll"
     ablehnung = _geprueft(_gw(kreis), LOCK)
-    assert ablehnung == cc.Ablehnung(cc.UNGUELTIG, cc.befund("fuehler", "anzahl", min=1, max=8, anzahl=0))
+    assert ablehnung == cc.Ablehnung(cc.UNGUELTIG, cc.befund("fuehler", "anzahl", min=1, max=16, anzahl=0))
 
 
-def test_ein_kreis_hat_hoechstens_acht_referenzfuehler():
+def test_ein_kreis_hat_hoechstens_sechzehn_referenzfuehler():
     kreis = _gw_kreis(1)
     kreis["raeume"] = [konfig_form.raum([_sensor(10 * n + i) for i in range(2)], nummer=n, name=f"R{n}")
-                       for n in range(1, 6)]
+                       for n in range(1, 9)]
+    assert _geprueft(_gw(kreis), LOCK) is None  # 16 Fuehler in acht Raeumen
+    kreis["raeume"] = [konfig_form.raum([_sensor(10 * n + i) for i in range(3)], nummer=n, name=f"R{n}")
+                       for n in range(1, 7)]
     ablehnung = _geprueft(_gw(kreis), LOCK)
-    assert ablehnung == cc.Ablehnung(cc.UNGUELTIG, cc.befund("fuehler", "anzahl", min=1, max=8, anzahl=10))
+    assert ablehnung == cc.Ablehnung(cc.UNGUELTIG, cc.befund("fuehler", "anzahl", min=1, max=16, anzahl=18))
 
 
 def test_doppelte_raumnummern_werden_abgelehnt():
@@ -383,12 +386,12 @@ def test_raeume_eines_kreises_grenzen_und_befunde():
     kreis["raeume"] = "keine Liste"
     assert _geprueft(_gw(kreis), LOCK) == _ungueltig("raeume", "ungueltig")
     kreis["raeume"] = []
-    assert _geprueft(_gw(kreis), LOCK) == _ungueltig("raeume", "anzahl", min=1, max=8, anzahl=0)
+    assert _geprueft(_gw(kreis), LOCK) == _ungueltig("raeume", "anzahl", min=1, max=16, anzahl=0)
     kreis["raeume"] = [konfig_form.raum([_sensor(1)])] + [
-        konfig_form.raum([], nummer=n, name=f"R{n}", rolle="kontroll") for n in range(2, 9)]
-    assert _geprueft(_gw(kreis), LOCK) is None  # acht Raeume
-    kreis["raeume"].append(konfig_form.raum([], nummer=9, name="R9", rolle="kontroll"))
-    assert _geprueft(_gw(kreis), LOCK) == _ungueltig("raeume", "anzahl", min=1, max=8, anzahl=9)
+        konfig_form.raum([], nummer=n, name=f"R{n}", rolle="kontroll") for n in range(2, 17)]
+    assert _geprueft(_gw(kreis), LOCK) is None  # sechzehn Raeume
+    kreis["raeume"].append(konfig_form.raum([], nummer=17, name="R17", rolle="kontroll"))
+    assert _geprueft(_gw(kreis), LOCK) == _ungueltig("raeume", "anzahl", min=1, max=16, anzahl=17)
 
 
 @pytest.mark.parametrize("versatz", [-3.0, -2.5, 0, 2.5, 3.0, 3])
@@ -424,11 +427,11 @@ def test_acht_referenzfuehler_sind_zulaessig_gegenprobe():
     assert _geprueft(_gw(kreis), LOCK) is None
 
 
-def test_acht_fuehler_in_einem_raum_sind_zulaessig_und_neun_nennen_die_grenze():
-    kreis = _kreis_ohne_raum(_gw_kreis(1), fuehler=[_sensor(10 + i) for i in range(8)])
+def test_drei_fuehler_in_einem_raum_sind_zulaessig_und_vier_nennen_die_grenze():
+    kreis = _kreis_ohne_raum(_gw_kreis(1), fuehler=[_sensor(10 + i) for i in range(3)])
     assert _geprueft(_gw(kreis), LOCK) is None
-    kreis = _kreis_ohne_raum(_gw_kreis(1), fuehler=[_sensor(10 + i) for i in range(9)])
-    assert _geprueft(_gw(kreis), LOCK) == _ungueltig("fuehler", "anzahl", min=0, max=8, anzahl=9)
+    kreis = _kreis_ohne_raum(_gw_kreis(1), fuehler=[_sensor(10 + i) for i in range(4)])
+    assert _geprueft(_gw(kreis), LOCK) == _ungueltig("fuehler", "anzahl", min=0, max=3, anzahl=4)
 
 
 @pytest.mark.parametrize("fuehler", ["sensor", 5, [1], [""], [None]])
