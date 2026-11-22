@@ -271,6 +271,10 @@ def test_ein_kreis_hat_hoechstens_sechzehn_referenzfuehler():
     kreis["raeume"] = [konfig_form.raum([_sensor(10 * n + i) for i in range(2)], nummer=n, name=f"R{n}")
                        for n in range(1, 9)]
     assert _geprueft(_gw(kreis), LOCK) is None  # 16 Fuehler in acht Raeumen
+    kreis["raeume"] = [konfig_form.raum([_sensor(10 * n + i) for i in range(3 if n < 6 else 2)], nummer=n, name=f"R{n}")
+                       for n in range(1, 7)]
+    ablehnung = _geprueft(_gw(kreis), LOCK)  # 5 Raeume zu 3 und einer zu 2: genau 17
+    assert ablehnung == cc.Ablehnung(cc.UNGUELTIG, cc.befund("fuehler", "anzahl", min=1, max=16, anzahl=17))
     kreis["raeume"] = [konfig_form.raum([_sensor(10 * n + i) for i in range(3)], nummer=n, name=f"R{n}")
                        for n in range(1, 7)]
     ablehnung = _geprueft(_gw(kreis), LOCK)
