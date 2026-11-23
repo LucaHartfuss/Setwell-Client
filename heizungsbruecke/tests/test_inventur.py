@@ -466,6 +466,19 @@ def test_ein_fremdes_busgeraet_macht_die_plattform_nicht_einstellbar():
     assert daten["entities"] == [] and daten["geraete"] == []
 
 
+def test_mqtt_zaehlt_nur_mit_einer_einstellbaren_entity_des_verankerten_geraets():
+    """Die Plattform des Buswegs ist einstellbar, wenn ihre einstellbare Entity am verankerten Registry-Geraet haengt;
+    ohne Angabe verankerter Geraete (fail closed) und bei einer Entity eines fremden Geraets zaehlt sie nicht. Andere
+    Plattformen zaehlen wie bisher."""
+    eintraege = {"number.kurve": {"platform": "mqtt", "device_id": "d-regler"},
+                 "number.fremd": {"platform": "mqtt", "device_id": "d-fremd"},
+                 "number.zigbee": {"platform": "zha", "device_id": "d-zha"}}
+    assert inventur.einstellbare_plattformen(eintraege, verankert={"d-regler"}) == {"mqtt", "zha"}
+    assert inventur.einstellbare_plattformen({"number.fremd": eintraege["number.fremd"]},
+                                             verankert={"d-regler"}) == set()
+    assert inventur.einstellbare_plattformen(eintraege) == {"zha"}
+
+
 def test_andere_plattformen_bleiben_von_der_verankerung_unberuehrt():
     daten = inventur.inventur(_ha(), FILTER)
     assert {e["entity_id"] for e in daten["entities"]} == {"number.curve", "climate.wz", "sensor.t"}

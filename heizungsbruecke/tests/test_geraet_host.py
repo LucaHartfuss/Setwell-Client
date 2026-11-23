@@ -68,7 +68,7 @@ def test_the_ha_host_reports_the_ways_of_its_write_platforms(tmp_path, monkeypat
     from heizungsbruecke import dokument
     host, _, _ = _host(tmp_path, monkeypatch)
     assert {weg for weg, _ in dokument.SCHREIB_PLATTFORM} == set(host.wege())
-    assert host.wege() == ["vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
+    assert host.wege() == ["vaillant_ebus", "vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
     assert nachrichten.hello(konfiguration_version=1, bedienung_version=1, anzeige_version=0, software_version="1.0.0",
                              host="ha", faehigkeiten=host.faehigkeiten(), wege=host.wege(), boot_id="b" * 16,
                              uhr_synchron=True)["wege"] == host.wege()

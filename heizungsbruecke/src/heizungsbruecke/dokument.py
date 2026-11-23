@@ -60,6 +60,7 @@ SCHREIB_PLATTFORM: dict[tuple[str, str], str] = {
     ("weishaupt_modbus", "weishaupt_wwp"): "weishaupt_modbus",
     ("weishaupt_modbus", "weishaupt_wwp_basis"): "weishaupt_modbus",
     ("viessmann_vicare", "viessmann_vicare"): "vicare",
+    ("vaillant_ebus", "vaillant_vrc720"): "mqtt",  # Bus: Schreibziele nur am verankerten Registry-Geraet (SCHREIBREGELN_BUS)
 }
 
 
@@ -416,8 +417,13 @@ def rollen_befund(b: HaBindung, ha_api, *, beim_start: bool) -> tuple[tuple[str,
         return ("plattform", "nicht_erlaubt"), []
     registry = {e["entity_id"]: e for e in ha_api.entity_registry() if isinstance(e, Mapping) and "entity_id" in e}
     states = {s["entity_id"]: s for s in ha_api.get_states() if isinstance(s, Mapping) and "entity_id" in s}
+    braucht_geraete = schreib == PLATTFORM_BUS or any(
+        entry.get("platform") == PLATTFORM_BUS for entity_id, entry in registry.items() if entity_id in states)
+    geraete = ({g["id"]: g for g in ha_api.device_registry() if isinstance(g, Mapping) and isinstance(g.get("id"), str)}
+               if braucht_geraete else {})  # die Geraete-Registry nur, wo die Verankerung am Geraet zaehlt
     einstellbar = einstellbare_plattformen({entity_id: entry for entity_id, entry in registry.items()
-                                            if entity_id in states})
+                                            if entity_id in states},
+                                           {geraet_id for geraet_id, g in geraete.items() if geraet_verankert(g)})
     pflicht = _pflicht_refs(b)
     ziele = {v1_rolle(rolle) for rolle, _ in _schreibziel_rollen(b)}
     ohne_zustand: list[tuple[str, str]] = []
@@ -435,9 +441,8 @@ def rollen_befund(b: HaBindung, ha_api, *, beim_start: bool) -> tuple[tuple[str,
         if not entity_erlaubt(entity_id, eintrag, state, einstellbar) or not (
                 schreibziel or _form_erlaubt(feld, ref, eintrag, state, schreib)):
             return (feld, "nicht_erlaubt"), ohne_zustand
-    geraete = ({g["id"]: g for g in ha_api.device_registry() if isinstance(g, Mapping) and isinstance(g.get("id"), str)}
-               if schreib == PLATTFORM_BUS else None)  # nur der Busweg braucht die Geraete-Registry
-    return schreibziele_befund(b, registry, beim_start=beim_start, geraete=geraete), ohne_zustand
+    return schreibziele_befund(b, registry, beim_start=beim_start,
+                               geraete=geraete if schreib == PLATTFORM_BUS else None), ohne_zustand  # nur der Busweg
 
 
 def rollen_pruefen(b: HaBindung, ha_api) -> tuple[str, str] | None:

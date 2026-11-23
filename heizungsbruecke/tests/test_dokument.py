@@ -385,11 +385,12 @@ def test_jeder_hebelsatz_hat_eine_schreibplattform():
         ("vaillant_myvaillant", "vaillant_vrc720"): "mypyllant",
         ("weishaupt_modbus", "weishaupt_wwp"): "weishaupt_modbus",
         ("weishaupt_modbus", "weishaupt_wwp_basis"): "weishaupt_modbus",
-        ("viessmann_vicare", "viessmann_vicare"): "vicare"}
+        ("viessmann_vicare", "viessmann_vicare"): "vicare",
+        ("vaillant_ebus", "vaillant_vrc720"): "mqtt"}
     assert {hebelsatz for _, hebelsatz in dokument.SCHREIB_PLATTFORM} == set(dokument.PFLICHT_ROLLEN)
 
 
-@pytest.mark.parametrize("weg", ["vaillant_ebus", "weishaupt_modbus", "unbekannt", "", None])
+@pytest.mark.parametrize("weg", ["weishaupt_modbus", "unbekannt", "", None])
 def test_ein_weg_ohne_schreibregeln_dieses_hebelsatzes_laesst_nichts_schreiben(weg):
     """Die Plattform der Schreibziele gilt je Weg und Hebelsatz. Ein Weg, der fuer den Hebelsatz keine Zeile hat (ein
     Weg ohne Schreibregeln, ein fremder Weg, ein fehlendes Feld), laesst keine Schreibziele zu, auch wenn der Kreis die
@@ -635,10 +636,10 @@ def _bus_ha(hersteller="Vaillant", modell="VRC 720"):
 
 
 @pytest.fixture
-def bus_offen(monkeypatch):
-    """Die Zeile der Schreibplattform des Buswegs ist ohne die Positivliste noch nicht da; hier nur zur Probe der
-    Verankerung am Registry-Geraet gesetzt."""
-    monkeypatch.setitem(dokument.SCHREIB_PLATTFORM, _BUS, "mqtt")
+def bus_offen():
+    """Die Zeile der Schreibplattform des Buswegs steht in der Tabelle; die Tests darunter pruefen die Verankerung am
+    Registry-Geraet."""
+    assert dokument.SCHREIB_PLATTFORM[_BUS] == "mqtt"
 
 
 def _bus_urteile(konfiguration, ha):
@@ -651,12 +652,16 @@ def _bus_urteile(konfiguration, ha):
     return uebernehmen, start
 
 
-def test_der_busweg_bleibt_ohne_schreibzeile_unbeschreibbar():
-    """Auch mit passendem Registry-Geraet laesst die lokale Tabelle den Weg nichts schreiben, solange sie keine Zeile fuer
-    ihn hat (beim Uebernehmen wie beim Start, auch das Dokument-Gate)."""
-    assert _BUS not in dokument.SCHREIB_PLATTFORM
-    assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (("plattform", "nicht_erlaubt"),) * 2
-    assert _zuordnung(_bus_konfiguration(), _bus_ha()) == {"feld": "plattform", "regel": "nicht_erlaubt"}
+def test_der_busweg_ist_mit_der_tabellenzeile_nur_am_verankerten_geraet_beschreibbar():
+    """Die Zeile gibt den Weg frei (beim Uebernehmen wie beim Start, auch das Dokument-Gate); ein anderer Hersteller am
+    selben Registry-Geraet oder ein Kreis mit fremder Plattform bleibt abgelehnt."""
+    assert dokument.SCHREIB_PLATTFORM[_BUS] == "mqtt"
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (None, None)
+    assert _zuordnung(_bus_konfiguration(), _bus_ha()) is None
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha("Wolf", "VRC 720"))[0] is not None
+    fremd = _bus_konfiguration()
+    fremd["kreise"][0]["bindung"]["kreis"]["plattform"] = "mypyllant"
+    assert _bus_urteile(fremd, _bus_ha())[0] == ("plattform", "nicht_erlaubt")
 
 
 def test_das_verankerte_geraet_besteht_beim_uebernehmen_und_beim_start(bus_offen):

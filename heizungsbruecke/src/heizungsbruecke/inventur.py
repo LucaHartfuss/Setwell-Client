@@ -14,7 +14,7 @@ herausgehen darf; ein kompromittierter Server kann so keine Schloesser, Personen
 erscheint im Log nur als Anzahl je Domaene."""
 import logging
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from smartheat_core.logtext import lesbar
 from smartheat_device import fehler, wire
@@ -100,13 +100,15 @@ def entity_erlaubt(entity_id: str, registry_entry: Mapping, state: Mapping, eins
                     registry_entry.get("platform") or OHNE_REGISTRY, einstellbar)
 
 
-def einstellbare_plattformen(eintraege: Mapping[str, Mapping]) -> set[str]:
+def einstellbare_plattformen(eintraege: Mapping[str, Mapping], verankert: Collection[object] = frozenset()) -> set[str]:
     """Plattformen mit einer nicht deaktivierten Entity der Domaenen climate, number oder select (ohne Entities ohne
     Registry-Eintrag). `eintraege` sind Registry-Eintraege je entity_id; wer nur Entities mit Zustand uebergibt,
-    zaehlt auch nur diese."""
+    zaehlt auch nur diese. Die Plattform des Buswegs zaehlt nur mit einer Entity eines verankerten Registry-Geraets
+    (`verankert` sind deren Ids, ohne Angabe zaehlt keine): am Broker haengt jedes Geraet."""
     return {plattform for entity_id, entry in eintraege.items()
             if entity_id.split(".", 1)[0] in EINSTELLBARE_DOMAENEN and not entry.get("disabled_by")
-            and (plattform := entry.get("platform") or OHNE_REGISTRY) != OHNE_REGISTRY}
+            and (plattform := entry.get("platform") or OHNE_REGISTRY) != OHNE_REGISTRY
+            and (plattform != PLATTFORM_BUS or entry.get("device_id") in verankert)}
 
 
 def inventur(ha_api, filter_: dict) -> dict:
@@ -135,7 +137,7 @@ def inventur(ha_api, filter_: dict) -> dict:
         if not (plattform in plattformen or domain in domaenen or (domain, klasse) in klassen):
             continue
         treffer.append((entity_id, entry, state, domain, attributes, plattform, klasse))
-    einstellbar = einstellbare_plattformen({entity_id: entry for (entity_id, entry, *_) in treffer})
+    einstellbar = einstellbare_plattformen({entity_id: entry for (entity_id, entry, *_) in treffer}, verankert)
     entities, geraete_ids, verworfen = [], set(), Counter()
     for entity_id, entry, state, domain, attributes, plattform, klasse in treffer:
         if not entity_erlaubt(entity_id, entry, state, einstellbar):

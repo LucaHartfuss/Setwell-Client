@@ -41,20 +41,19 @@ def test_der_busweg_traegt_den_vaillant_hebelsatz_mit_der_zeile_des_cloud_wegs()
         assert verfahren_fuer("vaillant_ebus", hebelsatz) is None
 
 
-def test_ein_mqtt_dokument_besteht_die_pruefung_schreibt_aber_nichts():
-    """Die Verfahrenszeile macht den Busweg nicht beschreibbar: ohne Zeile in SCHREIB_PLATTFORM (und ohne Schreibregeln
-    fuer die Plattform mqtt) gibt es kein Schreibziel."""
+def test_ein_mqtt_dokument_hat_die_schreibplattform_aber_ohne_geraet_kein_schreibziel():
+    """Der Busweg hat die Zeile in SCHREIB_PLATTFORM; ohne die Entities am verankerten Registry-Geraet gibt es dennoch
+    kein Schreibziel (die Verankerung steht in den Schreibregeln des Buswegs)."""
     from geraet_helpers import ha_konfiguration
     from rastung_beispiele import fuer
 
     neu = ha_konfiguration(bindung={"kreis": {"plattform": "mqtt", "anlage": "S", "nummer": "0", "geraet": "g1"}})
     assert neu["weg"] == "vaillant_ebus"
     assert config_check.pruefen(neu, fuer(None, neu), host=config_check.HOST_HA, treiber_pruefen=lambda k: None) is None
-    assert ("vaillant_ebus", "vaillant_vrc720") not in dokument.SCHREIB_PLATTFORM
+    assert dokument.SCHREIB_PLATTFORM[("vaillant_ebus", "vaillant_vrc720")] == "mqtt"
     b = dokument.bindung(neu)
-    assert dokument.schreib_plattform(b) is None
-    assert dokument.schreibziele_befund(b, {}, beim_start=False) == ("plattform", "nicht_erlaubt")
-    assert dokument.schreibziele_befund(b, {}, beim_start=True) == ("plattform", "nicht_erlaubt")
+    assert dokument.schreib_plattform(b) == "mqtt"
+    assert dokument.schreibziele_befund(b, {}, beim_start=False, geraete={}) is not None
 
 
 def test_jede_schreibplattform_fuehrt_zu_einer_zeile_ihres_hebelsatzes():

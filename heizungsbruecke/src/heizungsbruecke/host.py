@@ -192,7 +192,7 @@ class HaHost:
             return None
         roles = [role for role in binding_roles(description) if b.rollen.get(role)]
         manifest = ChannelManifest(refs={role: entity_ref(role, b.rollen[role]) for role in roles})
-        return RestoreParts(binding_for(description, self._ha_api, manifest), safety, plant_id)
+        return RestoreParts(binding_for(description, self._ha_api, manifest, b.weg), safety, plant_id)
 
     def load(self) -> Loaded:
         try:
@@ -228,7 +228,7 @@ class HaHost:
             rollen = {rolle: ref for rolle, ref in b.rollen.items() if ref not in ungelesen}
             manifest = build_manifest(
                 {**rollen, "room_target": SOLL_REF}, derived.entity_ids, b.hebelsatz, derived.raeume)
-            binding = binding_for(description, self._ha_api, manifest)
+            binding = binding_for(description, self._ha_api, manifest, b.weg)
             plant_id = dokument.anlagen_kennung(b)
         except StartupError as error:
             raise StartFailure(str(error), error.key) from error
