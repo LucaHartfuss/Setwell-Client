@@ -267,6 +267,8 @@ COMMANDS: dict[str, Command] = {
     "sign_off": Command((), ("zurueckgesetzt", "werte"), 24 * 3600, ("nicht_eingerichtet", "keine_bestaetigung")),
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
     "zertifikat_erneuern": Command((), ("fingerprint",), 900),
+    # Nur an Geraete vom Host ha nach der Freigabe: das Geraet verwirft Schluessel und Zertifikat und registriert sich neu.
+    "neue_identitaet": Command((), (), 24 * 3600),
     # konto_hinweis: Maske der Adresse des uebernehmenden Kontos (`a***@e***.com`), nur an Gateways; fehlt = kein Hinweis.
     "claim_state": Command(("device_state",), (), 24 * 3600, payload_optional=("konto_hinweis",)),
     "diagnostics": Command((), (), 300),
