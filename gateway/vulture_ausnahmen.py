@@ -8,6 +8,7 @@ _.zigbee_permit_join  # smartheat_gateway/befehle.py
 _.zigbee_devices  # smartheat_gateway/befehle.py
 _.driver_login  # smartheat_gateway/befehle.py
 _.sign_off  # smartheat_gateway/befehle.py
+_.neue_identitaet  # smartheat_gateway/befehle.py
 
 # --- paho-mqtt: Callback-Attribute und Callback-Signaturen (lokaler Bus, CallbackAPIVersion.VERSION2) ---
 _.on_connect  # smartheat_gateway/bus.py: paho ruft client.on_connect

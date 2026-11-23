@@ -365,6 +365,13 @@ def diagnostics(ctx: Kontext, payload: dict) -> Outcome:
     return Done(ctx.diagnostics())
 
 
+@_handler("neue_identitaet")
+def neue_identitaet(ctx: Kontext, payload: dict) -> Outcome:
+    """Der Server stellt den Befehl nur dem Host ha zu. Das Gateway behaelt seine Identitaet; dieser Handler ersetzt
+    den des Geraetekerns."""
+    return Failed("nicht_unterstuetzt")
+
+
 @_handler("sign_off")
 def sign_off(ctx: Kontext, payload: dict) -> Outcome:
     """Abmelden (5b 4.5): Markierung fuer die Anlage, dann startet die Laufzeit als "abgemeldet" neu und
