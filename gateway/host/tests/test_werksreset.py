@@ -599,6 +599,27 @@ def test_ohne_bestaetigung_haelt_der_host_nach_10s_trotzdem_an(welt):
         assert rel not in baum, rel
 
 
+def test_eine_unlesbare_bestaetigung_gilt_als_nicht_vorhanden(welt, monkeypatch):
+    class Kaputt:
+        def is_file(self):
+            raise PermissionError
+
+    welt.melden()
+    assert werksreset._gemeldet(welt.root) is True
+    monkeypatch.setattr(werksreset, "_gemeldet_pfad", lambda root: Kaputt())
+    assert werksreset._gemeldet(welt.root) is False
+
+
+def test_nur_ohne_bestaetigung_warnt_der_host_vor_dem_trotzdem_loeschen(welt, caplog):
+    with caplog.at_level(logging.WARNING):
+        welt.ausfuehren(melde_warte=lambda bedingung, frist: False)
+    assert "keine Bestaetigung der Ruecksetzmeldung" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        welt.ausfuehren(melde_warte=lambda bedingung, frist: True)
+    assert "keine Bestaetigung der Ruecksetzmeldung" not in caplog.text
+
+
 def test_eine_alte_bestaetigung_zaehlt_nicht(welt):
     welt.melden()  # Rest eines frueheren Resets
     uhr = MeldeUhr(welt)
