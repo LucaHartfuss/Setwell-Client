@@ -25,6 +25,16 @@ from smartheat_device import nachrichten, wire
 KEY_FILE = "key.pem"
 TLS_KEY_FILE = "tls_key.pem"
 CLAIM_CODE_FILE = "claim_code"  # nur noch zum Loeschen einer Datei aelterer Staende
+CERTIFICATE_FILE = "certificate.pem"
+ENDPOINT_FILE = "endpoint.json"
+STATE_FILE = "bootstrap.json"
+NEU_SUFFIX = ".neu"  # Dateien eines laufenden Zertifikatswechsels neben den aktuellen
+#: Marker eines begonnenen Verwerfens der Identitaet: liegt vor dem ersten Loeschen und geht nach dem letzten.
+MARKER_FILE = "neue_identitaet.json"
+#: Alles, was die Identitaet und ihren Zugang ausmacht. Nie dabei: die Rastung des Sicherheitssatzes
+#: (sicherheitssatz.json) und die Sicherung (backup.json), sie gehoeren zur Anlage, nicht zum Geraet.
+_VERWORFEN = (KEY_FILE, TLS_KEY_FILE, CERTIFICATE_FILE, ENDPOINT_FILE, STATE_FILE,
+              TLS_KEY_FILE + NEU_SUFFIX, CERTIFICATE_FILE + NEU_SUFFIX)
 #: 10 Zufallsbytes = 80 Bit = genau 16 Base32-Zeichen ohne Auffuellung.
 _CODE_BYTES = wire.CLAIM_CODE_CHARS * 5 // 8
 
@@ -85,6 +95,26 @@ def load_or_create(device_dir: Path, randbytes: Callable[[int], bytes] = secrets
     except OSError as error:
         logger.warning("Alte Datei %s nicht geloescht (%s)", CLAIM_CODE_FILE, type(error).__name__)
     return Identity(device_id_for(signing.public_key()), signing, tls, new_claim_code(randbytes))
+
+
+def verwerfen(device_dir: Path) -> None:
+    """Die Identitaet verwerfen (der Server hat das Geraet freigegeben): erst der Marker, dann Schluessel, Zertifikat,
+    Endpunkt und Status. Die Rastung des Sicherheitssatzes und die Sicherung bleiben unberuehrt. Ein Fehler oder Absturz
+    nach dem Marker laesst ihn liegen, fortsetzen() beendet das Loeschen beim naechsten Start."""
+    dateien.schreiben_json(device_dir / MARKER_FILE, {}, modus=dateien.PRIVAT)
+    fortsetzen(device_dir)
+
+
+def fortsetzen(device_dir: Path) -> bool:
+    """Ein begonnenes Verwerfen zu Ende fuehren; False, wenn keines begonnen war."""
+    marker = device_dir / MARKER_FILE
+    if not marker.exists():
+        return False
+    for name in _VERWORFEN:
+        (device_dir / name).unlink(missing_ok=True)
+    marker.unlink()
+    logger.info("Identitaet verworfen: das Geraet registriert sich neu")
+    return True
 
 
 def _base64url_ohne_padding(daten: bytes) -> str:

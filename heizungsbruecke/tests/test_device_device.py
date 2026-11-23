@@ -1,5 +1,6 @@
 """Das Geraet - Bootstrap, hello, Dokumente, Befehle, Bedienwunsch, Status, Meldungen, Rettungsweg,
 Laufzeit-Kanal. Link und Bootstrap-Server sind Fakes; die Wire-Formate sind die des Vertrags."""
+import base64
 import json
 import math
 import queue
@@ -8,6 +9,8 @@ import time
 
 import konfig_form
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 from device_helpers import WALL, FakeHost, FakeLink, World, _anzeige, _konfiguration, _leer
 
 from smartheat_core import config_check, dateien, meldungen
@@ -110,11 +113,12 @@ def test_first_start_registers_then_connects_and_says_hello(tmp_path):
     world.link.verbinden()
     world.device.schritt()
     (hello,) = world.link.of("up/hello")
-    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state", "seriennummer"}
     assert hello == {"schema": 2, "schemata": [2], "konfiguration_version": 0, "bedienung_version": 0,
                      "anzeige_version": 0, "wege": ["simulation"],
                      "software_version": "0.6.0", "host": "gateway", "faehigkeiten": world.host.faehigkeiten(),
-                     "boot_id": world.device.boot_id, "uhr_synchron": True, "device_state": "nicht_uebernommen"}
+                     "boot_id": world.device.boot_id, "uhr_synchron": True, "device_state": "nicht_uebernommen",
+                     "seriennummer": "SHG-0001"}
     assert world.device.zustand() == "nicht_uebernommen"
 
 
@@ -160,13 +164,125 @@ def test_hello_des_ha_hosts_traegt_auto_update_und_integration_version(tmp_path)
     assert (hello["auto_update"], hello["integration_version"]) == (True, "1.2.0")
 
 
-def test_hello_des_gateways_traegt_beide_felder_nie_und_der_host_wird_nicht_gefragt(tmp_path):
+def test_hello_des_gateways_traegt_die_seriennummer_und_keines_der_ha_felder(tmp_path):
     world = World(tmp_path)
     world.verbinden()
     for _ in range(3):
         world.device.schritt()
-    assert all("auto_update" not in hello and "integration_version" not in hello for hello in world.link.of("up/hello"))
-    assert world.host.hello_felder_aufrufe == 0
+    (hello,) = world.link.of("up/hello")
+    assert hello["seriennummer"] == "SHG-0001"
+    assert "auto_update" not in hello and "integration_version" not in hello
+    assert len(world.link.of("up/hello")) == 1  # die Seriennummer loest kein Nachsenden aus
+
+
+def test_hello_des_ha_hosts_traegt_nie_eine_seriennummer(tmp_path):
+    world = _ha_welt(tmp_path, auto_update=True, integration_version="1.2.0", seriennummer="SHG-0001")
+    world.verbinden()
+    assert all("seriennummer" not in hello for hello in world.link.of("up/hello"))
+
+
+@pytest.mark.parametrize("werte", [{}, {"seriennummer": None}, {"seriennummer": "geheim-klein"}])
+def test_ein_gateway_ohne_brauchbare_seriennummer_sendet_kein_hello_und_loggt_keinen_wert(tmp_path, caplog, werte):
+    world = World(tmp_path)
+    world.host.hello_werte = werte
+    with caplog.at_level("ERROR"):
+        world.verbinden()
+        world.device.schritt()
+    assert "up/hello" not in world.link.topics()
+    assert "geheim-klein" not in caplog.text
+
+
+# --- Rücksetzmeldung (Werksreset) ---
+
+def _zurueckgesetzt_pruefen(world, body):
+    """Die Signatur gehoert dem Signierschluessel des Geraets und deckt Methode, Pfad, Zeit und Geraete-ID ab."""
+    assert set(body) == set(wire.ZURUECKGESETZT_FIELDS) and body["schema"] == wire.SCHEMA
+    assert body["ts"] == str(int(WALL))
+    der = base64.urlsafe_b64decode(body["signatur"] + "=" * (-len(body["signatur"]) % 4))
+    gesamt = wire.canonical_string(*wire.ZURUECKGESETZT_SIGNATUR, int(body["ts"]), world.device.identity.device_id.encode())
+    world.device.identity.signing_key.public_key().verify(der, gesamt, ec.ECDSA(hashes.SHA256()))
+
+
+def test_ohne_aufruf_geht_keine_ruecksetzmeldung_hinaus(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.clock.now += 3600
+    world.device.schritt()
+    assert "up/zurueckgesetzt" not in world.link.topics()
+
+
+def test_die_ruecksetzmeldung_geht_nach_dem_hello_hinaus_und_ist_mit_dem_geraeteschluessel_signiert(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.schritt()
+    assert world.link.topics().index("up/hello") < world.link.topics().index("up/zurueckgesetzt")
+    (body,) = world.link.of("up/zurueckgesetzt")
+    _zurueckgesetzt_pruefen(world, body)
+
+
+def test_die_ruecksetzmeldung_wartet_auf_die_verbindung_und_das_hello(tmp_path):
+    world = World(tmp_path)
+    world.device.reset_melden()
+    world.device.schritt()
+    world.clock.now += 2
+    world.verbinden()
+    assert world.link.topics()[0] == "up/hello" and world.link.topics().count("up/zurueckgesetzt") == 1
+
+
+def test_die_ruecksetzmeldung_wird_ohne_puback_wiederholt_und_mit_dem_puback_beendet(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.reset_melden()  # ein zweiter Aufruf aendert nichts
+    world.device.schritt()
+    (erste,) = world.link.of("up/zurueckgesetzt")
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS - 1
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 1  # kein Sekundentakt
+    world.clock.now += 1
+    world.device.schritt()
+    assert world.link.of("up/zurueckgesetzt") == [erste, erste]  # dieselbe Zeichenfolge, kein neues Signieren
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS  # noch innerhalb der Frist: nur das PUBACK hat sie beendet
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 2
+
+
+def test_ein_fehler_puback_beendet_die_ruecksetzmeldung_nicht(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.schritt()
+    world.link.gesendet(len(world.link.sent), ok=False)
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 2
+
+
+def test_die_ruecksetzmeldung_wird_nach_der_frist_aufgegeben_und_einmal_geloggt(tmp_path, caplog):
+    world = World(tmp_path)
+    world.device.reset_melden()
+    world.device.schritt()  # nicht verbunden: nichts geht hinaus
+    world.clock.now += device.RESET_FRIST_SECONDS  # genau am Fristende gilt sie als abgelaufen
+    with caplog.at_level("WARNING"):
+        world.verbinden()
+        world.clock.now += 3600
+        world.device.schritt()
+    assert "up/zurueckgesetzt" not in world.link.topics()
+    assert caplog.text.count("Frist abgelaufen") == 1
+
+
+def test_die_ruecksetzmeldung_geht_aus_jedem_thread_und_bleibt_innerhalb_der_frist(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    faden = threading.Thread(target=world.device.reset_melden)
+    faden.start()
+    faden.join()
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 1
+    assert device.RESET_FRIST_SECONDS <= 10
 
 
 def test_ein_gescheiterter_hostrueckruf_meldet_beide_felder_unbekannt_und_loggt_nichts_geheimes(tmp_path, caplog):
@@ -1003,7 +1119,7 @@ def test_hello_reports_the_claim_state_the_device_knows(tmp_path):
     world.verbinden()
     (hello,) = world.link.of("up/hello")
     assert hello["device_state"] == bootstrap.device_state(world.dir) == "nicht_uebernommen"
-    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state", "seriennummer"}
 
 
 def test_weg_pruefen_is_refused_as_not_supported(tmp_path):
@@ -2506,3 +2622,20 @@ def test_a_wish_for_a_wrong_circuit_never_reaches_the_inbox(tmp_path, kreis):
         world.device.wunsch(22.0, herkunft="thermostat", kreis=kreis)
     world.device.schritt()
     assert world.link.of("up/wish") == [] and world.device.wunsch_puffer.wunsch(1) is None
+
+
+def test_die_zustellung_der_ruecksetzmeldung_steht_erst_nach_dem_puback_fest(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    assert world.device.reset_zugestellt is False
+    world.device.reset_melden()
+    world.device.schritt()
+    assert world.device.reset_zugestellt is False  # gesendet, aber noch nicht quittiert
+    world.link.gesendet(len(world.link.sent), ok=False)
+    world.device.schritt()
+    assert world.device.reset_zugestellt is False  # ein Fehler-PUBACK zaehlt nicht
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    assert world.device.reset_zugestellt is True

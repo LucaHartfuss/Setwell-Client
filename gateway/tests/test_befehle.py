@@ -108,8 +108,14 @@ def test_unbekannte_phase_und_fehlender_treiber_nennen_feld_und_regel(register):
 
 def test_the_gateway_registers_exactly_its_commands(register):
     assert set(befehle.HANDLERS) == {"zigbee_permit_join", "zigbee_devices", "driver_login",
-                                     "inventory", "diagnostics", "sign_off"}
+                                     "inventory", "diagnostics", "sign_off", "neue_identitaet"}
     assert set(befehle.HANDLERS) <= set(wire.COMMANDS) and set(befehle.HANDLERS) <= registrierte_befehle(register)
+
+
+def test_das_gateway_lehnt_neue_identitaet_ab_und_behaelt_seine_identitaet(register):
+    """Nur der Werksreset macht das Gateway zu einem neuen Geraet; der Befehl aendert nichts."""
+    antwort = _run(register, "neue_identitaet", {})
+    assert antwort["ok"] is False and antwort["error"] == {"grund": "nicht_unterstuetzt"}
 
 
 def test_bad_payloads(register):

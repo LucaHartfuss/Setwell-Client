@@ -49,6 +49,10 @@ SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
 #: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
 ENTFERNT_WIEDERHOLUNG_SECONDS = 60
+#: Die Ruecksetzmeldung (up/zurueckgesetzt) ist ein letzter Versuch vor dem Loeschen: sie geht ohne PUBACK in diesem
+#: Abstand erneut hinaus (dieselbe signierte Zeichenfolge) und wird nach RESET_FRIST_SECONDS aufgegeben.
+RESET_WIEDERHOLUNG_SECONDS = 2
+RESET_FRIST_SECONDS = 10
 #: Die Kreise mit lokal beendetem Leerstand (Datei im Geraeteordner).
 LEERSTAND_BEENDET_DATEI = "leerstand-beendet.json"
 #: Gruende des lokalen Hinweises `abwesend_abgelehnt` im Statusereignis an HA (kein Draht-Key, nie eine Meldung an den
@@ -146,7 +150,9 @@ class Device:
         self._stop = threading.Event()
         # Ein beim Neustart liegengebliebener Wechsel zaehlt nicht: es gilt das alte Paar, der Befehl endet als intern.
         bootstrap.erneuerung_verwerfen(self._dir)
+        identity.fortsetzen(self._dir)  # ein vor dem Absturz begonnenes Verwerfen der Identitaet zu Ende fuehren
         self._wechsel: _Wechsel | None = None
+        self._identitaet_erneuern = False  # das Verwerfen ist geschehen, der Takt wechselt Link und Identitaet
         self.identity = identity.load_or_create(self._dir)
         self.boot_id = identity.new_boot_id()
         self.documents = DocumentStore(self._dir, host=host.host, software_version=host.version,
@@ -159,6 +165,7 @@ class Device:
         self.befehle.register("new_claim_code", self._new_claim_code)
         self.befehle.register("claim_state", self._claim_state)
         self.befehle.register("zertifikat_erneuern", self._zertifikat_erneuern)
+        self.befehle.register("neue_identitaet", self._neue_identitaet)  # das Gateway ersetzt ihn (nicht_unterstuetzt)
         # Die Wegpruefung liest an der Anbindung der Anlage; bis ein Host sie kann, lehnt das Geraet sie ab.
         self.befehle.register("weg_pruefen", lambda _nutzlast: commands.Failed("nicht_unterstuetzt"))
         host.befehle_eintragen(self.befehle)
@@ -192,6 +199,12 @@ class Device:
         self._status_at: float | None = None
         self._entfernt_mid: int | None = None  # mid des gesendeten up/entfernt, solange das PUBACK aussteht
         self._entfernt_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung von up/entfernt
+        self._reset: dict | None = None  # die gebaute Ruecksetzmeldung; einmal je Lauf, nie neu signiert
+        self._reset_offen = False  # solange sie noch hinausgehen soll (bis PUBACK oder Fristende)
+        self._reset_zugestellt = False  # der Server hat sie quittiert (PUBACK)
+        self._reset_ende = 0.0  # Fristende (Takt-Uhr)
+        self._reset_mid: int | None = None  # mid der gesendeten Ruecksetzmeldung, solange das PUBACK aussteht
+        self._reset_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung
         #: Nach hello muss ein Status hinaus; gescheitert der Rueckruf dabei, bleibt der Merker, bis
         #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
         self._status_erzwingen = False
@@ -539,6 +552,7 @@ class Device:
             elif art == GETRENNT:
                 self._bereit = False
                 self._entfernt_mid = None  # ein neuer Client zaehlt mids wieder ab 1
+                self._reset_mid, self._reset_frei_ab = None, 0.0
                 self.wunsch_puffer.verbindung_verloren()
             elif art == ANMELDUNG_SCHEITERT:
                 self._rettung = True
@@ -550,6 +564,9 @@ class Device:
                     if ok and mid == self._entfernt_mid:
                         self._entfernt_mid = None
                         self._host_wert("entfernen_erledigt", self.host.entfernen_erledigt)
+                    if ok and mid == self._reset_mid:
+                        self._reset_offen, self._reset_mid = False, None
+                        self._reset_zugestellt = True
                     if ok:
                         self.wunsch_puffer.bestaetigt(mid)
                         self.befehle.inventur_bestaetigt(mid)
@@ -571,9 +588,35 @@ class Device:
             self._meldung_merken(item[1])
         elif quelle == "aufgabe":
             item[1]()
+        elif quelle == "reset_melden":
+            self._reset_vormerken()
+
+    def _neue_identitaet(self, payload: dict) -> commands.Outcome:
+        """Befehl neue_identitaet (Server, nach der Freigabe): Schluessel, Zertifikat, Endpunkt und Status werden
+        verworfen (Rastung und Sicherung bleiben). Das Ergebnis geht noch ueber den alten Link hinaus; im naechsten Takt
+        folgt die Registrierung als neues Geraet mit neuem Schluessel."""
+        if self._wechsel is not None:
+            return commands.Failed("intern")
+        identity.verwerfen(self._dir)
+        self._identitaet_erneuern = True
+        return commands.Done({})
+
+    def _identitaet_wechseln(self) -> None:
+        self._identitaet_erneuern = False
+        link, self.link, self._bereit = self.link, None, False
+        if link is not None:
+            link.stop()
+        self.identity = identity.load_or_create(self._dir)
+        self._code_angenommen, self._code_fehler, self._code_frei_ab = False, 0, 0.0
+        self._rettung = False
+        self._hello_offen = False
+        self._bootstrap.gesperrt = False
+        self._bootstrap.erfolg()
 
     def _takt(self) -> None:
         now = self._clock()
+        if self._identitaet_erneuern:
+            self._identitaet_wechseln()
         if self._rettung:
             if self._bootstrap.faellig():
                 self._retten()
@@ -596,6 +639,7 @@ class Device:
         self._wunsch_senden()
         self._status_senden(now, force=self._status_erzwingen)
         self._entfernt_senden(now)
+        self._reset_senden(now)
         self._meldungen_senden(now)
         self._host_wert("anzeigen", self.host.anzeigen, self.anzeige())  # gescheitert: diese Anzeige entfaellt
 
@@ -712,13 +756,14 @@ class Device:
             **self._hello_felder_jetzt())
 
     def _hello_felder_jetzt(self) -> dict:
-        """Die hello-Felder, die nur der Host ha sendet (auto_update, integration_version): None heisst unbekannt
-        (Rueckruf gescheitert oder Wert unbrauchbar). Der Gateway sendet beide Felder nie und fragt den Host nicht."""
-        if self.host.host != "ha":
-            return {}
+        """Die hello-Felder des Hosts. Der Host ha sendet auto_update und integration_version (None heisst unbekannt:
+        Rueckruf gescheitert oder Wert unbrauchbar). Das Gateway sendet nur die Seriennummer des Werks; fehlt sie oder
+        ist sie unbrauchbar, scheitert der Bau des hello laut (der Server verlangt sie)."""
         werte, gescheitert = self._host_wert("hello_felder", self.host.hello_felder)
         if gescheitert or not isinstance(werte, dict):
             werte = {}
+        if self.host.host != "ha":
+            return {"seriennummer": werte.get("seriennummer")}
         auto_update = werte.get("auto_update")
         version = werte.get("integration_version")
         return {"auto_update": auto_update if isinstance(auto_update, bool) else None,
@@ -1121,6 +1166,46 @@ class Device:
         self._entfernt_mid = self._publish("up/entfernt", body)
         if self._entfernt_mid is not None:
             self._entfernt_frei_ab = now + ENTFERNT_WIEDERHOLUNG_SECONDS
+
+    def reset_melden(self) -> None:
+        """Der Host loescht das Geraet gleich (Werksreset): eine letzte, mit dem Geraeteschluessel signierte Meldung
+        up/zurueckgesetzt an den Server, damit er das Geraet sperrt. Hoechstens RESET_FRIST_SECONDS lang, aus jedem
+        Thread; ein zweiter Aufruf aendert nichts. Kommt die Meldung nicht durch, loescht der Host trotzdem."""
+        self._inbox.put(("reset_melden",))
+
+    @property
+    def reset_zugestellt(self) -> bool:
+        """Der Server hat die Ruecksetzmeldung quittiert (PUBACK); aus jedem Thread lesbar. Der Host wartet vor dem
+        Loeschen darauf (hoechstens seine Frist)."""
+        return self._reset_zugestellt
+
+    def _reset_vormerken(self) -> None:
+        if self._reset is not None:
+            return
+        try:
+            ts = str(int(self._wall()))
+            signatur = identity.sign(self.identity.signing_key, *wire.ZURUECKGESETZT_SIGNATUR, int(ts),
+                                     self.identity.device_id.encode())
+            self._reset = nachrichten.zurueckgesetzt(ts=ts, signatur=signatur)
+        except Exception as error:  # nie ein Wert im Log (Regel 6)
+            logger.error("Ruecksetzmeldung nicht gebaut (%s)", type(error).__name__)
+            return
+        self._reset_offen = True
+        self._reset_ende = self._clock() + RESET_FRIST_SECONDS
+
+    def _reset_senden(self, now: float) -> None:
+        """Nach hello hinaus, ohne PUBACK im Abstand RESET_WIEDERHOLUNG_SECONDS erneut; nach der Frist wird aufgegeben."""
+        if not self._reset_offen or self._reset is None:
+            return
+        if now >= self._reset_ende:
+            self._reset_offen = False
+            logger.warning("Ruecksetzmeldung nicht zugestellt, Frist abgelaufen")
+            return
+        if not self._bereit or now < self._reset_frei_ab:
+            return
+        self._reset_mid = self._publish("up/zurueckgesetzt", self._reset)
+        if self._reset_mid is not None:
+            self._reset_frei_ab = now + RESET_WIEDERHOLUNG_SECONDS
 
     def _eigene_meldung(self, key: str, meldung: meldungen.Meldung | None) -> None:
         if key not in wire.MELDUNGEN:

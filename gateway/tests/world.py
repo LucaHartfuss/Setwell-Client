@@ -9,7 +9,7 @@ from configs import SENSOR, THERMOSTAT
 from fake_ca import GeraeteCa
 from fake_z2m import FakeZigbee2Mqtt
 from fakes import FakeBus
-from geraet_fakes import FakeLink, KeinBootstrap, zugang_ablegen
+from geraet_fakes import FakeLink, KeinBootstrap, werk_ablegen, zugang_ablegen
 
 from smartheat_core import dateien
 from smartheat_device import prozess
@@ -48,6 +48,7 @@ class GatewayWorld:
         self.z2m.report(SENSOR, temperature=20.0, battery=90)
         self.ca = GeraeteCa()
         self.zugang = zugang_ablegen(self.paths.device_dir, self.ca)
+        werk_ablegen(self.host_dir)
         self.links: list[FakeLink] = []
         self.restarts = 0
         self.zeit_synchron = True  # was der Zeitdienst des Hosts in host/status.json meldet

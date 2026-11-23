@@ -84,7 +84,8 @@ class DeviceHost(Protocol):
 
     def hello_felder(self) -> dict:
         """Felder des hello, die nur der Host ha sendet: auto_update (Schalter fuer automatische Updates) und
-        integration_version, je None = unbekannt. Das Geraet fragt nur den Host ha; das Gateway antwortet {}."""
+        integration_version, je None = unbekannt. Das Gateway antwortet stattdessen mit der Seriennummer des Werks
+        ({"seriennummer": ...}; {} ohne gueltiges Werk, dann baut das Geraet kein hello)."""
         ...
 
     def treiber_pruefen(self, bindung: dict, /) -> dict | None:
