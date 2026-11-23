@@ -695,6 +695,27 @@ def test_ein_busdokument_ohne_geraet_laesst_nichts_schreiben(bus_offen):
     assert urteile[0] is not None and urteile[1] is not None
 
 
+@pytest.mark.parametrize("geraet", ["", 7, None])
+def test_ein_busdokument_mit_unbrauchbarem_geraet_nennt_die_plattform(bus_offen, geraet):
+    """Ein leerer oder kein Text als Geraet des Kreises verankert nichts: beim Uebernehmen wie beim Start die Plattform."""
+    assert _bus_urteile(_bus_konfiguration(geraet=geraet), _bus_ha()) == (("plattform", "nicht_erlaubt"),) * 2
+
+
+def test_der_busweg_meldet_eine_ueberzaehlige_schreibrolle_lokal_mit_der_ersten_in_der_pruefreihenfolge(bus_offen):
+    """Eine gebundene Rolle ohne Zeile der Positivliste (hier zwei Servicewerte) lehnt schon der lokale Teil ab, mit
+    der ersten der Pruefreihenfolge; ohne sie bleibt das Dokument lokal ohne Befund."""
+    assert dokument.lokal_befund(_neu(_bus_konfiguration())) is None
+    befund = dokument.lokal_befund(_neu(_bus_konfiguration(setpoint_comfort=_SERVICEWERTE[0], level=_SERVICEWERTE[1])))
+    assert befund is not None
+    assert befund.details == {"feld": "level", "regel": "format"}
+    assert befund.text == "Die Zuordnung level_current gibt es für diese Ansteuerung nicht."
+
+
+def test_ein_cloud_dokument_hat_keine_ueberzaehlige_schreibrolle(bus_offen):
+    """Bei den Cloud-Wegen gibt es die Positivliste des Buswegs nicht: ihre Schreibziele sind kein lokaler Verstoss."""
+    assert dokument.lokal_befund(_neu(KONFIGURATION)) is None
+
+
 @pytest.mark.parametrize("hersteller, modell", [
     ("Wolf", "VRC 720"), ("Vaillant", "Fremdmodell"), (None, "VRC 720"), ("Vaillant", None), ("", ""), (5, 7)])
 def test_ein_geraet_mit_anderem_hersteller_oder_modell_wird_nie_schreibziel(bus_offen, hersteller, modell):
