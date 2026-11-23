@@ -64,6 +64,7 @@ class Welt:
         self.fristen: list[float] = []
         self.antwort: dict | None | bool = True  # True/False = ursprungswerte; None = keine Antwort
         self.angefordert: list[dict] = []
+        self.melde_fristen: list[float] = []  # Aufrufe des Wartens auf die Meldung der Bruecke an den Server
         self._kundendaten()
 
     def _datei(self, rel: str, inhalt: str = "x") -> None:
@@ -93,12 +94,23 @@ class Welt:
                 {"seq": anfrage["seq"], "ts": anfrage["ts"], "ursprungswerte": self.antwort}))
         return bedingung()
 
+    def melde_warte(self, bedingung, frist):
+        """Standard: die Bruecke bestaetigt nicht, und es wird nicht echt gewartet."""
+        self.melde_fristen.append(frist)
+        return bedingung()
+
+    def melden(self) -> None:
+        """Die Bruecke legt die Bestaetigung ab, dass die Ruecksetzmeldung beim Server angekommen ist."""
+        pfad = self.root / "data" / "werksreset_gemeldet.json"
+        pfad.parent.mkdir(parents=True, exist_ok=True)
+        pfad.write_text("{}")
+
     def ausfuehren(self, **ersatz):
         def journal_leeren():
             self.journal.append(not (self.root / "data" / "device").exists())
 
         argumente = dict(warte=self.warte, jetzt=lambda: self.uhr[0], neustart=lambda: self.neustarts.append(1),
-                         journal_leeren=journal_leeren)
+                         journal_leeren=journal_leeren, melde_warte=self.melde_warte)
         argumente.update(ersatz)
         return werksreset.ausfuehren(self.root, self.compose, **argumente)
 
@@ -536,6 +548,114 @@ def test_die_phase_loeschen_steht_vor_dem_anhalten_in_der_datei(welt):
     welt.compose.beim_down = lambda: phasen.append(json.loads((welt.root / "host" / "werksreset.json").read_text())["phase"])
     welt.ausfuehren()
     assert phasen == ["loeschen"]
+
+
+class MeldeUhr:
+    """Uhr und Schlaf fuer `werksreset.warten`: kein echtes Warten; nach `bestaetigung_ab` Sekunden legt die Bruecke ihre Datei ab."""
+
+    def __init__(self, welt, bestaetigung_ab: float | None = None) -> None:
+        self.welt, self.ab, self.jetzt, self.geschlafen = welt, bestaetigung_ab, 0.0, 0.0
+        self.downs_beim_warten: list[list] = []
+        self.daten_beim_warten: list[bool] = []
+
+    def uhr(self) -> float:
+        return self.jetzt
+
+    def schlaf(self, sekunden: float) -> None:
+        self.downs_beim_warten.append(list(self.welt.compose.downs))
+        self.daten_beim_warten.append((self.welt.root / "data" / "device").exists())
+        self.jetzt += sekunden
+        self.geschlafen += sekunden
+        if self.ab is not None and self.jetzt >= self.ab:
+            self.welt.melden()
+
+    def warte(self, bedingung, frist):
+        return werksreset.warten(bedingung, frist, uhr=self.uhr, schlaf=self.schlaf)
+
+
+def test_der_host_wartet_hoechstens_10s_auf_die_meldung_der_bruecke(welt):
+    assert werksreset.MELDE_FRIST_SEKUNDEN == 10.0
+    welt.ausfuehren()
+    assert welt.melde_fristen == [10.0]
+
+
+def test_eine_bestaetigung_vor_der_frist_beendet_das_warten_und_der_host_haelt_compose_an(welt):
+    uhr = MeldeUhr(welt, bestaetigung_ab=3.0)
+    ergebnis = welt.ausfuehren(melde_warte=uhr.warte)
+    assert uhr.geschlafen == 3.0  # nicht bis zur Frist
+    assert uhr.downs_beim_warten and all(downs == [] for downs in uhr.downs_beim_warten)  # Compose lief noch
+    assert all(uhr.daten_beim_warten)  # und die Kundendaten lagen noch
+    assert welt.compose.downs == ["0.3.0"] and ergebnis["abgeschlossen"] is True and welt.neustarts == [1]
+    assert not (welt.root / "data" / "werksreset_gemeldet.json").exists()  # mit dem Datenordner geloescht
+
+
+def test_ohne_bestaetigung_haelt_der_host_nach_10s_trotzdem_an(welt):
+    uhr = MeldeUhr(welt)
+    ergebnis = welt.ausfuehren(melde_warte=uhr.warte)
+    assert uhr.geschlafen == 10.0 and all(downs == [] for downs in uhr.downs_beim_warten)
+    assert welt.compose.downs == ["0.3.0"] and ergebnis["abgeschlossen"] is True and welt.neustarts == [1]
+    baum = welt.baum()
+    for rel in KUNDENDATEN:
+        assert rel not in baum, rel
+
+
+def test_eine_alte_bestaetigung_zaehlt_nicht(welt):
+    welt.melden()  # Rest eines frueheren Resets
+    uhr = MeldeUhr(welt)
+    welt.ausfuehren(melde_warte=uhr.warte)
+    assert uhr.geschlafen == 10.0
+
+
+def test_das_warten_steht_in_der_phase_loeschen(welt):
+    phasen = []
+    welt.ausfuehren(melde_warte=lambda bedingung, frist: phasen.append(
+        json.loads((welt.root / "host" / "werksreset.json").read_text())["phase"]) or False)
+    assert phasen == ["loeschen"]
+
+
+def test_ein_fehler_beim_warten_haelt_den_reset_nicht_auf(welt, caplog):
+    def kaputt(bedingung, frist):
+        raise OSError("GEHEIM")
+
+    with caplog.at_level(logging.ERROR):
+        ergebnis = welt.ausfuehren(melde_warte=kaputt)
+    assert ergebnis["abgeschlossen"] is True and welt.compose.downs == ["0.3.0"] and "GEHEIM" not in caplog.text
+
+
+def test_ein_neustart_in_loeschen_wartet_nicht_auf_die_meldung(welt, monkeypatch):
+    welt.anfrage("loeschen", seq=7, ursprungswerte=True)
+    monkeypatch.setattr(werksreset, "warten", lambda *a, **kw: pytest.fail("kein Warten beim Zu-Ende-Fuehren"))
+    monkeypatch.setattr(werksreset.time, "sleep", lambda s: pytest.fail("kein Schlaf beim Zu-Ende-Fuehren"))
+    assert welt.beim_start() is True
+    assert welt.compose.downs == ["0.3.0"]
+
+
+def test_eine_liegende_phase_loeschen_wartet_nicht_auf_die_meldung(welt):
+    welt.anfrage("loeschen", seq=7)
+    welt.ausfuehren(melde_warte=lambda bedingung, frist: pytest.fail("kein Warten bei liegender Phase loeschen"))
+
+
+def test_eine_unlesbare_anfrage_wartet_nicht_auf_die_meldung(welt, monkeypatch):
+    monkeypatch.setattr(werksreset, "_anfrage_zustand", lambda root: ("unlesbar", None))
+    welt.ausfuehren(melde_warte=lambda bedingung, frist: pytest.fail("kein Warten bei unlesbarer Anfrage"))
+
+
+def test_sigterm_waehrend_des_wartens_auf_die_meldung_wird_aufgeschoben(welt):
+    def terminate(signum, frame):
+        raise SystemExit(0)
+
+    def warte(bedingung, frist):
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert welt.compose.downs == []  # der Handler wirft hier nicht, nichts ist angehalten
+        return False
+
+    alt = signal.signal(signal.SIGTERM, terminate)
+    try:
+        with pytest.raises(SystemExit):
+            welt.ausfuehren(melde_warte=warte)
+    finally:
+        signal.signal(signal.SIGTERM, alt)
+    assert welt.compose.downs == ["0.3.0"] and welt.neustarts == [1] and welt.protokoll()[0]["ergebnis"] == "ausgefuehrt"
 
 
 @pytest.mark.parametrize(("antwort", "text"), [(True, "zurueckgesetzt: ja"), (False, "zurueckgesetzt: nein")])

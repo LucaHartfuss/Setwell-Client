@@ -201,6 +201,7 @@ class Device:
         self._entfernt_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung von up/entfernt
         self._reset: dict | None = None  # die gebaute Ruecksetzmeldung; einmal je Lauf, nie neu signiert
         self._reset_offen = False  # solange sie noch hinausgehen soll (bis PUBACK oder Fristende)
+        self._reset_zugestellt = False  # der Server hat sie quittiert (PUBACK)
         self._reset_ende = 0.0  # Fristende (Takt-Uhr)
         self._reset_mid: int | None = None  # mid der gesendeten Ruecksetzmeldung, solange das PUBACK aussteht
         self._reset_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung
@@ -565,6 +566,7 @@ class Device:
                         self._host_wert("entfernen_erledigt", self.host.entfernen_erledigt)
                     if ok and mid == self._reset_mid:
                         self._reset_offen, self._reset_mid = False, None
+                        self._reset_zugestellt = True
                     if ok:
                         self.wunsch_puffer.bestaetigt(mid)
                         self.befehle.inventur_bestaetigt(mid)
@@ -1170,6 +1172,12 @@ class Device:
         up/zurueckgesetzt an den Server, damit er das Geraet sperrt. Hoechstens RESET_FRIST_SECONDS lang, aus jedem
         Thread; ein zweiter Aufruf aendert nichts. Kommt die Meldung nicht durch, loescht der Host trotzdem."""
         self._inbox.put(("reset_melden",))
+
+    @property
+    def reset_zugestellt(self) -> bool:
+        """Der Server hat die Ruecksetzmeldung quittiert (PUBACK); aus jedem Thread lesbar. Der Host wartet vor dem
+        Loeschen darauf (hoechstens seine Frist)."""
+        return self._reset_zugestellt
 
     def _reset_vormerken(self) -> None:
         if self._reset is not None:

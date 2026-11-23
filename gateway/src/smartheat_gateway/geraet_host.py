@@ -29,7 +29,8 @@ Ein verworfener Reset (Anfrage verschwindet, ohne dass der Host die Phase loesch
 aber nur eine, die diese Anfragen gesetzt haben (Vermerk data/werksreset_abmeldung.json {seq, ts, anlage}, nach einem Neustart
 des Containers weiter gueltig); eine Abmeldung durch sign_off bleibt (Vermerk dann weg). Danach startet die Laufzeit neu.
 Erst in der Phase loeschen ruft der Host-Adapter einmal Device.reset_melden (letzte, signierte Meldung an den Server, best
-effort); in angefordert und bei einem verworfenen Reset meldet er nichts. Das hello traegt die Seriennummer aus host/werk.json."""
+effort); in angefordert und bei einem verworfenen Reset meldet er nichts. Nach dem PUBACK legt er data/werksreset_gemeldet.json
+an, auf die der Host vor dem Loeschen hoechstens 10 s wartet. Das hello traegt die Seriennummer aus host/werk.json."""
 import json
 import logging
 import shutil
@@ -219,6 +220,7 @@ class GatewayDeviceHost(GeraetHostBasis):
         self._reset_offen: tuple[int, str, str] | None = None  # (seq, ts, anlage): abgemeldet, Antwort steht aus
         self._reset_fehler: str | None = None  # Fehlerart des letzten gescheiterten Schritts, schon gemeldet
         self._reset_gemeldet = False  # die Ruecksetzmeldung an den Server ging fuer diesen Reset schon an das Geraet
+        self._reset_bestaetigt = False  # die Quittung des Servers steht fuer den Host in data/werksreset_gemeldet.json
 
     def aufraeumen_pfad(self) -> Path:
         return self.paths.aufraeumen
@@ -473,8 +475,9 @@ class GatewayDeviceHost(GeraetHostBasis):
             zustand, anfrage = self._reset_datei()
             if zustand == "loeschen":
                 self._reset_melden()
+                self._reset_bestaetigen()
             elif zustand in ("fehlt", "angefordert"):
-                self._reset_gemeldet = False
+                self._reset_gemeldet = self._reset_bestaetigt = False
             if zustand == "fehlt":
                 self._reset_aufheben()
             if anfrage is None:
@@ -501,6 +504,14 @@ class GatewayDeviceHost(GeraetHostBasis):
             return
         self._reset_gemeldet = True  # auch bei einem Fehler nur einmal: der Host loescht ohnehin gleich
         self.device.reset_melden()
+
+    def _reset_bestaetigen(self) -> None:
+        """Hat der Server die Ruecksetzmeldung quittiert, legt der Adapter einmal `data/werksreset_gemeldet.json` ab: der Host
+        wartet vor dem Loeschen hoechstens 10 s darauf. Ohne sie loescht er trotzdem."""
+        if not self._reset_gemeldet or self._reset_bestaetigt or self.device is None or not self.device.reset_zugestellt:
+            return
+        dateien.schreiben_json(self.paths.werksreset_gemeldet, {"ts": _iso(self._echt())}, modus=dateien.LESBAR)
+        self._reset_bestaetigt = True
 
     def _reset_beginnen(self, anfrage: tuple[int, str]) -> None:
         """Wie sign_off: Markierung setzen und Laufzeit neu starten; nicht eingerichtet: sofort die Antwort `false`."""

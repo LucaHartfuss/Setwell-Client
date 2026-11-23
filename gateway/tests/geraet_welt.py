@@ -26,6 +26,7 @@ class FakeDevice:
         self.code_ergebnis = "neu"  # Antwort von neuer_uebernahme_code
         self.code_aufrufe = 0
         self.reset_aufrufe = 0  # Aufrufe von reset_melden (die Meldung vor dem Loeschen)
+        self.reset_zugestellt = False  # der Server hat die Ruecksetzmeldung quittiert
         self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKLMNOP")
         self.uebernahme_code = "ABCDEFGHIJKLMNOP"
         self.documents = SimpleNamespace(

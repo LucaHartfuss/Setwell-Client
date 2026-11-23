@@ -406,6 +406,41 @@ def test_nach_einem_abgebrochenen_loeschen_meldet_ein_neuer_reset_erneut(welt, n
     assert welt.device.reset_aufrufe == 2
 
 
+def test_nach_dem_puback_legt_der_host_adapter_die_bestaetigung_fuer_den_host_ab(welt, neustarts):
+    _anfrage(welt, phase="loeschen")
+    _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()  # gemeldet, aber noch nicht quittiert
+    welt.device.reset_zugestellt = True
+    _takt(welt.host)
+    assert welt.paths.werksreset_gemeldet.exists()
+    assert welt.paths.werksreset_gemeldet.parent == welt.paths.data  # in data/: der Host loescht sie mit
+
+
+def test_ohne_quittung_oder_ohne_phase_loeschen_gibt_es_keine_bestaetigung(welt, neustarts):
+    welt.device.reset_zugestellt = True
+    _anfrage(welt)  # angefordert: noch keine Meldung, also auch keine Bestaetigung
+    for _ in range(3):
+        _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()
+    _verworfen(welt)
+    _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()
+
+
+def test_ein_neuer_reset_legt_seine_bestaetigung_neu_ab(welt, neustarts):
+    _anfrage(welt, seq=1, phase="loeschen")
+    welt.device.reset_zugestellt = True
+    _takt(welt.host)
+    welt.paths.werksreset_gemeldet.unlink()  # der Host raeumt vor dem naechsten Reset
+    _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()  # dieselbe Phase: nicht erneut
+    _verworfen(welt)
+    _takt(welt.host)
+    _anfrage(welt, seq=2, phase="loeschen")
+    _takt(welt.host)
+    assert welt.paths.werksreset_gemeldet.exists()
+
+
 def test_ohne_geraetekern_meldet_der_reset_nichts_und_wirft_nie(welt, neustarts):
     welt.host.device = None
     _anfrage(welt, phase="loeschen")

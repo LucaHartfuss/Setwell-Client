@@ -2622,3 +2622,20 @@ def test_a_wish_for_a_wrong_circuit_never_reaches_the_inbox(tmp_path, kreis):
         world.device.wunsch(22.0, herkunft="thermostat", kreis=kreis)
     world.device.schritt()
     assert world.link.of("up/wish") == [] and world.device.wunsch_puffer.wunsch(1) is None
+
+
+def test_die_zustellung_der_ruecksetzmeldung_steht_erst_nach_dem_puback_fest(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    assert world.device.reset_zugestellt is False
+    world.device.reset_melden()
+    world.device.schritt()
+    assert world.device.reset_zugestellt is False  # gesendet, aber noch nicht quittiert
+    world.link.gesendet(len(world.link.sent), ok=False)
+    world.device.schritt()
+    assert world.device.reset_zugestellt is False  # ein Fehler-PUBACK zaehlt nicht
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    assert world.device.reset_zugestellt is True
