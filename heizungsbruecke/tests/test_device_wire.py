@@ -52,6 +52,8 @@ def test_the_update_fields_are_part_of_the_contract():
     assert wire.SOFTWARE_FIELDS[-1] == "einmalig"
     assert wire.HELLO_OPTIONAL == ("device_state", "auto_update", "integration_version")
     assert {"manifest_abgelaufen", "einstellung_aus"} <= set(wire.SOFTWARE_ERRORS)
+    assert {"system_download", "system_installation", "system_fehlstart", "system_ungesund",
+            "system_netzprobe"} <= set(wire.SOFTWARE_ERRORS)
     assert wire.FELD_MINDESTVERSION == {}
 
 

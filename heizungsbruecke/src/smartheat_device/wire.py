@@ -231,6 +231,7 @@ DOKUMENT_ERRORS = (
 SOFTWARE_ERRORS = (
     "manifest_ungueltig", "signatur_ungueltig", "updater_zu_alt", "version_zu_alt", "start_fehlgeschlagen",
     "ungesund", "server_unerreichbar", "manifest_abgelaufen", "einstellung_aus",
+    "system_download", "system_installation", "system_fehlstart", "system_ungesund", "system_netzprobe",
 )
 MELDUNGEN = ("wunsch_begrenzt", "soll_quelle_aus", "geraet_doppelt", "update_noetig", "gesperrt")
 

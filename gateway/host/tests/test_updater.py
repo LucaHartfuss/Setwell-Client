@@ -2191,11 +2191,11 @@ def test_probestart_mit_tief_geschachteltem_healthz_faellt_regulaer_zurueck(tmp_
     world.updater._lokal_health = lambda version: updater.health_ok(
         updater.fetch_health(url + "/healthz"), {"runtime": "healthy"}, mit_server=False)
     world.updater.recover()
-    assert world.state().system["phase"] == "zurueck" and world.state().system["grund"] == "ungesund"
+    assert world.state().system["phase"] == "zurueck" and world.state().system["grund"] == "system_ungesund"
     assert "bestaetigen" not in [aufruf[0] for aufruf in world.sa.aufrufe]
     _im_alten_slot(world)
     state = world.state()
-    assert _berichte(world) == [("ungesund", "rollback")]
+    assert _berichte(world) == [("system_ungesund", "rollback")]
     assert state.rejected == [world.abgelehnt()] and (state.current, state.in_progress) == (ALT, None)
     assert world.sa.primaer() == "A"
 
@@ -2771,12 +2771,12 @@ def test_downgrade_reason_is_in_the_fixed_list():
 
 
 def test_der_updater_meldet_nur_gruende_aus_reasons():
-    """Jeder Grund, den der Updater an _Refused, _reject, _rollback oder _queue gibt, ist ein Name aus REASONS
-    oder ein durchgereichter Wert, nie ein Literal; so meldet er nur Gruende, die test_vertrag_im_host.py gegen den
-    Vertrag prueft. Ausnahme: _queue meldet das Ergebnis "ok" mit leerem Grund."""
+    """Jeder Grund, den der Updater an _Refused, _reject, _rollback, _zurueck_melden oder _queue gibt, ist ein Name aus
+    REASONS oder ein durchgereichter Wert, nie ein Literal; so meldet er nur Gruende, die test_vertrag_im_host.py gegen
+    den Vertrag prueft. Ausnahme: _queue meldet das Ergebnis "ok" mit leerem Grund."""
     tree = ast.parse(Path(updater.__file__).read_text(encoding="utf-8"))
     by_value = {name: getattr(updater, name) for name in dir(updater) if name.isupper()}
-    position = {"_Refused": 0, "_reject": 2, "_rollback": 2, "_queue": 3}  # Argument-Index ohne self
+    position = {"_Refused": 0, "_reject": 2, "_rollback": 2, "_zurueck_melden": 2, "_queue": 3}  # Argument-Index ohne self
     seen = set()
     for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
         name = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", None)
@@ -3359,13 +3359,13 @@ def test_system_wechsel_nur_mit_broker(tmp_path):
     assert world.updater.run_once() == "systemwechsel"  # Gegenprobe: derselbe Durchlauf mit Broker beginnt
 
 
-def test_system_bundle_pruefsumme_falsch_ist_manifest_ungueltig(tmp_path):
+def test_system_bundle_pruefsumme_falsch_ist_system_download(tmp_path):
     """Gleiche Groesse, ein Byte anders: der Weg liefert ein anderes System-Bundle als signiert (S-3)."""
     world = _system_world(tmp_path)
     world.compose.images.add(IMAGE)  # das Archiv des Images ist nicht Gegenstand
     world.served[BASE + bundles.SYSTEM_NAME] = b"X" + SYSTEM_INHALT[1:]
     assert world.updater.run_once() == "abgelehnt"
-    assert _berichte(world) == [("manifest_ungueltig", "rollback")]
+    assert _berichte(world) == [("system_download", "rollback")]
     assert world.state().rejected == [world.abgelehnt()]
     assert world.sa.aufrufe == [] and _system_dateien(world) == []  # nichts installiert, nichts liegen geblieben
     world.served[BASE + bundles.SYSTEM_NAME] = SYSTEM_INHALT
@@ -3377,8 +3377,9 @@ def test_system_bundle_pruefsumme_falsch_ist_manifest_ungueltig(tmp_path):
 
 @pytest.mark.parametrize("fall", ["manifest_nennt_mehr_als_erlaubt", "server_liefert_mehr_als_das_manifest_nennt"])
 def test_system_bundle_zu_gross_bricht_vor_dem_abruf_ab(tmp_path, fall):
-    """(a) Das Manifest nennt mehr als MAX_SYSTEM_BYTES: abgelehnt, bevor irgendeine Datei geholt wird. (b) Es nennt
-    weniger, als der Server liefert: der Abruf bricht ab (TooLarge), nichts bleibt liegen."""
+    """(a) Das Manifest nennt mehr als MAX_SYSTEM_BYTES: abgelehnt als ungueltiges Manifest, bevor irgendeine Datei geholt
+    wird. (b) Es nennt weniger, als der Server liefert: der Abruf bricht ab (TooLarge), abgelehnt als `system_download`,
+    nichts bleibt liegen."""
     if fall == "manifest_nennt_mehr_als_erlaubt":
         system = {**SYSTEM, "groesse": bundles.MAX_SYSTEM_BYTES + 1}
     else:
@@ -3386,7 +3387,8 @@ def test_system_bundle_zu_gross_bricht_vor_dem_abruf_ab(tmp_path, fall):
     world = _system_world(tmp_path, manifest_over={"system": system})
     world.compose.images.add(IMAGE)
     assert world.updater.run_once() == "abgelehnt"
-    assert _berichte(world) == [("manifest_ungueltig", "rollback")]
+    erwartet = "manifest_ungueltig" if fall == "manifest_nennt_mehr_als_erlaubt" else "system_download"
+    assert _berichte(world) == [(erwartet, "rollback")]
     assert world.sa.aufrufe == [] and _system_dateien(world) == []
     if fall == "manifest_nennt_mehr_als_erlaubt":
         assert world.archive_fetches == []  # (a) nicht einmal ein Abruf
@@ -3410,7 +3412,7 @@ def test_compatible_falsch_wird_abgelehnt(tmp_path):
     """Das Manifest nennt ein anderes `compatible` als die system.conf des Geraets: abgelehnt, vor jedem Abruf."""
     world = _system_world(tmp_path, sa_compatible="smartheat-gateway-anderes")
     assert world.updater.run_once() == "abgelehnt"
-    assert _berichte(world) == [("manifest_ungueltig", "rollback")]
+    assert _berichte(world) == [("system_download", "rollback")]
     assert world.archive_fetches == [] and world.sa.aufrufe == []
     assert world.state().rejected == [world.abgelehnt()]
 
@@ -3437,7 +3439,7 @@ def test_installieren_dann_probestart_neustart(tmp_path):
 
 
 def test_install_scheitert_einmal_vorlaeufig_zweimal_abgelehnt(tmp_path, caplog):
-    """Der erste gescheiterte `rauc install` ist vorlaeufig (neuer Versuch), der zweite in Folge `manifest_ungueltig`.
+    """Der erste gescheiterte `rauc install` ist vorlaeufig (neuer Versuch), der zweite in Folge `system_installation`.
     Auch 'Frist abgelaufen, Dienst jetzt idle, Ergebnis unbekannt' (StartauswahlFehler) zaehlt so."""
     world = _system_world(tmp_path)
     world.sa.installieren_fehler = StartauswahlFehler("rauc install: Exit 1")
@@ -3447,10 +3449,10 @@ def test_install_scheitert_einmal_vorlaeufig_zweimal_abgelehnt(tmp_path, caplog)
     world.sa.installieren_fehler = StartauswahlFehler("rauc install: Frist ueberschritten, Dienst jetzt idle, Ergebnis unbekannt")
     with caplog.at_level("ERROR"):
         assert world.updater.run_once() == "abgelehnt"
-    assert "system_grund=manifest_ungueltig" in caplog.text
+    assert "system_grund=system_installation" in caplog.text
     state = world.state()
     assert (state.system_installfehler, state.rejected) == (0, [world.abgelehnt()])
-    assert _berichte(world) == [("manifest_ungueltig", "rollback")] and _system_dateien(world) == []
+    assert _berichte(world) == [("system_installation", "rollback")] and _system_dateien(world) == []
     assert [aufruf[0] for aufruf in world.sa.aufrufe] == ["installieren", "installieren"]
     assert world.updater.run_once() == "aktuell"
 
@@ -3474,10 +3476,10 @@ def test_unterbrechung_dann_ein_installfehler_lehnt_ab(tmp_path, caplog):
     world.sa.installieren_fehler = StartauswahlFehler("rauc install: Exit 1")
     with caplog.at_level("ERROR"):
         assert world.updater.run_once() == "abgelehnt"
-    assert "system_grund=manifest_ungueltig" in caplog.text
+    assert "system_grund=system_installation" in caplog.text
     state = world.state()
     assert (state.system_installfehler, state.rejected) == (0, [world.abgelehnt()])
-    assert _berichte(world) == [("manifest_ungueltig", "rollback")] and _system_dateien(world) == []
+    assert _berichte(world) == [("system_installation", "rollback")] and _system_dateien(world) == []
 
 
 def test_ein_gelungener_install_setzt_die_zaehlung_der_fehler_zurueck(tmp_path):
@@ -3515,14 +3517,14 @@ def test_strom_weg_waehrend_installation_versucht_spaeter_erneut(tmp_path):
 
 def test_neues_system_erreicht_updater_nie_ist_fehlstart(tmp_path):
     """Phase `installiert` im alten Slot: der neue Slot kam nie bis zum Updater (Watchdog, Frist-Timer): Fehlstart,
-    `start_fehlgeschlagen`, abgelehnt, die alten Container laufen wieder."""
+    `system_fehlstart`, abgelehnt, die alten Container laufen wieder."""
     world = _system_world(tmp_path)
     _bis_zum_neustart(world)
     world.sa.neustart()  # Neustart in den neuen Slot ...
     assert world.sa.gestartet() == "B"
     _im_alten_slot(world)  # ... der Frist-Timer startet neu, [all] ist der alte Slot
     state = world.state()
-    assert _berichte(world) == [("start_fehlgeschlagen", "rollback")]
+    assert _berichte(world) == [("system_fehlstart", "rollback")]
     assert state.rejected == [world.abgelehnt()] and state.system is None and state.in_progress is None
     assert state.current == ALT and state.system_abstand is None
     assert world.compose.calls[-1] == ("up", ALT) and ("up", NEU) not in world.compose.calls
@@ -3594,7 +3596,7 @@ def test_lokale_gesundheit_endet_nach_600s_ohne_verlaengerung(tmp_path):
     world.updater.recover()
     assert world.clock[0] == 5000.0 + updater.LOKAL_GESUND_SECONDS == 5600.0
     system = world.state().system
-    assert (system["phase"], system["grund"], system["ablehnen"]) == ("zurueck", "ungesund", True)
+    assert (system["phase"], system["grund"], system["ablehnen"]) == ("zurueck", "system_ungesund", True)
     assert world.sa.aufrufe[-1] == ("zurueckschalten",)
 
 
@@ -3625,30 +3627,30 @@ def test_probestart_ungesund_schaltet_zurueck_und_lehnt_ab(tmp_path, caplog):
                    lambda state: (state.system["phase"], state.system["grund"], state.system["ablehnen"]))
     with caplog.at_level("ERROR"):
         _im_neuen_slot(world)
-    assert protokoll == [("zurueckschalten", ("zurueck", "ungesund", True))]
-    assert "system_grund=ungesund" in caplog.text
+    assert protokoll == [("zurueckschalten", ("zurueck", "system_ungesund", True))]
+    assert "system_grund=system_ungesund" in caplog.text
     assert "bestaetigen" not in [aufruf[0] for aufruf in world.sa.aufrufe]
     _im_alten_slot(world)
     state = world.state()
-    assert _berichte(world) == [("ungesund", "rollback")]
+    assert _berichte(world) == [("system_ungesund", "rollback")]
     assert state.rejected == [world.abgelehnt()] and state.system is None and state.system_abstand is None
     assert (state.current, state.in_progress) == (ALT, None) and world.compose.calls[-1] == ("up", ALT)
     assert world.sa.primaer() == "A" and _system_dateien(world) == []
     assert world.updater.run_once() == "aktuell"
 
 
-def test_probestart_start_der_container_scheitert_ist_start_fehlgeschlagen(tmp_path):
+def test_probestart_start_der_container_scheitert_ist_system_fehlstart(tmp_path):
     world = _system_world(tmp_path, fail_up=(NEU,))
     _bis_zum_neustart(world)
     _im_neuen_slot(world)
     assert [a[0] for a in world.sa.aufrufe][-1] == "zurueckschalten" and world.lokal_aufrufe == 0
     _im_alten_slot(world)
-    assert _berichte(world) == [("start_fehlgeschlagen", "rollback")] and world.state().rejected == [world.abgelehnt()]
+    assert _berichte(world) == [("system_fehlstart", "rollback")] and world.state().rejected == [world.abgelehnt()]
 
 
 def test_strom_weg_im_probestart_rueckfall_ohne_ablehnung(tmp_path):
     """Strom weg im Probestart vor mark-good: tryboot war einmalig, [all] ist der alte Slot. Phase `probestart` im alten Slot
-    -> Rueckfall ohne Ablehnung (`server_unerreichbar`), zaehlt zu den drei, Abstand beginnt, die alten Container laufen."""
+    -> Rueckfall ohne Ablehnung (`system_netzprobe`), zaehlt zu den drei, Abstand beginnt, die alten Container laufen."""
     world = _system_world(tmp_path)
     _bis_zum_neustart(world)
     _neustart(world, NEU)
@@ -3662,7 +3664,7 @@ def test_strom_weg_im_probestart_rueckfall_ohne_ablehnung(tmp_path):
     assert world.state().system["phase"] == "probestart"
     _im_alten_slot(world)
     state = world.state()
-    assert _berichte(world) == [("server_unerreichbar", "rollback")]
+    assert _berichte(world) == [("system_netzprobe", "rollback")]
     assert state.rejected == [] and state.system is None and state.current == ALT
     assert state.system_abstand == {"version": NEU, "rueckfaelle": 1, "naechster_versuch": None}
     assert world.compose.calls[-1] == ("up", ALT) and world.sa.primaer() == "A"
@@ -3684,7 +3686,7 @@ def test_strom_weg_zwischen_speichern_und_mark_good(tmp_path):
     assert world.state().system["phase"] == "bestaetigt"
     _im_alten_slot(world)
     state = world.state()
-    assert _berichte(world) == [("server_unerreichbar", "rollback")] and state.rejected == []
+    assert _berichte(world) == [("system_netzprobe", "rollback")] and state.rejected == []
     assert state.system_abstand["rueckfaelle"] == 1 and state.current == ALT and world.sa.primaer() == "A"
 
 
@@ -3704,7 +3706,7 @@ def test_strom_weg_zwischen_zurueck_und_mark_bad(tmp_path):
     with pytest.raises(_Strom):
         world.updater.recover()
     system = world.state().system
-    assert (system["phase"], system["grund"], system["ablehnen"]) == ("zurueck", "server_unerreichbar", False)
+    assert (system["phase"], system["grund"], system["ablehnen"]) == ("zurueck", "system_netzprobe", False)
     assert world.sa.primaer() == "B" and world.state().current == ALT  # bestaetigt, aber current/previous noch nicht gewechselt
     world.sa.zurueckschalten = original
     _neustart(world, NEU)  # B ist [all]: der bestaetigte neue Slot startet wieder
@@ -3713,7 +3715,7 @@ def test_strom_weg_zwischen_zurueck_und_mark_bad(tmp_path):
     assert world.sa.aufrufe[-1] == ("zurueckschalten",) and world.sa.primaer() == "A"
     _im_alten_slot(world)
     state = world.state()
-    assert _berichte(world) == [("server_unerreichbar", "rollback")]
+    assert _berichte(world) == [("system_netzprobe", "rollback")]
     assert state.rejected == [] and state.system_abstand["rueckfaelle"] == 1 and state.current == ALT
 
 
@@ -3728,12 +3730,12 @@ def test_netzprobe_ohne_broker_schaltet_zurueck_ohne_ablehnung(tmp_path):
     _im_neuen_slot(world)
     assert world.clock[0] - start == updater.NETZPROBE_SECONDS
     assert [a[0] for a in world.sa.aufrufe][-2:] == ["bestaetigen", "zurueckschalten"]
-    assert protokoll == [("zurueckschalten", ("zurueck", "server_unerreichbar", False, ALT))]
+    assert protokoll == [("zurueckschalten", ("zurueck", "system_netzprobe", False, ALT))]
     assert not any(call[0] == "prune" for call in world.compose.calls) and world.api.results == []
     assert world.sa.primaer() == "A" and world.sa.neustart_angefordert  # mark-bad kippte [all] zurueck auf A
     _im_alten_slot(world)
     state = world.state()
-    assert _berichte(world) == [("server_unerreichbar", "rollback")]
+    assert _berichte(world) == [("system_netzprobe", "rollback")]
     assert state.rejected == [] and state.system_abstand["rueckfaelle"] == 1 and state.current == ALT
     assert world.compose.calls[-1] == ("up", ALT)
 
@@ -3751,12 +3753,12 @@ def test_netzprobe_verlangt_den_serverkontakt_des_neuen_stands(tmp_path):
     _im_neuen_slot(world)
     assert not world.api.offline and world.api.reach_calls == 1  # nur das Gate des Durchlaufs
     assert world.clock[0] - start == updater.NETZPROBE_SECONDS
-    assert protokoll == [("zurueckschalten", ("zurueck", "server_unerreichbar", False, ALT))]
+    assert protokoll == [("zurueckschalten", ("zurueck", "system_netzprobe", False, ALT))]
     assert world.api.results == [] and world.state().current == ALT
     world.healthy = True
     _im_alten_slot(world)
     state = world.state()
-    assert _berichte(world) == [("server_unerreichbar", "rollback")] and state.rejected == []
+    assert _berichte(world) == [("system_netzprobe", "rollback")] and state.rejected == []
     assert state.system_abstand["rueckfaelle"] == 1 and state.current == ALT
 
 
@@ -3795,7 +3797,7 @@ def test_zurueckschalten_scheitert_im_probestart_startet_normal_neu(tmp_path):
     _im_neuen_slot(world)
     assert [a[0] for a in world.sa.aufrufe][-2:] == ["zurueckschalten", "normal_neustarten"]
     _im_alten_slot(world)
-    assert _berichte(world) == [("ungesund", "rollback")]
+    assert _berichte(world) == [("system_ungesund", "rollback")]
 
 
 def test_zurueckschalten_scheitert_nach_der_bestaetigung_startet_nicht_normal_neu(tmp_path):
@@ -3850,7 +3852,7 @@ def test_probestart_in_unerwarteter_phase_bestaetigt_nie_ohne_gesundheit(tmp_pat
 @pytest.mark.parametrize(("unterbrechungen", "abgelehnt"), [(1, False), (2, False), (3, True)])
 def test_unterbrochene_installation_wird_dreimal_in_folge_abgelehnt(tmp_path, unterbrechungen, abgelehnt):
     """T1-10: reisst `rauc install` selbst das System herunter (Reset), wiederholt sich das nicht endlos. Die dritte
-    Unterbrechung derselben Installation in Folge lehnt die Version ab (`manifest_ungueltig`); zwei davon nicht."""
+    Unterbrechung derselben Installation in Folge lehnt die Version ab (`system_installation`); zwei davon nicht."""
     world = _system_world(tmp_path)
     world.compose.images.add(IMAGE)
 
@@ -3869,7 +3871,7 @@ def test_unterbrochene_installation_wird_dreimal_in_folge_abgelehnt(tmp_path, un
         if n < unterbrechungen:
             assert state.rejected == [] and world.api.results == []
     if abgelehnt:
-        assert state.rejected == [world.abgelehnt()] and _berichte(world) == [("manifest_ungueltig", "rollback")]
+        assert state.rejected == [world.abgelehnt()] and _berichte(world) == [("system_installation", "rollback")]
         assert _system_dateien(world) == [] and world.updater.run_once() == "aktuell"
     else:
         assert state.rejected == [] and world.api.results == []
@@ -3933,14 +3935,14 @@ def test_dritter_rueckfall_lehnt_ab(tmp_path):
         if n < 3:
             assert state.rejected == [] and state.system_abstand["rueckfaelle"] == n
     assert state.rejected == [world.abgelehnt()] and state.system_abstand is None and state.system is None
-    # die ersten beiden ohne Ablehnung als `server_unerreichbar`; abgelehnt wird als Fehlstart gemeldet (`server_unerreichbar`
+    # die ersten beiden ohne Ablehnung als `system_netzprobe`; abgelehnt wird als Fehlstart gemeldet (`system_netzprobe`
     # hiesse beim Server "wird erneut versucht")
-    assert _berichte(world) == [("server_unerreichbar", "rollback")] * 2 + [("start_fehlgeschlagen", "rollback")]
+    assert _berichte(world) == [("system_netzprobe", "rollback")] * 2 + [("system_fehlstart", "rollback")]
     world.api.offline = False
     assert world.updater.run_once() == "aktuell"
 
 
-def test_geraet_fehlt_im_probestart_ist_start_fehlgeschlagen_und_abgelehnt(tmp_path, caplog):
+def test_geraet_fehlt_im_probestart_ist_system_fehlstart_und_abgelehnt(tmp_path, caplog):
     """Der alte Slot sah den Stick im selben Lauf: fehlt er im neuen System, ist das ein Fehler des Systems (Treiber, udev)."""
     stick = tmp_path / "zigbee"
     stick.touch()
@@ -3949,12 +3951,12 @@ def test_geraet_fehlt_im_probestart_ist_start_fehlgeschlagen_und_abgelehnt(tmp_p
     stick.unlink()
     with caplog.at_level("ERROR"):
         _im_neuen_slot(world)
-    assert "system_grund=start_fehlgeschlagen" in caplog.text
+    assert "system_grund=system_fehlstart" in caplog.text
     assert ("up", NEU) not in world.compose.calls and world.lokal_aufrufe == 0
     assert [a[0] for a in world.sa.aufrufe][-1] == "zurueckschalten"
     stick.touch()
     _im_alten_slot(world)
-    assert _berichte(world) == [("start_fehlgeschlagen", "rollback")]
+    assert _berichte(world) == [("system_fehlstart", "rollback")]
     assert world.state().rejected == [world.abgelehnt()] and world.state().system_abstand is None
 
 
@@ -4024,7 +4026,7 @@ def test_unlesbarer_systemauftrag_mit_offenem_auftrag_sperrt_kein_angebot_einer_
     state = world.state()
     assert (state.current, state.system["version"], state.system["phase"]) == (ALT, NEU, "installiert")
     assert state.in_progress["version"] == NEU and world.compose.calls.count(("up", ALT)) == 1
-    assert _berichte(world) == [("server_unerreichbar", "rollback")]  # der abgebrochene Auftrag 0.2.5, ohne Ablehnung
+    assert _berichte(world) == [("system_netzprobe", "rollback")]  # der abgebrochene Auftrag 0.2.5, ohne Ablehnung
     assert state.rejected == [] and world.sa.tryboot_vorgemerkt
 
 

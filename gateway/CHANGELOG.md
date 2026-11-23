@@ -2,6 +2,9 @@
 
 ## Unveroeffentlicht
 
+- Ein Systemupdate meldet seine Fehler mit eigenen Gruenden (`system_download`, `system_installation`, `system_fehlstart`,
+  `system_ungesund`, `system_netzprobe`); das Update der Container behaelt seine bisherigen Gruende.
+
 - Der Uebernahme-Code erscheint erst nach dem Knopfdruck am Geraet und liegt nur im Speicher; nach einem Neustart gibt
   es einen neuen Code, eine alte Datei `claim_code` wird beim Start geloescht.
 
