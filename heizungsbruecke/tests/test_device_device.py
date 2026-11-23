@@ -245,7 +245,7 @@ def test_die_ruecksetzmeldung_wird_ohne_puback_wiederholt_und_mit_dem_puback_bee
     assert world.link.of("up/zurueckgesetzt") == [erste, erste]  # dieselbe Zeichenfolge, kein neues Signieren
     world.link.gesendet(len(world.link.sent))
     world.device.schritt()
-    world.clock.now += 3600
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS  # noch innerhalb der Frist: nur das PUBACK hat sie beendet
     world.device.schritt()
     assert world.link.topics().count("up/zurueckgesetzt") == 2
 
@@ -265,7 +265,7 @@ def test_die_ruecksetzmeldung_wird_nach_der_frist_aufgegeben_und_einmal_geloggt(
     world = World(tmp_path)
     world.device.reset_melden()
     world.device.schritt()  # nicht verbunden: nichts geht hinaus
-    world.clock.now += device.RESET_FRIST_SECONDS + 1
+    world.clock.now += device.RESET_FRIST_SECONDS  # genau am Fristende gilt sie als abgelaufen
     with caplog.at_level("WARNING"):
         world.verbinden()
         world.clock.now += 3600
