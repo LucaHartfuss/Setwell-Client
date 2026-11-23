@@ -393,6 +393,19 @@ def test_ein_reset_nach_einem_verworfenen_meldet_wieder_erst_in_loeschen(welt, n
     assert welt.device.reset_aufrufe == 1
 
 
+def test_nach_einem_abgebrochenen_loeschen_meldet_ein_neuer_reset_erneut(welt, neustarts):
+    _anfrage(welt, seq=1, phase="loeschen")
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 1
+    _verworfen(welt)
+    _takt(welt.host)
+    _anfrage(welt, seq=2)
+    _takt(welt.host)
+    _anfrage(welt, seq=2, phase="loeschen")
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 2
+
+
 def test_ohne_geraetekern_meldet_der_reset_nichts_und_wirft_nie(welt, neustarts):
     welt.host.device = None
     _anfrage(welt, phase="loeschen")
