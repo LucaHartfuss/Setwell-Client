@@ -7,9 +7,9 @@ from smartheat_core.levers import LEVER_SETS
 from smartheat_core.safety import LOCAL_SAFETY
 from smartheat_core.verfahren import VERFAHREN, WEG_UNBEKANNT, WegUnbekannt, verfahren_fuer
 
-#: Die Zeilen der Tabelle, woertlich: heute gibt es vier Wege; die Simulation traegt jeden Hebelsatz.
+#: Die Zeilen der Tabelle, woertlich: heute gibt es fuenf Wege; die Simulation traegt jeden Hebelsatz.
 ZEILEN = {
-    ("vaillant_myvaillant", "vaillant_vrc720"),
+    ("vaillant_myvaillant", "vaillant_vrc720"), ("vaillant_ebus", "vaillant_vrc720"),
     ("weishaupt_modbus", "weishaupt_wwp"), ("weishaupt_modbus", "weishaupt_wwp_basis"),
     ("viessmann_vicare", "viessmann_vicare"),
     ("simulation", "vaillant_vrc720"), ("simulation", "weishaupt_wwp"), ("simulation", "weishaupt_wwp_basis"),
@@ -32,8 +32,29 @@ def test_jeder_hebelsatz_hat_eine_zeile():
 
 
 def test_wege_der_tabelle_sind_die_wege_der_konfigurationspruefung():
-    # Der Busweg ist bekannt, aber unbeschreibbar: seine Verfahrenszeilen kommen mit seinen Schreibregeln.
-    assert {weg for weg, _ in VERFAHREN} == set(config_check.WEGE) - {"vaillant_ebus"}
+    assert {weg for weg, _ in VERFAHREN} == set(config_check.WEGE)
+
+
+def test_der_busweg_traegt_den_vaillant_hebelsatz_mit_der_zeile_des_cloud_wegs():
+    assert verfahren_fuer("vaillant_ebus", "vaillant_vrc720") is verfahren_fuer("vaillant_myvaillant", "vaillant_vrc720")
+    for hebelsatz in ("weishaupt_wwp", "weishaupt_wwp_basis", "viessmann_vicare", "erfunden"):
+        assert verfahren_fuer("vaillant_ebus", hebelsatz) is None
+
+
+def test_ein_mqtt_dokument_besteht_die_pruefung_schreibt_aber_nichts():
+    """Die Verfahrenszeile macht den Busweg nicht beschreibbar: ohne Zeile in SCHREIB_PLATTFORM (und ohne Schreibregeln
+    fuer die Plattform mqtt) gibt es kein Schreibziel."""
+    from geraet_helpers import ha_konfiguration
+    from rastung_beispiele import fuer
+
+    neu = ha_konfiguration(bindung={"kreis": {"plattform": "mqtt", "anlage": "S", "nummer": "0", "geraet": "g1"}})
+    assert neu["weg"] == "vaillant_ebus"
+    assert config_check.pruefen(neu, fuer(None, neu), host=config_check.HOST_HA, treiber_pruefen=lambda k: None) is None
+    assert ("vaillant_ebus", "vaillant_vrc720") not in dokument.SCHREIB_PLATTFORM
+    b = dokument.bindung(neu)
+    assert dokument.schreib_plattform(b) is None
+    assert dokument.schreibziele_befund(b, {}, beim_start=False) == ("plattform", "nicht_erlaubt")
+    assert dokument.schreibziele_befund(b, {}, beim_start=True) == ("plattform", "nicht_erlaubt")
 
 
 def test_jede_schreibplattform_fuehrt_zu_einer_zeile_ihres_hebelsatzes():
@@ -55,7 +76,7 @@ def test_hebelsatz_ohne_zeile_am_weg_gibt_keine_zeile(weg, hebelsatz):
     assert verfahren_fuer(weg, hebelsatz) is None
 
 
-@pytest.mark.parametrize("weg", ["vaillant_ebus", "", "Simulation", "vaillant_myvaillant ", None, 3])
+@pytest.mark.parametrize("weg", ["vaillant_ebusd", "", "Simulation", "vaillant_myvaillant ", None, 3])
 def test_unbekannter_weg_scheitert_laut(weg):
     with pytest.raises(WegUnbekannt) as fehler:
         verfahren_fuer(weg, "vaillant_vrc720")

@@ -211,8 +211,14 @@ def test_der_weg_wird_vor_den_bindungsparametern_geprueft():
 
 
 def test_der_busweg_gehoert_nicht_zu_einem_gateway_treiber():
-    ablehnung = _geprueft(gateway_konfiguration(weg="vaillant_ebus"), LOCK)
+    ablehnung = _geprueft(gateway_konfiguration(weg="vaillant_ebus", hebelsatz="vaillant_vrc720",
+                                                bindungsparameter=parameter("vaillant_vrc720")), None)
     assert ablehnung == cc.Ablehnung(cc.WEG_MEHRFACH, cc.befund("weg", "doppelt"))
+
+
+def test_der_busweg_mit_fremdem_hebelsatz_hat_keine_sicherheitswerte():
+    ablehnung = _geprueft(gateway_konfiguration(weg="vaillant_ebus"), LOCK)
+    assert ablehnung == cc.Ablehnung(cc.SICHERHEITSWERTE_FEHLEN, cc.befund("hebelsatz", "unbekannt"))
 
 
 @pytest.mark.parametrize("hebelsatz", ["vaillant_vrc720", "weishaupt_wwp", "weishaupt_wwp_basis"])
