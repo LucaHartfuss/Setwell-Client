@@ -131,7 +131,7 @@ def inventur(ha_api, filter_: dict) -> dict:
             "aktualisiert": state.get("last_updated"),
         }, wire.INVENTUR_ENTITY_FIELDS))
     geraete = [pruefen("inventur.geraet", {"id": d["id"], "name": d.get("name_by_user") or d.get("name"),
-                                           "modell": d.get("model"),
+                                           "modell": d.get("model"), "hersteller": d.get("manufacturer"),
                                            "config_entries": list(d.get("config_entries") or [])},
                        wire.INVENTUR_GERAET_FIELDS)
                for d in ha_api.device_registry() if isinstance(d, dict) and d.get("id") in geraete_ids]

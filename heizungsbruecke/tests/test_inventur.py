@@ -207,7 +207,7 @@ def _s_geraet(raw):
     entries = raw.get("config_entries")
     entries = [e for e in map(_s_text, entries[:32]) if e] if isinstance(entries, list) else []
     return {"id": geraet_id, "name": _s_text(raw.get("name")), "modell": _s_text(raw.get("modell")),
-            "config_entries": entries}
+            "hersteller": _s_text(raw.get("hersteller")), "config_entries": entries}
 
 
 def _s_lesen(daten):
@@ -375,6 +375,14 @@ def test_deaktivierte_entity_mit_zustand_faellt_raus():
     ha.registry.append({"entity_id": "number.aus", "platform": "mypyllant", "disabled_by": "user"})
     ids = {e["entity_id"] for e in inventur.inventur(ha, FILTER)["entities"]}
     assert "number.aus" not in ids and "number.curve" in ids
+
+
+def test_der_hersteller_des_registry_geraets_wird_uebertragen_und_fehlt_er_ist_er_null():
+    ha = _ha()
+    ha.devices[0]["manufacturer"] = "Vaillant"
+    geraete = {g["id"]: g for g in inventur.inventur(ha, FILTER)["geraete"]}
+    assert geraete["d1"]["hersteller"] == "Vaillant"
+    assert geraete["d2"]["hersteller"] is None
 
 
 def test_config_entries_des_geraets_sind_eine_liste():

@@ -94,7 +94,7 @@ INVENTUR_ATTRIBUTE = (
     "temperature", "current_temperature", "temperature_unit", "min", "max", "step", "min_temp", "max_temp",
     "target_temp_step", "options", "hvac_modes",
 )
-INVENTUR_GERAET_FIELDS = ("id", "name", "modell", "config_entries")
+INVENTUR_GERAET_FIELDS = ("id", "name", "modell", "hersteller", "config_entries")
 # Gateway-Inventur `stunden: 0` (Spec Stufe 3 S5 5.1): rohe Features je Anlage, Features auf oberster Ebene (Stueckelung)
 INVENTUR_FILTER_GATEWAY_FIELDS = ("treiber",)
 INVENTUR_GATEWAY_FIELDS = ("treiber", "anlagen", "features")
