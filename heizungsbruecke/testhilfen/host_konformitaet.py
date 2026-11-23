@@ -10,10 +10,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+
+import pytest
 
 from smartheat_core import dateien
-from smartheat_device import nachrichten, wire
+from smartheat_device import nachrichten, programm, wire
 from smartheat_device.commands import CommandRegister
 from smartheat_runtime import dokument_config
 from smartheat_runtime.ports import SignalUngueltig
@@ -383,7 +384,8 @@ def ohne_konfiguration_kann_der_host_programm(w: Welt) -> None:
 
 
 def ohne_zonendaten_meldet_der_host_programm_nicht(w: Welt) -> None:
-    with patch("smartheat_device.programm.zonendaten_vorhanden", return_value=False):
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(programm, "zonendaten_vorhanden", lambda: False)
         assert "programm" not in w.host.faehigkeiten()
 
 
