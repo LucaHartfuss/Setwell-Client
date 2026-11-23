@@ -1,6 +1,7 @@
 """Fakes fuer den Geraetekern in den Gateway-Tests: Zugang von der Test-CA (fake_ca), Link ohne Netz, ein
 Bootstrap, der nie laufen darf (der Zugang liegt schon vor), und eine Geraetesicht ohne Geraetekern fuer Host-Tests.
 Gegenstuecke der Hilfen in heizungsbruecke/tests (D1), die hier nicht importierbar sind."""
+import base64
 import itertools
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from fake_ca import GeraeteCa
 
 from smartheat_device import bootstrap, identity
+from smartheat_gateway import anmeldung
 from smartheat_gateway.geraet_host import GatewayDeviceHost
 from smartheat_runtime import dokument_config
 
@@ -20,6 +22,18 @@ def zugang_ablegen(device_dir: Path, ca: GeraeteCa) -> bootstrap.Zugang:
                               bootstrap.Endpoint("mqtt.e2e.test", 8883, ca.pem))
     bootstrap.speichern(device_dir, bootstrap.Antwort("uebernommen", zugang))
     return zugang
+
+
+def werk_ablegen(host_dir: Path, seriennummer: str = "SHG-0001", **felder) -> None:
+    """Die Kopie von werk.json im Host-Ordner, wie der Bespieler sie ablegt (der Eintrag hat nur die Form des Passworts,
+    gerechnet wird nichts); ohne sie baut das Gateway kein hello."""
+    host_dir.mkdir(parents=True, exist_ok=True)
+    passwort = {"verfahren": "scrypt", "n": anmeldung.SCRYPT_N, "r": anmeldung.SCRYPT_R, "p": anmeldung.SCRYPT_P,
+                "salz": base64.b64encode(bytes(anmeldung.SALZ_BYTES)).decode(),
+                "hash": base64.b64encode(bytes(anmeldung.HASH_BYTES)).decode()}
+    werk = {"format": "smartheat-werk-1", "seriennummer": seriennummer, "hostname": "smartheat-0001",
+            "passwort": passwort, "bespielt": "2026-10-27", "hardware": "Raspberry Pi 5"} | felder
+    (host_dir / anmeldung.WERK_DATEI).write_text(json.dumps(werk))
 
 
 class KeinBootstrap:

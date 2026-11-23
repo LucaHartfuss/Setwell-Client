@@ -358,6 +358,60 @@ def test_ein_unbrauchbarer_vermerk_hebt_nichts_auf_und_wird_entfernt(welt, neust
     assert welt.paths.abgemeldet.exists() and _vermerk(welt) is None and neustarts == []
 
 
+# --- Meldung an den Server vor dem Loeschen ---
+
+def test_die_ruecksetzmeldung_geht_erst_in_der_phase_loeschen_und_nur_einmal_hinaus(welt, neustarts):
+    _anfrage(welt)
+    for _ in range(3):
+        _takt(welt.host)
+    assert welt.device.reset_aufrufe == 0  # angefordert: der Reset kann noch verworfen werden
+    _anfrage(welt, phase="loeschen")
+    for _ in range(3):
+        _takt(welt.host)
+    assert welt.device.reset_aufrufe == 1
+
+
+def test_ein_verworfener_reset_meldet_nichts(welt, neustarts):
+    _anfrage(welt)
+    _takt(welt.host)
+    _verworfen(welt)
+    for _ in range(3):
+        _takt(welt.host)
+    assert welt.device.reset_aufrufe == 0
+
+
+def test_ein_reset_nach_einem_verworfenen_meldet_wieder_erst_in_loeschen(welt, neustarts):
+    _anfrage(welt, seq=1)
+    _takt(welt.host)
+    _verworfen(welt)
+    _takt(welt.host)
+    _anfrage(welt, seq=2)
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 0
+    _anfrage(welt, seq=2, phase="loeschen")
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 1
+
+
+def test_ohne_geraetekern_meldet_der_reset_nichts_und_wirft_nie(welt, neustarts):
+    welt.host.device = None
+    _anfrage(welt, phase="loeschen")
+    _takt(welt.host)  # kein Fehler
+
+
+def test_ein_fehler_der_ruecksetzmeldung_stoert_die_anzeige_nicht_und_wird_einmal_gemeldet(welt, neustarts, caplog):
+    def kaputt():
+        raise RuntimeError("GEHEIM")
+
+    welt.device.reset_melden = kaputt
+    _anfrage(welt, phase="loeschen")
+    with caplog.at_level(logging.ERROR):
+        for _ in range(3):
+            _takt(welt.host)
+    assert len([r for r in caplog.records if "Werksreset-Anfrage nicht bearbeitet" in r.message]) == 1
+    assert "GEHEIM" not in caplog.text
+
+
 def test_die_statussenke_haelt_das_flache_laufzeit_ereignis_ohne_kreisliste(welt):
     """Server und Abmelden lesen das flache Laufzeit-Ereignis; die Kreisliste der Zusammenfassung gehoert nur ins
     Ereignis der Integration."""

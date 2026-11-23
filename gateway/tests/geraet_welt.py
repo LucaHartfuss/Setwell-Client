@@ -25,6 +25,7 @@ class FakeDevice:
         self.ergebnis_ok = True
         self.code_ergebnis = "neu"  # Antwort von neuer_uebernahme_code
         self.code_aufrufe = 0
+        self.reset_aufrufe = 0  # Aufrufe von reset_melden (die Meldung vor dem Loeschen)
         self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKLMNOP")
         self.uebernahme_code = "ABCDEFGHIJKLMNOP"
         self.documents = SimpleNamespace(
@@ -51,6 +52,9 @@ class FakeDevice:
 
     def meldung(self, key, meldung, *, offen):
         self.meldungen.append((key, meldung, offen))
+
+    def reset_melden(self):
+        self.reset_aufrufe += 1
 
     def neuer_uebernahme_code(self):
         self.code_aufrufe += 1

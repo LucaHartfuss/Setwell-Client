@@ -12,6 +12,7 @@ import pytest
 from befehle_sicht import registrierte_befehle
 from configs import bedienung, dokumente_schreiben, konfiguration, leer
 from fakes import FakeBus
+from geraet_fakes import werk_ablegen
 from geraet_welt import WALL, FakeDevice, Welt
 from rastung_beispiele import rastung_aus
 from world import GatewayWorld
@@ -21,8 +22,8 @@ from smartheat_device import nachrichten, programm, wire
 from smartheat_device.documents import DocumentStore
 from smartheat_device.geraet_host_basis import EV_RELOAD
 from smartheat_device.host import Anzeige
+from smartheat_gateway import anmeldung, runtime_main
 from smartheat_gateway import geraet_host as gh
-from smartheat_gateway import runtime_main
 from smartheat_gateway.drivers import registry
 from smartheat_gateway.triggers import EV_TARGET_INPUT
 from smartheat_gateway.version import GATEWAY_VERSION
@@ -92,7 +93,18 @@ def test_clock_sync_comes_from_the_host_status(welt):
     assert welt.host.uhr_synchron() is None
 
 
-def test_the_gateway_has_no_hello_fields_of_the_ha_host(welt):
+def test_the_gateway_sends_its_serial_number_from_the_factory_file_and_none_of_the_ha_fields(welt):
+    werk_ablegen(welt.host_dir, "SHG-0001")
+    assert welt.host.hello_felder() == {"seriennummer": "SHG-0001"}
+
+
+@pytest.mark.parametrize("zustand", ["fehlt", "ungueltig", "zusatzfeld"])
+def test_without_a_valid_factory_file_the_gateway_has_no_hello_fields(welt, zustand):
+    if zustand == "ungueltig":
+        welt.host_dir.mkdir(parents=True, exist_ok=True)
+        (welt.host_dir / anmeldung.WERK_DATEI).write_text("kein json")
+    elif zustand == "zusatzfeld":
+        werk_ablegen(welt.host_dir, pilot="x")
     assert welt.host.hello_felder() == {}
 
 
