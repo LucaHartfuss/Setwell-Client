@@ -5,6 +5,8 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Ein Kreis darf bis zu 16 Räume und bis zu 16 Referenzfühler haben, je Raum höchstens 3 Fühler (bisher 8 Räume,
+  8 Fühler je Raum); ein Auftrag mit mehr wird mit der Grenze im Befund abgelehnt.
 - Das Gerät nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
   (`smartheat_device/anker.pem`, aktiver Schlüssel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
   loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Kälteschutz laufen unverändert

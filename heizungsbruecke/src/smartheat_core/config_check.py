@@ -64,12 +64,12 @@ URSPRUNG_WERT_MAX = 1e12  # Kopie aus wire.URSPRUNG_WERT_MAX (test_core_vertrag_
 PRUEFUNG_S = (1, 3600)
 TELEMETRIE_S = (10, 600)
 INTERVALLE = {"pruefung_s": PRUEFUNG_S, "telemetrie_s": TELEMETRIE_S}
-RAUMFUEHLER_MAX = 8  # Fuehler der Referenzraeume je Kreis
+RAUMFUEHLER_MAX = 16  # Fuehler der Referenzraeume je Kreis
 #: Kopie aus smartheat_device.wire (KREISE_MAX, RAEUME_MAX, RAUM_FUEHLER_MAX, RAUM_ROLLEN, KONFIGURATION_KREIS_FIELDS,
 #: KONFIGURATION_KREIS_OPTIONAL, KONFIGURATION_RAUM_FIELDS, WEGE, WEG_DER_PLATTFORM, WEG_DES_TREIBERS), ebenfalls in
 #: test_core_vertrag_pin.py gehalten. Hoechstens vier Kreise je Geraet (Nutzer-Entscheidung, Regel 4).
 KREISE_MAX = 4
-RAEUME_MAX, RAUM_FUEHLER_MAX = 8, 8
+RAEUME_MAX, RAUM_FUEHLER_MAX = 16, 3
 #: Kopie aus smartheat_device.wire (RAUM_SOLL_MIN/MAX und RAUM_VERSATZ_MAX), ebenfalls in test_core_vertrag_pin.py
 #: gehalten: festes Ziel eines Kontrollraums 15 bis 25 Grad, Versatz eines Referenzraums -3 bis +3 K (Regel 4).
 RAUM_ZIEL_MIN, RAUM_ZIEL_MAX = 15.0, 25.0
