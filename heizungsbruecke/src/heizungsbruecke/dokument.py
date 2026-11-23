@@ -57,6 +57,27 @@ SCHREIB_PLATTFORM: dict[tuple[str, str], str] = {
 }
 
 
+#: Generische Plattform des Buswegs: jedes MQTT-Geraet am Broker liefert Entities dieser Plattform, sie sagt nichts ueber
+#: den Waermeerzeuger. Die Verankerung ist deshalb das Registry-Geraet (kreis.geraet), nicht die Plattform.
+PLATTFORM_BUS = "mqtt"
+#: ANNAHME (AW §8.1, Bestaetigung am echten Geraet): wie ebusd den Regler im Geraeteregister von Home Assistant nennt.
+#: Hersteller gleich (ohne Gross-/Kleinschreibung), Modell enthaelt einen der Teile. Weder Hersteller noch Modell des
+#: Kunden-Geraets stehen je in Log, Diagnose oder Topic (S-5).
+_BUS_HERSTELLER = "vaillant"
+_BUS_MODELL_TEILE = ("720",)
+#: Zweites Argument von NichtPruefbar, wenn das Registry-Geraet der Schreibziele beim Start fehlt.
+OHNE_GERAET = "geraet"
+
+
+def _geraet_passt(geraet: Mapping) -> bool:
+    """Hersteller und Modell des Registry-Geraets passen zum Bus-Regler (Annahme, siehe oben); fehlt eines oder ist es kein
+    Text, passt es nicht (fail closed)."""
+    hersteller, modell = geraet.get("manufacturer"), geraet.get("model")
+    return (isinstance(hersteller, str) and isinstance(modell, str)
+            and hersteller.strip().casefold() == _BUS_HERSTELLER
+            and any(teil in modell.casefold() for teil in _BUS_MODELL_TEILE))
+
+
 def schreib_plattform(b: "HaBindung") -> str | None:
     """Die Plattform der Schreibziele fuer Weg und Hebelsatz der Bindung; None: der Weg hat dafuer keine Zeile."""
     return SCHREIB_PLATTFORM.get((b.weg, b.hebelsatz)) if b.weg is not None else None
@@ -287,7 +308,8 @@ def _form_erlaubt(feld: str, ref: str, registry_entry: Mapping, state: Mapping, 
 OHNE_REGISTRY = "registry"
 
 
-def schreibziele_befund(b: HaBindung, registry: Mapping[str, Mapping], *, beim_start: bool) -> tuple[str, str] | None:
+def schreibziele_befund(b: HaBindung, registry: Mapping[str, Mapping], *, beim_start: bool,
+                        geraete: Mapping[str, Mapping] | None = None) -> tuple[str, str] | None:
     """Die Regeln der Schreibziele (Regel 4): (feld, "nicht_erlaubt") des ersten
     Verstosses oder None. Der Kreis nennt die Plattform von Weg und Hebelsatz (SCHREIB_PLATTFORM, sonst Feld plattform;
     ohne Zeile fuer den Weg ist nichts erlaubt); jedes
@@ -295,14 +317,23 @@ def schreibziele_befund(b: HaBindung, registry: Mapping[str, Mapping], *, beim_s
     eines nennt, sonst dem des ersten Schreibziels; ohne Config-Entry nicht erlaubt); die Soll-Entity ist kein
     Schreibziel und nicht an dessen Geraet. `registry` ist die Entity-Registry je entity_id. Ein Schreibziel ohne
     Registry-Eintrag: beim Uebernehmen (beim_start=False) nicht_erlaubt wie bisher, beim Start kein Urteil, sondern
-    NichtPruefbar(feld, OHNE_REGISTRY) (Wiederholung, fail closed). Keyword ohne Standard: jeder Aufrufer
-    entscheidet."""
+    NichtPruefbar(feld, OHNE_REGISTRY) (Wiederholung, fail closed). `beim_start` hat keinen Standard: jeder Aufrufer
+    entscheidet.
+    Beim Busweg (Plattform mqtt) gilt zusaetzlich die Verankerung am Registry-Geraet (`geraete`, Geraete-Registry je id):
+    jedes Schreibziel haengt an dem Geraet, das der Kreis nennt, und dessen Hersteller und Modell passen (_geraet_passt);
+    sonst nicht_erlaubt. Fehlt das Geraet in der Geraete-Registry, ist das beim Start NichtPruefbar(feld, OHNE_GERAET),
+    beim Uebernehmen nicht_erlaubt wie bei fehlendem Registry-Eintrag."""
     plattform = schreib_plattform(b)
     if plattform is None or b.kreis.get("plattform") != plattform:
         return "plattform", "nicht_erlaubt"
+    anker = None
+    if plattform == PLATTFORM_BUS:
+        anker = b.kreis.get("geraet")
+        if not (isinstance(anker, str) and anker):
+            return "plattform", "nicht_erlaubt"  # ohne Geraet des Kreises ist nichts verankert
     config_entry = b.kreis.get("config_entry")
     ziele = _schreibziel_rollen(b)
-    geraete: set[str | None] = set()
+    geraete_der_ziele: set[str | None] = set()
     for rolle, ref in ziele:
         eintrag = registry.get(_entity(ref))
         if eintrag is None:
@@ -313,12 +344,23 @@ def schreibziele_befund(b: HaBindung, registry: Mapping[str, Mapping], *, beim_s
         if eintrag.get("platform") != plattform or not isinstance(eigenes, str) or not eigenes or (
                 config_entry is not None and eigenes != config_entry):
             return v1_rolle(rolle), "nicht_erlaubt"
+        if anker is not None and eintrag.get("device_id") != anker:
+            return v1_rolle(rolle), "nicht_erlaubt"  # fremdes Geraet, auch mit gleichem Entity-Namen
         config_entry = eigenes  # ohne Config-Entry im Kreis bindet das erste Schreibziel alle weiteren
-        geraete.add(eintrag.get("device_id"))
+        geraete_der_ziele.add(eintrag.get("device_id"))
+    if anker is not None:
+        feld = v1_rolle(ziele[0][0]) if ziele else "plattform"
+        geraet = (geraete or {}).get(anker)
+        if geraet is None:
+            if beim_start:
+                raise NichtPruefbar(feld, OHNE_GERAET)
+            return feld, "nicht_erlaubt"
+        if not _geraet_passt(geraet):
+            return feld, "nicht_erlaubt"
     if b.soll_entity is not None:
         soll_geraet = (registry.get(_entity(b.soll_entity)) or {}).get("device_id")
         if _entity(b.soll_entity) in {_entity(ref) for _, ref in ziele} or (
-                soll_geraet is not None and soll_geraet in geraete):
+                soll_geraet is not None and soll_geraet in geraete_der_ziele):
             return "room_target", "nicht_erlaubt"
     return None
 
@@ -359,7 +401,9 @@ def rollen_befund(b: HaBindung, ha_api, *, beim_start: bool) -> tuple[tuple[str,
         if not entity_erlaubt(entity_id, eintrag, state, einstellbar) or not (
                 schreibziel or _form_erlaubt(feld, ref, eintrag, state, schreib)):
             return (feld, "nicht_erlaubt"), ohne_zustand
-    return schreibziele_befund(b, registry, beim_start=beim_start), ohne_zustand
+    geraete = ({g["id"]: g for g in ha_api.device_registry() if isinstance(g, Mapping) and isinstance(g.get("id"), str)}
+               if schreib == PLATTFORM_BUS else None)  # nur der Busweg braucht die Geraete-Registry
+    return schreibziele_befund(b, registry, beim_start=beim_start, geraete=geraete), ohne_zustand
 
 
 def rollen_pruefen(b: HaBindung, ha_api) -> tuple[str, str] | None:

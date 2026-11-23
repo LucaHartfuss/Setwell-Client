@@ -597,6 +597,123 @@ def _start_rollen(konfiguration, ha):
     return dokument.rollen_befund(_bindung(konfiguration), ha, beim_start=True)[0]
 
 
+_BUS = ("vaillant_ebus", "vaillant_vrc720")
+
+
+def _bus_konfiguration(geraet="dev-ebus", ohne_geraet=False):
+    """Dokument des Buswegs (Kreis mit Plattform mqtt und Registry-Geraet)."""
+    dok = _neu(KONFIGURATION)
+    kreis = dok["kreise"][0]
+    neuer_kreis = {"plattform": "mqtt", "config_entry": "e-mqtt", "anlage": "S", "nummer": "0"}
+    if not ohne_geraet:
+        neuer_kreis["geraet"] = geraet
+    return {**dok, "weg": "vaillant_ebus",
+            "kreise": [{**kreis, "bindung": {**kreis["bindung"], "kreis": neuer_kreis}}]}
+
+
+def _bus_ha(hersteller="Vaillant", modell="VRC 720"):
+    """HA mit den Entities des Waermeerzeugers am Registry-Geraet dev-ebus der Plattform mqtt."""
+    ha = _ha()
+    ha.registry = [{**e, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-ebus"}
+                   if e["platform"] == "mypyllant" else e for e in ha.registry]
+    ha.devices = [{"id": "dev-ebus", "manufacturer": hersteller, "model": modell, "name": "Regler"}]
+    return ha
+
+
+@pytest.fixture
+def bus_offen(monkeypatch):
+    """Die Zeile der Schreibplattform des Buswegs ist ohne die Positivliste noch nicht da; hier nur zur Probe der
+    Verankerung am Registry-Geraet gesetzt."""
+    monkeypatch.setitem(dokument.SCHREIB_PLATTFORM, _BUS, "mqtt")
+
+
+def _bus_urteile(konfiguration, ha):
+    """(beim Uebernehmen, beim Start); der Start meldet NichtPruefbar als ('nicht_pruefbar', args)."""
+    uebernehmen = _rollen(konfiguration, ha)
+    try:
+        start = _start_rollen(konfiguration, ha)
+    except config_check.NichtPruefbar as fehler:
+        start = ("nicht_pruefbar", fehler.args)
+    return uebernehmen, start
+
+
+def test_der_busweg_bleibt_ohne_schreibzeile_unbeschreibbar():
+    """Auch mit passendem Registry-Geraet laesst die lokale Tabelle den Weg nichts schreiben, solange sie keine Zeile fuer
+    ihn hat (beim Uebernehmen wie beim Start, auch das Dokument-Gate)."""
+    assert _BUS not in dokument.SCHREIB_PLATTFORM
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (("plattform", "nicht_erlaubt"),) * 2
+    assert _zuordnung(_bus_konfiguration(), _bus_ha()) == {"feld": "plattform", "regel": "nicht_erlaubt"}
+
+
+def test_das_verankerte_geraet_besteht_beim_uebernehmen_und_beim_start(bus_offen):
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (None, None)
+
+
+def test_ein_fremdes_geraet_mit_gleichem_entity_namen_wird_nie_schreibziel(bus_offen):
+    """Ein Geraet am selben Broker bietet dieselben Entity-Namen an: die Entity haengt am anderen Registry-Geraet."""
+    ha = _bus_ha()
+    ha.registry = [{**e, "device_id": "dev-fremd"} if e["entity_id"] == "number.heat_limit" else e for e in ha.registry]
+    ha.devices.append({"id": "dev-fremd", "manufacturer": "Vaillant", "model": "VRC 720"})
+    assert _bus_urteile(_bus_konfiguration(), ha) == (("heat_limit", "nicht_erlaubt"),) * 2
+    assert _zuordnung(_bus_konfiguration(), ha) == {"feld": "heat_limit", "regel": "nicht_erlaubt"}
+
+
+@pytest.mark.parametrize("geraet", [None, ""])
+def test_eine_entity_ohne_registry_geraet_wird_nie_schreibziel(bus_offen, geraet):
+    ha = _bus_ha()
+    ha.registry = [{**e, "device_id": geraet} if e["entity_id"] == "number.min_flow" else e for e in ha.registry]
+    assert _bus_urteile(_bus_konfiguration(), ha) == (("min_flow", "nicht_erlaubt"),) * 2
+
+
+def test_das_dokument_nennt_ein_anderes_geraet_als_die_entities(bus_offen):
+    assert _bus_urteile(_bus_konfiguration(geraet="dev-anders"), _bus_ha())[0] is not None
+    assert _bus_urteile(_bus_konfiguration(geraet="dev-anders"), _bus_ha())[1] is not None
+
+
+def test_ein_busdokument_ohne_geraet_laesst_nichts_schreiben(bus_offen):
+    urteile = _bus_urteile(_bus_konfiguration(ohne_geraet=True), _bus_ha())
+    assert urteile[0] is not None and urteile[1] is not None
+
+
+@pytest.mark.parametrize("hersteller, modell", [
+    ("Wolf", "VRC 720"), ("Vaillant", "Fremdmodell"), (None, "VRC 720"), ("Vaillant", None), ("", ""), (5, 7)])
+def test_ein_geraet_mit_anderem_hersteller_oder_modell_wird_nie_schreibziel(bus_offen, hersteller, modell):
+    """Auch nach einem Neustart (beim Start) gesperrt: Hersteller und Modell des Registry-Geraets gehoeren zur Rastung."""
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha(hersteller, modell))[0] is not None
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha(hersteller, modell))[1] == _bus_urteile(
+        _bus_konfiguration(), _bus_ha(hersteller, modell))[0]
+
+
+def test_hersteller_und_modell_vergleichen_ohne_gross_und_kleinschreibung(bus_offen):
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha("vaillant", "vrc 720/3f")) == (None, None)
+
+
+def test_ein_fehlendes_registry_geraet_ist_beim_start_nicht_pruefbar(bus_offen):
+    """Die Entities nennen das Geraet, die Geraete-Registry kennt es (noch) nicht: beim Uebernehmen abgelehnt, beim Start
+    Wiederholung (fail closed), nie ein Schreibziel."""
+    ha = _bus_ha()
+    ha.devices = []
+    uebernehmen, start = _bus_urteile(_bus_konfiguration(), ha)
+    assert uebernehmen is not None
+    assert start[0] == "nicht_pruefbar" and start[1][1:] == (dokument.OHNE_GERAET,)
+
+
+def test_hersteller_und_modell_stehen_in_keiner_meldung(bus_offen, caplog):
+    ha = _bus_ha("Geheimfirma", "Geheimmodell")
+    with caplog.at_level("DEBUG"):
+        uebernehmen = _rollen(_bus_konfiguration(), ha)
+        details = _zuordnung(_bus_konfiguration(), ha)
+    text = repr((uebernehmen, details, caplog.text))
+    assert "Geheim" not in text and "dev-ebus" not in text
+
+
+def test_ein_fremdes_geraet_der_geraete_registry_ersetzt_das_verankerte_nicht(bus_offen):
+    """Zwei Registry-Geraete, nur das zweite hat die richtigen Texte: das Dokument nennt das erste."""
+    ha = _bus_ha("Wolf", "Kessel")
+    ha.devices.append({"id": "dev-gut", "manufacturer": "Vaillant", "model": "VRC 720"})
+    assert _bus_urteile(_bus_konfiguration(), ha)[0] is not None
+
+
 def _batterie(ref):
     return {**KONFIGURATION, "bindung": {**KONFIGURATION["bindung"], "batterien": [ref]}}
 
