@@ -600,22 +600,36 @@ def _start_rollen(konfiguration, ha):
 _BUS = ("vaillant_ebus", "vaillant_vrc720")
 
 
-def _bus_konfiguration(geraet="dev-ebus", ohne_geraet=False):
-    """Dokument des Buswegs (Kreis mit Plattform mqtt und Registry-Geraet)."""
+#: Die Schreibziele des Buswegs je Rolle des Dokuments (ANNAHME wie in dokument.py; hier die erwarteten exakten Namen).
+_BUS_ZIELE = {"curve": "number.ebusd_720_hc1heatcurve", "room_setpoint": "number.ebusd_720_z1manualtemp",
+              "min_flow": "number.ebusd_720_hc1heatingflowtempmin", "heat_limit": "number.ebusd_720_hc1summertemplimit",
+              "mode_select": "select.ebusd_720_z1opmode"}
+#: Servicewerte des Waermeerzeugers am selben Geraet (Installateurebene): nie ein Schreibziel.
+_SERVICEWERTE = ("number.ebusd_bai_d_00_teillast", "number.ebusd_bai_d_02_taktsperre", "number.ebusd_720_hc1heatcurve_2")
+#: Alles am Geraet, was nicht eines der fuenf Schreibziele ist.
+_ANDERE = (*_SERVICEWERTE, "number.ebusd_720_z1nighttemp", "select.ebusd_720_z2opmode")
+
+
+def _bus_konfiguration(geraet="dev-ebus", ohne_geraet=False, **rollen):
+    """Dokument des Buswegs (Kreis mit Plattform mqtt und Registry-Geraet); `rollen` ersetzen Rollen der Bindung."""
     dok = _neu(KONFIGURATION)
     kreis = dok["kreise"][0]
     neuer_kreis = {"plattform": "mqtt", "config_entry": "e-mqtt", "anlage": "S", "nummer": "0"}
     if not ohne_geraet:
         neuer_kreis["geraet"] = geraet
-    return {**dok, "weg": "vaillant_ebus",
-            "kreise": [{**kreis, "bindung": {**kreis["bindung"], "kreis": neuer_kreis}}]}
+    bindung = {**kreis["bindung"], "kreis": neuer_kreis, "rollen": {**kreis["bindung"]["rollen"], **_BUS_ZIELE, **rollen}}
+    return {**dok, "weg": "vaillant_ebus", "kreise": [{**kreis, "bindung": bindung}]}
 
 
 def _bus_ha(hersteller="Vaillant", modell="VRC 720"):
-    """HA mit den Entities des Waermeerzeugers am Registry-Geraet dev-ebus der Plattform mqtt."""
+    """HA mit den Entities des Waermeerzeugers am Registry-Geraet dev-ebus der Plattform mqtt (Schreibziele mit den
+    exakten Namen, dazu Servicewerte am selben Geraet)."""
     ha = _ha()
     ha.registry = [{**e, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-ebus"}
-                   if e["platform"] == "mypyllant" else e for e in ha.registry]
+                   for e in ha.registry if e["entity_id"] == "sensor.outdoor_temp"]
+    ha.registry += [{"entity_id": ref, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-ebus"}
+                    for ref in (*_BUS_ZIELE.values(), *_ANDERE)]
+    ha.states.update({ref: "auto" if ref.startswith("select.") else 1.0 for ref in (*_BUS_ZIELE.values(), *_ANDERE)})
     ha.devices = [{"id": "dev-ebus", "manufacturer": hersteller, "model": modell, "name": "Regler"}]
     return ha
 
@@ -652,7 +666,8 @@ def test_das_verankerte_geraet_besteht_beim_uebernehmen_und_beim_start(bus_offen
 def test_ein_fremdes_geraet_mit_gleichem_entity_namen_wird_nie_schreibziel(bus_offen):
     """Ein Geraet am selben Broker bietet dieselben Entity-Namen an: die Entity haengt am anderen Registry-Geraet."""
     ha = _bus_ha()
-    ha.registry = [{**e, "device_id": "dev-fremd"} if e["entity_id"] == "number.heat_limit" else e for e in ha.registry]
+    ha.registry = [{**e, "device_id": "dev-fremd"} if e["entity_id"] == _BUS_ZIELE["heat_limit"] else e
+                   for e in ha.registry]
     ha.devices.append({"id": "dev-fremd", "manufacturer": "Vaillant", "model": "VRC 720"})
     assert _bus_urteile(_bus_konfiguration(), ha) == (("heat_limit", "nicht_erlaubt"),) * 2
     assert _zuordnung(_bus_konfiguration(), ha) == {"feld": "heat_limit", "regel": "nicht_erlaubt"}
@@ -661,7 +676,7 @@ def test_ein_fremdes_geraet_mit_gleichem_entity_namen_wird_nie_schreibziel(bus_o
 @pytest.mark.parametrize("geraet", [None, ""])
 def test_eine_entity_ohne_registry_geraet_wird_nie_schreibziel(bus_offen, geraet):
     ha = _bus_ha()
-    ha.registry = [{**e, "device_id": geraet} if e["entity_id"] == "number.min_flow" else e for e in ha.registry]
+    ha.registry = [{**e, "device_id": geraet} if e["entity_id"] == _BUS_ZIELE["min_flow"] else e for e in ha.registry]
     assert _bus_urteile(_bus_konfiguration(), ha) == (("min_flow", "nicht_erlaubt"),) * 2
 
 
@@ -712,6 +727,51 @@ def test_ein_fremdes_geraet_der_geraete_registry_ersetzt_das_verankerte_nicht(bu
     ha = _bus_ha("Wolf", "Kessel")
     ha.devices.append({"id": "dev-gut", "manufacturer": "Vaillant", "model": "VRC 720"})
     assert _bus_urteile(_bus_konfiguration(), ha)[0] is not None
+
+
+def test_die_positivliste_des_buswegs_nennt_genau_die_fuenf_schreibziele():
+    assert set(dokument.SCHREIBREGELN_BUS) == {"curve_current", "shift_current", "min_flow", "heat_limit", "mode_select"}
+    erwartet = {"curve_current": "curve", "shift_current": "room_setpoint", "min_flow": "min_flow",
+                "heat_limit": "heat_limit", "mode_select": "mode_select"}
+    for rolle, (muster, _) in dokument.SCHREIBREGELN_BUS.items():
+        assert [ref for ref in (*_BUS_ZIELE.values(), *_ANDERE) if muster.fullmatch(ref)] == [_BUS_ZIELE[erwartet[rolle]]]
+    assert set(dokument.PFLICHT_ROLLEN_BUS) == {*dokument.PFLICHT_ROLLEN["vaillant_vrc720"], "mode_select"}
+
+
+@pytest.mark.parametrize("rolle", _BUS_ZIELE)
+@pytest.mark.parametrize("ref", [*_ANDERE, "number.ebusd_720_hc1heatcurve::temperature"])
+def test_jede_andere_schreibanfrage_des_buswegs_wird_abgelehnt(bus_offen, rolle, ref):
+    """Jeder Hebel und die Betriebsart haengen an genau einer Entity; Servicewerte (Installateurebene) und jede andere
+    Entity, auch am selben Geraet und mit gleicher Domaene, besteht weder beim Uebernehmen noch beim Start."""
+    konfiguration = _bus_konfiguration(**{rolle: ref})
+    assert _bus_urteile(konfiguration, _bus_ha()) == ((rolle, "nicht_erlaubt"),) * 2
+    assert _zuordnung(konfiguration, _bus_ha())["regel"] in {"format", "nicht_erlaubt"}
+    assert _lokal_pruefen(konfiguration) is not None
+
+
+@pytest.mark.parametrize("rolle", ["level", "setpoint_comfort", "setpoint_setback"])
+@pytest.mark.parametrize("ref", _SERVICEWERTE)
+def test_servicewerte_werden_unter_keiner_weiteren_rolle_ein_schreibziel(bus_offen, rolle, ref):
+    """Rollen, die die Regelung bei anderen Herstellern schreibt, hat der Busweg nicht: gebunden bedeutet abgelehnt."""
+    konfiguration = _bus_konfiguration(**{rolle: ref})
+    assert _bus_urteile(konfiguration, _bus_ha()) == ((rolle, "nicht_erlaubt"),) * 2
+
+
+@pytest.mark.parametrize("rolle", ["curve", "room_setpoint", "min_flow", "heat_limit", "mode_select"])
+def test_der_busweg_verlangt_jedes_schreibziel_samt_betriebsart(bus_offen, rolle):
+    konfiguration = _bus_konfiguration()
+    kreis = konfiguration["kreise"][0]
+    rollen = {k: v for k, v in kreis["bindung"]["rollen"].items() if k != rolle}
+    ohne = {**konfiguration, "kreise": [{**kreis, "bindung": {**kreis["bindung"], "rollen": rollen}}]}
+    befund = dokument.lokal_befund(ohne)
+    assert befund is not None and befund.details == {"feld": rolle, "regel": "fehlt"}
+
+
+def test_ein_anderer_weg_behaelt_seine_schreibregeln(bus_offen):
+    """Die Namen des Buswegs gelten nur dort: ein Cloud-Dokument mit denselben Namen bleibt an seine Regeln gebunden."""
+    assert dokument.pflicht_rollen(dokument.bindung(_neu(KONFIGURATION))) == dokument.PFLICHT_ROLLEN["vaillant_vrc720"]
+    assert dokument.schreibregeln(dokument.bindung(_neu(KONFIGURATION))) == dokument.SCHREIBREGELN["vaillant_vrc720"]
+    assert dokument.schreibregeln(dokument.bindung(_bus_konfiguration())) is dokument.SCHREIBREGELN_BUS
 
 
 def _batterie(ref):

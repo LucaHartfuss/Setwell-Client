@@ -428,6 +428,49 @@ class _GrosseHa(FakeHa):
         return [dict(zustand) for zustand in self._zustaende]
 
 
+_BUS_FILTER = {"plattformen": ["mqtt"], "domaenen": [], "geraeteklassen": [], "dienste": []}
+
+
+def _bus_ha():
+    """Broker mit dem Regler (verankert), einem fremden Geraet und einer Entity ohne Geraet; alle Plattform mqtt."""
+    ha = FakeHa()
+    ha.states = {"number.regler_kurve": 1.0, "sensor.regler_status": "ok", "number.fremd_kurve": 1.0,
+                 "sensor.fremd_status": "ok", "number.ohne_geraet": 1.0, "number.ohne_eintrag": 1.0}
+    ha.registry = [
+        {"entity_id": "number.regler_kurve", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-regler"},
+        {"entity_id": "sensor.regler_status", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-regler"},
+        {"entity_id": "number.fremd_kurve", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "sensor.fremd_status", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "number.ohne_geraet", "platform": "mqtt", "config_entry_id": "m", "device_id": None},
+        {"entity_id": "number.ohne_eintrag", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-weg"},
+    ]
+    ha.devices = [{"id": "d-regler", "manufacturer": "Vaillant", "model": "VRC 720", "name": "Regler"},
+                  {"id": "d-fremd", "manufacturer": "Wolf", "model": "Kessel", "name": "Fremd"}]
+    return ha
+
+
+def test_der_busweg_meldet_nur_entities_verankerter_geraete():
+    """Am Broker haengen beliebige Geraete mit beliebigen Namen: nur was am Geraet des Anker haengt (Hersteller und
+    Modell des Reglers), geht in die Inventur; das Geraet erscheint nur mit seinen Entities."""
+    daten = inventur.inventur(_bus_ha(), _BUS_FILTER)
+    assert {e["entity_id"] for e in daten["entities"]} == {"number.regler_kurve", "sensor.regler_status"}
+    assert {g["id"] for g in daten["geraete"]} == {"d-regler"}
+
+
+def test_ein_fremdes_busgeraet_macht_die_plattform_nicht_einstellbar():
+    """Der Sensor des Reglers (ohne Geraeteklasse) bleibt nur ueber die einstellbare Entity desselben verankerten
+    Geraets; die number-Entity eines Fremdgeraets schaltet nichts frei."""
+    ha = _bus_ha()
+    ha.registry = [e for e in ha.registry if e["entity_id"] != "number.regler_kurve"]
+    daten = inventur.inventur(ha, _BUS_FILTER)
+    assert daten["entities"] == [] and daten["geraete"] == []
+
+
+def test_andere_plattformen_bleiben_von_der_verankerung_unberuehrt():
+    daten = inventur.inventur(_ha(), FILTER)
+    assert {e["entity_id"] for e in daten["entities"]} == {"number.curve", "climate.wz", "sensor.t"}
+
+
 def test_a_large_installation_stays_under_the_message_limit():
     """5000 Entities, davon 50 nach dem Filter: die Inventur ist eine Nachricht unter der Grenze des Links (120 KB =
     122 880 Bytes)."""

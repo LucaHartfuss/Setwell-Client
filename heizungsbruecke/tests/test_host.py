@@ -454,13 +454,18 @@ def test_ein_schreibziel_ohne_registry_geraet_wird_wiederholt_und_endet_als_star
     bindung["kreis"] = {"plattform": "mqtt", "config_entry": "e-mqtt", "anlage": "S", "nummer": "0",
                         "geraet": "dev-geheim"}
     konfiguration["weg"] = "vaillant_ebus"
+    ziele = {"curve": "number.ebusd_720_hc1heatcurve", "room_setpoint": "number.ebusd_720_z1manualtemp",
+             "min_flow": "number.ebusd_720_hc1heatingflowtempmin", "heat_limit": "number.ebusd_720_hc1summertemplimit",
+             "mode_select": "select.ebusd_720_z1opmode"}
+    bindung["rollen"].update(ziele)
+    env.ha.states.update({ref: 1.0 for ref in ziele.values()})
     bus = {"platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-geheim"}
-    _registry(env, dict.fromkeys(SCHREIBZIELE, bus))
+    _registry(env, {**dict.fromkeys(SCHREIBZIELE, bus), **dict.fromkeys(ziele.values(), bus)})
     env.ha.devices = []
     with pytest.raises(StartFailure) as fehler:
         HaHost(FakeGeraet(konfiguration), env.ha).load()
     assert fehler.value.key == "rollen_nicht_pruefbar"
-    assert fehler.value.grund == ("room_setpoint: Registry-Geraet der Schreibziele fehlt in Home Assistant "
+    assert fehler.value.grund == ("curve: Registry-Geraet der Schreibziele fehlt in Home Assistant "
                                   "(lokale Positivliste nicht prüfbar)")
     assert "geheim" not in fehler.value.grund
     assert sleeps == list(DERIVED_SENSORS_RETRY_DELAYS_SECONDS) and angelegt == []

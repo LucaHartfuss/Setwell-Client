@@ -31,6 +31,23 @@ ERLAUBTE_BINAER_KLASSEN = frozenset({"battery", "problem"})
 ERLAUBTE_SENSOR_KLASSEN = frozenset({"temperature", "battery", "energy", "gas", "pressure", "power", "duration"})
 EINSTELLBARE_DOMAENEN = frozenset({"climate", "number", "select"})
 DIENST_PRAEFIX = "notify.mobile_app_"
+#: Generische Plattform des Buswegs: jedes MQTT-Geraet am Broker liefert Entities dieser Plattform, sie sagt nichts ueber
+#: den Waermeerzeuger. Die Verankerung ist deshalb das Registry-Geraet, nicht die Plattform.
+PLATTFORM_BUS = "mqtt"
+#: ANNAHME (Bestaetigung am echten Geraet): wie ebusd den Regler im Geraeteregister von Home Assistant nennt. Hersteller
+#: gleich (ohne Gross-/Kleinschreibung), Modell enthaelt einen der Teile. Weder Hersteller noch Modell des
+#: Kunden-Geraets stehen je in Log, Diagnose oder Topic.
+_BUS_HERSTELLER = "vaillant"
+_BUS_MODELL_TEILE = ("720",)
+
+
+def geraet_verankert(geraet: Mapping) -> bool:
+    """Hersteller und Modell des Registry-Geraets passen zum Bus-Regler (Annahme, siehe oben); fehlt eines oder ist es
+    kein Text, passt es nicht (fail closed). Dieselbe Pruefung verankert die Schreibziele (dokument)."""
+    hersteller, modell = geraet.get("manufacturer"), geraet.get("model")
+    return (isinstance(hersteller, str) and isinstance(modell, str)
+            and hersteller.strip().casefold() == _BUS_HERSTELLER
+            and any(teil in modell.casefold() for teil in _BUS_MODELL_TEILE))
 
 
 def _texte(value) -> bool:
@@ -100,6 +117,8 @@ def inventur(ha_api, filter_: dict) -> dict:
     praefixe = tuple(filter_.get("dienste") or [])
     registry = {e["entity_id"]: e for e in ha_api.entity_registry() if isinstance(e, dict) and "entity_id" in e}
     states = {s["entity_id"]: s for s in ha_api.get_states() if isinstance(s, dict) and "entity_id" in s}
+    geraete_register = [d for d in ha_api.device_registry() if isinstance(d, dict)]
+    verankert = {d.get("id") for d in geraete_register if geraet_verankert(d)}
     treffer = []
     for entity_id in sorted(set(registry) | set(states)):
         entry = registry.get(entity_id, {})
@@ -111,6 +130,8 @@ def inventur(ha_api, filter_: dict) -> dict:
         attributes: dict = raw if isinstance(raw, dict) else {}
         plattform = entry.get("platform") or OHNE_REGISTRY
         klasse = _klasse(entry, attributes)
+        if plattform == PLATTFORM_BUS and entry.get("device_id") not in verankert:
+            continue  # am Broker haengt jedes Geraet: nur der verankerte Regler geht heraus
         if not (plattform in plattformen or domain in domaenen or (domain, klasse) in klassen):
             continue
         treffer.append((entity_id, entry, state, domain, attributes, plattform, klasse))
@@ -134,7 +155,7 @@ def inventur(ha_api, filter_: dict) -> dict:
                                            "modell": d.get("model"), "hersteller": d.get("manufacturer"),
                                            "config_entries": list(d.get("config_entries") or [])},
                        wire.INVENTUR_GERAET_FIELDS)
-               for d in ha_api.device_registry() if isinstance(d, dict) and d.get("id") in geraete_ids]
+               for d in geraete_register if d.get("id") in geraete_ids]
     if verworfen:
         logger.info("Inventur: %d Entities ausserhalb der Positivliste verworfen (%s)", sum(verworfen.values()),
                     lesbar(", ".join(f"{domain}={anzahl}" for domain, anzahl in sorted(verworfen.items()))))

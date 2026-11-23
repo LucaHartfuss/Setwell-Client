@@ -398,7 +398,7 @@ def _retry_with_budget(ha_api, attempt, describe, *, identify=None):
 def _wait_for_required_entities(ha_api, b: dokument.HaBindung) -> None:
     """Pflicht-Entities muessen existieren; `unavailable` ist kein Startfehler (das behandeln
     Datenfehler und Notbetrieb im Betrieb)."""
-    refs = [b.rollen[rolle] for rolle in dokument.PFLICHT_ROLLEN[b.hebelsatz]] + list(b.raumfuehler)
+    refs = [b.rollen[rolle] for rolle in dokument.pflicht_rollen(b)] + list(b.raumfuehler)
     entity_ids = sorted({ref.partition("::")[0] for ref in refs})
 
     def _check():
