@@ -5,6 +5,10 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät kann auf Anforderung des Betreibers sein Zertifikat wechseln (Befehl `zertifikat_erneuern`): neuer
+  Schlüssel, neues Zertifikat neben dem alten, Anmeldung am Broker damit; erst danach ersetzt es das alte Paar und meldet
+  den Fingerabdruck. Scheitert die Anmeldung oder startet das Gerät mitten im Wechsel neu, gilt das alte Paar weiter.
+
 - Der Übernahme-Code erscheint erst, wenn die Einrichtung ihn anfordert, und gilt eine Stunde; nach einem Neustart gibt
   es einen neuen Code.
 

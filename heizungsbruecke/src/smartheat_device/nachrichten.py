@@ -179,7 +179,9 @@ def register(*, werks_nachweis=None, **felder) -> dict:
     return body
 
 
-def zertifikat(csr: str) -> dict:
-    body = pruefen("zertifikat", {"csr": csr}, wire.CERTIFICATE_FIELDS)
+def zertifikat(csr: str, *, erneuerung: bool = False) -> dict:
+    """erneuerung: Wechsel auf Anforderung (Befehl zertifikat_erneuern); ohne das Feld gilt der Rettungsweg."""
+    body = pruefen("zertifikat", {"csr": csr, **({"erneuerung": True} if erneuerung else {})},
+                   wire.CERTIFICATE_FIELDS, wire.CERTIFICATE_OPTIONAL)
     _csr("zertifikat", csr)
     return body

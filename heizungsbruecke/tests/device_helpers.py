@@ -236,14 +236,16 @@ class ScriptedBootstrap:
         self.calls.append(("register", kwargs))
         return self._next("register")
 
-    def certificate(self):
-        self.calls.append(("certificate", None))
+    def certificate(self, *, erneuerung=False):
+        self.calls.append(("certificate", {"erneuerung": erneuerung}))
         return self._next("certificate")
 
     def _next(self, route):
         answer = self.script[route].pop(0)
         if isinstance(answer, Exception):
             raise answer
+        if callable(answer):  # eine Antwort, die vom zuletzt angefragten Geraet (neuer Schluessel) abhaengt
+            return answer(self.idents[-1])
         return answer
 
 

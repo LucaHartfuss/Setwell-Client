@@ -21,7 +21,7 @@ from smartheat_gateway import befehle
 from smartheat_gateway.drivers import registry
 
 # Befehle, die der Geraetekern selbst eintraegt (smartheat_device.device.Device), nicht das Gateway.
-GERAETEKERN_BEFEHLE = ("hinweis", "new_claim_code", "claim_state", "weg_pruefen")
+GERAETEKERN_BEFEHLE = ("hinweis", "new_claim_code", "claim_state", "weg_pruefen", "zertifikat_erneuern")
 
 
 @pytest.fixture

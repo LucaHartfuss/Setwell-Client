@@ -19,7 +19,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
@@ -68,6 +68,17 @@ _FAULT = ("notbetrieb", "datenfehler", "konfigurationsfehler", "zugang_abgelehnt
 #: wie eine startende Laufzeit, kein erfundener Betriebszustand.
 _LAUFZEIT_UNBEKANNT = {"status": "startet"}
 _T = TypeVar("_T")
+#: So lange darf die Anmeldung mit dem neuen Zertifikat dauern (Takt-Uhr); danach faellt das Geraet auf das alte Paar zurueck.
+WECHSEL_SEKUNDEN = 90
+
+
+@dataclass(frozen=True)
+class _Wechsel:
+    """Ein laufender Zertifikatswechsel: das neue Paar steckt im Link, die alten Dateien gelten bis zur Bestaetigung."""
+    identitaet: identity.Identity
+    link: Link
+    abdruck: str
+    frist: float
 
 
 def derive_zustand(*, gesperrt: bool, update_noetig: bool, server_seen: bool, server_down_seconds: float | None,
@@ -133,6 +144,9 @@ class Device:
         self._link_factory = link_factory
         self._inbox: queue.Queue = queue.Queue()
         self._stop = threading.Event()
+        # Ein beim Neustart liegengebliebener Wechsel zaehlt nicht: es gilt das alte Paar, der Befehl endet als intern.
+        bootstrap.erneuerung_verwerfen(self._dir)
+        self._wechsel: _Wechsel | None = None
         self.identity = identity.load_or_create(self._dir)
         self.boot_id = identity.new_boot_id()
         self.documents = DocumentStore(self._dir, host=host.host, software_version=host.version,
@@ -144,6 +158,7 @@ class Device:
         self.befehle.register("hinweis", self.hinweise.handler)
         self.befehle.register("new_claim_code", self._new_claim_code)
         self.befehle.register("claim_state", self._claim_state)
+        self.befehle.register("zertifikat_erneuern", self._zertifikat_erneuern)
         # Die Wegpruefung liest an der Anbindung der Anlage; bis ein Host sie kann, lehnt das Geraet sie ab.
         self.befehle.register("weg_pruefen", lambda _nutzlast: commands.Failed("nicht_unterstuetzt"))
         host.befehle_eintragen(self.befehle)
@@ -913,6 +928,66 @@ class Device:
         bootstrap.device_state_speichern(self._dir, state)
         bootstrap.konto_hinweis_speichern(self._dir, hinweis)  # fehlt er, loescht das einen alten (Konto ohne Maske)
         return commands.Done({})
+
+    def _zertifikat_erneuern(self, payload: dict) -> commands.Outcome:
+        """Befehl zertifikat_erneuern: neuer TLS-Schluessel und CSR, Zertifikat vom Server (erneuerung), das neue Paar
+        neben den alten Dateien, die MQTT-Anmeldung damit. Gelingt sie, ersetzt das Paar das alte und das Ergebnis traegt den
+        Abdruck des neuen Zertifikats; sonst werden die neuen Dateien geloescht und das alte Paar verbindet wieder. Nie
+        Schluessel oder PEM im Log."""
+        if self._wechsel is not None or self.link is None or not self._bereit:
+            return commands.Failed("intern")
+        neu = identity.mit_neuem_tls_schluessel(self.identity)
+        try:
+            antwort = self._client_for(neu).certificate(erneuerung=True)
+        except bootstrap.BootstrapError as error:
+            logger.warning("Zertifikatswechsel: kein neues Zertifikat (%s)", type(error).__name__)
+            return commands.Failed("intern")
+        pem = antwort.zugang.certificate_pem
+        if not identity.passt_zum_schluessel(neu, pem):
+            logger.warning("Zertifikatswechsel: das Zertifikat gehoert nicht zum neuen Schluessel")
+            return commands.Failed("intern")
+        abdruck = identity.fingerprint(pem)
+        bootstrap.erneuerung_ablegen(self._dir, neu, pem)
+        self.link.stop()  # dieselbe Client-ID: zwei Verbindungen wuerden sich gegenseitig trennen
+        self.link, self._bereit = None, False
+        link = self._link_factory(neu.device_id, antwort.zugang, identity.tls_key_pem(neu), self._ereignis)
+        try:
+            link.start()
+        except ValueError as error:  # TransportConfigError
+            logger.warning("Zertifikatswechsel: neues Paar nicht verwendbar (%s)", type(error).__name__)
+            bootstrap.erneuerung_verwerfen(self._dir)
+            return commands.Failed("intern")  # der Takt baut den Link mit dem alten Paar neu auf
+        self.link = link
+        frist = self._clock() + WECHSEL_SEKUNDEN
+        self._wechsel = _Wechsel(neu, link, abdruck, frist)
+        return commands.Waiting(self._wechsel_pruefen, frist + 5)
+
+    def _wechsel_pruefen(self) -> commands.Done | commands.Failed | None:
+        wechsel = self._wechsel
+        if wechsel is None:
+            return commands.Failed("intern")
+        link = self.link
+        if link is not None and link is wechsel.link and link.connected and self._bereit:
+            try:
+                bootstrap.erneuerung_uebernehmen(self._dir)
+            except OSError as error:
+                logger.error("Zertifikatswechsel: neues Paar nicht ersetzt (%s)", type(error).__name__)
+                return self._wechsel_abbrechen()
+            self.identity, self._wechsel = wechsel.identitaet, None
+            logger.info("Zertifikatswechsel: das neue Zertifikat gilt")
+            return commands.Done({"fingerprint": wechsel.abdruck})
+        if link is None or link is not wechsel.link or link.connect_failures > 0 or self._clock() > wechsel.frist:
+            logger.warning("Zertifikatswechsel: Anmeldung mit dem neuen Zertifikat gescheitert, das alte gilt weiter")
+            return self._wechsel_abbrechen()
+        return None
+
+    def _wechsel_abbrechen(self) -> commands.Failed:
+        wechsel, self._wechsel = self._wechsel, None
+        if wechsel is not None and self.link is wechsel.link:
+            wechsel.link.stop()
+            self.link, self._bereit = None, False  # der Takt baut den Link mit dem alten Paar neu auf
+        bootstrap.erneuerung_verwerfen(self._dir)
+        return commands.Failed("intern")
 
     def neuer_uebernahme_code(self) -> str:
         """Neuer Uebernahme-Code: erst beim Server melden (register mit neuem Code-Hash; der Server uebernimmt ihn nur

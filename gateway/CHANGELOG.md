@@ -2,6 +2,10 @@
 
 ## Unveroeffentlicht
 
+- Das Gateway kann auf Anforderung des Betreibers sein Geraetezertifikat wechseln (Befehl `zertifikat_erneuern`, wie
+  im Geraetekern): neues Paar neben dem alten, erst nach erfolgreicher Anmeldung ersetzt es das alte; sonst gilt das alte
+  Paar weiter, auch nach einem Neustart mitten im Wechsel.
+
 - Ein Systemupdate meldet seine Fehler mit eigenen Gruenden (`system_download`, `system_installation`, `system_fehlstart`,
   `system_ungesund`, `system_netzprobe`); das Update der Container behaelt seine bisherigen Gruende.
 

@@ -11,7 +11,7 @@ import logging
 import secrets
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from cryptography import x509
@@ -122,6 +122,17 @@ def csr_pem(ident: Identity) -> str:
 
 def tls_key_pem(ident: Identity) -> str:
     return _pem(ident.tls_key)
+
+
+def mit_neuem_tls_schluessel(ident: Identity) -> Identity:
+    """Dieselbe Identitaet mit frischem TLS-Schluessel, nur im Speicher: die Datei bleibt, bis der Wechsel bestaetigt ist."""
+    return replace(ident, tls_key=ec.generate_private_key(ec.SECP256R1()))
+
+
+def fingerprint(certificate_pem: str) -> str:
+    """SHA-256 des DER-Zertifikats, Kleinbuchstaben-Hex (dieselbe Rechnung wie der Server). ValueError bei unlesbarem PEM."""
+    cert = x509.load_pem_x509_certificate(certificate_pem.encode())
+    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
 
 
 def passt_zum_schluessel(ident: Identity, certificate_pem: str) -> bool:

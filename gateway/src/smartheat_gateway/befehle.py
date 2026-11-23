@@ -3,7 +3,7 @@
 Ausfuehrung, Gruende-Pruefung und Versand macht das Register. Gateway-Befehle: zigbee_permit_join, zigbee_devices,
 driver_login, inventory (stunden 0: Erkennung des Treibers, sonst Messreihe des Treibers aus der Konfiguration;
 Ergebnis jeweils als up/inventory), diagnostics und sign_off (Markierung, dann startet die Laufzeit als "abgemeldet"
-neu und setzt die Anlage zurueck). hinweis und new_claim_code kann jedes Geraet (Geraetekern). Fehler als Grund und
+neu und setzt die Anlage zurueck). hinweis, new_claim_code und zertifikat_erneuern kann jedes Geraet (Geraetekern). Fehler als Grund und
 details, nie Texte oder Geheimnisse; DriverError und QuotaExhausted uebersetzt
 fehler_uebersetzen in Vertragsgruende.
 

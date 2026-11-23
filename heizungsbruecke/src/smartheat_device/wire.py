@@ -42,6 +42,7 @@ REGISTER_FIELDS = (
 )
 REGISTER_OPTIONAL = ("werks_nachweis",)  # fehlt = kein Nachweis (Pruefung: eigene Spec vor der Freischaltung)
 CERTIFICATE_FIELDS = ("csr",)
+CERTIFICATE_OPTIONAL = ("erneuerung",)  # true = Erneuerung auf Anforderung (Befehl zertifikat_erneuern), fehlt = false
 CAPABILITY_FIELDS = ("drivers", "zigbee")
 CAPABILITY_OPTIONAL = ("updater", "programm", "testphase", "kaelteschutz")  # fehlt = false
 BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca", "anker_signatur",
@@ -265,6 +266,7 @@ COMMANDS: dict[str, Command] = {
                          "stunden*3600+3600", ("filter",)),
     "sign_off": Command((), ("zurueckgesetzt", "werte"), 24 * 3600, ("nicht_eingerichtet", "keine_bestaetigung")),
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
+    "zertifikat_erneuern": Command((), ("fingerprint",), 900),
     # konto_hinweis: Maske der Adresse des uebernehmenden Kontos (`a***@e***.com`), nur an Gateways; fehlt = kein Hinweis.
     "claim_state": Command(("device_state",), (), 24 * 3600, payload_optional=("konto_hinweis",)),
     "diagnostics": Command((), (), 300),
