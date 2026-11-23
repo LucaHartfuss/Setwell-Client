@@ -4,6 +4,7 @@ Uhr (monoton und Wand) steht unter Kontrolle des Tests. Ein gewollter Neustart (
 neuen Prozess auf denselben Dateien. Ersetzt werden nur Namen in runtime_main (Geraete-Host und Geraetekern mit
 eingespeisten Uhren und Link, die beiden Diagnose-Ports) und die Wanduhr; beobachtet wird nur, was nach aussen geht:
 Bus, Link, Dateien. Nichts aus den Hilfen der uebrigen Tests."""
+import base64
 import datetime
 import itertools
 import json
@@ -191,6 +192,16 @@ def _zugang_ablegen(device_dir) -> None:
     bootstrap.speichern(device_dir, bootstrap.Antwort("uebernommen", zugang))
 
 
+def _werk_ablegen(host_dir) -> None:
+    """Die Kopie von werk.json im Host-Ordner, wie der Bespieler sie ablegt: das Gateway sendet die Seriennummer daraus im
+    hello und baut ohne sie keins. Der Passworteintrag hat nur die Form (gerechnet wird in dieser Welt nichts)."""
+    passwort = {"verfahren": "scrypt", "n": 131072, "r": 8, "p": 1,
+                "salz": base64.b64encode(bytes(16)).decode(), "hash": base64.b64encode(bytes(32)).decode()}
+    werk = {"format": "smartheat-werk-1", "seriennummer": "AKZ-0001", "hostname": "akzeptanz", "passwort": passwort,
+            "bespielt": "2026-01-01", "hardware": "test"}
+    (host_dir / "werk.json").write_text(json.dumps(werk))
+
+
 class Welt(Handgriffe, Diagnose):
     """Eine Gateway-Anlage unter Test. `starten()` ist der Prozessstart; die Zeit laeuft nur ueber `runde`."""
 
@@ -198,6 +209,7 @@ class Welt(Handgriffe, Diagnose):
         self.paths = Paths(tmp_path / "data")
         self.host_dir = tmp_path / "host"
         self.host_dir.mkdir()
+        _werk_ablegen(self.host_dir)
         self._monkeypatch, self.diagnose_port = monkeypatch, None
         self._status_um: datetime.datetime | None = None  # Wanduhrzeit der zuletzt geschriebenen host/status.json
         self.uhr, self.bus = Uhr(), Bus()
