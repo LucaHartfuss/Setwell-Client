@@ -4,7 +4,7 @@ flachen Angaben, mit denen die Tests ihre Anlagen beschreiben (ein Kreis, ein Re
 from collections.abc import Mapping
 
 #: Anbindungswege (Kopie der Abbildung aus der Bindung; die Tests pruefen den Vertrag, nicht diese Tabelle)
-_WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
+_WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "mqtt": "vaillant_ebus", "vicare": "viessmann_vicare",
                       "weishaupt_modbus": "weishaupt_modbus"}
 _WEG_DES_TREIBERS = {"vicare_cloud": "viessmann_vicare", "simulation": "simulation"}
 KREIS_FELDER = ("hebelsatz", "verteilsystem", "bindung", "abo", "ursprungswerte")

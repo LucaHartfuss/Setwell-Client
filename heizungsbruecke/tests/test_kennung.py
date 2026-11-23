@@ -10,7 +10,7 @@ def test_ein_ha_kreis_wird_zur_kanonischen_kennung():
     assert kennung.aus_ha_kreis("mypyllant", "Zuhause", "0") == '{"anlage":"Zuhause","hersteller":"vaillant","nummer":0}'
 
 
-@pytest.mark.parametrize("plattform,hersteller", [("mypyllant", "vaillant"), ("vicare", "viessmann"),
+@pytest.mark.parametrize("plattform,hersteller", [("mypyllant", "vaillant"), ("mqtt", "vaillant"), ("vicare", "viessmann"),
                                                   ("weishaupt_modbus", "weishaupt")])
 def test_der_hersteller_kommt_aus_der_plattform(plattform, hersteller):
     assert json.loads(kennung.aus_ha_kreis(plattform, "A", "2"))["hersteller"] == hersteller
@@ -58,7 +58,7 @@ def test_ein_unbrauchbarer_treiber_scheitert_laut(treiber, parameter):
 
 def test_die_tabellen_des_geraets():
     """Der Contract-Check vergleicht sie mit dem Wegekatalog des Servers (gemeinsam/wege.py)."""
-    assert kennung.HERSTELLER_DER_PLATTFORM == {"mypyllant": "vaillant", "vicare": "viessmann",
+    assert kennung.HERSTELLER_DER_PLATTFORM == {"mypyllant": "vaillant", "mqtt": "vaillant", "vicare": "viessmann",
                                                 "weishaupt_modbus": "weishaupt"}
     assert kennung.TREIBER == {
         "vicare_cloud": ("viessmann", ("installation_id", "gateway_serial", "device_id")),

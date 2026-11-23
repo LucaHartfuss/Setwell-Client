@@ -146,8 +146,8 @@ KREISE_MAX = 4
 RAEUME_MAX, RAUM_FUEHLER_MAX = 8, 8  # Raeume je Kreis, Fuehler je Raum
 #: Anbindungswege, die ein Geraet heute ausfuehrt, und ihre Abbildung aus der Bindung (HA: Plattform der Integration,
 #: Gateway: Treiber-ID); `simulation` ist der Testweg (nur Labor). Ein anderer Weg ist `weg_unbekannt`.
-WEGE = ("vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus", "simulation")
-WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
+WEGE = ("vaillant_myvaillant", "vaillant_ebus", "viessmann_vicare", "weishaupt_modbus", "simulation")
+WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "mqtt": "vaillant_ebus", "vicare": "viessmann_vicare",
                      "weishaupt_modbus": "weishaupt_modbus"}
 WEG_DES_TREIBERS = {"vicare_cloud": "viessmann_vicare", "simulation": "simulation"}
 # Spec Stufe 3 S4b 4.1: Herstellerwissen der Bindung (G-7). Pflicht fuer eine eingerichtete Konfiguration, null in einer
@@ -163,7 +163,9 @@ BINDUNG_GATEWAY_FIELDS = ("treiber", "thermostat")
 BINDUNG_HA_FIELDS = ("kreis", "rollen", "batterien", "benachrichtigung", "hinweise_aus")
 BINDUNG_HA_OPTIONAL = ("abfrage_s", "einheiten")  # fehlt = Standardwert des Hebelsatzes bzw. keine Energiekanaele
 KREIS_FIELDS = ("plattform", "anlage", "nummer")
-KREIS_OPTIONAL = ("config_entry",)  # fehlt = Kreis ohne Config-Entry (dann kein Schreibziel, ha_pruefung)
+# config_entry: fehlt = Kreis ohne Config-Entry (dann kein Schreibziel, ha_pruefung); geraet: Registry-Geraet des Reglers,
+# Pflicht bei Plattform `mqtt` (der Bus meldet je Teilnehmer ein Geraet), bei jeder anderen Plattform verboten
+KREIS_OPTIONAL = ("config_entry", "geraet")
 HA_ROLLEN = (
     "room_target", "curve", "room_setpoint", "level", "heat_limit", "min_flow", "mode_select", "setpoint_comfort",
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",

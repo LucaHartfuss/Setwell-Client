@@ -32,7 +32,8 @@ def test_jeder_hebelsatz_hat_eine_zeile():
 
 
 def test_wege_der_tabelle_sind_die_wege_der_konfigurationspruefung():
-    assert {weg for weg, _ in VERFAHREN} == set(config_check.WEGE)
+    # Der Busweg ist bekannt, aber unbeschreibbar: seine Verfahrenszeilen kommen mit seinen Schreibregeln.
+    assert {weg for weg, _ in VERFAHREN} == set(config_check.WEGE) - {"vaillant_ebus"}
 
 
 def test_jede_schreibplattform_fuehrt_zu_einer_zeile_ihres_hebelsatzes():
