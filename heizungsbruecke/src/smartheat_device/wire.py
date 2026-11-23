@@ -58,7 +58,7 @@ SESSION_EXPIRY_SECONDS = 3600  # AN-9: Hoechstwert von IoT Core
 DEVICE_SUBSCRIPTION = "down/#"  # AN-6: die Policy erlaubt nur diesen Filter
 UP_TOPICS = (
     "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "up/entfernt",
-    "telemetry",
+    "up/zurueckgesetzt", "telemetry",
 )
 DOWN_TOPICS = ("down/config", "down/operation", "down/display", "down/command", "down/setpoints")
 
@@ -69,7 +69,9 @@ HELLO_FIELDS = (
 #: device_state: fehlt = Uebernahmestand des Geraets unbekannt, kein Abgleich. Nur Host ha: auto_update (Schalter des
 #: Supervisors fuer das Add-on; fehlt oder null = unbekannt) und integration_version (Version der HA-Integration; fehlt oder
 #: null nach 900 s ohne Ereignis der Integration = unbekannt). Ein Geraet sendet beide immer, der Server speichert Wert und Zeit.
-HELLO_OPTIONAL = ("device_state", "auto_update", "integration_version")
+#: seriennummer: Pflicht fuer Host gateway (Seriennummer aus dem Werk, Format `devices.seriennummer_gueltig`), fuer Host ha
+#: verboten; der Server prueft die Regel je Host.
+HELLO_OPTIONAL = ("device_state", "auto_update", "integration_version", "seriennummer")
 STATUS_FIELDS = ("schema", "zustand", "runtime_status", "kreise", "ts")
 STATUS_KREIS_FIELDS = ("kreis", "raum")  # ein Eintrag je Kreis der Konfiguration, Nummern aufsteigend und einmalig
 STATUS_OPTIONAL = ("ursprungswerte",)  # fehlt = keine neuen Ursprungswerte (G-4: Hebel -> Wert vor dem ersten Schreiben)
@@ -116,6 +118,11 @@ WISH_WERTE_PROGRAMM = ("uebersteuerung", "abwesend", "leerstand")
 #: bittet den Server, das Geraet aus dem Konto zu loesen; `behalten` laesst es dort (der Server fuehrt es weiter als abgemeldet).
 ENTFERNT_FIELDS = ("schema", "wahl", "ts")
 ENTFERNT_WAHLEN = ("behalten", "freigeben")
+#: Das Geraet meldet seinen lokalen Werksreset (erst, wenn die Daten geloescht werden). `signatur`: Base64 (URL-sicher, ohne
+#: Auffuellung) der ECDSA-Signatur des Geraeteschluessels ueber `canonical_string(methode, pfad, ts, <Geraete-ID>)` mit
+#: `ZURUECKGESETZT_SIGNATUR`; `ts` Sekunden seit der Epoche als Ziffernfolge. Sie gilt einmal und nur innerhalb der Uhrabweichung.
+ZURUECKGESETZT_FIELDS = ("schema", "ts", "signatur")
+ZURUECKGESETZT_SIGNATUR = ("MQTT", "up/zurueckgesetzt")
 HERKUNFT = ("thermostat", "soll_entity", "ha")
 DURCH = ("nutzer", "automation")
 
