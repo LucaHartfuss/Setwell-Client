@@ -1,7 +1,7 @@
 """Lokaler Verfahrensteil je Weg und Hebelsatz."""
 import pytest
 
-from heizungsbruecke import dokument, geraet_host
+from heizungsbruecke import dokument
 from smartheat_core import config_check
 from smartheat_core.levers import LEVER_SETS
 from smartheat_core.safety import LOCAL_SAFETY
@@ -36,8 +36,8 @@ def test_wege_der_tabelle_sind_die_wege_der_konfigurationspruefung():
 
 
 def test_jede_schreibplattform_fuehrt_zu_einer_zeile_ihres_hebelsatzes():
-    for hebelsatz, plattform in dokument.SCHREIB_PLATTFORM.items():
-        assert (geraet_host.WEG_JE_PLATTFORM[plattform], hebelsatz) in VERFAHREN
+    for weg, hebelsatz in dokument.SCHREIB_PLATTFORM:
+        assert (weg, hebelsatz) in VERFAHREN
 
 
 def test_auswahl_nach_weg_und_hebelsatz():

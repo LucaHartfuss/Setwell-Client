@@ -63,11 +63,11 @@ def test_capabilities_and_clock(tmp_path, monkeypatch):
 
 
 def test_the_ha_host_reports_the_ways_of_its_write_platforms(tmp_path, monkeypatch):
-    """Jede Schreib-Plattform hat einen Weg; die Liste ist sortiert und ohne Doppelte (zwei Hebelsaetze teilen sich eine
-    Plattform)."""
+    """Die Wege des Hosts sind die der Tabelle der Schreibplattformen; die Liste ist sortiert und ohne Doppelte (zwei
+    Hebelsaetze teilen sich einen Weg)."""
     from heizungsbruecke import dokument
     host, _, _ = _host(tmp_path, monkeypatch)
-    assert set(dokument.SCHREIB_PLATTFORM.values()) <= set(geraet_host.WEG_JE_PLATTFORM)
+    assert {weg for weg, _ in dokument.SCHREIB_PLATTFORM} == set(host.wege())
     assert host.wege() == ["vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
     assert nachrichten.hello(konfiguration_version=1, bedienung_version=1, anzeige_version=0, software_version="1.0.0",
                              host="ha", faehigkeiten=host.faehigkeiten(), wege=host.wege(), boot_id="b" * 16,

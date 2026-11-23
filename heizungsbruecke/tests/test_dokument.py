@@ -380,11 +380,26 @@ def test_kreis_mit_fremder_plattform_wird_abgelehnt():
 
 
 def test_jeder_hebelsatz_hat_eine_schreibplattform():
-    """Die Tabelle als Literal (Regel 4, E5): je Hebelsatz genau die Plattform seiner Integration."""
+    """Die Tabelle als Literal (Regel 4, E5): je Weg und Hebelsatz genau die Plattform seiner Integration."""
     assert dokument.SCHREIB_PLATTFORM == {
-        "vaillant_vrc720": "mypyllant", "weishaupt_wwp": "weishaupt_modbus", "weishaupt_wwp_basis": "weishaupt_modbus",
-        "viessmann_vicare": "vicare"}
-    assert set(dokument.SCHREIB_PLATTFORM) == set(dokument.PFLICHT_ROLLEN)
+        ("vaillant_myvaillant", "vaillant_vrc720"): "mypyllant",
+        ("weishaupt_modbus", "weishaupt_wwp"): "weishaupt_modbus",
+        ("weishaupt_modbus", "weishaupt_wwp_basis"): "weishaupt_modbus",
+        ("viessmann_vicare", "viessmann_vicare"): "vicare"}
+    assert {hebelsatz for _, hebelsatz in dokument.SCHREIB_PLATTFORM} == set(dokument.PFLICHT_ROLLEN)
+
+
+@pytest.mark.parametrize("weg", ["vaillant_ebus", "weishaupt_modbus", "unbekannt", "", None])
+def test_ein_weg_ohne_schreibregeln_dieses_hebelsatzes_laesst_nichts_schreiben(weg):
+    """Die Plattform der Schreibziele gilt je Weg und Hebelsatz. Ein Weg, der fuer den Hebelsatz keine Zeile hat (ein
+    Weg ohne Schreibregeln, ein fremder Weg, ein fehlendes Feld), laesst keine Schreibziele zu, auch wenn der Kreis die
+    Plattform nennt, die zu einem anderen Weg gehoert (fail closed, beim Uebernehmen wie beim Start)."""
+    dokument_ohne_regeln = {**_neu(KONFIGURATION), "weg": weg}
+    ha = _ha()
+    assert _zuordnung(dokument_ohne_regeln, ha) == {"feld": "plattform", "regel": "nicht_erlaubt"}
+    assert _rollen(dokument_ohne_regeln, ha) == ("plattform", "nicht_erlaubt")
+    assert _start_rollen(dokument_ohne_regeln, ha) == ("plattform", "nicht_erlaubt")
+    assert _rollen(KONFIGURATION, ha) is None   # Gegenprobe: der Weg des Kreises schreibt
 
 
 def test_ein_schreibziel_ohne_registry_eintrag_wird_uebernommen_abgelehnt_und_ist_beim_start_nicht_pruefbar():
@@ -655,7 +670,7 @@ def test_eine_kennzahl_ohne_klasse_braucht_die_plattform_des_hebelsatzes():
 
 def _mit_kreis_plattform(konfiguration, plattform):
     kreis = {**konfiguration["bindung"]["kreis"], "plattform": plattform}
-    return {**konfiguration, "bindung": {**konfiguration["bindung"], "kreis": kreis}}
+    return {**konfiguration, "weg": "vaillant_myvaillant", "bindung": {**konfiguration["bindung"], "kreis": kreis}}
 
 
 def test_sensor_ohne_klasse_nur_von_der_plattform_des_hebelsatzes():
@@ -1026,5 +1041,6 @@ def test_die_plattform_des_kreises_zaehlt_nur_als_echter_registry_wert():
     _dazu(ha, "sensor.frei", None, wert=1.0)
     konfiguration = _mit_rolle("operating_mode", "sensor.frei")
     kreis = {**konfiguration["bindung"]["kreis"], "plattform": "ohne_registry"}
-    konfiguration = {**konfiguration, "bindung": {**konfiguration["bindung"], "kreis": kreis}}
+    konfiguration = {**konfiguration, "weg": "vaillant_myvaillant",
+                     "bindung": {**konfiguration["bindung"], "kreis": kreis}}
     assert dokument.rollen_pruefen(_bindung(konfiguration), ha) == ("operating_mode", "nicht_erlaubt")
