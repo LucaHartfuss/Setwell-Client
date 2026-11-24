@@ -445,10 +445,9 @@ def test_ein_schreibziel_ohne_registry_eintrag_wird_wiederholt_und_endet_als_sta
 
 
 def test_ein_schreibziel_ohne_registry_geraet_wird_wiederholt_und_endet_als_startfehler_ohne_namen(
-        env, angelegt, sleeps, monkeypatch):
+        env, angelegt, sleeps):
     """Busweg: das Registry-Geraet der Schreibziele fehlt in der Geraete-Registry (kein Urteil moeglich): Wiederholung,
     dann Startfehler rollen_nicht_pruefbar; Text und Grund nennen weder Geraet noch Hersteller noch Modell."""
-    monkeypatch.setitem(dokument.SCHREIB_PLATTFORM, ("vaillant_ebus", "vaillant_vrc720"), "mqtt")
     konfiguration = konfiguration_aus_optionen(OPTIONS)
     bindung = konfiguration["kreise"][0]["bindung"]
     bindung["kreis"] = {"plattform": "mqtt", "config_entry": "e-mqtt", "anlage": "S", "nummer": "0",

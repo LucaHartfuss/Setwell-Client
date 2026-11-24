@@ -315,21 +315,25 @@ def _form_domaene(feld: str, ref: str) -> bool:
     return any(domain == erlaubt for erlaubt, _ in ROLLEN_FORM.get(feld, ()))
 
 
-def _form_erlaubt(feld: str, ref: str, registry_entry: Mapping, state: Mapping, schreib_plattform: str) -> bool:
+def _form_erlaubt(feld: str, ref: str, registry_entry: Mapping, state: Mapping, schreib_plattform: str,
+                  anker: object = None) -> bool:
     """Mit Zustand: Domaene, Geraeteklasse und bei freier Klasse ohne Klasse die Plattform der Schreibziele von Weg und
-    Hebelsatz (SCHREIB_PLATTFORM, nicht kreis.plattform des Servers)."""
+    Hebelsatz (SCHREIB_PLATTFORM, nicht kreis.plattform des Servers). Beim Busweg (Plattform mqtt) haengt am Broker jedes
+    Geraet: dort zaehlt die Plattform nur fuer Entities des verankerten Geraets des Kreises (`anker`, kreis.geraet)."""
     if not _form_domaene(feld, ref):
         return False
     domain = _entity(ref).partition(".")[0]
     klasse = entity_klasse(registry_entry, state)
     plattform = registry_entry.get("platform")
+    am_anker = schreib_plattform != PLATTFORM_BUS or (
+        isinstance(anker, str) and bool(anker) and registry_entry.get("device_id") == anker)
     for erlaubt, verlangt in ROLLEN_FORM[feld]:
         if erlaubt != domain:
             continue
         if verlangt is None or klasse == verlangt:
             return True
         if verlangt == FREIE_KLASSE and (
-            klasse is not None or (plattform is not None and plattform == schreib_plattform)
+            klasse is not None or (plattform is not None and plattform == schreib_plattform and am_anker)
         ):
             return True
     return False
@@ -439,7 +443,7 @@ def rollen_befund(b: HaBindung, ha_api, *, beim_start: bool) -> tuple[tuple[str,
             continue
         eintrag = registry.get(entity_id) or {}
         if not entity_erlaubt(entity_id, eintrag, state, einstellbar) or not (
-                schreibziel or _form_erlaubt(feld, ref, eintrag, state, schreib)):
+                schreibziel or _form_erlaubt(feld, ref, eintrag, state, schreib, b.kreis.get("geraet"))):
             return (feld, "nicht_erlaubt"), ohne_zustand
     return schreibziele_befund(b, registry, beim_start=beim_start,
                                geraete=geraete if schreib == PLATTFORM_BUS else None), ohne_zustand  # nur der Busweg

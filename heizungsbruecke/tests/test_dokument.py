@@ -658,7 +658,7 @@ def test_der_busweg_ist_mit_der_tabellenzeile_nur_am_verankerten_geraet_beschrei
     assert dokument.SCHREIB_PLATTFORM[_BUS] == "mqtt"
     assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (None, None)
     assert _zuordnung(_bus_konfiguration(), _bus_ha()) is None
-    assert _bus_urteile(_bus_konfiguration(), _bus_ha("Wolf", "VRC 720"))[0] is not None
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha("Wolf", "VRC 720")) == (("curve", "nicht_erlaubt"),) * 2
     fremd = _bus_konfiguration()
     fremd["kreise"][0]["bindung"]["kreis"]["plattform"] = "mypyllant"
     assert _bus_urteile(fremd, _bus_ha())[0] == ("plattform", "nicht_erlaubt")
@@ -686,13 +686,11 @@ def test_eine_entity_ohne_registry_geraet_wird_nie_schreibziel(bus_offen, geraet
 
 
 def test_das_dokument_nennt_ein_anderes_geraet_als_die_entities(bus_offen):
-    assert _bus_urteile(_bus_konfiguration(geraet="dev-anders"), _bus_ha())[0] is not None
-    assert _bus_urteile(_bus_konfiguration(geraet="dev-anders"), _bus_ha())[1] is not None
+    assert _bus_urteile(_bus_konfiguration(geraet="dev-anders"), _bus_ha()) == (("curve", "nicht_erlaubt"),) * 2
 
 
 def test_ein_busdokument_ohne_geraet_laesst_nichts_schreiben(bus_offen):
-    urteile = _bus_urteile(_bus_konfiguration(ohne_geraet=True), _bus_ha())
-    assert urteile[0] is not None and urteile[1] is not None
+    assert _bus_urteile(_bus_konfiguration(ohne_geraet=True), _bus_ha()) == (("plattform", "nicht_erlaubt"),) * 2
 
 
 @pytest.mark.parametrize("geraet", ["", 7, None])
@@ -719,10 +717,45 @@ def test_ein_cloud_dokument_hat_keine_ueberzaehlige_schreibrolle(bus_offen):
 @pytest.mark.parametrize("hersteller, modell", [
     ("Wolf", "VRC 720"), ("Vaillant", "Fremdmodell"), (None, "VRC 720"), ("Vaillant", None), ("", ""), (5, 7)])
 def test_ein_geraet_mit_anderem_hersteller_oder_modell_wird_nie_schreibziel(bus_offen, hersteller, modell):
-    """Auch nach einem Neustart (beim Start) gesperrt: Hersteller und Modell des Registry-Geraets gehoeren zur Rastung."""
-    assert _bus_urteile(_bus_konfiguration(), _bus_ha(hersteller, modell))[0] is not None
-    assert _bus_urteile(_bus_konfiguration(), _bus_ha(hersteller, modell))[1] == _bus_urteile(
-        _bus_konfiguration(), _bus_ha(hersteller, modell))[0]
+    """Auch nach einem Neustart (beim Start) gesperrt: Die Rastung fuehrt nur die Geraete-Id des Kreises; Hersteller und
+    Modell des Registry-Geraets werden gegen Konstanten des Codes geprueft (inventur.geraet_verankert)."""
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha(hersteller, modell)) == (("curve", "nicht_erlaubt"),) * 2
+
+
+def _bus_mit_fremdem_sensor(entity_id, klasse=None):
+    """Der Bus aus _bus_ha, dazu ein Sensor eines fremden MQTT-Geraets (z. B. ESPresense oder Zigbee2MQTT) am selben
+    Broker (gleiche Plattform und Config-Entry), optional mit Geraeteklasse im Zustand."""
+    ha = _bus_ha()
+    ha.registry.append({"entity_id": entity_id, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-fremd"})
+    ha.devices.append({"id": "dev-fremd", "manufacturer": "Espresense", "model": "Node"})
+    ha.states[entity_id] = 1.0
+    if klasse is not None:
+        ha.states[f"{entity_id}::device_class"] = klasse
+    return ha
+
+
+@pytest.mark.parametrize("rolle", ["operating_mode", "generator_state", "efficiency_ratio"])
+def test_eine_freie_leserolle_am_fremden_mqtt_geraet_ist_nicht_erlaubt(bus_offen, rolle):
+    """Die Plattform mqtt gilt ueber das verankerte Geraet als einstellbar; ein klassenloser Sensor eines fremden
+    Geraets am Broker darf trotzdem keine Kennzahl des Reglers vortaeuschen (beim Uebernehmen wie beim Start)."""
+    ha = _bus_mit_fremdem_sensor("sensor.espresense_raum")
+    assert _bus_urteile(_bus_konfiguration(**{rolle: "sensor.espresense_raum"}), ha) == ((rolle, "nicht_erlaubt"),) * 2
+
+
+def test_eine_freie_leserolle_am_verankerten_geraet_ist_erlaubt(bus_offen):
+    ha = _bus_ha()
+    ha.registry.append({"entity_id": "sensor.ebusd_status", "platform": "mqtt", "config_entry_id": "e-mqtt",
+                        "device_id": "dev-ebus"})
+    ha.states["sensor.ebusd_status"] = "ok"
+    assert _bus_urteile(_bus_konfiguration(operating_mode="sensor.ebusd_status"), ha) == (None, None)
+
+
+@pytest.mark.parametrize("rolle", ["outdoor_temp", "operating_mode"])
+def test_ein_klassen_treffer_eines_fremden_mqtt_geraets_bleibt_wie_bisher_erlaubt(bus_offen, rolle):
+    """Haelt das heutige Verhalten fest: eine Geraeteklasse (hier temperature) genuegt der Form, das Geraet zaehlt dann
+    nicht."""
+    ha = _bus_mit_fremdem_sensor("sensor.zigbee_aussen", klasse="temperature")
+    assert _bus_urteile(_bus_konfiguration(**{rolle: "sensor.zigbee_aussen"}), ha) == (None, None)
 
 
 def test_hersteller_und_modell_vergleichen_ohne_gross_und_kleinschreibung(bus_offen):

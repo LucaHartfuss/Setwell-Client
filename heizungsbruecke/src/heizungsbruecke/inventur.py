@@ -132,8 +132,9 @@ def inventur(ha_api, filter_: dict) -> dict:
         attributes: dict = raw if isinstance(raw, dict) else {}
         plattform = entry.get("platform") or OHNE_REGISTRY
         klasse = _klasse(entry, attributes)
-        if plattform == PLATTFORM_BUS and entry.get("device_id") not in verankert:
-            continue  # am Broker haengt jedes Geraet: nur der verankerte Regler geht heraus
+        if (plattform == PLATTFORM_BUS and entry.get("device_id") not in verankert
+                and (domain in ("number", "select") or (domain != "climate" and klasse is None))):
+            continue  # am Broker haengt jedes Geraet: number, select und Klassenlose gibt nur der verankerte Regler her
         if not (plattform in plattformen or domain in domaenen or (domain, klasse) in klassen):
             continue
         treffer.append((entity_id, entry, state, domain, attributes, plattform, klasse))

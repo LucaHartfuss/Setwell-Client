@@ -457,6 +457,23 @@ def test_der_busweg_meldet_nur_entities_verankerter_geraete():
     assert {g["id"] for g in daten["geraete"]} == {"d-regler"}
 
 
+def test_der_busweg_bietet_fremde_sensoren_mit_klasse_und_climate_an_aber_kein_number_und_keine_klassenlosen():
+    """Zigbee2MQTT-Raum- und Batteriesensoren haengen am selben Broker: mit Geraeteklasse (Treffer) und climate bleiben
+    sie waehlbar, ein fremdes number oder select und ein klassenloser Sensor nicht."""
+    ha = _bus_ha()
+    ha.registry += [
+        {"entity_id": "sensor.z2m_raum", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "sensor.z2m_batterie", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "climate.z2m_trv", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "select.fremd_modus", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"}]
+    ha.states.update({"sensor.z2m_raum": 20.5, "sensor.z2m_raum::device_class": "temperature",
+                      "sensor.z2m_batterie": 80, "sensor.z2m_batterie::device_class": "battery",
+                      "climate.z2m_trv": "heat", "select.fremd_modus": "auto"})
+    angeboten = {e["entity_id"] for e in inventur.inventur(ha, _BUS_FILTER)["entities"]}
+    assert angeboten == {"number.regler_kurve", "sensor.regler_status", "sensor.z2m_raum", "sensor.z2m_batterie",
+                         "climate.z2m_trv"}
+
+
 def test_ein_fremdes_busgeraet_macht_die_plattform_nicht_einstellbar():
     """Der Sensor des Reglers (ohne Geraeteklasse) bleibt nur ueber die einstellbare Entity desselben verankerten
     Geraets; die number-Entity eines Fremdgeraets schaltet nichts frei."""

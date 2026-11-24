@@ -54,6 +54,16 @@ def test_ein_mqtt_dokument_hat_die_schreibplattform_aber_ohne_geraet_kein_schrei
     b = dokument.bindung(neu)
     assert dokument.schreib_plattform(b) == "mqtt"
     assert dokument.schreibziele_befund(b, {}, beim_start=False, geraete={}) is not None
+    # Gegenprobe: mit dem verankerten Geraet und den Entities daran ergibt sich ein Schreibziel
+    ziele = {"curve": "number.ebusd_720_hc1heatcurve", "room_setpoint": "number.ebusd_720_z1manualtemp"}
+    verankert = ha_konfiguration(bindung={
+        "kreis": {"plattform": "mqtt", "anlage": "S", "nummer": "0", "geraet": "g1"},
+        "rollen": {"room_target": "climate.wohnzimmer_thermostat::temperature", **ziele}})
+    registry = {ref: {"entity_id": ref, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "g1"}
+                for ref in ziele.values()}
+    geraete = {"g1": {"id": "g1", "manufacturer": "Vaillant", "model": "VRC 720"}}
+    assert dokument.schreibziele_befund(dokument.bindung(verankert), registry, beim_start=False,
+                                        geraete=geraete) is None
 
 
 def test_jede_schreibplattform_fuehrt_zu_einer_zeile_ihres_hebelsatzes():
