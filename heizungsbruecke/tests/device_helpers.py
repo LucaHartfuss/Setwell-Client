@@ -250,7 +250,7 @@ class ScriptedBootstrap:
 
 
 class World:
-    def __init__(self, tmp_path, host=None, *, access=True) -> None:
+    def __init__(self, tmp_path, host=None, *, access=True, echt=lambda: WALL) -> None:
         self.dir = tmp_path / device.DEVICE_DIR
         self.host = host or FakeHost()
         self.ca = GeraeteCa()
@@ -267,7 +267,7 @@ class World:
             return self.client
 
         self.device = device.Device(self.host, tmp_path, "https://accounts.example.test", clock=self.clock,
-                                    wall=lambda: WALL, bootstrap_client=client_for, link_factory=self._link)
+                                    wall=lambda: WALL, echt=echt, bootstrap_client=client_for, link_factory=self._link)
 
     def neuer_zugang(self, ident=None):
         ident = ident or self.device.identity

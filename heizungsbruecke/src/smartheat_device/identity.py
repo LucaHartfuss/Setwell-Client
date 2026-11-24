@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from smartheat_core import dateien
-from smartheat_device import nachrichten, wire
+from smartheat_device import documents, nachrichten, wire, wish
 
 KEY_FILE = "key.pem"
 TLS_KEY_FILE = "tls_key.pem"
@@ -99,7 +99,8 @@ def load_or_create(device_dir: Path, randbytes: Callable[[int], bytes] = secrets
 
 def verwerfen(device_dir: Path) -> None:
     """Die Identitaet verwerfen (der Server hat das Geraet freigegeben): erst der Marker, dann Schluessel, Zertifikat,
-    Endpunkt und Status. Die Rastung des Sicherheitssatzes und die Sicherung bleiben unberuehrt. Ein Fehler oder Absturz
+    Endpunkt und Status sowie die empfangenen Dokumente und der Wunsch-Puffer (der Server kennt ein neues Geraet, kein
+    alter Stand darf es als eingerichtet oder eine Dokumentversion als Duplikat gelten lassen). Die Rastung des Sicherheitssatzes und die Sicherung bleiben unberuehrt. Ein Fehler oder Absturz
     nach dem Marker laesst ihn liegen, fortsetzen() beendet das Loeschen beim naechsten Start."""
     dateien.schreiben_json(device_dir / MARKER_FILE, {}, modus=dateien.PRIVAT)
     fortsetzen(device_dir)
@@ -110,8 +111,10 @@ def fortsetzen(device_dir: Path) -> bool:
     marker = device_dir / MARKER_FILE
     if not marker.exists():
         return False
-    for name in _VERWORFEN:
+    for name in (*_VERWORFEN, *documents.DATEIEN.values(), documents.ZUSTAND_DATEI):
         (device_dir / name).unlink(missing_ok=True)
+    for wunsch in device_dir.glob(wish.WUNSCH_MUSTER):
+        wunsch.unlink(missing_ok=True)
     marker.unlink()
     logger.info("Identitaet verworfen: das Geraet registriert sich neu")
     return True
