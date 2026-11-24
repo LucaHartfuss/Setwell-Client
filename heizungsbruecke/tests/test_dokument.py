@@ -636,10 +636,32 @@ def _bus_ha(hersteller="Vaillant", modell="VRC 720"):
 
 
 @pytest.fixture
-def bus_offen():
-    """Die Zeile der Schreibplattform des Buswegs steht in der Tabelle; die Tests darunter pruefen die Verankerung am
-    Registry-Geraet."""
+def bus_offen(monkeypatch):
+    """Die Zeile der Schreibplattform des Buswegs steht in der Tabelle und ist nicht gesperrt (die Sperre ist leer);
+    die Tests darunter pruefen die Verankerung am Registry-Geraet."""
     assert dokument.SCHREIB_PLATTFORM[_BUS] == "mqtt"
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
+
+
+def test_die_gesperrten_schreibzeilen_sind_genau_der_busweg():
+    """Regel 4: der Busweg ist am Geraet gesperrt, bis er am echten Geraet freigegeben ist (zweite Linie neben dem Tor
+    des Servers); die Sperre nennt nur Zeilen der Tabelle. Das Oeffnen ist das Streichen dieser einen Zeile."""
+    assert frozenset({("vaillant_ebus", "vaillant_vrc720")}) == dokument.GESPERRTE_SCHREIBZEILEN
+    assert set(dokument.SCHREIB_PLATTFORM) >= dokument.GESPERRTE_SCHREIBZEILEN
+
+
+def test_ein_gueltiges_busdokument_wird_mit_der_standard_sperre_abgelehnt(monkeypatch):
+    """Ein verankertes Busdokument mit allen Schreibzielen der Positivliste lehnt das Geraet beim Uebernehmen wie beim
+    Start mit plattform/nicht_erlaubt ab, solange die Zeile gesperrt ist; ohne Sperre wird es angenommen."""
+    assert dokument.GESPERRTE_SCHREIBZEILEN
+    konfiguration, ha = _bus_konfiguration(), _bus_ha()
+    assert _bus_urteile(konfiguration, ha) == (("plattform", "nicht_erlaubt"),) * 2
+    assert dokument.schreib_plattform(_bindung(konfiguration)) is None
+    assert _zuordnung(konfiguration, ha) == {"feld": "plattform", "regel": "nicht_erlaubt"}
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
+    assert _bus_urteile(konfiguration, ha) == (None, None)
+    assert dokument.schreib_plattform(_bindung(konfiguration)) == "mqtt"
+    assert _zuordnung(konfiguration, ha) is None
 
 
 def _bus_urteile(konfiguration, ha):
@@ -652,8 +674,9 @@ def _bus_urteile(konfiguration, ha):
     return uebernehmen, start
 
 
-def test_der_busweg_ist_mit_der_tabellenzeile_nur_am_verankerten_geraet_beschreibbar():
-    """Die Zeile gibt den Weg frei (beim Uebernehmen wie beim Start, auch das Dokument-Gate); ein anderer Hersteller am
+def test_der_busweg_ist_mit_der_tabellenzeile_nur_am_verankerten_geraet_beschreibbar(bus_offen):
+    """Die Zeile gibt den Weg frei, sobald sie nicht gesperrt ist (beim Uebernehmen wie beim Start, auch das
+    Dokument-Gate); ein anderer Hersteller am
     selben Registry-Geraet oder ein Kreis mit fremder Plattform bleibt abgelehnt."""
     assert dokument.SCHREIB_PLATTFORM[_BUS] == "mqtt"
     assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (None, None)

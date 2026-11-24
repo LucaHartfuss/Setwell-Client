@@ -138,8 +138,10 @@ class HaDeviceHost(GeraetHostBasis):
         return schreibbar
 
     def wege(self) -> list[str]:
-        """Wege des Katalogs, fuer die dieser Host Schreibziele zulaesst (Wege der Tabelle SCHREIB_PLATTFORM)."""
-        return sorted({weg for weg, _ in dokument.SCHREIB_PLATTFORM})
+        """Wege des Katalogs, fuer die dieser Host Schreibziele zulaesst (Wege der Tabelle SCHREIB_PLATTFORM ohne die
+        gesperrten Zeilen, GESPERRTE_SCHREIBZEILEN)."""
+        return sorted({weg for weg, hebelsatz in dokument.SCHREIB_PLATTFORM
+                       if (weg, hebelsatz) not in dokument.GESPERRTE_SCHREIBZEILEN})
 
     def uhr_synchron(self) -> bool | None:
         """dt_synchronized aus GET /host/info; kein bool oder Fehler = unbekannt (gilt als nicht synchron). Der Aufruf

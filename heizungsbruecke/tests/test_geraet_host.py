@@ -63,11 +63,13 @@ def test_capabilities_and_clock(tmp_path, monkeypatch):
 
 
 def test_the_ha_host_reports_the_ways_of_its_write_platforms(tmp_path, monkeypatch):
-    """Die Wege des Hosts sind die der Tabelle der Schreibplattformen; die Liste ist sortiert und ohne Doppelte (zwei
-    Hebelsaetze teilen sich einen Weg)."""
+    """Die Wege des Hosts sind die der Tabelle der Schreibplattformen ohne die gesperrten Zeilen; die Liste ist sortiert
+    und ohne Doppelte (zwei Hebelsaetze teilen sich einen Weg). Der gesperrte Busweg fehlt, mit leerer Sperre steht er da."""
     from heizungsbruecke import dokument
     host, _, _ = _host(tmp_path, monkeypatch)
-    assert {weg for weg, _ in dokument.SCHREIB_PLATTFORM} == set(host.wege())
+    assert {weg for weg, _ in dokument.SCHREIB_PLATTFORM} - {"vaillant_ebus"} == set(host.wege())
+    assert host.wege() == ["vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
     assert host.wege() == ["vaillant_ebus", "vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
     assert nachrichten.hello(konfiguration_version=1, bedienung_version=1, anzeige_version=0, software_version="1.0.0",
                              host="ha", faehigkeiten=host.faehigkeiten(), wege=host.wege(), boot_id="b" * 16,

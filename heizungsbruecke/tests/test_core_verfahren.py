@@ -41,9 +41,10 @@ def test_der_busweg_traegt_den_vaillant_hebelsatz_mit_der_zeile_des_cloud_wegs()
         assert verfahren_fuer("vaillant_ebus", hebelsatz) is None
 
 
-def test_ein_mqtt_dokument_hat_die_schreibplattform_aber_ohne_geraet_kein_schreibziel():
-    """Der Busweg hat die Zeile in SCHREIB_PLATTFORM; ohne die Entities am verankerten Registry-Geraet gibt es dennoch
-    kein Schreibziel (die Verankerung steht in den Schreibregeln des Buswegs)."""
+def test_ein_mqtt_dokument_hat_die_schreibplattform_aber_ohne_geraet_kein_schreibziel(monkeypatch):
+    """Der Busweg hat die Zeile in SCHREIB_PLATTFORM (hier ohne die lokale Sperre); ohne die Entities am verankerten
+    Registry-Geraet gibt es dennoch kein Schreibziel (die Verankerung steht in den Schreibregeln des Buswegs)."""
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
     from geraet_helpers import ha_konfiguration
     from rastung_beispiele import fuer
 

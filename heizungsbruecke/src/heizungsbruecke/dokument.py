@@ -5,7 +5,8 @@ lokalen Pruefung (config_check ruft ihn ueber DeviceHost.treiber_pruefen): Pflic
 Schreibbarkeit je Hebelsatz, Entities vorhanden, jede gebundene Entity (Soll-Entity, Rollen, Raumfuehler, Batterien)
 besteht die lokale Positivliste der Inventur (rollen_pruefen), dann die Schreibziele (schreibziele_befund).
 Schreibziele (jeder Hebel der Bindung, nicht nur die Schreibregeln des Hebelsatzes) kommen nur von der lokal je
-Weg und Hebelsatz festgelegten Plattform (SCHREIB_PLATTFORM) und alle aus einem Config-Entry (dem des Kreises, wenn er
+Weg und Hebelsatz festgelegten Plattform (SCHREIB_PLATTFORM; gesperrte Zeilen, GESPERRTE_SCHREIBZEILEN, hat das Geraet
+nicht: der Busweg ist bis zur Freigabe am echten Geraet gesperrt) und alle aus einem Config-Entry (dem des Kreises, wenn er
 eines nennt); die Soll-Entity ist kein Schreibziel und nicht an dessen Geraet. Dieselben Regeln gelten beim Start
 fuer die uebernommene Konfiguration (rollen_befund mit beim_start=True). Ob outdoor_temp und die
 Kennzahl-Rollen fachlich passen, prueft der Server (ha_pruefung).
@@ -62,6 +63,13 @@ SCHREIB_PLATTFORM: dict[tuple[str, str], str] = {
     ("viessmann_vicare", "viessmann_vicare"): "vicare",
     ("vaillant_ebus", "vaillant_vrc720"): "mqtt",  # Bus: Schreibziele nur am verankerten Registry-Geraet (SCHREIBREGELN_BUS)
 }
+#: Zeilen von SCHREIB_PLATTFORM, die das Geraet nicht zulaesst (Regel 4, Nutzer-Entscheidung 2026-11-24): der Busweg ist
+#: am echten Geraet noch nicht freigegeben, das Tor des Servers allein genuegt nicht (zweite Linie am Geraet). Eine
+#: gesperrte Zeile hat keine Schreibplattform: das Dokument wird beim Uebernehmen wie beim Start mit
+#: plattform/nicht_erlaubt abgelehnt; Lesen und Inventur der Entities bleiben unberuehrt, die Logik des Wegs
+#: (Positivliste, Verankerung) bleibt im Code und getestet. Oeffnen = die Zeile hier streichen, nur mit Freigabe des
+#: Nutzers fuer Regel 4.
+GESPERRTE_SCHREIBZEILEN: frozenset[tuple[str, str]] = frozenset({("vaillant_ebus", "vaillant_vrc720")})
 
 
 #: Die Verankerung der Schreibziele des Buswegs ist das Registry-Geraet (kreis.geraet), nicht die Plattform mqtt
@@ -101,8 +109,11 @@ def schreibregeln(b: "HaBindung") -> dict[str, tuple[re.Pattern, str]]:
 
 
 def schreib_plattform(b: "HaBindung") -> str | None:
-    """Die Plattform der Schreibziele fuer Weg und Hebelsatz der Bindung; None: der Weg hat dafuer keine Zeile."""
-    return SCHREIB_PLATTFORM.get((b.weg, b.hebelsatz)) if b.weg is not None else None
+    """Die Plattform der Schreibziele fuer Weg und Hebelsatz der Bindung; None: der Weg hat dafuer keine Zeile oder die
+    Zeile ist gesperrt (GESPERRTE_SCHREIBZEILEN); beides lehnt das Geraet als plattform/nicht_erlaubt ab."""
+    if b.weg is None or (b.weg, b.hebelsatz) in GESPERRTE_SCHREIBZEILEN:
+        return None
+    return SCHREIB_PLATTFORM.get((b.weg, b.hebelsatz))
 
 
 _NUMBER = (re.compile(r"number\.[a-z0-9_]+"), "eine number.*-Entity")
