@@ -221,6 +221,19 @@ def test_die_ruecksetzmeldung_geht_nach_dem_hello_hinaus_und_ist_mit_dem_geraete
     _zurueckgesetzt_pruefen(world, body)
 
 
+def test_die_ruecksetzmeldung_ist_mit_der_echten_zeit_signiert_nicht_mit_der_fachlichen(tmp_path):
+    echt = WALL - 5 * 86400  # fachliche Zeit mit Versatz: die echte Uhr, gegen die der Server prueft, liegt davor
+    world = World(tmp_path, echt=lambda: echt)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.schritt()
+    (body,) = world.link.of("up/zurueckgesetzt")
+    assert body["ts"] == str(int(echt)) != str(int(WALL))
+    der = base64.urlsafe_b64decode(body["signatur"] + "=" * (-len(body["signatur"]) % 4))
+    gesamt = wire.canonical_string(*wire.ZURUECKGESETZT_SIGNATUR, int(echt), world.device.identity.device_id.encode())
+    world.device.identity.signing_key.public_key().verify(der, gesamt, ec.ECDSA(hashes.SHA256()))
+
+
 def test_die_ruecksetzmeldung_wartet_auf_die_verbindung_und_das_hello(tmp_path):
     world = World(tmp_path)
     world.device.reset_melden()

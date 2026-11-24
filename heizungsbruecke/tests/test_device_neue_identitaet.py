@@ -5,10 +5,10 @@ import logging
 from pathlib import Path
 
 import pytest
-from device_helpers import World
+from device_helpers import World, _konfiguration
 
 from smartheat_core import dateien
-from smartheat_device import bootstrap, device, identity
+from smartheat_device import bootstrap, device, documents, identity, wish
 
 RASTUNG = b'{"sicherheitssatz": "nicht anfassen"}\n'
 SICHERUNG = b'{"backup": 1}\n'
@@ -75,8 +75,10 @@ def test_der_marker_liegt_vor_dem_ersten_loeschen(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", unlink)
     identity.verwerfen(ordner)
 
-    assert gesehen[0] == (identity.KEY_FILE, True) or gesehen[0][1] is True
-    assert all(marker for name, marker in gesehen if name != identity.MARKER_FILE)
+    loeschungen = [(name, marker) for name, marker in gesehen if name != identity.MARKER_FILE]
+    assert loeschungen, "es wurde nichts geloescht"
+    assert all(marker for _name, marker in loeschungen)
+    assert gesehen[-1][0] == identity.MARKER_FILE  # der Marker geht als Letztes
 
 
 def test_ein_absturz_nach_dem_marker_setzt_beim_naechsten_start_fort(tmp_path, monkeypatch):
@@ -102,6 +104,17 @@ def test_ein_absturz_nach_dem_marker_setzt_beim_naechsten_start_fort(tmp_path, m
     assert (ordner / "sicherheitssatz.json").read_bytes() == RASTUNG
     assert (ordner / "backup.json").read_bytes() == SICHERUNG
     assert identity.fortsetzen(ordner) is False
+
+
+def test_fortsetzen_nach_einem_absturz_raeumt_auch_dokumente_und_wunsch_puffer_weg(tmp_path):
+    ordner = _gerat_bereit(tmp_path)
+    for name in (*documents.DATEIEN.values(), documents.ZUSTAND_DATEI, wish.wunsch_datei(1), wish.wunsch_datei(2)):
+        (ordner / name).write_text("{}")
+    dateien.schreiben_json(ordner / identity.MARKER_FILE, {}, modus=dateien.PRIVAT)
+
+    assert identity.fortsetzen(ordner) is True
+
+    assert sorted(p.name for p in ordner.iterdir()) == ["backup.json", "sicherheitssatz.json"]
 
 
 def test_der_start_mit_marker_setzt_fort_und_legt_eine_neue_identitaet_an(tmp_path):
@@ -139,6 +152,33 @@ def test_der_befehl_verwirft_meldet_ok_und_das_geraet_registriert_sich_neu(tmp_p
     assert world.link is not alter_link and world.link.started
     assert bootstrap.device_state(world.dir) == "nicht_uebernommen"
     assert (world.dir / "sicherheitssatz.json").read_bytes() == RASTUNG
+
+
+def test_die_neue_identitaet_verwirft_auch_die_dokumente_und_den_wunsch_puffer(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.empfangen("down/config", _konfiguration(version=7))  # rastet den Sicherheitssatz selbst ein
+    world.link.sent.clear()
+    world.device.wunsch(22.0, herkunft="thermostat")
+    world.device.schritt()
+    rastung = (world.dir / "sicherheitssatz.json").read_bytes()
+    (world.dir / "backup.json").write_bytes(SICHERUNG)
+    assert world.device.documents.eingerichtet() and world.device.wunsch_puffer.kreise() == [1]
+    assert (world.dir / documents.ZUSTAND_DATEI).exists() and (world.dir / wish.wunsch_datei(1)).exists()
+    world.client.script["register"] = [
+        lambda ident: bootstrap.Antwort("nicht_uebernommen", world.neuer_zugang(ident))]
+
+    world.empfangen("down/command", _befehl())  # ohne vorheriges Abmelden
+    world.device.schritt()
+
+    assert [p.name for p in world.dir.glob(wish.WUNSCH_MUSTER)] == []
+    for name in (*documents.DATEIEN.values(), documents.ZUSTAND_DATEI):
+        assert not (world.dir / name).exists(), name
+    assert not world.device.documents.eingerichtet()
+    assert world.device.documents.version("konfiguration") == 0
+    assert world.device.wunsch_puffer.kreise() == []
+    assert (world.dir / "sicherheitssatz.json").read_bytes() == rastung
+    assert (world.dir / "backup.json").read_bytes() == SICHERUNG
 
 
 def test_scheitert_das_verwerfen_endet_der_befehl_mit_intern_und_die_identitaet_bleibt(tmp_path, monkeypatch):

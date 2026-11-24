@@ -141,7 +141,7 @@ class Device:
                  befehl_fehler: Callable[[Exception], commands.Failed | None] = lambda error: None) -> None:
         self.host = host
         self._dir = data_dir / DEVICE_DIR
-        self._clock, self._wall = clock, wall
+        self._clock, self._wall, self._echt = clock, wall, echt
         # wall ist die fachliche Zeit der Nachrichten; die Signaturzeit des Bootstraps prueft der Server gegen die echte
         self._client_for = bootstrap_client or (
             lambda ident: bootstrap.BootstrapClient(bootstrap_url, ident, now=echt))
@@ -155,9 +155,7 @@ class Device:
         self._identitaet_erneuern = False  # das Verwerfen ist geschehen, der Takt wechselt Link und Identitaet
         self.identity = identity.load_or_create(self._dir)
         self.boot_id = identity.new_boot_id()
-        self.documents = DocumentStore(self._dir, host=host.host, software_version=host.version,
-                                       treiber_pruefen=host.treiber_pruefen,
-                                       vor_speichern=host.konfiguration_vorbereiten)
+        self.documents = self._dokumente_laden()
         self.hinweise = commands.Hinweise(self._dir)
         self.befehle = commands.CommandRegister(self._dir, self._ergebnis_senden, send_inventory=self._inventur_senden,
                                                 clock=clock, uebersetzen=befehl_fehler)
@@ -601,8 +599,16 @@ class Device:
         self._identitaet_erneuern = True
         return commands.Done({})
 
+    def _dokumente_laden(self) -> DocumentStore:
+        return DocumentStore(self._dir, host=self.host.host, software_version=self.host.version,
+                             treiber_pruefen=self.host.treiber_pruefen, vor_speichern=self.host.konfiguration_vorbereiten)
+
     def _identitaet_wechseln(self) -> None:
         self._identitaet_erneuern = False
+        # Dokumente und Wunsch-Puffer des alten Geraets sind verworfen (identity.verwerfen): auch im Speicher gilt das
+        # neue Geraet als nicht eingerichtet, bis der Server sein Dokument schickt.
+        self.documents = self._dokumente_laden()
+        self.wunsch_puffer = wish.WunschPuffer(self._dir, self._clock)
         link, self.link, self._bereit = self.link, None, False
         if link is not None:
             link.stop()
@@ -1183,7 +1189,7 @@ class Device:
         if self._reset is not None:
             return
         try:
-            ts = str(int(self._wall()))
+            ts = str(int(self._echt()))  # echte Zeit wie im Bootstrap: der Server prueft die Signatur gegen seine Uhr
             signatur = identity.sign(self.identity.signing_key, *wire.ZURUECKGESETZT_SIGNATUR, int(ts),
                                      self.identity.device_id.encode())
             self._reset = nachrichten.zurueckgesetzt(ts=ts, signatur=signatur)

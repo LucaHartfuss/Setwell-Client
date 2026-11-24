@@ -92,7 +92,7 @@ def test_die_lokale_sicht_traegt_das_datum_und_das_ereignis_gibt_es_weiter(tmp_p
         lambda: None, lambda kreis: None, lambda kreis: None, lambda: None,
         kritisch_ende=lambda kreise: "2026-12-01", update_noetig_kritisch=lambda: True)
     assert lokal()["update_noetig_ende"] == "2026-12-01" and lokal()["update_noetig_kritisch"] is True
-    status = geraet_status.GeraetStatus(ha, "shg-aaaaaaaaaaaaaaaa", lokal, laufzeit_merken=lambda e: None)
+    status = geraet_status.GeraetStatus(ha, lambda: "shg-aaaaaaaaaaaaaaaa", lokal, laufzeit_merken=lambda e: None)
     status.anzeige(Anzeige(zustand="update_noetig", server_ok=True, device_state="uebernommen", eingerichtet=True,
                            hinweise=(), meldungen=(), konfiguration_abgelehnt=None))
     gesendet = ha.events[-1][1]["meldungen"]

@@ -190,7 +190,7 @@ class GeraetStatus:
     Ausfall (nur die Fehlerart), eine Info-Zeile bei der Erholung. Nach einem Fehler sendet der naechste erlaubte
     Versuch den aktuellen Stand, auch wenn er sich nicht geaendert hat."""
 
-    def __init__(self, ha_api, geraet_id: str, lokal: Callable[[], Mapping], *,
+    def __init__(self, ha_api, geraet_id: Callable[[], str], lokal: Callable[[], Mapping], *,
                  laufzeit_merken: Callable[[dict], None], clock: Callable[[], float] = time.monotonic) -> None:
         """`lokal` liefert die lokale Sicht (`lokale_sicht`); es wird ausserhalb der Zustandssperre gerufen."""
         self._ha, self._geraet_id, self._lokal, self._merken = ha_api, geraet_id, lokal, laufzeit_merken
@@ -233,7 +233,7 @@ class GeraetStatus:
                for feld in LOKAL_KREIS_FIELDS},
             **{feld: self._laufzeit_kreise.get(nummer, {}).get(feld) for feld in status.KREIS_FELDER},
         } for nummer in sorted({*lokale_kreise, *self._laufzeit_kreise})]
-        return {**self._laufzeit, "schema": EVENT_SCHEMA, "geraet_id": self._geraet_id,
+        return {**self._laufzeit, "schema": EVENT_SCHEMA, "geraet_id": self._geraet_id(),
                 "geraet_zustand": anzeige.zustand if anzeige is not None else "startet",
                 "server_verbunden": anzeige.server_ok if anzeige is not None else False,
                 "meldungen": (meldungen_liste(anzeige, lokal.get("update_noetig_ende"),

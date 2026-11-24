@@ -65,7 +65,8 @@ class HaDeviceHost(GeraetHostBasis):
     def __init__(self, ha_api, supervisor, *, clock: Callable[[], float] = time.monotonic) -> None:
         super().__init__()
         self._ha, self._supervisor, self._clock = ha_api, supervisor, clock
-        self.geraet_id: str | None = None  # ID des Geraets fuer das Ereignis smartheat_meldung (__main__.verdrahten)
+        # aktuelle ID des Geraets fuer das Ereignis smartheat_meldung (__main__.verdrahten); die Identitaet wechselt im Prozess
+        self.geraet_id: Callable[[], str | None] = lambda: None
         self.status_sink: GeraetStatus | None = None  # StatusSink der Laufzeit und Anzeige (__main__.verdrahten)
         self.discovery: Discovery | None = None  # Supervisor-Meldung (__main__.verdrahten)
         self.claim_code: Callable[[], str | None] = lambda: None  # Uebernahme-Code des Geraets (__main__.verdrahten)
@@ -94,7 +95,7 @@ class HaDeviceHost(GeraetHostBasis):
     def notify_sink_fuer(self, services: list[str]) -> GeraetUndHaSink:
         """Meldungen der Laufzeit an den Geraetekern (Portal, Betreiber-Alarm geraetemeldung; HA-Geraete wie
         Gateways) und an HA (Notify-Dienste, persistent_notification)."""
-        return GeraetUndHaSink(self.notify_sink, HaNotifySink(self._ha, services), lambda: self.geraet_id)
+        return GeraetUndHaSink(self.notify_sink, HaNotifySink(self._ha, services), lambda: self.geraet_id())
 
     def raum_merken(self, kreis: int, raum: dict | None) -> None:
         """Worker-Thread des Kreises (raum.RaumPublisher): {ist, soll, soll_quelle, ts} fuer up/status."""
