@@ -24,7 +24,7 @@ def _befehle(caplog, daten: bytes) -> tuple[list[str], list[logging.LogRecord]]:
     WARNING-Records (INFO und darunter ausgeschlossen)."""
     gerufen = []
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        stdin_befehl.lesen(io.BytesIO(daten), EIGEN, lambda: gerufen.append("entfernen"),
+        stdin_befehl.lesen(io.BytesIO(daten), lambda: EIGEN, lambda: gerufen.append("entfernen"),
                            lambda: gerufen.append("nachweis"), lambda: gerufen.append("freigeben"),
                            lambda: gerufen.append("code"))
     return gerufen, [r for r in caplog.records if r.name == LOGGER and r.levelno >= logging.WARNING]
@@ -149,7 +149,7 @@ def test_eine_zu_lange_zeile_bis_eof_verwirft_den_rest_mit_einer_warnung(caplog)
 def test_eof_beendet_den_thread_still(caplog):
     gerufen = []
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
-        thread = stdin_befehl.starten(io.BytesIO(b""), EIGEN, lambda: gerufen.append(1), lambda: gerufen.append(2),
+        thread = stdin_befehl.starten(io.BytesIO(b""), lambda: EIGEN, lambda: gerufen.append(1), lambda: gerufen.append(2),
                                        lambda: gerufen.append(3), lambda: gerufen.append(4))
         thread.join(timeout=2)
     assert not thread.is_alive()
@@ -160,10 +160,26 @@ def test_eof_beendet_den_thread_still(caplog):
 
 def test_der_thread_ruft_den_rueckruf_fuer_die_eigene_zeile():
     gerufen = threading.Event()
-    thread = stdin_befehl.starten(io.BytesIO(b"entfernen shg-aaaaaaaaaaaaaaaa\n"), EIGEN, gerufen.set, lambda: None, lambda: None,
+    thread = stdin_befehl.starten(io.BytesIO(b"entfernen shg-aaaaaaaaaaaaaaaa\n"), lambda: EIGEN, gerufen.set, lambda: None, lambda: None,
                                     lambda: None)
     thread.join(timeout=2)
     assert gerufen.is_set()
+
+
+def test_die_geraete_id_wird_je_zeile_neu_gelesen():
+    """Wechselt die Identitaet des Geraets im laufenden Prozess, gilt ab der naechsten Zeile die neue ID."""
+    neu = "shg-bbbbbbbbbbbbbbbb"
+    aktuell = [EIGEN]
+    gerufen = []
+
+    def entfernen():
+        gerufen.append("entfernen")
+        aktuell[0] = neu  # der Geraetekern tauscht die Identitaet nach dem Entfernen
+
+    daten = f"entfernen {EIGEN}\nentfernen {EIGEN}\ncode {neu}\ncode {EIGEN}\n".encode()
+    stdin_befehl.lesen(io.BytesIO(daten), lambda: aktuell[0], entfernen, lambda: gerufen.append("nachweis"),
+                       lambda: gerufen.append("freigeben"), lambda: gerufen.append("code"))
+    assert gerufen == ["entfernen", "code"]  # die alte ID ist nach dem Wechsel verworfen, die neue gilt
 
 
 class _Kaputt:
@@ -178,7 +194,7 @@ class _Kaputt:
 def test_ein_lesefehler_beendet_den_thread_mit_einer_warnung(caplog, fehler):
     gerufen = []
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        thread = stdin_befehl.starten(_Kaputt(fehler), EIGEN, lambda: gerufen.append(1), lambda: gerufen.append(2),
+        thread = stdin_befehl.starten(_Kaputt(fehler), lambda: EIGEN, lambda: gerufen.append(1), lambda: gerufen.append(2),
                                        lambda: gerufen.append(3), lambda: gerufen.append(4))
         thread.join(timeout=2)
     assert not thread.is_alive()
@@ -196,7 +212,7 @@ def test_ein_blockierter_stdin_thread_verhindert_kein_sauberes_ende():
     skript = (
         "import time\n"
         "from heizungsbruecke import __main__ as m, stdin_befehl\n"
-        f"stdin_befehl.starten(m.stdin_quelle(), {EIGEN!r}, lambda: None, lambda: None, lambda: None, lambda: None)\n"
+        f"stdin_befehl.starten(m.stdin_quelle(), lambda: {EIGEN!r}, lambda: None, lambda: None, lambda: None, lambda: None)\n"
         "time.sleep(0.2)\n"
         "raise SystemExit(0)\n"
     )

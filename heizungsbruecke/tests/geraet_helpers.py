@@ -145,7 +145,7 @@ class FakeGeraet:
         self.host = None
         self._ha = ha
         self.status_sink = self if ha is None else GeraetStatus(
-            ha, GERAET_ID, lokale_sicht(self._konfig_dokument, self._raum_soll, self._raum_ist, lambda: None,
+            ha, lambda: GERAET_ID, lokale_sicht(self._konfig_dokument, self._raum_soll, self._raum_ist, lambda: None,
                          update_noetig_kritisch=lambda: False),
             laufzeit_merken=self.status.append)
 

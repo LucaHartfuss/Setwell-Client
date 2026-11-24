@@ -63,10 +63,11 @@ def _rest_verwerfen(quelle: BinaryIO) -> None:
             return
 
 
-def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachweis: Callable[[], None],
+def lesen(quelle: BinaryIO, geraet_id: Callable[[], str], entfernen: Callable[[], None], nachweis: Callable[[], None],
           freigeben: Callable[[], None], code: Callable[[], None]) -> None:
     """Zeilen aus quelle lesen bis EOF (still) oder bis ein Lesefehler (eine WARNING mit der Fehlerart); jede Zeile
-    wird geprueft, ein Treffer ruft entfernen(), freigeben() (entfernen mit Zusatz), nachweis() bzw. code()."""
+    wird gegen die aktuelle Geraete-ID geprueft (der Geraetekern tauscht sie nach dem Entfernen im laufenden Prozess),
+    ein Treffer ruft entfernen(), freigeben() (entfernen mit Zusatz), nachweis() bzw. code()."""
     try:
         while True:
             zeile = quelle.readline(ZEILE_MAX + 1)
@@ -85,7 +86,7 @@ def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachw
                 continue
             else:
                 inhalt = zeile  # letzte Zeile ohne Zeilenende vor EOF
-            befehl, grund = zeile_pruefen(inhalt, geraet_id)
+            befehl, grund = zeile_pruefen(inhalt, geraet_id())
             if befehl == BEFEHL_ENTFERNEN:
                 entfernen()
             elif befehl == BEFEHL_FREIGEBEN:
@@ -100,7 +101,7 @@ def lesen(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachw
         logger.warning("stdin: Lesen gescheitert (%s), der lokale Befehl entfaellt", type(error).__name__)
 
 
-def starten(quelle: BinaryIO, geraet_id: str, entfernen: Callable[[], None], nachweis: Callable[[], None],
+def starten(quelle: BinaryIO, geraet_id: Callable[[], str], entfernen: Callable[[], None], nachweis: Callable[[], None],
             freigeben: Callable[[], None], code: Callable[[], None]) -> threading.Thread:
     thread = threading.Thread(target=lesen, args=(quelle, geraet_id, entfernen, nachweis, freigeben, code),
                               name="stdin", daemon=True)
