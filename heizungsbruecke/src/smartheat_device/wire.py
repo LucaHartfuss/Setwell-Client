@@ -150,7 +150,7 @@ KONFIGURATION_RAUM_FIELDS = ("raum", "name", "rolle", "fuehler", "soll_quelle", 
 RAUM_ROLLEN = ("referenz", "kontroll")
 #: Hoechstens so viele Kreise je Geraet (Nachrichten und Konfiguration), Nutzer-Entscheidung.
 KREISE_MAX = 4
-RAEUME_MAX, RAUM_FUEHLER_MAX = 8, 8  # Raeume je Kreis, Fuehler je Raum
+RAEUME_MAX, RAUM_FUEHLER_MAX = 16, 3  # Raeume je Kreis, Fuehler je Raum
 #: Anbindungswege, die ein Geraet heute ausfuehrt, und ihre Abbildung aus der Bindung (HA: Plattform der Integration,
 #: Gateway: Treiber-ID); `simulation` ist der Testweg (nur Labor). Ein anderer Weg ist `weg_unbekannt`.
 WEGE = ("vaillant_myvaillant", "vaillant_ebus", "viessmann_vicare", "weishaupt_modbus", "simulation")

@@ -100,10 +100,14 @@ def test_die_rettungsroute_ist_an_ihren_pfad_gebunden(ident, antwort):
         client.certificate()
 
 
-def test_der_platzhalter_der_datei_macht_jede_antwort_ungueltig(ident, antwort, monkeypatch):
+PAKET_ANKER = {"e94b188faa982eac", "e35f46099d64d7b6"}  # aktiv und Reserve des Release-Ankers (NB-2)
+
+
+def test_die_paketdatei_traegt_aktiv_und_reserve_und_lehnt_fremd_signiertes_ab(ident, antwort, monkeypatch):
     monkeypatch.delenv(anker.ENV_DATEI)
-    assert "PLATZHALTER" in anker.ANKER_DATEI.read_text() and anker.schluessel() == {}
-    _ungueltig(ident, _signiert(antwort, ident))
+    assert "PLATZHALTER" not in anker.ANKER_DATEI.read_text()
+    assert set(anker.schluessel()) == PAKET_ANKER
+    _ungueltig(ident, _signiert(antwort, ident))  # mit dem Testanker signiert, nicht mit dem Release-Anker
 
 
 @pytest.mark.parametrize("inhalt", [None, "", "# nur Kommentar\n", "kein pem",
@@ -133,11 +137,11 @@ def test_der_override_ohne_testkennung_wird_ignoriert_und_geloggt(ident, antwort
     assert len(anker.schluessel()) == 2  # mit Testkennung gilt die Datei
     monkeypatch.setenv("SMARTHEAT_TESTKENNUNG", " ")
     with caplog.at_level(logging.WARNING):
-        assert anker.schluessel() == {}  # Paketdatei = Platzhalter
+        assert set(anker.schluessel()) == PAKET_ANKER  # es gilt die Paketdatei
         _ungueltig(ident, _signiert(antwort, ident))
     assert anker.ENV_DATEI in caplog.text and str(datei) not in caplog.text
     monkeypatch.delenv("SMARTHEAT_TESTKENNUNG")
-    assert anker.schluessel() == {}
+    assert set(anker.schluessel()) == PAKET_ANKER
 
 
 def test_ungueltig_ist_ein_backoff_kein_gesperrt_und_das_log_nennt_nur_den_grund(tmp_path, ident, antwort, caplog):
