@@ -2,12 +2,12 @@ name: Release
 # Tag heizungsbruecke-vX.Y.Z. Rechte und Code sind getrennt (Abschlussreview AP-04, I-1):
 #   ci:      volle Stufe (Docker, Real-HA-Container-Tests).
 #   gate:    Leserecht, keine Environment. Prueft die Freigabe (Tag-Signatur, tools/release_gate.py) und fuehrt dafuer Code
-#            aus dem privaten Root-Repo aus (siblings.sh, CROSS_REPO_TOKEN). Ohne Schreibtoken: was dort schiefgeht, erreicht
+#            aus dem Kern-Repo aus (siblings.sh, CI_LESE_TOKEN). Ohne Schreibtoken: was dort schiefgeht, erreicht
 #            weder main noch GHCR. Ausgaben: dryrun, title und die Release-Notiz als Artefakt (reine Daten).
-#   image:   hinter der Freigabe der Environment `release` (Runbook H-1); packages: write, kein Root-Code, kein CROSS_REPO_TOKEN.
+#   image:   hinter der Freigabe der Environment `release` (Runbook H-1); packages: write, kein Root-Code, kein CI_LESE_TOKEN.
 #            Baut das Add-on je Architektur, pusht es nach GHCR (nie auf ein vorhandenes Tag) und erzeugt das CycloneDX-SBOM
 #            des gepushten Digests (gepinnter syft-Container). Im Probelauf (-dryrun) wird nur gebaut.
-#   release: hinter der Freigabe der Environment `release`; contents: write, kein Root-Code, kein CROSS_REPO_TOKEN. Prueft
+#   release: hinter der Freigabe der Environment `release`; contents: write, kein Root-Code, kein CI_LESE_TOKEN. Prueft
 #            die Signatur des Tags mit dem eigenen Skript, die Ausgaben des Gates per Regex, rueckt main per Fast-Forward vor
 #            und legt das GitHub-Release mit Notiz und SBOM an. Der Checkout behaelt den Token nicht (persist-credentials:
 #            false); er steht nur in den Schritten, die schreiben.
@@ -56,8 +56,8 @@ jobs:
           python-version: "3.12"
       - name: tools/ aus dem Root-Repo holen
         env:
-          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
-          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
+          CI_LESE_TOKEN: ${{ secrets.CI_LESE_TOKEN }}
+          KERN_REPO: setwell-de/entwicklung
         run: bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE" "$GITHUB_REF_NAME"
       # release_gate.py braucht nur PyYAML, installiert aus dem Hash-Lock.
       - run: pip install --require-hashes --no-deps -r "$DEV_ROOT/tools/release/requirements.txt"
@@ -75,7 +75,7 @@ jobs:
   image:
     # Baut das Add-on als fertiges Image je Architektur und pusht es nach GHCR (ghcr.io/lucahartfuss/<arch>-
     # heizungsbruecke:<version>, config.yaml `image:`); der Supervisor zieht es, statt selbst zu bauen. Nur dieser Job
-    # hat `packages: write`; ohne CROSS_REPO_TOKEN, ohne Root-Code, ohne Python-Pakete. Die GHCR-Pakete muessen oeffentlich
+    # hat `packages: write`; ohne CI_LESE_TOKEN, ohne Root-Code, ohne Python-Pakete. Die GHCR-Pakete muessen oeffentlich
     # sein (H-9): der Supervisor und das SBOM-Werkzeug ziehen anonym.
     needs: gate
     environment: release
@@ -164,7 +164,7 @@ jobs:
   release:
     needs: [gate, image]
     # Schreibt main per Fast-Forward und legt das GitHub-Release an. Das Environment `release` haelt den Lauf bis zur
-    # Freigabe des Reviewers an (Runbook H-1). Kein Root-Code, kein CROSS_REPO_TOKEN: das Gate lief im Job `gate`.
+    # Freigabe des Reviewers an (Runbook H-1). Kein Root-Code, kein CI_LESE_TOKEN: das Gate lief im Job `gate`.
     environment: release
     permissions:
       contents: write

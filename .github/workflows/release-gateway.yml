@@ -7,10 +7,10 @@ name: Release Gateway
 #          und per Neubau pruefen, signieren, Signatur pruefen; kein Upload. Fuehrt Repo-Code aus, daher nur Leserecht,
 #          keine Environment, keine Secrets. Laeuft bei echten und bei -dryrun-Tags gleich.
 #   gate:  Leserecht, keine Environment. Prueft die Freigabe (Tag-Signatur, tools/release_gate.py) und fuehrt dafuer Code
-#          aus dem privaten Root-Repo aus (siblings.sh, CROSS_REPO_TOKEN). Ohne Schreibtoken. Ausgaben: dryrun, title und
+#          aus dem Kern-Repo aus (siblings.sh, CI_LESE_TOKEN). Ohne Schreibtoken. Ausgaben: dryrun, title und
 #          die Release-Notiz als Artefakt (reine Daten).
 #   main:  nach gate und probe, hinter der Freigabe der Environment "release" (Pflicht-Reviewer, Runbook H-1); contents:
-#          write, kein Root-Code, kein CROSS_REPO_TOKEN. Prueft die Signatur des Tags mit dem eigenen Skript, die Ausgaben
+#          write, kein Root-Code, kein CI_LESE_TOKEN. Prueft die Signatur des Tags mit dem eigenen Skript, die Ausgaben
 #          des Gates per Regex, rueckt main per Fast-Forward vor und legt die Release-Notiz ohne Dateien an. Im -dryrun
 #          bleibt main. Der Checkout behaelt den Token nicht (persist-credentials: false).
 # Ein Werks-Image gibt es in der CI nicht mehr (Nutzer-Entscheidung FR-26: der Bau kommt lokal, AP-05a).
@@ -89,8 +89,8 @@ jobs:
           python-version: "3.12"
       - name: tools/ aus dem Root-Repo holen
         env:
-          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
-          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
+          CI_LESE_TOKEN: ${{ secrets.CI_LESE_TOKEN }}
+          KERN_REPO: setwell-de/entwicklung
         run: bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE" "$GITHUB_REF_NAME"
       # release_gate.py braucht nur PyYAML, installiert aus dem Hash-Lock.
       - run: pip install --require-hashes --no-deps -r "$DEV_ROOT/tools/release/requirements.txt"
@@ -108,7 +108,7 @@ jobs:
   main:
     needs: [gate, probe]
     # Schreibt main per Fast-Forward und legt die Release-Notiz an. Das Environment `release` haelt den Lauf bis zur
-    # Freigabe des Reviewers an (Runbook H-1). Kein Root-Code, kein CROSS_REPO_TOKEN: das Gate lief im Job `gate`.
+    # Freigabe des Reviewers an (Runbook H-1). Kein Root-Code, kein CI_LESE_TOKEN: das Gate lief im Job `gate`.
     environment: release
     permissions:
       contents: write
