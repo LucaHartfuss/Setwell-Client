@@ -32,7 +32,7 @@ STATISTICS = "heating.burners.0.statistics"
 # Viessmann (Gas), dieselben Werte wie `ERZEUGER["viessmann_vicare"]` des Simulationstreibers. Der Fake laeuft im E2E in einem
 # Container, der nur den Kern einhaengt (nicht das Gateway-Paket): ein Import des Treibers ginge dort nicht, darum die
 # Konstante hier; `test_fake_vicare.py` haelt beide gleich.
-ERZEUGER = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0)
+ERZEUGER = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0, room_step=1.0)
 HEAT_LIMIT = 16.0
 KERN_STUNDE = 12.0  # ausserhalb der Warmwasserpausen: die Tageszeit darf die Lieferung nicht bestimmen
 START_ROOM = 20.0
