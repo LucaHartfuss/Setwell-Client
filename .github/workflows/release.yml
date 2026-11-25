@@ -19,7 +19,6 @@ concurrency:
   cancel-in-progress: false
 env:
   KIND: addon
-  SELF: SmartHeat-for-HomeAssistant
   REGISTRY: ghcr.io/lucahartfuss
   # syft fuer das CycloneDX-SBOM: Digest gepinnt, derselbe wie in gateway/release/release_lokal.sh (ein Test haelt beide gleich).
   SYFT_IMAGE: anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a
@@ -58,7 +57,8 @@ jobs:
       - name: tools/ aus dem Root-Repo holen
         env:
           CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
-        run: bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$SELF" "$GITHUB_WORKSPACE" "$GITHUB_REF_NAME"
+          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
+        run: bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE" "$GITHUB_REF_NAME"
       # release_gate.py braucht nur PyYAML, installiert aus dem Hash-Lock.
       - run: pip install --require-hashes --no-deps -r "$DEV_ROOT/tools/release/requirements.txt"
       - name: Freigabe pruefen

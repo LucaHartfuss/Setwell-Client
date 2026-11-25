@@ -169,9 +169,10 @@ jobs:
       - name: Dev-Root aufbauen
         env:
           CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
           SIBLINGS_REF: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
         run: >-
-          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" SmartHeat-for-HomeAssistant "$GITHUB_WORKSPACE"
+          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE"
           "$SIBLINGS_REF"
           SmartHeat-Integration
       - run: pip install --require-hashes -r "$DEV_ROOT/tools/requirements-dev.txt"
@@ -198,8 +199,9 @@ jobs:
       - name: Dev-Root aufbauen
         env:
           CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
         run: >-
-          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" SmartHeat-for-HomeAssistant "$GITHUB_WORKSPACE"
+          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE"
           develop
       - run: pip install --require-hashes -r "$DEV_ROOT/tools/requirements-audit.txt"
       - run: bash "$DEV_ROOT/tools/pip_audit.sh" "$DEV_ROOT"
