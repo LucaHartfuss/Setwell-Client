@@ -71,7 +71,10 @@ def test_kein_job_hat_ein_secret_ausser_github_token():
         for step in jobs[name]["steps"]:
             if "secrets." in yaml.safe_dump(step):
                 assert name == "gate" and "siblings.sh" in step["run"] and "pip" not in step["run"]
-                assert step["env"] == {"CROSS_REPO_TOKEN": "${{ secrets.CROSS_REPO_TOKEN }}"}
+                assert step["env"] == {
+                    "CROSS_REPO_TOKEN": "${{ secrets.CROSS_REPO_TOKEN }}",
+                    "KERN_REPO": "LucaHartfuss/HomeAssistant_Dev_Root",
+                }
 
 
 def test_kein_job_hat_packages_write():
