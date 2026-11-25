@@ -79,3 +79,5 @@ _.phasendauer_gueltig  # smartheat_core/safety.py: Mindestdauer der Phase, noch 
 _.abwesenheit_vorschlag  # smartheat_core/safety.py: Vorschlag je Verteilsystem, noch ohne Aufrufer im Takt
 # --- Push-Regeln der Person (V1): die Kopie der Feldliste in wire.py ---
 _.PUSH_REGELN_FIELDS  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py push_regeln_gueltig) und im Vertragscheck
+# --- Hausmodell-Kopie (smartheat_core/hausmodell.py): byte-gleich der Quelle im Server, daher nicht kuerzbar ---
+_.anlage_schritt  # smartheat_core/hausmodell.py: Einzelkreis-Schritt der Kopie; Leser sind Tests und der Fake-ViCare (gateway/tests/fake_vicare/server.py), der Simulationstreiber nutzt erzeuger_schritt

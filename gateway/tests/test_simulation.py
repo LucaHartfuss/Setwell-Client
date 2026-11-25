@@ -159,7 +159,7 @@ WALL = 12 * 3600.0  # feste Wanduhr; mit aussen_amplitude 0 ist die Aussentemper
 AUSSEN = 5.0
 SCHRITT = hausmodell.DT
 # Viessmann Gas mit den Werten des Servermodells (`ViessmannModel`).
-VIESSMANN_GAS = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0)
+VIESSMANN_GAS = hausmodell.ViessmannPolynom(c0=1.4347, c1=0.021, c2=247.9e-6, offset=0.0, room_step=1.0)
 # Abbildung Hebel -> Kern je Hebelsatz: (geschriebene Hebel, Erzeuger (a, b) oder fertiger Erzeuger, (Steigung, Verschiebung,
 # Heizgrenze), Mindestvorlauf). Heizgrenze 16 und Steigung 1 gelten, wo der Hebelsatz den Hebel nicht hat.
 ABBILDUNG = {
@@ -389,7 +389,7 @@ def test_aux_zulaessig_takes_short_texts_for_aux_names_only(paths, clock):
 
 # --- zwei Heizkreise ---
 
-def test_jeder_heizkreis_hat_seinen_eigenen_anlagenzustand(paths, clock):
+def test_raum_je_heizkreis_erzeuger_gemeinsam(paths, paths_zwei, clock):
     eins = _sim(paths, clock, heizkreis=0)
     zwei = _sim(paths, clock, heizkreis=1)
     eins.write("curve", 1.7)
@@ -398,6 +398,15 @@ def test_jeder_heizkreis_hat_seinen_eigenen_anlagenzustand(paths, clock):
     assert (paths.sim_dir / "plant.json").is_file() and (paths.sim_dir / "plant-1.json").is_file()
     assert eins.read("curve") == 1.7 and zwei.read("curve") == 0.6
     assert eins.physical_writes == 1 and zwei.physical_writes == 1
+    # Die Hebel sind je Kreis; die Brennerstunden gehoeren dem gemeinsamen Erzeuger.
+    walls = [WALL]
+    kreis0 = _sim_zeit(paths_zwei, clock, walls, aussen_amplitude=0.0, heizkreis=0, hebel={"heat_limit": 16.0})
+    kreis1 = _sim_zeit(paths_zwei, clock, walls, aussen_amplitude=0.0, heizkreis=1, hebel={"heat_limit": 3.0})
+    clock.advance(12 * SCHRITT)
+    kreis0.poll_once()
+    kreis1.poll_once()
+    assert kreis1.read_signal("generator_hours") == kreis0.read_signal("generator_hours") > 1000.0
+    assert kreis1.read_signal("room_temperature") != kreis0.read_signal("room_temperature")
 
 
 def test_ohne_heizkreis_gilt_die_datei_des_ersten_kreises(paths, clock):
@@ -563,18 +572,78 @@ def test_the_plant_files_keep_their_form_and_keys(paths, clock, heizkreis):
     assert plant["geschrieben_um"] == {"curve": 1234.0}
 
 
-def test_every_heating_circuit_has_its_own_house(paths, clock):
-    erzeuger, hebel_a, hebel_b = ABBILDUNG["vaillant_vrc720"][1], (0.5, 18.0, 16.0), (2.0, 24.0, 16.0)
-    walls = [WALL]
-    kreis0 = _sim_zeit(paths, clock, walls, aussen_amplitude=0.0, heizkreis=0)
-    kreis1 = _sim_zeit(paths, clock, walls, aussen_amplitude=0.0, heizkreis=1)
-    kreis0.write("curve", 0.5), kreis0.write("room_setpoint", 18.0), kreis0.write("min_flow", 18.0)
-    kreis1.write("curve", 2.0), kreis1.write("room_setpoint", 24.0), kreis1.write("min_flow", 24.0)
+def _kern_erzeuger(erzeuger, kreise, schritte, aussen=MITTEL):
+    """Direktlauf des Erzeugers mit mehreren Kreisen im Kern (Stunde fest ausserhalb der Warmwasserpausen)."""
+    zustand = hausmodell.ErzeugerZustand([hausmodell.KreisZustand([20.0]) for _ in kreise], burner_hours=1000.0)
+    letzter = None
+    for _ in range(schritte):
+        letzter = hausmodell.erzeuger_schritt(
+            zustand, kreise, _erzeuger(erzeuger), aussen, 0.0, 12.0, hausmodell.Betriebsflags(liefert=True), None)
+    return zustand, letzter
+
+
+def _zwei_kreise(paths, clock, walls, hebel_a, hebel_b):
+    """Zwei Kreise derselben Anlage; hebel = (Steigung, Raum-Soll, Heizgrenze), der Mindestvorlauf ist das Raum-Soll."""
+    kreise = []
+    for nummer, (curve, soll, grenze) in enumerate((hebel_a, hebel_b)):
+        kreis = _sim_zeit(paths, clock, walls, aussen_amplitude=0.0, heizkreis=nummer)
+        for name, wert in (("curve", curve), ("room_setpoint", soll), ("min_flow", soll), ("heat_limit", grenze)):
+            kreis.write(name, wert)
+        kreise.append(kreis)
+    return kreise
+
+
+def test_the_circuits_of_one_plant_run_on_one_shared_generator(paths, clock):
+    erzeuger = ABBILDUNG["vaillant_vrc720"][1]
+    hebel_a, hebel_b = (0.5, 18.0, 16.0), (2.0, 24.0, 16.0)
+    kreis0, kreis1 = _zwei_kreise(paths, clock, [WALL], hebel_a, hebel_b)
     clock.advance(36 * SCHRITT)
     kreis0.poll_once()
     kreis1.poll_once()
-    for kreis, hebel in ((kreis0, hebel_a), (kreis1, hebel_b)):
-        erwartet = _kern_folge(erzeuger, hebel, hebel[1], [MITTEL] * 36)
-        assert kreis.read_signal("room_temperature") == round(erwartet.room, 2)
-        assert kreis.read_signal("generator_hours") == round(erwartet.burner_hours, 3)
-    assert kreis0.read_signal("room_temperature") != kreis1.read_signal("room_temperature")
+    kreise = [hausmodell.Kreis(hebel, hebel[1], (hausmodell.HOUSES["H1"],)) for hebel in (hebel_a, hebel_b)]
+    zustand, letzter = _kern_erzeuger(erzeuger, kreise, 36)
+    for kreis, raum in zip((kreis0, kreis1), zustand.kreise, strict=True):
+        assert kreis.read_signal("room_temperature") == round(raum.raeume[0], 2)
+        assert kreis.read_signal("generator_hours") == round(zustand.burner_hours, 3)
+    # Der Kreis mit der kleineren Anforderung bekommt den Vorlauf des Erzeugers (kein Mischer): beide Raeume sind gleich warm.
+    assert kreis0.read_signal("room_temperature") == kreis1.read_signal("room_temperature")
+    assert kreis0.read_signal("flow_temperature") == round(letzter.flow, 1)
+
+
+def test_a_circuit_without_demand_keeps_its_own_room_but_shares_the_burner(paths, clock):
+    erzeuger = ABBILDUNG["vaillant_vrc720"][1]
+    hebel_a, hebel_b = (1.2, 21.0, 16.0), (1.2, 21.0, 3.0)  # der zweite Kreis heizt bei 5 Grad Aussen nicht
+    kreis0, kreis1 = _zwei_kreise(paths, clock, [WALL], hebel_a, hebel_b)
+    clock.advance(36 * SCHRITT)
+    kreis1.poll_once()  # der Kreis, der nicht selbst heizt, treibt den gemeinsamen Erzeuger genauso voran
+    kreis0.poll_once()
+    kreise = [hausmodell.Kreis(hebel, hebel[1], (hausmodell.HOUSES["H1"],)) for hebel in (hebel_a, hebel_b)]
+    zustand, _ = _kern_erzeuger(erzeuger, kreise, 36)
+    assert kreis0.read_signal("room_temperature") == round(zustand.kreise[0].raeume[0], 2)
+    assert kreis1.read_signal("room_temperature") == round(zustand.kreise[1].raeume[0], 2)
+    assert kreis0.read_signal("room_temperature") > kreis1.read_signal("room_temperature")
+    assert kreis1.read_signal("generator_hours") == kreis0.read_signal("generator_hours") == round(zustand.burner_hours, 3)
+    assert kreis0.read_signal("generator_hours") > 1000.0
+    assert kreis1.read_signal("flow_temperature") == 29.5  # ohne eigene Anforderung kein Vorlauf
+
+
+def test_plants_in_different_directories_do_not_share_a_generator(paths, paths_zwei, clock):
+    walls = [WALL]
+    eins = _sim_zeit(paths, clock, walls, aussen_amplitude=0.0, hebel=ABBILDUNG["vaillant_vrc720"][0])
+    zwei = _sim_zeit(paths_zwei, clock, walls, aussen_amplitude=0.0, hebel={"heat_limit": 3.0})
+    clock.advance(12 * SCHRITT)
+    eins.poll_once()
+    zwei.poll_once()
+    assert eins.read_signal("generator_hours") > 1000.0
+    assert zwei.read_signal("generator_hours") == 1000.0
+
+
+def test_a_new_driver_for_the_only_circuit_starts_the_plant_afresh(paths, clock):
+    walls = [WALL]
+    alt = _sim_zeit(paths, clock, walls, aussen_amplitude=0.0, hebel=ABBILDUNG["vaillant_vrc720"][0])
+    clock.advance(12 * SCHRITT)
+    alt.poll_once()
+    assert alt.read_signal("generator_hours") > 1000.0
+    neu = _sim_zeit(paths, clock, walls, aussen_amplitude=0.0)
+    assert neu.read_signal("room_temperature") == 20.0
+    assert neu.read_signal("generator_hours") == 1000.0
