@@ -53,7 +53,7 @@ def test_no_object_is_invalid():
 @pytest.mark.parametrize("change", [
     {"anlage": ""}, {"anlage": 5}, {"anlage": "x" * 65}, {"anlage_name": 5}, {"hebelsatz": None},
     {"verteilsystem": 3}, {"bindung": []}, {"raumfuehler": []}, {"raumfuehler": [5]},
-    {"raumfuehler": [SENSOR] * 9}, {"tagestick": "25:00"}, {"tagestick": None}, {"abo": "vielleicht"},
+    {"raumfuehler": [SENSOR] * 17}, {"tagestick": "25:00"}, {"tagestick": None}, {"abo": "vielleicht"},
     {"abo": None},
 ])
 def test_structure_and_ranges(change):
@@ -175,7 +175,7 @@ def test_a_gateway_shaped_configuration_is_not_a_home_assistant_binding():
 
 @pytest.mark.parametrize(("change", "details"), [
     ({"tagestick": "25:00"}, {"feld": "tagestick", "regel": "format"}),
-    ({"raumfuehler": [SENSOR] * 9}, {"feld": "fuehler", "regel": "anzahl", "min": 0, "max": 8, "anzahl": 9}),
+    ({"raumfuehler": [SENSOR] * 4}, {"feld": "fuehler", "regel": "anzahl", "min": 0, "max": 3, "anzahl": 4}),
     ({"abo": "vielleicht"}, {"feld": "abo", "regel": "unbekannt"}),
 ])
 def test_aufbau_nennt_feld_und_regel(change, details):
