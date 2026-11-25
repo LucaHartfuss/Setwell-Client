@@ -34,6 +34,15 @@ def test_check_47_gruende_des_updaters_sind_gruende_des_vertrags():
     assert _probleme_47(updater, wire.SOFTWARE_ERRORS) == []
 
 
+def test_die_gruende_des_systemwechsels_sind_gruende_des_vertrags_und_die_alten_bleiben():
+    system = (updater.SYSTEM_DOWNLOAD, updater.SYSTEM_INSTALLATION, updater.SYSTEM_FEHLSTART, updater.SYSTEM_UNGESUND,
+              updater.SYSTEM_NETZPROBE)
+    assert system == ("system_download", "system_installation", "system_fehlstart", "system_ungesund", "system_netzprobe")
+    assert set(system) <= set(updater.REASONS) and set(system) <= set(wire.SOFTWARE_ERRORS)
+    # das Container-Update meldet weiter die bisherigen Gruende
+    assert {"manifest_ungueltig", "start_fehlgeschlagen", "ungesund", "server_unerreichbar"} <= set(updater.REASONS)
+
+
 def test_die_werte_der_einstellung_updates_sind_die_des_vertrags():
     from smartheat_host import kanal
 

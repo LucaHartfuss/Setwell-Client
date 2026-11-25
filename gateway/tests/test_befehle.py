@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ from pathlib import Path
 import pytest
 from befehle_sicht import registrierte_befehle
 from configs import SENSOR, THERMOSTAT, bedienung, dokumente_schreiben, konfiguration
+from conftest import ANMELDE_PARAMETER
+from fake_vicare.server import GOOD_CODE
 from fake_z2m import FakeZigbee2Mqtt
 from fakes import FakeBus, SofortHintergrund
 from world import GatewayWorld
@@ -23,6 +26,7 @@ from smartheat_device.hintergrund import HINTERGRUND_NAME
 from smartheat_gateway import befehle
 from smartheat_gateway.drivers.base import DriverError
 from smartheat_gateway.drivers.simulation import SimulationDriver
+from smartheat_gateway.drivers.vicare_cloud.driver import ViCareCloudDriver
 from smartheat_gateway.paths import Paths
 from smartheat_gateway.quota import QuotaExhausted
 from smartheat_gateway.zigbee import ZigbeeMirror
@@ -104,8 +108,14 @@ def test_unbekannte_phase_und_fehlender_treiber_nennen_feld_und_regel(register):
 
 def test_the_gateway_registers_exactly_its_commands(register):
     assert set(befehle.HANDLERS) == {"zigbee_permit_join", "zigbee_devices", "driver_login",
-                                     "inventory", "diagnostics", "sign_off"}
+                                     "inventory", "diagnostics", "sign_off", "neue_identitaet"}
     assert set(befehle.HANDLERS) <= set(wire.COMMANDS) and set(befehle.HANDLERS) <= registrierte_befehle(register)
+
+
+def test_das_gateway_lehnt_neue_identitaet_ab_und_behaelt_seine_identitaet(register):
+    """Nur der Werksreset macht das Gateway zu einem neuen Geraet; der Befehl aendert nichts."""
+    antwort = _run(register, "neue_identitaet", {})
+    assert antwort["ok"] is False and antwort["error"] == {"grund": "nicht_unterstuetzt"}
 
 
 def test_bad_payloads(register):
@@ -517,6 +527,48 @@ def server_calls(server) -> int:
     return len(server.calls)
 
 
+def test_driver_login_begin_returns_only_the_state_hash_and_refuses_foreign_parameters(vicare_kontext):
+    ctx, server, clock = vicare_kontext
+    begin = {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER}
+    done = befehle.driver_login(ctx, begin)
+    assert isinstance(done, Done) and set(done.result) == {"state_hash"}
+    pending = json.loads((ctx.paths.driver_secrets_dir / "vicare.json").read_text())["pending"]
+    assert all(geheim not in str(done.result) for geheim in (pending["verifier"], pending["state"]))
+    for fremd in ({"redirect_uri": "https://evil.test/oauth/callback"}, {"scope": "IoT admin"}):
+        with pytest.raises(DriverError) as abgelehnt:
+            befehle.driver_login(ctx, {**begin, **fremd})
+        assert abgelehnt.value.grund == "login_fehlgeschlagen"
+
+
+def test_driver_login_begin_sends_a_state_hash_that_matches_the_contract_pattern(vicare_kontext):
+    ctx, server, clock = vicare_kontext
+    done = befehle.driver_login(ctx, {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER})
+    assert isinstance(done, Done) and re.fullmatch(wire.STATE_HASH_MUSTER, done.result["state_hash"])
+
+
+@pytest.mark.parametrize("hash_", ["a" * 63, "a" * 65, "A" * 64, "g" * 64, "", None, 7])
+def test_driver_login_begin_with_a_malformed_state_hash_fails_without_sending_it(vicare_kontext, monkeypatch, hash_):
+    ctx, server, clock = vicare_kontext
+    monkeypatch.setattr(ViCareCloudDriver, "login_begin", lambda self, params: {"state_hash": hash_})
+    ergebnis = befehle.driver_login(ctx, {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER})
+    assert ergebnis == Failed("login_fehlgeschlagen")
+
+
+def test_driver_login_finish_with_a_wrong_code_or_without_an_open_login_is_refused(vicare_kontext):
+    ctx, server, clock = vicare_kontext
+    finish = {"phase": "finish", "driver_id": "vicare_cloud", "code": "falsch"}
+    with pytest.raises(DriverError) as ohne_begin:  # die Anmeldung des Fixtures ist abgeschlossen, keine offen
+        befehle.driver_login(ctx, finish)
+    assert ohne_begin.value.grund == "login_fehlgeschlagen"
+    befehle.driver_login(ctx, {"phase": "begin", "driver_id": "vicare_cloud", **ANMELDE_PARAMETER})
+    with pytest.raises(DriverError) as falsch:
+        befehle.driver_login(ctx, finish)
+    assert falsch.value.grund == "login_fehlgeschlagen" and "falsch" not in str(falsch.value)
+    with pytest.raises(DriverError) as verbraucht:  # die offene Anmeldung ist mit dem Fehlversuch verbraucht
+        befehle.driver_login(ctx, {**finish, "code": GOOD_CODE})
+    assert verbraucht.value.grund == "login_fehlgeschlagen"
+
+
 def test_inventory_samples_every_15_minutes_and_returns_the_series(vicare_kontext):
     ctx, server, clock = vicare_kontext
     outcome = befehle.inventory(ctx, {"stunden": 1})
@@ -892,7 +944,7 @@ def test_a_blocking_login_does_not_stall_the_device_thread_and_keeps_its_contrac
 
     gestartet, frei = _blockieren(
         monkeypatch, "smartheat_gateway.drivers.vicare_cloud.driver.ViCareCloudDriver.login_finish", abgelehnt)
-    payload = {"phase": "finish", "driver_id": "vicare_cloud", "code": "abc", "redirect_uri": "https://portal.test/cb"}
+    payload = {"phase": "finish", "driver_id": "vicare_cloud", "code": "abc"}
     _geraete_thread_arbeitet_weiter(world, gestartet, lambda: _befehl(world, "c-login", "driver_login", payload))
     assert _ergebnisse(world, command_id="c-login") == []
     frei.set()

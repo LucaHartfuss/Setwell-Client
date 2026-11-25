@@ -39,10 +39,12 @@ MAX_ZIELE = 10
 MINDEST_INTEGRATION_RE = re.compile(
     r"(?=.{1,32}\Z)\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z]{1,16}|\.dev\d{1,6})?", re.ASCII)
 #: Felder der Anlage im Ereignis und Felder eines Kreises: die Kreisfelder der Laufzeit plus die lokalen.
-LOKAL_KREIS_FIELDS = ("name", "raum_soll", "raum_ist", "einlernphase_tag", "testphase_bis", "befunde")
+LOKAL_KREIS_FIELDS = ("name", "raum_soll", "raum_ist", "einlernphase_tag", "testphase_bis", "befunde", "abwesend")
 EVENT_FIELDS = (*status.ANLAGE_FELDER, *GERAET_FIELDS, "kreise")
 KREIS_EVENT_FIELDS = ("kreis", *LOKAL_KREIS_FIELDS, *status.KREIS_FELDER)
 KONFIGURATION_ABGELEHNT = "konfiguration_abgelehnt"
+#: Lokaler Hinweis (nicht in `wire.MELDUNGEN`): Away aus HA nicht uebernommen, mit festem Grund als Parameter.
+ABWESEND_ABGELEHNT = "abwesend_abgelehnt"
 #: HA nicht erreichbar: so lange Pause bis zum naechsten Versuch des Takts (wie discovery.RETRY_SECONDS: Log nicht fuellen).
 WIEDERHOLEN_SECONDS = 60
 #: Zustaende des Geraets, die einen Hinweis tragen, mit dem Code der Meldung (update_noetig: siehe `meldungen_liste`).
@@ -67,6 +69,9 @@ def meldungen_liste(anzeige: Anzeige, ende: str | None = None, *, kritisch: bool
     abgelehnt = meldungen.aus_dict(anzeige.konfiguration_abgelehnt)
     if abgelehnt is not None:
         result.append(meldung_daten(KONFIGURATION_ABGELEHNT, abgelehnt))
+    abwesend = meldungen.aus_dict(anzeige.abwesend_abgelehnt)
+    if abwesend is not None:
+        result.append(meldung_daten(ABWESEND_ABGELEHNT, abwesend))
     if anzeige.zustand == "update_noetig":
         result.append(meldung_daten("update_noetig", meldungen.update_noetig(kritisch=kritisch, ende=ende)))
     if anzeige.zustand in ZUSTAND_MELDUNGEN:
@@ -109,10 +114,34 @@ def _push_regeln(wert) -> dict[str, int]:
     return {feld: getattr(regeln, feld) for feld in PUSH_REGELN_FELDER}
 
 
+def _abwesend(wert) -> dict | None:
+    """Abwesenheit eines Kreises im Ereignis: genau `bis` (Zeitpunkt als Text) und `temp` (Zahl), sonst None; was der
+    Bedienung sonst anhaengt (etwa `aufheizen_ab`) geht nicht hinaus."""
+    if not isinstance(wert, Mapping):
+        return None
+    bis, temp = wert.get("bis"), _zahl(wert.get("temp"))
+    if not isinstance(bis, str) or not bis or temp is None:
+        return None
+    return {"bis": bis, "temp": temp}
+
+
+def abwesend_aus_bedienung(bedienung: Callable[[], Mapping | None]) -> Callable[[int], Mapping | None]:
+    """Rueckruf fuer `lokale_sicht`: das Feld `abwesend` des Kreises aus dem Bedienungs-Dokument, nur im Modus `abwesend`
+    (sonst gilt keine Abwesenheit, ein Rest im Feld zaehlt nicht)."""
+    def lesen(kreis: int) -> Mapping | None:
+        dokument = bedienung()
+        for eintrag in (dokument.get("kreise") if isinstance(dokument, Mapping) else None) or ():
+            if isinstance(eintrag, Mapping) and eintrag.get("kreis") == kreis and not isinstance(eintrag.get("kreis"), bool):
+                return eintrag.get("abwesend") if eintrag.get("modus") == "abwesend" else None
+        return None
+    return lesen
+
+
 def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[int], float | None],
                  raum_ist: Callable[[int], float | None], anzeige: Callable[[], Mapping | None],
                  kritisch_ende: Callable[[list[int]], str | None] | None = None, *,
-                 update_noetig_kritisch: Callable[[], bool]) -> Callable[[], dict]:
+                 update_noetig_kritisch: Callable[[], bool],
+                 abwesend: Callable[[int], Mapping | None] | None = None) -> Callable[[], dict]:
     """Die lokale Sicht des Ereignisses: Anlagenname, Version des Konfigurationsdokuments und dessen kritische
     Mindestversion der Integration (beide null ohne Dokument bzw. ohne gueltigen Wert) und je Kreis der Konfiguration
     Name, Soll (Soll-Speicher), Ist des Raums und die Felder des Anzeige-Dokuments (heute ohne Befund: null/null/[]).
@@ -139,6 +168,7 @@ def lokale_sicht(konfiguration: Callable[[], Dokument | None], soll: Callable[[i
                 "name": name if isinstance(name, str) else None, "raum_soll": _zahl(soll(nummer)),
                 "raum_ist": _zahl(raum_ist(nummer)), "einlernphase_tag": angezeigt.get("einlernphase_tag"),
                 "testphase_bis": angezeigt.get("testphase_bis"), "befunde": list(befunde) if isinstance(befunde, list) else [],
+                "abwesend": _abwesend(abwesend(nummer)) if abwesend is not None else None,
             }
         name = konf.get("anlage_name") if isinstance(konf, Mapping) else None
         dienste, kategorien = _ziele(konf)
@@ -160,7 +190,7 @@ class GeraetStatus:
     Ausfall (nur die Fehlerart), eine Info-Zeile bei der Erholung. Nach einem Fehler sendet der naechste erlaubte
     Versuch den aktuellen Stand, auch wenn er sich nicht geaendert hat."""
 
-    def __init__(self, ha_api, geraet_id: str, lokal: Callable[[], Mapping], *,
+    def __init__(self, ha_api, geraet_id: Callable[[], str], lokal: Callable[[], Mapping], *,
                  laufzeit_merken: Callable[[dict], None], clock: Callable[[], float] = time.monotonic) -> None:
         """`lokal` liefert die lokale Sicht (`lokale_sicht`); es wird ausserhalb der Zustandssperre gerufen."""
         self._ha, self._geraet_id, self._lokal, self._merken = ha_api, geraet_id, lokal, laufzeit_merken
@@ -203,7 +233,7 @@ class GeraetStatus:
                for feld in LOKAL_KREIS_FIELDS},
             **{feld: self._laufzeit_kreise.get(nummer, {}).get(feld) for feld in status.KREIS_FELDER},
         } for nummer in sorted({*lokale_kreise, *self._laufzeit_kreise})]
-        return {**self._laufzeit, "schema": EVENT_SCHEMA, "geraet_id": self._geraet_id,
+        return {**self._laufzeit, "schema": EVENT_SCHEMA, "geraet_id": self._geraet_id(),
                 "geraet_zustand": anzeige.zustand if anzeige is not None else "startet",
                 "server_verbunden": anzeige.server_ok if anzeige is not None else False,
                 "meldungen": (meldungen_liste(anzeige, lokal.get("update_noetig_ende"),

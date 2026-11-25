@@ -77,6 +77,16 @@ KONSTANTEN = {
     "Betriebsarten Bedienbereich gleich Wunsch-Eingang": (safety.BEDIENBEREICH_MAX_C, wire.RAUM_SOLL_MAX),
     "Betriebsarten Mindestdauer der Phase": (safety.PHASE_MINDESTDAUER, timedelta(minutes=60)),
     "Betriebsarten Leerstand hoechstens": (safety.LEERSTAND_HOECHSTDAUER, timedelta(days=365)),
+    "Betriebsarten Absenkung hoechstens (K)": (safety.ABSENKUNG_MAX_K, 5.0),
+    "Betriebsarten Absenkung Schritt (K)": (safety.ABSENKUNG_SCHRITT_K, 0.5),
+    "Betriebsarten Absenkung mindestens (K)": (safety.ABSENKUNG_MIN_K, 0.0),
+    "Betriebsarten Absenkung gleich Vertrag": (
+        (safety.ABSENKUNG_MIN_K, safety.ABSENKUNG_MAX_K, safety.ABSENKUNG_SCHRITT_K),
+        (wire.ABSENKUNG_K_MIN, wire.ABSENKUNG_K_MAX, wire.ABSENKUNG_K_STEP)),
+    "Betriebsarten Uebersteuerung der Leerstandsphase hoechstens": (
+        safety.UEBERSTEUERUNG_LEERSTAND_HOECHSTDAUER, timedelta(hours=4)),
+    "Betriebsarten Leerstand: Aenderungen bis zum Beenden": (safety.LEERSTAND_AENDERUNGEN_BEENDEN, 3),
+    "Betriebsarten Leerstand: Fenster dieser Aenderungen": (safety.LEERSTAND_AENDERUNGEN_FENSTER, timedelta(hours=24)),
     "Betriebsarten Abwesenheits-Vorschlag": (
         dict(safety.ABWESENHEIT_VORSCHLAG_C), {"Heizkoerper": 17.0, "Fussbodenheizung": 19.0}),
 }
@@ -110,6 +120,22 @@ def test_temperaturgrenzen_der_betriebsarten(pruefung, grenze, rand):
     """Die Grenze gilt, ein halbes Grad dahinter nicht."""
     assert pruefung(grenze), R4
     assert not pruefung(grenze - 0.5 if rand == "unten" else grenze + 0.5), R4
+
+
+@pytest.mark.parametrize(("tiefe", "gueltig"), [
+    (0, True), (0.0, True), (0.5, True), (4.5, True), (5, True), (5.0, True),
+    (5.5, False), (6, False), (-0.5, False), (-1, False), (0.25, False), (4.75, False),
+    (math.nan, False), (math.inf, False), (-math.inf, False), (True, False), (False, False), ("2", False), (None, False),
+])
+def test_absenkung_von_0_bis_5_k_in_halben_schritten(tiefe, gueltig):
+    assert safety.absenkung_k_gueltig(tiefe) is gueltig, f"{R4}: {tiefe!r}"
+
+
+@pytest.mark.parametrize(("wunsch", "tiefe", "erwartet"), [
+    (22.0, 5.0, 17.0), (22.0, 5.5, 17.0), (22.0, 10.0, 17.0), (25.0, 30.0, 20.0), (25.0, 5.0, 20.0),
+])
+def test_die_absenktemperatur_geht_nie_tiefer_als_5_k_unter_den_wunsch(wunsch, tiefe, erwartet):
+    assert safety.absenktemperatur(wunsch, tiefe) == erwartet, R4
 
 
 def test_abwesend_bis_hoechstens_365_tage_voraus():

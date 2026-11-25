@@ -10,6 +10,7 @@ import bindung_beispiele
 import pytest
 from bindung_beispiele import VIESSMANN_VICARE_BINDING
 from configs import SENSOR, THERMOSTAT, bedienung, dokumente_schreiben, konfiguration, kreis_bindung, leer
+from conftest import ANMELDE_PARAMETER
 from fake_vicare.server import GOOD_CODE, FakeVicare
 from fakes import FakeBus
 from geraet_fakes import geraet_fuer
@@ -277,8 +278,8 @@ def test_manifest_is_built_after_the_first_poll_so_optional_signals_are_in_it(da
             monkeypatch.setenv(key, value)
         paths = Paths(data_dir)
         login = ViCareCloudDriver(VICARE["parameter"], paths, clock=clock)
-        login.login_begin({"client_id": "c", "redirect_uri": "r"})
-        login.login_finish({"code": GOOD_CODE, "redirect_uri": "r"})
+        login.login_begin(ANMELDE_PARAMETER)
+        login.login_finish({"code": GOOD_CODE})
         host = _host(paths, konfiguration(bindung={"treiber": VICARE, "thermostat": THERMOSTAT}), clock)
         loaded = host.load()
         assert loaded.manifest.refs["flow_temperature"] == "treiber:flow_temperature"
@@ -347,6 +348,30 @@ def test_the_counter_probe_starts_with_a_real_thermostat_and_creates_one_driver(
     assert erzeugt == ["simulation"] and host.driver is loaded.binding
     assert {ref.ref for ref in loaded.config.battery_refs} == {
         f"zigbee:{SENSOR}:battery", f"zigbee:{THERMOSTAT}:battery_low"}
+
+
+def test_the_read_paths_of_the_target_input_follow_the_worker_set_after_the_trigger_source_is_built(
+        data_dir, clock, monkeypatch):
+    """Die Laufzeit setzt die Lesewege am Worker vor dem Trigger, eine andere Reihenfolge darf sie nicht still auf
+    die Vorgabe (keine Betriebsart) festlegen: der Soll-Eingang liest sie erst beim Aufruf."""
+    from smartheat_runtime.worker import RegulationWorker
+    _erzeugte_treiber(monkeypatch)
+    host, _ = _host_mit_z2m(data_dir, clock, konfiguration())
+    loaded = host.load()
+    gebaut = {}
+
+    def _quelle(*args, **kwargs):
+        gebaut.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(host_modul, "BusTriggerSource", _quelle)
+    worker = RegulationWorker(clock)
+    host.trigger_source(loaded.manifest, worker)
+    lage, art, art_trotz_aus = object(), object(), object()
+    worker.geltendes_soll, worker.betriebsart = lambda: lage, lambda: art
+    worker.betriebsart_trotz_aus = lambda: art_trotz_aus
+    weg = gebaut["uebersteuerung"]
+    assert (weg.lage(), weg.betriebsart(), weg.betriebsart_trotz_aus()) == (lage, art, art_trotz_aus)
 
 
 @pytest.mark.parametrize("ohne", ["unbekannt", "ohne_definition"])

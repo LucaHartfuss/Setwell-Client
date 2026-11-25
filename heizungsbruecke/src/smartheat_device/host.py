@@ -54,6 +54,7 @@ class Anzeige:
     hinweise: tuple[dict, ...]  # Befehl hinweis: {key, code, params, stufe}
     meldungen: tuple[dict, ...]  # eigene Meldungen des Geraets (wunsch_begrenzt, soll_quelle_aus): {key, text, code, params, stufe}
     konfiguration_abgelehnt: dict | None  # zuletzt abgelehnte Konfiguration als Meldung {code, params, stufe}
+    abwesend_abgelehnt: dict | None = None  # lokaler Hinweis, wenn Away aus HA nicht uebernommen wurde: {code, params, stufe}
     konto_hinweis: str | None = None  # Maske der Adresse des uebernehmenden Kontos (nur Gateway, nur uebernommen)
 
     @property
@@ -83,7 +84,8 @@ class DeviceHost(Protocol):
 
     def hello_felder(self) -> dict:
         """Felder des hello, die nur der Host ha sendet: auto_update (Schalter fuer automatische Updates) und
-        integration_version, je None = unbekannt. Das Geraet fragt nur den Host ha; das Gateway antwortet {}."""
+        integration_version, je None = unbekannt. Das Gateway antwortet stattdessen mit der Seriennummer des Werks
+        ({"seriennummer": ...}; {} ohne gueltiges Werk, dann baut das Geraet kein hello)."""
         ...
 
     def treiber_pruefen(self, bindung: dict, /) -> dict | None:

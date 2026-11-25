@@ -30,6 +30,8 @@ class Paths:
     anlage_budget = property(lambda self: self.runtime_dir / _ANLAGE_BUDGET)
     abgemeldet = property(lambda self: self.data / "runtime" / "abgemeldet.json")
     werksreset_bereit = property(lambda self: self.data / "werksreset_bereit.json")
+    #: Die Ruecksetzmeldung ist beim Server quittiert; der Host wartet vor dem Loeschen darauf (hoechstens 10 s)
+    werksreset_gemeldet = property(lambda self: self.data / "werksreset_gemeldet.json")
     #: Vermerk des Geraete-Hosts: diese Abmeldung (abgemeldet.json) stammt von einer Reset-Anfrage {seq, ts, anlage}
     werksreset_abmeldung = property(lambda self: self.data / "werksreset_abmeldung.json")
     aufraeumen = property(lambda self: self.data / "aufraeumen.json")

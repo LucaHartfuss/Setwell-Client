@@ -19,12 +19,12 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from smartheat_core import config_check, kreisansicht, meldungen
+from smartheat_core import config_check, dateien, kreisansicht, meldungen, safety
 from smartheat_core.logtext import lesbar
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_core.zeitquelle import echte_epoche, fachliche_epoche
@@ -49,6 +49,21 @@ SERVER_DOWN_SECONDS = 300
 PRUEFUNG_WIEDERHOLEN_SECONDS = 30
 #: Ohne PUBACK geht up/entfernt in diesem Abstand erneut hinaus (der Server nimmt Wiederholungen still hin).
 ENTFERNT_WIEDERHOLUNG_SECONDS = 60
+#: Die Ruecksetzmeldung (up/zurueckgesetzt) ist ein letzter Versuch vor dem Loeschen: sie geht ohne PUBACK in diesem
+#: Abstand erneut hinaus (dieselbe signierte Zeichenfolge) und wird nach RESET_FRIST_SECONDS aufgegeben.
+RESET_WIEDERHOLUNG_SECONDS = 2
+RESET_FRIST_SECONDS = 10
+#: Die Kreise mit lokal beendetem Leerstand (Datei im Geraeteordner).
+LEERSTAND_BEENDET_DATEI = "leerstand-beendet.json"
+#: Gruende des lokalen Hinweises `abwesend_abgelehnt` im Statusereignis an HA (kein Draht-Key, nie eine Meldung an den
+#: Server), wenn Away aus HA nicht uebernommen wurde. Feste Gruende, nie ein Wert: Kreis ohne Bedienung, Rueckkehrzeit, Temperatur, Urheber, Leerstand, Ende ohne Away.
+ABGELEHNT_KREIS = "kreis"
+ABGELEHNT_BIS = "bis"
+ABGELEHNT_TEMP = "temp"
+ABGELEHNT_DURCH = "durch"
+ABGELEHNT_LEERSTAND = "leerstand"
+ABGELEHNT_KEIN_ABWESEND = "kein_abwesend"
+_ZEIT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 #: Down-Topic eines Dokuments -> Dokumentart (wire.DOKUMENT_TOPICS umgekehrt)
 _DOKUMENT_ART = {topic: art for art, topic in wire.DOKUMENT_TOPICS.items()}
 _RUNNING = ("regelt", "abo_inaktiv")
@@ -57,6 +72,17 @@ _FAULT = ("notbetrieb", "datenfehler", "konfigurationsfehler", "zugang_abgelehnt
 #: wie eine startende Laufzeit, kein erfundener Betriebszustand.
 _LAUFZEIT_UNBEKANNT = {"status": "startet"}
 _T = TypeVar("_T")
+#: So lange darf die Anmeldung mit dem neuen Zertifikat dauern (Takt-Uhr); danach faellt das Geraet auf das alte Paar zurueck.
+WECHSEL_SEKUNDEN = 90
+
+
+@dataclass(frozen=True)
+class _Wechsel:
+    """Ein laufender Zertifikatswechsel: das neue Paar steckt im Link, die alten Dateien gelten bis zur Bestaetigung."""
+    identitaet: identity.Identity
+    link: Link
+    abdruck: str
+    frist: float
 
 
 def derive_zustand(*, gesperrt: bool, update_noetig: bool, server_seen: bool, server_down_seconds: float | None,
@@ -115,28 +141,41 @@ class Device:
                  befehl_fehler: Callable[[Exception], commands.Failed | None] = lambda error: None) -> None:
         self.host = host
         self._dir = data_dir / DEVICE_DIR
-        self._clock, self._wall = clock, wall
+        self._clock, self._wall, self._echt = clock, wall, echt
         # wall ist die fachliche Zeit der Nachrichten; die Signaturzeit des Bootstraps prueft der Server gegen die echte
         self._client_for = bootstrap_client or (
             lambda ident: bootstrap.BootstrapClient(bootstrap_url, ident, now=echt))
         self._link_factory = link_factory
         self._inbox: queue.Queue = queue.Queue()
         self._stop = threading.Event()
+        # Ein beim Neustart liegengebliebener Wechsel zaehlt nicht: es gilt das alte Paar, der Befehl endet als intern.
+        bootstrap.erneuerung_verwerfen(self._dir)
+        identity.fortsetzen(self._dir)  # ein vor dem Absturz begonnenes Verwerfen der Identitaet zu Ende fuehren
+        self._wechsel: _Wechsel | None = None
+        self._identitaet_erneuern = False  # das Verwerfen ist geschehen, der Takt wechselt Link und Identitaet
         self.identity = identity.load_or_create(self._dir)
         self.boot_id = identity.new_boot_id()
-        self.documents = DocumentStore(self._dir, host=host.host, software_version=host.version,
-                                       treiber_pruefen=host.treiber_pruefen,
-                                       vor_speichern=host.konfiguration_vorbereiten)
+        self.documents = self._dokumente_laden()
         self.hinweise = commands.Hinweise(self._dir)
         self.befehle = commands.CommandRegister(self._dir, self._ergebnis_senden, send_inventory=self._inventur_senden,
                                                 clock=clock, uebersetzen=befehl_fehler)
         self.befehle.register("hinweis", self.hinweise.handler)
         self.befehle.register("new_claim_code", self._new_claim_code)
         self.befehle.register("claim_state", self._claim_state)
+        self.befehle.register("zertifikat_erneuern", self._zertifikat_erneuern)
+        self.befehle.register("neue_identitaet", self._neue_identitaet)  # das Gateway ersetzt ihn (nicht_unterstuetzt)
         # Die Wegpruefung liest an der Anbindung der Anlage; bis ein Host sie kann, lehnt das Geraet sie ab.
         self.befehle.register("weg_pruefen", lambda _nutzlast: commands.Failed("nicht_unterstuetzt"))
         host.befehle_eintragen(self.befehle)
         self.wunsch_puffer = wish.WunschPuffer(self._dir, clock)
+        #: Away aus HA je Kreis, bis eine neue Bedienung des Servers kommt: {bis, temp, aufheizen_ab} oder None (beendet).
+        #: Nur im Speicher: nach einem Neustart ohne Server gilt wieder der Plan (die sichere Richtung).
+        self._abwesend_lokal: dict[int, dict | None] = {}
+        self._abwesend_temp: dict[int, float] = {}  # zuletzt gewaehlte Abwesenheitstemperatur je Kreis
+        self._abwesend_sperre = threading.Lock()  # Host-Thread (Rueckrufe) und Geraete-Thread
+        #: Kreise, deren Leerstand der Kunde am Thermostat beendet hat und der Server noch nicht bestaetigt hat; in einer Datei,
+        #: damit ein Neustart ohne Server nicht in den Leerstand zurueckfaellt (die dritte Aenderung hat ihn beendet).
+        self._leerstand_beendet: set[int] = self._leerstand_beendet_laden()
         self._bootstrap = bootstrap.Bootstrap(
             self._dir, lambda: self._client_for(self.identity), register_args=self._register_args,
             uhr_synchron=self._uhr_synchron, identity=lambda: self.identity, clock=clock)
@@ -147,8 +186,10 @@ class Device:
         self._rettung = False
         self._code_frei_ab = 0.0  # fruehestens dann meldet _code_erneuern wieder (Takt-Uhr)
         self._code_fehler = 0
+        self._code_angenommen = False  # der Server kennt den Hash des Codes im Speicher (nach register bzw. Annahme)
         self._kanaele: dict[int, RuntimeChannel] = {}  # je Kreis ein Kanal ueber denselben Link
         self._eigene: dict[str, meldungen.Meldung] = {}  # eigene Meldungen des Geraets: key -> Meldung
+        self._abwesend_hinweis: meldungen.Meldung | None = None  # lokal, nie an den Server (nur im Statusereignis an HA)
         self._meldungen: dict[str, dict] = {}  # offene Meldungen (Geraet und Laufzeit)
         self._meldungen_neu: dict[str, dict] = {}  # geaendert, noch nicht gesendet
         self._meldungen_at: float | None = None
@@ -156,6 +197,12 @@ class Device:
         self._status_at: float | None = None
         self._entfernt_mid: int | None = None  # mid des gesendeten up/entfernt, solange das PUBACK aussteht
         self._entfernt_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung von up/entfernt
+        self._reset: dict | None = None  # die gebaute Ruecksetzmeldung; einmal je Lauf, nie neu signiert
+        self._reset_offen = False  # solange sie noch hinausgehen soll (bis PUBACK oder Fristende)
+        self._reset_zugestellt = False  # der Server hat sie quittiert (PUBACK)
+        self._reset_ende = 0.0  # Fristende (Takt-Uhr)
+        self._reset_mid: int | None = None  # mid der gesendeten Ruecksetzmeldung, solange das PUBACK aussteht
+        self._reset_frei_ab = 0.0  # frueheste Uhrzeit (Takt-Uhr) fuer die naechste Sendung
         #: Nach hello muss ein Status hinaus; gescheitert der Rueckruf dabei, bleibt der Merker, bis
         #: einer gesendet ist (sonst unterdrueckten Gleichheit und Mindestabstand ihn im naechsten Takt).
         self._status_erzwingen = False
@@ -275,7 +322,168 @@ class Device:
         return self.documents.inhalt(KONFIGURATION)
 
     def bedienung(self) -> dict | None:
-        return self.documents.inhalt(BEDIENUNG)
+        """Die Bedienung, wie sie jetzt gilt: das Dokument des Servers, darueber das Away, das HA lokal gesetzt oder
+        beendet hat, und das Ende des Leerstands am Thermostat, solange der Server sie noch nicht bestaetigt hat. Das
+        gespeicherte Dokument bleibt unveraendert."""
+        inhalt = self.documents.inhalt(BEDIENUNG)
+        with self._abwesend_sperre:
+            lokal = dict(self._abwesend_lokal)
+            leerstand_beendet = set(self._leerstand_beendet)
+        if (not lokal and not leerstand_beendet) or not isinstance(inhalt, dict) \
+                or not isinstance(kreise := inhalt.get("kreise"), list):
+            return inhalt
+        return {**inhalt, "kreise": [self._mit_abwesend(self._ohne_leerstand(eintrag, leerstand_beendet), lokal)
+                                     for eintrag in kreise]}
+
+    @staticmethod
+    def _ohne_leerstand(eintrag, beendet: set[int]):
+        nummer = eintrag.get("kreis") if isinstance(eintrag, dict) else None
+        if type(nummer) is not int or nummer not in beendet or eintrag.get("modus") != "leerstand":
+            return eintrag
+        return {**eintrag, "modus": "manuell", "leerstand": None}
+
+    @staticmethod
+    def _mit_abwesend(eintrag, lokal: dict[int, dict | None]):
+        nummer = eintrag.get("kreis") if isinstance(eintrag, dict) else None
+        if type(nummer) is not int or nummer not in lokal:
+            return eintrag
+        abwesend = lokal[nummer]
+        if abwesend is None:
+            return {**eintrag, "modus": "manuell", "abwesend": None}
+        return {**eintrag, "modus": "abwesend", "abwesend": dict(abwesend)}
+
+    def _leerstand_beendet_laden(self) -> set[int]:
+        roh = dateien.lesen_json(self._dir / LEERSTAND_BEENDET_DATEI)
+        if not isinstance(roh, list):
+            return set()
+        return {kreis for kreis in roh if type(kreis) is int and wire.KREIS_MIN <= kreis <= wire.KREIS_MAX}
+
+    def _leerstand_beendet_speichern(self) -> None:
+        """Unter der Sperre aufrufen. Der Stand im Speicher gilt zuerst und immer: ein Speicherfehler (Datentraeger voll
+        oder nur lesbar) darf weder den Wunsch an den Server noch die Verarbeitung eines neuen Dokuments verhindern. Nach
+        einem Neustart gilt dann der Stand der Datei: ein neues Ende fehlt (der Leerstand des Servers gilt wieder), ein
+        Zuruecksetzen fehlt (das alte Ende gilt bis zum naechsten Dokument des Servers weiter)."""
+        try:
+            dateien.schreiben_json(self._dir / LEERSTAND_BEENDET_DATEI, sorted(self._leerstand_beendet),
+                                   modus=dateien.LESBAR)
+        except OSError as exc:
+            logger.warning("Ende des Leerstands nicht gespeichert (%s)", type(exc).__name__)
+
+    def _kreis_eintrag(self, kreis: int) -> dict | None:
+        inhalt = self.documents.inhalt(BEDIENUNG)
+        kreise = inhalt.get("kreise") if isinstance(inhalt, dict) else None
+        for eintrag in kreise if isinstance(kreise, list) else ():
+            if isinstance(eintrag, dict) and type(eintrag.get("kreis")) is int and eintrag["kreis"] == kreis:
+                return eintrag
+        return None
+
+    def abwesend_setzen(self, kreis: int, bis: datetime, temp: float | None, durch: str | None) -> str | None:
+        """Away aus HA (Host-Thread): wirkt sofort und ohne Server in der Planrechnung und geht als Bedienwunsch mit
+        Herkunft `ha` zum Server. `temp` None: der zuletzt gewaehlte Wert des Kreises. Rueckgabe: None (angenommen) oder
+        der feste Grund der Ablehnung (ABGELEHNT_*), nie ein Wert."""
+        try:
+            wish.pruefen_herkunft("ha", durch)
+            wish.pruefen_kreis(kreis)
+        except ValueError:
+            return ABGELEHNT_DURCH if durch is not None and durch not in wire.DURCH else ABGELEHNT_KREIS
+        eintrag = self._kreis_eintrag(kreis)
+        if eintrag is None:
+            return ABGELEHNT_KREIS
+        if eintrag.get("modus") == "leerstand":
+            return ABGELEHNT_LEERSTAND
+        if not isinstance(bis, datetime) or not safety.abwesend_bis_gueltig(bis, datetime.fromtimestamp(self._wall(), UTC)):
+            return ABGELEHNT_BIS
+        with self._abwesend_sperre:
+            wert = temp if temp is not None else self._abwesend_temp.get(kreis, eintrag.get("abwesend_temp_standard"))
+            if isinstance(wert, bool) or not isinstance(wert, int | float) or not safety.abwesend_temperatur_gueltig(wert):
+                return ABGELEHNT_TEMP
+            abwesend = {"bis": bis.astimezone(UTC).strftime(_ZEIT_FORMAT), "temp": float(wert), "aufheizen_ab": None}
+            self._abwesend_lokal[kreis] = abwesend
+            self._abwesend_temp[kreis] = float(wert)
+        self._inbox.put(("abwesend", kreis, dict(abwesend), durch))
+        return None
+
+    def abwesend_beenden(self, kreis: int, durch: str | None) -> str | None:
+        """Ende von Away aus HA (Host-Thread): Rueckgabe wie bei abwesend_setzen; ohne laufendes Away ABGELEHNT_KEIN_ABWESEND."""
+        try:
+            wish.pruefen_herkunft("ha", durch)
+            wish.pruefen_kreis(kreis)
+        except ValueError:
+            return ABGELEHNT_DURCH if durch is not None and durch not in wire.DURCH else ABGELEHNT_KREIS
+        eintrag = self._kreis_eintrag(kreis)
+        if eintrag is None:
+            return ABGELEHNT_KREIS
+        with self._abwesend_sperre:
+            if kreis in self._abwesend_lokal:
+                laeuft = self._abwesend_lokal[kreis] is not None
+            else:
+                laeuft = eintrag.get("modus") == "abwesend" and isinstance(eintrag.get("abwesend"), dict)
+            if not laeuft:
+                return ABGELEHNT_KEIN_ABWESEND
+            self._abwesend_lokal[kreis] = None
+        self._inbox.put(("abwesend", kreis, None, durch))
+        return None
+
+    def programm_faehig(self) -> bool:
+        """Der Host bietet die Faehigkeit `programm` an (Uebersteuerung und Away als Wunsch); ohne sie bleibt jede
+        Eingabe am Thermostat ein Wunsch."""
+        faehigkeiten, _ = self._host_wert("faehigkeiten", self.host.faehigkeiten)
+        return isinstance(faehigkeiten, dict) and faehigkeiten.get("programm") is True
+
+    def uebersteuerung_senden(self, kreis: int, temp: float, bis: str, herkunft: str | None,
+                              durch: str | None) -> None:
+        """Eine Uebersteuerung der kuehlen Phase (Worker-Thread des Kreises) geht als Bedienwunsch mit programm zum
+        Server; sie gilt lokal schon im Soll-Speicher des Kreises. ValueError (nie mit Wert oder Zeit), wenn die
+        Faehigkeit fehlt oder ein Wert nicht zum Vertrag passt."""
+        if not self.programm_faehig():
+            raise ValueError("Faehigkeit programm nicht angeboten")
+        wish.pruefen_herkunft(herkunft, durch)
+        wish.pruefen_kreis(kreis)
+        if not safety.uebersteuerung_temperatur_gueltig(temp):
+            raise ValueError("Uebersteuerung ausserhalb der Grenzen")
+        try:
+            datetime.strptime(bis, _ZEIT_FORMAT)
+        except (TypeError, ValueError):
+            raise ValueError("Uebersteuerung ohne gueltiges Ende") from None
+        self._inbox.put(("uebersteuerung", kreis, {"temp": float(temp), "bis": bis}, herkunft, durch))
+
+    def betriebsart_beenden(self, kreis: int, art: str, raum_soll: float | None, uebersteuerung: dict | None,
+                            herkunft: str | None, durch: str | None) -> float | None:
+        """Eine Eingabe des Kunden am Thermostat beendet Leerstand oder Away (Worker-Thread des Kreises): ein Bedienwunsch
+        mit der Betriebsart null und dem Wert der Phase danach, `raum_soll` (Rueckgabe: sofort begrenzt) oder eine
+        Uebersteuerung (kuehle Phase danach), in einem Wunsch, denn je Kreis haelt der Puffer nur einen. ValueError
+        (nie mit Wert oder Zeit), wenn die Faehigkeit fehlt oder etwas nicht zum Vertrag passt; dann kommt nichts in die
+        Inbox. Das Ende von Away und das von Leerstand gelten lokal sofort (Away wie bei abwesend_beenden); beide bleiben,
+        bis der Server ein neues Dokument schickt, das Ende des Leerstands auch ueber einen Neustart."""
+        if not self.programm_faehig():
+            raise ValueError("Faehigkeit programm nicht angeboten")
+        if art not in ("leerstand", "abwesend"):
+            raise ValueError("Betriebsart unbekannt")
+        if (raum_soll is None) == (uebersteuerung is None):
+            raise ValueError("Ende einer Betriebsart braucht genau einen Wert")
+        wish.pruefen_herkunft(herkunft, durch)
+        wish.pruefen_kreis(kreis)
+        begrenzt, roh = wish.begrenzen(raum_soll) if raum_soll is not None else (None, None)
+        if uebersteuerung is not None:
+            if not safety.uebersteuerung_temperatur_gueltig(uebersteuerung.get("temp")):
+                raise ValueError("Uebersteuerung ausserhalb der Grenzen")
+            try:
+                datetime.strptime(uebersteuerung.get("bis"), _ZEIT_FORMAT)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                raise ValueError("Uebersteuerung ohne gueltiges Ende") from None
+            uebersteuerung = {"temp": float(uebersteuerung["temp"]), "bis": uebersteuerung["bis"]}
+        with self._abwesend_sperre:
+            if art == "abwesend":
+                self._abwesend_lokal[kreis] = None
+            else:  # der Leerstand endet lokal, bis der Server ein neues Dokument schickt
+                self._leerstand_beendet.add(kreis)
+                self._leerstand_beendet_speichern()  # scheitert die Datei, gilt das Ende bis zum Neustart
+        self._inbox.put(("beenden", kreis, art, begrenzt, roh, uebersteuerung, herkunft, durch))
+        return begrenzt
+
+    def abwesend_abgelehnt(self, grund: str) -> None:
+        """Hinweis `abwesend_abgelehnt` mit dem festen Grund; er schliesst beim naechsten angenommenen Away."""
+        self._inbox.put(("abwesend_hinweis", meldungen.neu("meldung.abwesend_abgelehnt", grund=grund)))
 
     def abo_status(self, kreis: int | None = None) -> str:
         """abo_source der Laufzeit (dokument_config.runtime_config): das Abo des Kreises, ohne Angabe des ersten."""
@@ -312,6 +520,8 @@ class Device:
             konfiguration_abgelehnt=(
                 meldungen.zu_dict(meldungen.neu("meldung.konfiguration_abgelehnt", grund=ablehnung[1]))
                 if ablehnung is not None else None),
+            abwesend_abgelehnt=(meldungen.zu_dict(self._abwesend_hinweis)
+                                if self._abwesend_hinweis is not None else None),
             konto_hinweis=bootstrap.konto_hinweis(self._dir))
 
     # --- Geraete-Thread ---
@@ -340,6 +550,7 @@ class Device:
             elif art == GETRENNT:
                 self._bereit = False
                 self._entfernt_mid = None  # ein neuer Client zaehlt mids wieder ab 1
+                self._reset_mid, self._reset_frei_ab = None, 0.0
                 self.wunsch_puffer.verbindung_verloren()
             elif art == ANMELDUNG_SCHEITERT:
                 self._rettung = True
@@ -351,6 +562,9 @@ class Device:
                     if ok and mid == self._entfernt_mid:
                         self._entfernt_mid = None
                         self._host_wert("entfernen_erledigt", self.host.entfernen_erledigt)
+                    if ok and mid == self._reset_mid:
+                        self._reset_offen, self._reset_mid = False, None
+                        self._reset_zugestellt = True
                     if ok:
                         self.wunsch_puffer.bestaetigt(mid)
                         self.befehle.inventur_bestaetigt(mid)
@@ -358,15 +572,57 @@ class Device:
                         self.wunsch_puffer.abgelehnt(mid)
         elif quelle == "wunsch":
             self._wunsch(*item[1:])
+        elif quelle == "abwesend":
+            self._abwesend_wunsch(*item[1:])
+        elif quelle == "uebersteuerung":
+            self._uebersteuerung_wunsch(*item[1:])
+        elif quelle == "beenden":
+            self._beenden_wunsch(*item[1:])
         elif quelle == "eigene":
             self._eigene_meldung(item[1], item[2])
+        elif quelle == "abwesend_hinweis":
+            self._abwesend_hinweis = item[1]
         elif quelle == "meldung":
             self._meldung_merken(item[1])
         elif quelle == "aufgabe":
             item[1]()
+        elif quelle == "reset_melden":
+            self._reset_vormerken()
+
+    def _neue_identitaet(self, payload: dict) -> commands.Outcome:
+        """Befehl neue_identitaet (Server, nach der Freigabe): Schluessel, Zertifikat, Endpunkt und Status werden
+        verworfen (Rastung und Sicherung bleiben). Das Ergebnis geht noch ueber den alten Link hinaus; im naechsten Takt
+        folgt die Registrierung als neues Geraet mit neuem Schluessel."""
+        if self._wechsel is not None:
+            return commands.Failed("intern")
+        identity.verwerfen(self._dir)
+        self._identitaet_erneuern = True
+        return commands.Done({})
+
+    def _dokumente_laden(self) -> DocumentStore:
+        return DocumentStore(self._dir, host=self.host.host, software_version=self.host.version,
+                             treiber_pruefen=self.host.treiber_pruefen, vor_speichern=self.host.konfiguration_vorbereiten)
+
+    def _identitaet_wechseln(self) -> None:
+        self._identitaet_erneuern = False
+        # Dokumente und Wunsch-Puffer des alten Geraets sind verworfen (identity.verwerfen): auch im Speicher gilt das
+        # neue Geraet als nicht eingerichtet, bis der Server sein Dokument schickt.
+        self.documents = self._dokumente_laden()
+        self.wunsch_puffer = wish.WunschPuffer(self._dir, self._clock)
+        link, self.link, self._bereit = self.link, None, False
+        if link is not None:
+            link.stop()
+        self.identity = identity.load_or_create(self._dir)
+        self._code_angenommen, self._code_fehler, self._code_frei_ab = False, 0, 0.0
+        self._rettung = False
+        self._hello_offen = False
+        self._bootstrap.gesperrt = False
+        self._bootstrap.erfolg()
 
     def _takt(self) -> None:
         now = self._clock()
+        if self._identitaet_erneuern:
+            self._identitaet_wechseln()
         if self._rettung:
             if self._bootstrap.faellig():
                 self._retten()
@@ -389,6 +645,7 @@ class Device:
         self._wunsch_senden()
         self._status_senden(now, force=self._status_erzwingen)
         self._entfernt_senden(now)
+        self._reset_senden(now)
         self._meldungen_senden(now)
         self._host_wert("anzeigen", self.host.anzeigen, self.anzeige())  # gescheitert: diese Anzeige entfaellt
 
@@ -410,22 +667,22 @@ class Device:
         if zugang is None:
             if not self._bootstrap.faellig():
                 return
-            if not identity.code_gueltig(self.identity.claim_code):
-                # nie registriert: der Server kennt keinen Hash, die erste Anmeldung meldet gleich den neuen Code
-                self.identity = identity.save_claim_code(self._dir, self.identity, identity.new_claim_code())
             faehigkeiten, gescheitert = self._host_wert("faehigkeiten", self.host.faehigkeiten)
             if gescheitert:
                 return  # Registrierung verschieben, der naechste Takt versucht es erneut (ohne Backoff)
             zugang = self._bootstrap.holen(rettung=False, register_args=self._register_args(faehigkeiten))
             if zugang is None:
                 return
+            # Die erste Anmeldung meldet den Code im Speicher gleich mit; der Server hat ihn mit der Antwort.
+            self._code_angenommen = True
         self._link_starten(zugang)
 
     def _code_erneuern(self) -> None:
-        """Ein Code alter Form ist beim Server nur als Hash bekannt; ein registriertes, nicht uebernommenes Geraet
-        meldet den neuen Code ueber register (neuer_uebernahme_code). Eigene Pause, damit ein erreichbarer Server den
-        Bootstrap-Backoff nicht berührt und ein ausfallender nicht jeden Takt gefragt wird."""
-        if identity.code_gueltig(self.identity.claim_code) or self._clock() < self._code_frei_ab:
+        """Nach jedem Start kennt der Server nur den Hash des Codes vom letzten Start; ein registriertes, nicht
+        uebernommenes Geraet meldet den neuen Code im Speicher ueber register (neuer_uebernahme_code), bis der Server
+        ihn angenommen hat. Eigene Pause, damit ein erreichbarer Server den Bootstrap-Backoff nicht beruehrt und ein
+        ausfallender nicht jeden Takt gefragt wird."""
+        if self._code_angenommen or self._clock() < self._code_frei_ab:
             return
         if bootstrap.device_state(self._dir) == "uebernommen":  # braucht den Code nicht
             self._code_frei_ab = self._clock() + bootstrap.RETRY_MAX_SECONDS
@@ -441,7 +698,7 @@ class Device:
                 bootstrap.RETRY_MAX_SECONDS, bootstrap.RETRY_MIN_SECONDS * 2 ** min(self._code_fehler - 1, 5))
             return
         self._code_fehler = 0
-        if ergebnis != "neu":  # uebernommen oder gesperrt: der Code bleibt alt, also nicht jeden Takt neu fragen
+        if ergebnis != "neu":  # uebernommen oder gesperrt: kein Code beim Server, also nicht jeden Takt neu fragen
             self._code_frei_ab = self._clock() + bootstrap.RETRY_MAX_SECONDS
 
     def _link_starten(self, zugang: bootstrap.Zugang) -> None:
@@ -505,13 +762,14 @@ class Device:
             **self._hello_felder_jetzt())
 
     def _hello_felder_jetzt(self) -> dict:
-        """Die hello-Felder, die nur der Host ha sendet (auto_update, integration_version): None heisst unbekannt
-        (Rueckruf gescheitert oder Wert unbrauchbar). Der Gateway sendet beide Felder nie und fragt den Host nicht."""
-        if self.host.host != "ha":
-            return {}
+        """Die hello-Felder des Hosts. Der Host ha sendet auto_update und integration_version (None heisst unbekannt:
+        Rueckruf gescheitert oder Wert unbrauchbar). Das Gateway sendet nur die Seriennummer des Werks; fehlt sie oder
+        ist sie unbrauchbar, scheitert der Bau des hello laut (der Server verlangt sie)."""
         werte, gescheitert = self._host_wert("hello_felder", self.host.hello_felder)
         if gescheitert or not isinstance(werte, dict):
             werte = {}
+        if self.host.host != "ha":
+            return {"seriennummer": werte.get("seriennummer")}
         auto_update = werte.get("auto_update")
         version = werte.get("integration_version")
         return {"auto_update": auto_update if isinstance(auto_update, bool) else None,
@@ -651,6 +909,12 @@ class Device:
                     bootstrap.device_state_speichern(self._dir, "uebernommen")
                 self._host_rufen("konfiguration_uebernommen", self.host.konfiguration_uebernommen, alt, neu)
             elif art == BEDIENUNG:
+                with self._abwesend_sperre:  # der Server hat gesprochen: sein Dokument gilt wieder allein
+                    self._abwesend_lokal.clear()
+                    self._abwesend_temp.clear()
+                    if self._leerstand_beendet:  # lehnt er das Ende ab, gilt sein Leerstand wieder
+                        self._leerstand_beendet.clear()
+                        self._leerstand_beendet_speichern()
                 self._host_rufen("bedienung_uebernommen", self.host.bedienung_uebernommen, neu)
         if (angebot := angebot_aus(art, body)) is not None:
             # dasselbe Angebot, das der Speicher merkt, auch aus einer abgelehnten Konfiguration (ein Update kann der
@@ -716,11 +980,72 @@ class Device:
         bootstrap.konto_hinweis_speichern(self._dir, hinweis)  # fehlt er, loescht das einen alten (Konto ohne Maske)
         return commands.Done({})
 
+    def _zertifikat_erneuern(self, payload: dict) -> commands.Outcome:
+        """Befehl zertifikat_erneuern: neuer TLS-Schluessel und CSR, Zertifikat vom Server (erneuerung), das neue Paar
+        neben den alten Dateien, die MQTT-Anmeldung damit. Gelingt sie, ersetzt das Paar das alte und das Ergebnis traegt den
+        Abdruck des neuen Zertifikats; sonst werden die neuen Dateien geloescht und das alte Paar verbindet wieder. Nie
+        Schluessel oder PEM im Log."""
+        if self._wechsel is not None or self.link is None or not self._bereit:
+            return commands.Failed("intern")
+        neu = identity.mit_neuem_tls_schluessel(self.identity)
+        try:
+            antwort = self._client_for(neu).certificate(erneuerung=True)
+        except bootstrap.BootstrapError as error:
+            logger.warning("Zertifikatswechsel: kein neues Zertifikat (%s)", type(error).__name__)
+            return commands.Failed("intern")
+        pem = antwort.zugang.certificate_pem
+        if not identity.passt_zum_schluessel(neu, pem):
+            logger.warning("Zertifikatswechsel: das Zertifikat gehoert nicht zum neuen Schluessel")
+            return commands.Failed("intern")
+        abdruck = identity.fingerprint(pem)
+        bootstrap.erneuerung_ablegen(self._dir, neu, pem)
+        self.link.stop()  # dieselbe Client-ID: zwei Verbindungen wuerden sich gegenseitig trennen
+        self.link, self._bereit = None, False
+        link = self._link_factory(neu.device_id, antwort.zugang, identity.tls_key_pem(neu), self._ereignis)
+        try:
+            link.start()
+        except ValueError as error:  # TransportConfigError
+            logger.warning("Zertifikatswechsel: neues Paar nicht verwendbar (%s)", type(error).__name__)
+            bootstrap.erneuerung_verwerfen(self._dir)
+            return commands.Failed("intern")  # der Takt baut den Link mit dem alten Paar neu auf
+        self.link = link
+        frist = self._clock() + WECHSEL_SEKUNDEN
+        self._wechsel = _Wechsel(neu, link, abdruck, frist)
+        return commands.Waiting(self._wechsel_pruefen, frist + 5)
+
+    def _wechsel_pruefen(self) -> commands.Done | commands.Failed | None:
+        wechsel = self._wechsel
+        if wechsel is None:
+            return commands.Failed("intern")
+        link = self.link
+        if link is not None and link is wechsel.link and link.connected and self._bereit:
+            try:
+                bootstrap.erneuerung_uebernehmen(self._dir)
+            except OSError as error:
+                logger.error("Zertifikatswechsel: neues Paar nicht ersetzt (%s)", type(error).__name__)
+                return self._wechsel_abbrechen()
+            self.identity, self._wechsel = wechsel.identitaet, None
+            logger.info("Zertifikatswechsel: das neue Zertifikat gilt")
+            return commands.Done({"fingerprint": wechsel.abdruck})
+        if link is None or link is not wechsel.link or link.connect_failures > 0 or self._clock() > wechsel.frist:
+            logger.warning("Zertifikatswechsel: Anmeldung mit dem neuen Zertifikat gescheitert, das alte gilt weiter")
+            return self._wechsel_abbrechen()
+        return None
+
+    def _wechsel_abbrechen(self) -> commands.Failed:
+        wechsel, self._wechsel = self._wechsel, None
+        if wechsel is not None and self.link is wechsel.link:
+            wechsel.link.stop()
+            self.link, self._bereit = None, False  # der Takt baut den Link mit dem alten Paar neu auf
+        bootstrap.erneuerung_verwerfen(self._dir)
+        return commands.Failed("intern")
+
     def neuer_uebernahme_code(self) -> str:
         """Neuer Uebernahme-Code: erst beim Server melden (register mit neuem Code-Hash; der Server uebernimmt ihn nur
-        fuer ein nicht uebernommenes Geraet), dann speichern. "neu" = gespeichert, "keine_verbindung" = der Server
-        hat den Hash nicht angenommen (der alte Code bleibt), "uebernommen" = das Geraet ist uebernommen. Nur im
-        Geraete-Thread (Befehl new_claim_code, Rueckruf des Hosts); blockiert fuer die Dauer der Anfrage."""
+        fuer ein nicht uebernommenes Geraet), dann gilt er (nur im Speicher, nie in einer Datei). "neu" = angenommen,
+        "keine_verbindung" = der Server hat den Hash nicht angenommen (der bisherige Code bleibt), "uebernommen" = das
+        Geraet ist uebernommen. Nur im Geraete-Thread (Befehl new_claim_code, Rueckruf des Hosts); blockiert fuer die
+        Dauer der Anfrage."""
         code = identity.new_claim_code()
         kandidat = replace(self.identity, claim_code=code)
         try:
@@ -731,8 +1056,15 @@ class Device:
         bootstrap.device_state_speichern(self._dir, antwort.device_state)
         if antwort.device_state != "nicht_uebernommen":
             return "uebernommen"
-        self.identity = identity.save_claim_code(self._dir, self.identity, code)
+        self.identity = kandidat
+        self._code_angenommen = True
         return "neu"
+
+    @property
+    def uebernahme_code(self) -> str | None:
+        """Der Uebernahme-Code, sobald der Server dessen Hash kennt, sonst None: kein Host zeigt einen Code, der beim
+        Server noch nicht gilt."""
+        return self.identity.claim_code if self._code_angenommen else None
 
     def _new_claim_code(self, payload: dict) -> commands.Outcome:
         """Befehl new_claim_code (HA und Server): dieselbe Methode wie der Knopfdruck des Gateways."""
@@ -743,14 +1075,62 @@ class Device:
             return commands.Failed("bereits_uebernommen")
         return commands.Done({})
 
+    def _wunsch_puffern(self, neu: wish.Wunsch) -> None:
+        """Der Puffer haelt je Kreis einen Wunsch: ein Folgewunsch uebernimmt das noch nicht bestaetigte Ende des Leerstands
+        (`leerstand: null`) des alten, statt es zu ueberschreiben."""
+        alt = self.wunsch_puffer.wunsch(neu.kreis)
+        if (alt is not None and alt.programm and "leerstand" in alt.programm and alt.programm["leerstand"] is None
+                and "leerstand" not in (neu.programm or {})):
+            neu = replace(neu, programm={**(neu.programm or {}), "leerstand": None})
+        self.wunsch_puffer.setzen(neu)
+
     def _wunsch(self, begrenzt: float, roh: float | None, herkunft: str | None, durch: str | None, kreis: int) -> None:
         # herkunft, durch und kreis hat Device.wunsch schon geprueft (wish.pruefen_herkunft, wish.pruefen_kreis)
         neu = wish.neu(begrenzt, roh, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
                        uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall())
-        self.wunsch_puffer.setzen(neu)
+        self._wunsch_puffern(neu)
         self.documents.mark_dirty()
         meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
         self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
+        self._wunsch_senden()
+
+    def _abwesend_wunsch(self, kreis: int, abwesend: dict | None, durch: str | None) -> None:
+        """Away (Objekt) oder sein Ende (None) als Bedienwunsch mit Herkunft ha; ein angenommenes Away schliesst den
+        Hinweis einer frueheren Ablehnung."""
+        neu = wish.neu(None, None, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
+                       uhr_synchron=self._uhr_synchron() is True, herkunft="ha", durch=durch, wall=self._wall(),
+                       programm={"abwesend": abwesend})
+        self._wunsch_puffern(neu)
+        self.documents.mark_dirty()
+        self._abwesend_hinweis = None
+        self._wunsch_senden()
+
+    def _uebersteuerung_wunsch(self, kreis: int, uebersteuerung: dict, herkunft: str | None, durch: str | None) -> None:
+        """Die Uebersteuerung der kuehlen Phase als Bedienwunsch (werte.uebersteuerung) mit der Herkunft der Eingabe."""
+        neu = wish.neu(None, None, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
+                       uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall(),
+                       programm={"uebersteuerung": uebersteuerung})
+        self._wunsch_puffern(neu)
+        self.documents.mark_dirty()
+        self._wunsch_senden()
+
+    def _beenden_wunsch(self, kreis: int, art: str, begrenzt: float | None, roh: float | None,
+                        uebersteuerung: dict | None, herkunft: str | None, durch: str | None) -> None:
+        """Das Ende von Leerstand oder Away als ein Bedienwunsch: die Betriebsart null, dazu der Wunsch oder die
+        Uebersteuerung der Phase danach."""
+        programm: dict = {art: None}
+        if uebersteuerung is not None:
+            programm["uebersteuerung"] = uebersteuerung
+        neu = wish.neu(begrenzt, roh, kreis=kreis, basis_version=self.documents.version(BEDIENUNG),
+                       uhr_synchron=self._uhr_synchron() is True, herkunft=herkunft, durch=durch, wall=self._wall(),
+                       programm=programm)
+        self._wunsch_puffern(neu)
+        self.documents.mark_dirty()
+        if art == "abwesend":
+            self._abwesend_hinweis = None
+        if begrenzt is not None:
+            meldung = wish.begrenzt_meldung(roh, begrenzt, herkunft) if roh is not None else None
+            self._eigene_meldung(wish.BEGRENZT_KEY, meldung)
         self._wunsch_senden()
 
     def _wunsch_senden(self) -> None:
@@ -792,6 +1172,46 @@ class Device:
         self._entfernt_mid = self._publish("up/entfernt", body)
         if self._entfernt_mid is not None:
             self._entfernt_frei_ab = now + ENTFERNT_WIEDERHOLUNG_SECONDS
+
+    def reset_melden(self) -> None:
+        """Der Host loescht das Geraet gleich (Werksreset): eine letzte, mit dem Geraeteschluessel signierte Meldung
+        up/zurueckgesetzt an den Server, damit er das Geraet sperrt. Hoechstens RESET_FRIST_SECONDS lang, aus jedem
+        Thread; ein zweiter Aufruf aendert nichts. Kommt die Meldung nicht durch, loescht der Host trotzdem."""
+        self._inbox.put(("reset_melden",))
+
+    @property
+    def reset_zugestellt(self) -> bool:
+        """Der Server hat die Ruecksetzmeldung quittiert (PUBACK); aus jedem Thread lesbar. Der Host wartet vor dem
+        Loeschen darauf (hoechstens seine Frist)."""
+        return self._reset_zugestellt
+
+    def _reset_vormerken(self) -> None:
+        if self._reset is not None:
+            return
+        try:
+            ts = str(int(self._echt()))  # echte Zeit wie im Bootstrap: der Server prueft die Signatur gegen seine Uhr
+            signatur = identity.sign(self.identity.signing_key, *wire.ZURUECKGESETZT_SIGNATUR, int(ts),
+                                     self.identity.device_id.encode())
+            self._reset = nachrichten.zurueckgesetzt(ts=ts, signatur=signatur)
+        except Exception as error:  # nie ein Wert im Log (Regel 6)
+            logger.error("Ruecksetzmeldung nicht gebaut (%s)", type(error).__name__)
+            return
+        self._reset_offen = True
+        self._reset_ende = self._clock() + RESET_FRIST_SECONDS
+
+    def _reset_senden(self, now: float) -> None:
+        """Nach hello hinaus, ohne PUBACK im Abstand RESET_WIEDERHOLUNG_SECONDS erneut; nach der Frist wird aufgegeben."""
+        if not self._reset_offen or self._reset is None:
+            return
+        if now >= self._reset_ende:
+            self._reset_offen = False
+            logger.warning("Ruecksetzmeldung nicht zugestellt, Frist abgelaufen")
+            return
+        if not self._bereit or now < self._reset_frei_ab:
+            return
+        self._reset_mid = self._publish("up/zurueckgesetzt", self._reset)
+        if self._reset_mid is not None:
+            self._reset_frei_ab = now + RESET_WIEDERHOLUNG_SECONDS
 
     def _eigene_meldung(self, key: str, meldung: meldungen.Meldung | None) -> None:
         if key not in wire.MELDUNGEN:

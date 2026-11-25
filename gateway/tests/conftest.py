@@ -26,6 +26,17 @@ class FakeClock:
         self.now += seconds
 
 
+PORTAL_BASIS = "https://portal.setwell.de"
+ANMELDE_PARAMETER = {"client_id": "0123456789abcdef0123456789abcdef", "redirect_uri": PORTAL_BASIS + "/oauth/callback",
+                     "scope": "IoT User offline_access"}
+
+
+@pytest.fixture(autouse=True)
+def _portal_des_baus(monkeypatch):
+    """Das Portal kommt aus dem signierten Bau (gateway.env), nicht vom Server; die Anmeldung im Geraet braucht es."""
+    monkeypatch.setenv("SHG_PORTAL_BASE_URL", PORTAL_BASIS)
+
+
 @pytest.fixture(autouse=True)
 def _kein_echtes_lebenszeichen(tmp_path, monkeypatch):
     """Nie das echte Lebenszeichen unter /tmp (runtime_main beruehrt es bei jedem Start)."""
@@ -87,8 +98,8 @@ def vicare_kontext(data_dir, clock, monkeypatch):
         monkeypatch.setenv(key, value)
     paths = Paths(data_dir)
     login = ViCareCloudDriver({}, paths, clock=clock)
-    login.login_begin({"client_id": "c", "redirect_uri": "https://portal.test/oauth/callback"})
-    login.login_finish({"code": GOOD_CODE, "redirect_uri": "https://portal.test/oauth/callback"})
+    login.login_begin(ANMELDE_PARAMETER)
+    login.login_finish({"code": GOOD_CODE})
     bus = FakeBus()
     mirror = ZigbeeMirror(bus, clock)
     mirror.start()

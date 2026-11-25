@@ -12,7 +12,9 @@ Datei liegt):
    `data/werksreset_bereit.json` {seq, ts, ursprungswerte} (nicht eingerichtet: sofort `false`). Hoechstens 120 s warten
    (GPC9); ohne Antwort (Container tot, kein Treiber) wird trotzdem geloescht, die Anlage bleibt dann auf den zuletzt
    geschriebenen Werten innerhalb der lokalen Grenzen (GW 15).
-3. Phase `loeschen`: Compose anhalten (unter der Compose-Sperre), Inhalte von `data/`, `bus/credentials/`, `bus/mosquitto/`,
+3. Phase `loeschen`: die Bruecke meldet dem Server jetzt das Zuruecksetzen (`up/zurueckgesetzt`) und legt nach dessen
+   Quittung `data/werksreset_gemeldet.json` an; der Host wartet darauf hoechstens 10 s (danach in jedem Fall weiter, nur im
+   ersten Durchlauf, nie bei einer liegenden Phase nach einem Neustart). Dann Compose anhalten (unter der Compose-Sperre), Inhalte von `data/`, `bus/credentials/`, `bus/mosquitto/`,
    `bus/mosquitto-daten/`, `zigbee2mqtt/` und `host/knopf.json` loeschen, Journal leeren, Protokoll schreiben, Anfrage
    loeschen, Neustart. `werk`, `bundles/`, `updater/`, `archive/`, der uebrige `host/`, der Docker-Speicher und der aktive
    Slot bleiben.
@@ -44,6 +46,7 @@ logger = logging.getLogger("smartheat_host.werksreset")
 
 WARTE_SEKUNDEN = 120.0  # Frist fuer das Zuruecksetzen der Ursprungswerte (GPC9)
 WARTE_TAKT_SEKUNDEN = 1.0
+MELDE_FRIST_SEKUNDEN = 10.0  # Frist fuer die Bestaetigung der Bruecke, dass die Ruecksetzmeldung beim Server angekommen ist
 JOURNAL_FRIST_SEKUNDEN = 60.0
 NEUSTART_FRIST_SEKUNDEN = 30.0
 PROTOKOLL_MAX = 20
@@ -76,6 +79,18 @@ def _bereit_pfad(root: Path) -> Path:
 
 def _protokoll_pfad(root: Path) -> Path:
     return root / "host" / "werksreset_protokoll.json"
+
+
+def _gemeldet_pfad(root: Path) -> Path:
+    """Die Bruecke legt sie an, sobald der Server die Ruecksetzmeldung quittiert hat (liegt in `data/`, wird mitgeloescht)."""
+    return root / "data" / "werksreset_gemeldet.json"
+
+
+def _gemeldet(root: Path) -> bool:
+    try:
+        return _gemeldet_pfad(root).is_file()
+    except OSError:
+        return False
 
 
 def _iso(sekunden: float) -> str:
@@ -316,10 +331,12 @@ def _sigterm_aufschieben():
 
 
 def ausfuehren(root: Path, compose, *, warte: Callable[[Callable[[], bool], float], bool], jetzt: Callable[[], float],
-               neustart: Callable[[], None], journal_leeren: Callable[[], None]) -> dict:
+               neustart: Callable[[], None], journal_leeren: Callable[[], None],
+               melde_warte: Callable[[Callable[[], bool], float], bool] | None = None) -> dict:
     """Der Werksreset nach Bestaetigung der Folge am Knopf (Modulkopf). `warte(bedingung, frist)` wartet hoechstens `frist`
-    Sekunden auf die Bedingung und liefert, ob sie erfuellt wurde. Liefert {seq, ts, ursprungswerte, abgeschlossen}; wirft
-    `Abgewiesen` (nichts geschehen) oder was das Schreiben der Anfrage wirft (nichts geschehen)."""
+    Sekunden auf die Bedingung und liefert, ob sie erfuellt wurde; `melde_warte` (Standard `warten`) wartet so auf die
+    Bestaetigung der Bruecke, bevor in der neuen Phase `loeschen` Compose angehalten wird. Liefert {seq, ts, ursprungswerte,
+    abgeschlossen}; wirft `Abgewiesen` (nichts geschehen) oder was das Schreiben der Anfrage wirft (nichts geschehen)."""
     state = updater.State.load(root / "updater" / "state.json")
     if waechter.systemwechsel(state):
         phase = state.system["phase"] if state.system else ""
@@ -360,17 +377,34 @@ def ausfuehren(root: Path, compose, *, warte: Callable[[Callable[[], bool], floa
         raise Abgewiesen(f"Systemwechsel hat begonnen (Phase {phase})")
     anfrage = {"seq": seq, "ts": ts, "phase": LOESCHEN, "ursprungswerte": ursprungswerte}
     return _loeschphase(root, compose, anfrage, schreiben=True, jetzt=jetzt, neustart=neustart,
-                        journal_leeren=journal_leeren)
+                        journal_leeren=journal_leeren, melde_warte=melde_warte or warten)
+
+
+def _auf_meldung_warten(root: Path, melde_warte: Callable[[Callable[[], bool], float], bool]) -> None:
+    """Gibt der Bruecke Zeit, die Ruecksetzmeldung beim Server abzuliefern (sie meldet erst in der Phase `loeschen`).
+    Bestaetigung oder Fristende, ein Fehler hier: danach geht es in jedem Fall weiter."""
+    try:
+        if not melde_warte(lambda: _gemeldet(root), MELDE_FRIST_SEKUNDEN):
+            logger.warning("Werksreset: keine Bestaetigung der Ruecksetzmeldung, es wird trotzdem geloescht")
+    except Exception as fehler:
+        logger.error("Werksreset: Warten auf die Ruecksetzmeldung gescheitert (%s), es wird trotzdem geloescht",
+                     type(fehler).__name__)
 
 
 def _loeschphase(root: Path, compose, anfrage: dict, *, schreiben: bool, jetzt: Callable[[], float],
-                 neustart: Callable[[], None], journal_leeren: Callable[[], None]) -> dict:
+                 neustart: Callable[[], None], journal_leeren: Callable[[], None],
+                 melde_warte: Callable[[Callable[[], bool], float], bool] | None = None) -> dict:
     """Phase `loeschen` (`schreiben`: die Anfrage dieser Phase erst ablegen, sonst liegt sie schon) und Neustart; ein SIGTERM
-    wartet, bis beides getan ist."""
+    wartet, bis beides getan ist. Mit `melde_warte` (nur beim ersten Eintritt in die Phase, den die Bruecke sieht) wartet der
+    Host vor dem Anhalten auf deren Bestaetigung; eine liegende Phase nach einem Neustart wartet nie."""
     ergebnis = {"seq": anfrage["seq"], "ts": anfrage["ts"], "ursprungswerte": anfrage.get("ursprungswerte") is True}
     with _sigterm_aufschieben():
         if schreiben:
+            with contextlib.suppress(OSError):  # eine alte Bestaetigung darf die neue nicht vortaeuschen
+                _gemeldet_pfad(root).unlink()
             dateien.schreiben_json(_anfrage_pfad(root), anfrage, modus=dateien.LESBAR)
+            if melde_warte is not None:
+                _auf_meldung_warten(root, melde_warte)
         try:
             _abschliessen(root, compose, anfrage, jetzt=jetzt, journal_leeren=journal_leeren)
         except Exception as fehler:

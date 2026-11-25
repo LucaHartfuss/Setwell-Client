@@ -19,6 +19,16 @@ LEERSTAND_UNTERGRENZE_C = 15.0
 LEERSTAND_VORGABE_C = 16.0
 PHASE_MINDESTDAUER = timedelta(minutes=60)
 LEERSTAND_HOECHSTDAUER = timedelta(days=365)
+#: Absenkung der kuehlen Phase: 0 bis 5 K in Schritten von 0,5 K (Kopie aus smartheat_device.wire: ABSENKUNG_K_MIN/MAX/STEP,
+#: gepinnt in test_core_vertrag_pin.py). Tiefer geht keine Absenkung, auch wenn ABSENK_UNTERGRENZE_C es erlaubte.
+ABSENKUNG_MIN_K = 0.0
+ABSENKUNG_MAX_K = 5.0
+ABSENKUNG_SCHRITT_K = 0.5
+#: Uebersteuerung waehrend des Leerstands: hoechstens 4 h; die dritte Aenderung innerhalb von 24 h beendet den Leerstand
+#: (Zaehler und Entscheidung liegen im Geraet, nie auf dem Server).
+UEBERSTEUERUNG_LEERSTAND_HOECHSTDAUER = timedelta(hours=4)
+LEERSTAND_AENDERUNGEN_BEENDEN = 3
+LEERSTAND_AENDERUNGEN_FENSTER = timedelta(hours=24)
 #: Vorschlag der Abwesenheitstemperatur je Verteilsystem (Voreinstellung fuer den Kunden, keine Grenze).
 ABWESENHEIT_VORSCHLAG_C: Mapping[str, float] = MappingProxyType({"Heizkoerper": 17.0, "Fussbodenheizung": 19.0})
 
@@ -155,14 +165,20 @@ def _endliche_zahl(wert) -> bool:
         return False
 
 
+def absenkung_k_gueltig(absenkung_k) -> bool:
+    """Die Absenkung liegt von ABSENKUNG_MIN_K bis ABSENKUNG_MAX_K und ist ein Vielfaches von ABSENKUNG_SCHRITT_K."""
+    return (_endliche_zahl(absenkung_k) and ABSENKUNG_MIN_K <= absenkung_k <= ABSENKUNG_MAX_K
+            and absenkung_k % ABSENKUNG_SCHRITT_K == 0)
+
+
 def absenktemperatur(wunsch_c, absenkung_k) -> float:
-    """Kuehles Soll einer Absenkung: nie unter ABSENK_UNTERGRENZE_C und nie waermer als der Wunsch. Eine Absenkung
-    von 0 K laesst den Wunsch; liegt der Wunsch selbst unter der Untergrenze, bleibt er (es wird nie angehoben).
-    Unbrauchbare Eingaben (keine endliche Zahl, negative Tiefe) sind ein Fehler: der Aufrufer faellt dann auf den
-    Wunsch zurueck, die warme Richtung."""
+    """Kuehles Soll einer Absenkung: nie unter ABSENK_UNTERGRENZE_C, nie tiefer als ABSENKUNG_MAX_K unter dem Wunsch und nie
+    waermer als der Wunsch. Eine Absenkung von 0 K laesst den Wunsch; liegt der Wunsch selbst unter der Untergrenze, bleibt
+    er (es wird nie angehoben). Unbrauchbare Eingaben (keine endliche Zahl, negative Tiefe) sind ein Fehler: der Aufrufer
+    faellt dann auf den Wunsch zurueck, die warme Richtung."""
     if not _endliche_zahl(wunsch_c) or not _endliche_zahl(absenkung_k) or absenkung_k < 0:
         raise ValueError(f"Absenkung aus Wunsch {wunsch_c!r} und Tiefe {absenkung_k!r} unbrauchbar")
-    return min(float(wunsch_c), max(wunsch_c - absenkung_k, ABSENK_UNTERGRENZE_C))
+    return min(float(wunsch_c), max(wunsch_c - min(absenkung_k, ABSENKUNG_MAX_K), ABSENK_UNTERGRENZE_C))
 
 
 def _temperatur_im_bereich(temp_c, untergrenze_c: float) -> bool:

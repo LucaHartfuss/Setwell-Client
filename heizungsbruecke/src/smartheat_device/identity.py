@@ -1,6 +1,7 @@
 """Identitaet des Geraets: Signierschluessel ECDSA P-256 (Geraete-ID und
 signierte Bootstrap-Anfragen), eigener TLS-Schluessel fuer das MQTT-Zertifikat (CSR mit CN = Geraete-ID) und
-Uebernahme-Code (16 Zeichen Base32, 80 Bit), alle unter <daten>/device/ (0600). Den Verschluesselungsschluessel enc_key.pem erzeugt das Geraet nicht; eine
+Uebernahme-Code (16 Zeichen Base32, 80 Bit). Die Schluessel liegen unter <daten>/device/ (0600), der Code nur im Speicher:
+jeder Start erzeugt einen neuen, eine alte Datei claim_code wird geloescht, ohne sie zu lesen. Den Verschluesselungsschluessel enc_key.pem erzeugt das Geraet nicht; eine
 vorhandene Datei bleibt liegen und wird nicht gelesen. Geraete-ID = shg- + die ersten 16
 Zeichen von Base32(SHA-256(DER-SPKI)) in Kleinbuchstaben (unveraendert). boot_id: neu je Prozessstart (Erkennung doppelt
 laufender Geraete). Schluessel und Code erscheinen nie in einem Log (Regel 6)."""
@@ -19,12 +20,21 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from smartheat_core import dateien
-from smartheat_device import nachrichten, wire
+from smartheat_device import documents, nachrichten, wire, wish
 
 KEY_FILE = "key.pem"
 TLS_KEY_FILE = "tls_key.pem"
-CLAIM_CODE_FILE = "claim_code"
-_CODE_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+CLAIM_CODE_FILE = "claim_code"  # nur noch zum Loeschen einer Datei aelterer Staende
+CERTIFICATE_FILE = "certificate.pem"
+ENDPOINT_FILE = "endpoint.json"
+STATE_FILE = "bootstrap.json"
+NEU_SUFFIX = ".neu"  # Dateien eines laufenden Zertifikatswechsels neben den aktuellen
+#: Marker eines begonnenen Verwerfens der Identitaet: liegt vor dem ersten Loeschen und geht nach dem letzten.
+MARKER_FILE = "neue_identitaet.json"
+#: Alles, was die Identitaet und ihren Zugang ausmacht. Nie dabei: die Rastung des Sicherheitssatzes
+#: (sicherheitssatz.json) und die Sicherung (backup.json), sie gehoeren zur Anlage, nicht zum Geraet.
+_VERWORFEN = (KEY_FILE, TLS_KEY_FILE, CERTIFICATE_FILE, ENDPOINT_FILE, STATE_FILE,
+              TLS_KEY_FILE + NEU_SUFFIX, CERTIFICATE_FILE + NEU_SUFFIX)
 #: 10 Zufallsbytes = 80 Bit = genau 16 Base32-Zeichen ohne Auffuellung.
 _CODE_BYTES = wire.CLAIM_CODE_CHARS * 5 // 8
 
@@ -72,30 +82,42 @@ def new_claim_code(randbytes: Callable[[int], bytes] = secrets.token_bytes) -> s
     return base64.b32encode(randbytes(_CODE_BYTES)).decode()
 
 
-def code_gueltig(code: str) -> bool:
-    return len(code) == wire.CLAIM_CODE_CHARS and set(code) <= _CODE_ALPHABET
-
-
 def load_or_create(device_dir: Path, randbytes: Callable[[int], bytes] = secrets.token_bytes) -> Identity:
+    """Schluessel aus den Dateien (oder neu), der Uebernahme-Code nie: er entsteht bei jedem Start neu im Speicher und
+    steht in keiner Datei. Eine Datei aelterer Staende wird geloescht, ohne sie zu lesen."""
     signing = _key(device_dir / KEY_FILE)
     tls = _key(device_dir / TLS_KEY_FILE)
-    code_path = device_dir / CLAIM_CODE_FILE
     try:
-        code = code_path.read_text().strip()
-        if not code_gueltig(code):
-            # Behalten: der Server kennt nur den Hash dieses Codes. Das Geraet meldet einen neuen Code erst beim
-            # Server und speichert ihn nach der Annahme (Device), nie vorher.
-            logger.warning("Uebernahme-Code hat nicht die vorgesehene Form (aelterer Stand); er wird beim Server erneuert")
+        (device_dir / CLAIM_CODE_FILE).unlink()
+        logger.info("Alte Datei %s geloescht: der Uebernahme-Code liegt nur noch im Speicher", CLAIM_CODE_FILE)
     except FileNotFoundError:
-        code = new_claim_code(randbytes)
-        dateien.schreiben_text(code_path, code, modus=dateien.PRIVAT)
-    return Identity(device_id_for(signing.public_key()), signing, tls, code)
+        pass
+    except OSError as error:
+        logger.warning("Alte Datei %s nicht geloescht (%s)", CLAIM_CODE_FILE, type(error).__name__)
+    return Identity(device_id_for(signing.public_key()), signing, tls, new_claim_code(randbytes))
 
 
-def save_claim_code(device_dir: Path, ident: Identity, code: str) -> Identity:
-    """Neuer Uebernahme-Code (Befehl new_claim_code): erst gespeichert, wenn der Server ihn angenommen hat."""
-    dateien.schreiben_text(device_dir / CLAIM_CODE_FILE, code, modus=dateien.PRIVAT)
-    return replace(ident, claim_code=code)
+def verwerfen(device_dir: Path) -> None:
+    """Die Identitaet verwerfen (der Server hat das Geraet freigegeben): erst der Marker, dann Schluessel, Zertifikat,
+    Endpunkt und Status sowie die empfangenen Dokumente und der Wunsch-Puffer (der Server kennt ein neues Geraet, kein
+    alter Stand darf es als eingerichtet oder eine Dokumentversion als Duplikat gelten lassen). Die Rastung des Sicherheitssatzes und die Sicherung bleiben unberuehrt. Ein Fehler oder Absturz
+    nach dem Marker laesst ihn liegen, fortsetzen() beendet das Loeschen beim naechsten Start."""
+    dateien.schreiben_json(device_dir / MARKER_FILE, {}, modus=dateien.PRIVAT)
+    fortsetzen(device_dir)
+
+
+def fortsetzen(device_dir: Path) -> bool:
+    """Ein begonnenes Verwerfen zu Ende fuehren; False, wenn keines begonnen war."""
+    marker = device_dir / MARKER_FILE
+    if not marker.exists():
+        return False
+    for name in (*_VERWORFEN, *documents.DATEIEN.values(), documents.ZUSTAND_DATEI):
+        (device_dir / name).unlink(missing_ok=True)
+    for wunsch in device_dir.glob(wish.WUNSCH_MUSTER):
+        wunsch.unlink(missing_ok=True)
+    marker.unlink()
+    logger.info("Identitaet verworfen: das Geraet registriert sich neu")
+    return True
 
 
 def _base64url_ohne_padding(daten: bytes) -> str:
@@ -133,6 +155,17 @@ def csr_pem(ident: Identity) -> str:
 
 def tls_key_pem(ident: Identity) -> str:
     return _pem(ident.tls_key)
+
+
+def mit_neuem_tls_schluessel(ident: Identity) -> Identity:
+    """Dieselbe Identitaet mit frischem TLS-Schluessel, nur im Speicher: die Datei bleibt, bis der Wechsel bestaetigt ist."""
+    return replace(ident, tls_key=ec.generate_private_key(ec.SECP256R1()))
+
+
+def fingerprint(certificate_pem: str) -> str:
+    """SHA-256 des DER-Zertifikats, Kleinbuchstaben-Hex (dieselbe Rechnung wie der Server). ValueError bei unlesbarem PEM."""
+    cert = x509.load_pem_x509_certificate(certificate_pem.encode())
+    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
 
 
 def passt_zum_schluessel(ident: Identity, certificate_pem: str) -> bool:

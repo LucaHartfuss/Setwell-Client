@@ -41,6 +41,59 @@ def test_the_values_have_exactly_the_contract_keys():
     assert set(_wunsch().payload()["werte"]) == set(wire.WISH_WERTE)
 
 
+UEBERSTEUERUNG = {"temp": 19.0, "bis": "2027-01-15T12:00:00Z"}
+ABWESEND = {"bis": "2027-01-20T10:00:00Z", "temp": 17.0, "aufheizen_ab": None}
+
+
+def _mit_programm(raum_soll, programm, herkunft="thermostat"):
+    return wish.neu(raum_soll, None, kreis=1, basis_version=2, uhr_synchron=True, herkunft=herkunft, durch=None,
+                    wall=WALL, programm=programm)
+
+
+@pytest.mark.parametrize("raum_soll, programm, herkunft, erwartet", [
+    (21.0, {"abwesend": None}, "thermostat", {"raum_soll": 21.0, "abwesend": None}),  # Thermostat beendet Away
+    (None, {"uebersteuerung": UEBERSTEUERUNG}, "thermostat", {"uebersteuerung": UEBERSTEUERUNG}),
+    (None, {"abwesend": ABWESEND}, "ha", {"abwesend": ABWESEND}),
+    (21.0, {"leerstand": None, "uebersteuerung": None}, "thermostat",
+     {"raum_soll": 21.0, "leerstand": None, "uebersteuerung": None}),
+], ids=["away-ende", "uebersteuerung", "away-aus-ha", "leerstand-ende"])
+def test_the_values_follow_the_situation(raum_soll, programm, herkunft, erwartet):
+    nachricht = _mit_programm(raum_soll, programm, herkunft).payload()
+    assert nachricht["werte"] == erwartet
+    assert set(nachricht["werte"]) <= {*wire.WISH_WERTE, *wire.WISH_WERTE_PROGRAMM}
+    assert not {"ziel", "wochenplan"} & set(nachricht["werte"])
+
+
+@pytest.mark.parametrize("raum_soll, programm, herkunft", [
+    (None, None, "thermostat"),  # ohne jeden Wert
+    (None, {}, "thermostat"),
+    (21.0, {"leerstand": {"von": "a", "bis": "b", "temp": 17.0, "aufheizen_ab": None}}, "ha"),  # Leerstand setzt nur der Server
+    (21.0, {"abwesend": ABWESEND}, "thermostat"),  # Away setzt nur HA
+    (21.0, {"abwesend": {**ABWESEND, "plus": 1}}, "ha"),
+    (21.0, {"uebersteuerung": {"temp": 19.0}}, "thermostat"),
+    (21.0, {"ziel": 20.0}, "thermostat"),
+    (21.0, {"wochenplan": None}, "thermostat"),
+])
+def test_values_outside_the_contract_are_refused(raum_soll, programm, herkunft):
+    with pytest.raises(ValueError):
+        _mit_programm(raum_soll, programm, herkunft)
+
+
+def test_a_wish_with_program_values_survives_a_restart(tmp_path):
+    puffer = wish.WunschPuffer(tmp_path)
+    wunsch = _mit_programm(None, {"uebersteuerung": UEBERSTEUERUNG})
+    puffer.setzen(wunsch)
+    geladen = wish.WunschPuffer(tmp_path).wunsch(1)
+    assert geladen == wunsch and geladen.payload()["werte"] == {"uebersteuerung": UEBERSTEUERUNG}
+
+
+def test_a_stored_wish_without_program_values_still_loads(tmp_path):
+    (tmp_path / wish.wunsch_datei(1)).write_text(json.dumps({
+        "wish_id": "w", "kreis": 1, "basis_version": 1, "ts": "2027-01-15T08:00:00+00:00", "uhr_synchron": True,
+        "raum_soll": 21.0, "roh": None, "herkunft": "thermostat", "durch": None}))
+    assert wish.WunschPuffer(tmp_path).wunsch(1).payload()["werte"] == {"raum_soll": 21.0}
+
+
 @pytest.mark.parametrize("feld, wert", [("WISH_FIELDS", "neu"), ("WISH_WERTE", "neu")])
 def test_a_wish_outside_the_contract_is_a_contract_error(monkeypatch, feld, wert):
     monkeypatch.setattr(wire, feld, (*getattr(wire, feld), wert))

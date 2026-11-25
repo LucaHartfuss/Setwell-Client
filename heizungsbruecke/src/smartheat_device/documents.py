@@ -54,11 +54,13 @@ import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import TypeGuard
 
-from smartheat_core import config_check, dateien, kreisansicht, rastung, wallclock
+from smartheat_core import config_check, dateien, kreisansicht, plan, rastung, safety, wallclock
 from smartheat_core.rastung import Rastung
+from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_device import fehler, nachrichten, wire
 from smartheat_runtime import soll_speicher
 
@@ -74,6 +76,7 @@ UPDATE_NOETIG = "update_noetig"
 AUSSERHALB_BEREICH = "ausserhalb_bereich"
 _RESERVIERT = ("schema", "version")
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_ZEITPUNKT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")  # Zeitpunkte der Bedienung: UTC, auf die Sekunde
 
 
 def _ohne_huelle(felder: tuple[str, ...]) -> tuple[str, ...]:
@@ -152,7 +155,8 @@ def _form(inhalt: dict, pflicht: tuple[str, ...], optional: tuple[str, ...] = ()
     steht."""
     fehlen = [field for field in pflicht if field not in inhalt]
     if fehlen:
-        return config_check.Ablehnung(UNGUELTIG, fehler.details(fehlen[0], "fehlt", anzahl=len(fehlen)))
+        feld = fehlen[0] if fehlen[0] in wire.PRUEF_FELDER else None  # nur ein Name des Vertrags steht in details
+        return config_check.Ablehnung(UNGUELTIG, fehler.details(feld, "fehlt", anzahl=len(fehlen)))
     if fremd := fehler.fremdes_feld(inhalt, (*pflicht, *optional)):
         return config_check.Ablehnung(UNGUELTIG, fremd)
     return None
@@ -189,9 +193,10 @@ def angebot_aus(art: str, payload: dict) -> Angebot | None:
     return Angebot(copy.deepcopy(payload["software"]))
 
 
-def _kreise_pruefen(inhalt: dict, felder: tuple[str, ...]) -> config_check.Ablehnung | None:
+def _kreise_pruefen(inhalt: dict, felder: tuple[str, ...], programm: tuple[str, ...] = ()) -> config_check.Ablehnung | None:
     """Die Liste `kreise` eines Dokuments: nicht leer, je Eintrag genau `felder`, die Nummern ganze Zahlen von
-    KREIS_MIN bis KREIS_MAX, aufsteigend und einmalig (wie der Server sie schreibt)."""
+    KREIS_MIN bis KREIS_MAX, aufsteigend und einmalig (wie der Server sie schreibt). Die `programm`-Felder fuehrt ein
+    Eintrag ganz oder gar nicht (ein Geraet ohne die Faehigkeit bekommt keines davon)."""
     eintraege = inhalt["kreise"]
     if not isinstance(eintraege, list) or not eintraege:
         return config_check.Ablehnung(UNGUELTIG, fehler.details("kreise", "ungueltig"))
@@ -199,7 +204,8 @@ def _kreise_pruefen(inhalt: dict, felder: tuple[str, ...]) -> config_check.Ableh
     for eintrag in eintraege:
         if not isinstance(eintrag, dict):
             return config_check.Ablehnung(UNGUELTIG, fehler.details("kreise", "ungueltig"))
-        if ablehnung := _form(eintrag, felder):
+        mit_programm = any(feld in eintrag for feld in programm)
+        if ablehnung := _form(eintrag, (*felder, *programm) if mit_programm else felder):
             return ablehnung
         nummer = eintrag["kreis"]
         if not _is_version(nummer) or not wire.KREIS_MIN <= nummer <= wire.KREIS_MAX:
@@ -217,14 +223,82 @@ def _bedienung_pruefen(inhalt: dict) -> config_check.Ablehnung | None:
         return config_check.Ablehnung(UNGUELTIG, fehler.details("quelle", "unbekannt"))
     if not isinstance(inhalt["ts"], str) or not inhalt["ts"]:
         return config_check.Ablehnung(UNGUELTIG, fehler.details("ts", "ungueltig"))
-    if ablehnung := _kreise_pruefen(inhalt, wire.BEDIENUNG_KREIS_FIELDS):
+    if ablehnung := _kreise_pruefen(inhalt, wire.BEDIENUNG_KREIS_FIELDS, wire.BEDIENUNG_KREIS_PROGRAMM):
         return ablehnung
     for eintrag in inhalt["kreise"]:
-        if eintrag["modus"] not in wire.MODI:
+        mit_programm = wire.BEDIENUNG_KREIS_PROGRAMM[0] in eintrag
+        if eintrag["modus"] not in (*wire.MODI, *(wire.MODI_PROGRAMM if mit_programm else ())):
             return config_check.Ablehnung(UNGUELTIG, fehler.details("modus", "unbekannt"))
         if not soll_speicher.im_bedienbereich(eintrag["raum_soll"]):
             return config_check.Ablehnung(AUSSERHALB_BEREICH, fehler.details(
                 "raum_soll", "bereich", min=wire.RAUM_SOLL_MIN, max=wire.RAUM_SOLL_MAX))
+        if mit_programm and (ablehnung := _programm_pruefen(eintrag)):
+            return ablehnung
+    return None
+
+
+def _ungueltig() -> config_check.Ablehnung:
+    return config_check.Ablehnung(UNGUELTIG, fehler.details(None, "ungueltig"))
+
+
+def _zeitpunkt_gueltig(wert) -> bool:
+    """Ein Zeitpunkt `JJJJ-MM-TTTHH:MM:SSZ` (UTC), der ein Datum der Folge ist."""
+    if not isinstance(wert, str) or not _ZEITPUNKT.fullmatch(wert):
+        return False
+    try:
+        datetime.strptime(wert, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
+def _temperatur_pruefen(wert, gueltig: Callable[[object], bool], untergrenze: float) -> config_check.Ablehnung | None:
+    """Eine Temperatur der Bedienung: eine endliche Zahl, die `gueltig` (safety.py) annimmt, sonst ausserhalb des Bereichs."""
+    if not ist_endliche_zahl(wert):
+        return _ungueltig()
+    if not gueltig(wert):
+        return config_check.Ablehnung(AUSSERHALB_BEREICH, fehler.details(
+            None, "bereich", min=untergrenze, max=safety.BEDIENBEREICH_MAX_C))
+    return None
+
+
+def _teil_pruefen(teil, felder: tuple[str, ...], zeitpunkte: tuple[str, ...], gueltig: Callable[[object], bool],
+                  untergrenze: float) -> config_check.Ablehnung | None:
+    """Abwesend, Leerstand oder Uebersteuerung (nicht null): genau `felder`, `zeitpunkte` Zeitpunkte (`aufheizen_ab` darf
+    null sein), `temp` im Bereich der Betriebsart. Ob die Zeiten zur Uhr des Geraets passen, entscheidet die Rechnung des Plans."""
+    if not isinstance(teil, dict) or set(teil) != set(felder):
+        return _ungueltig()
+    for feld in zeitpunkte:
+        if not _zeitpunkt_gueltig(teil[feld]) and not (feld == "aufheizen_ab" and teil[feld] is None):
+            return _ungueltig()
+    return _temperatur_pruefen(teil["temp"], gueltig, untergrenze)
+
+
+def _programm_pruefen(eintrag: dict) -> config_check.Ablehnung | None:
+    """Die Teile der Faehigkeit `programm` eines Kreises der Bedienung (null = nicht gesetzt): Form, Bereich der Temperaturen
+    (safety.py) und der Modus dazu. `abwesend` gilt nur mit `modus: abwesend`, `leerstand` nur mit `modus: leerstand`; die
+    Uebersteuerung gilt in jedem Modus."""
+    modus = eintrag["modus"]
+    if eintrag["wochenplan"] is not None and plan.wochenplan_fehler(eintrag["wochenplan"]) is not None:
+        return _ungueltig()
+    for teil, passend in (("abwesend", "abwesend"), ("leerstand", "leerstand")):
+        if eintrag[teil] is not None and modus != passend:
+            return config_check.Ablehnung(UNGUELTIG, fehler.details("modus", "unbekannt"))
+    if eintrag["abwesend"] is not None and (ablehnung := _teil_pruefen(
+            eintrag["abwesend"], wire.ABWESEND_FIELDS, ("bis", "aufheizen_ab"), safety.abwesend_temperatur_gueltig,
+            safety.LEERSTAND_UNTERGRENZE_C)):
+        return ablehnung
+    if eintrag["leerstand"] is not None and (ablehnung := _teil_pruefen(
+            eintrag["leerstand"], wire.LEERSTAND_FIELDS, ("von", "bis", "aufheizen_ab"),
+            safety.leerstand_temperatur_gueltig, safety.LEERSTAND_UNTERGRENZE_C)):
+        return ablehnung
+    if eintrag["uebersteuerung"] is not None and (ablehnung := _teil_pruefen(
+            eintrag["uebersteuerung"], wire.UEBERSTEUERUNG_FIELDS, ("bis",), safety.uebersteuerung_temperatur_gueltig,
+            safety.ABSENK_UNTERGRENZE_C)):
+        return ablehnung
+    if eintrag["abwesend_temp_standard"] is not None:
+        return _temperatur_pruefen(eintrag["abwesend_temp_standard"], safety.abwesend_temperatur_gueltig,
+                                   safety.LEERSTAND_UNTERGRENZE_C)
     return None
 
 
@@ -536,7 +610,7 @@ class DocumentStore:
             return _bedienung_pruefen(inhalt)
         if art == ANZEIGE:
             return _anzeige_pruefen(inhalt)
-        ablehnung = (_form(inhalt, _ohne_huelle(wire.KONFIGURATION_FIELDS))
+        ablehnung = (_form(inhalt, _ohne_huelle(wire.KONFIGURATION_FIELDS), wire.KONFIGURATION_PROGRAMM)
                      or software_pruefen(inhalt["software"]))
         if ablehnung is not None:
             # Eine Konfiguration, die dieses Geraet nicht lesen kann (fremdes oder fehlendes Feld), verlangt ein Update,

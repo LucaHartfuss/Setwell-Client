@@ -76,8 +76,8 @@ def test_html_shows_device_id_and_code_only_while_not_set_up():
 
 
 def test_the_page_has_no_qr_code_and_no_portal_link_with_the_code():
-    """GW 7.1: kein Portal-Link mit Code. Weder ein Link (`href`, `claim?`) noch ein QR-Bild (svg) enthaelt den Code,
-    auch nicht bei offenem Fenster."""
+    """Kein Portal-Link mit Code. Weder ein Link (`href`, `claim?`) noch ein QR-Bild (svg) enthaelt den Code,
+    auch nicht bei offenem Fenster; der QR-Code der Hersteller-Anmeldung gehoert nur zu dessen Abschnitt."""
     page = render_html(SNAPSHOT)
     assert "ABCDEFGHJKLM" in page  # als Text, zum Abtippen im Portal
     assert "claim?" not in page and "href" not in page and "<svg" not in page and "<img" not in page

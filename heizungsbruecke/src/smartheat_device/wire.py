@@ -42,6 +42,7 @@ REGISTER_FIELDS = (
 )
 REGISTER_OPTIONAL = ("werks_nachweis",)  # fehlt = kein Nachweis (Pruefung: eigene Spec vor der Freischaltung)
 CERTIFICATE_FIELDS = ("csr",)
+CERTIFICATE_OPTIONAL = ("erneuerung",)  # true = Erneuerung auf Anforderung (Befehl zertifikat_erneuern), fehlt = false
 CAPABILITY_FIELDS = ("drivers", "zigbee")
 CAPABILITY_OPTIONAL = ("updater", "programm", "testphase", "kaelteschutz")  # fehlt = false
 BOOTSTRAP_RESPONSE = ("device_state", "certificate", "mqtt_endpoint", "mqtt_port", "mqtt_ca", "anker_signatur",
@@ -57,7 +58,7 @@ SESSION_EXPIRY_SECONDS = 3600  # AN-9: Hoechstwert von IoT Core
 DEVICE_SUBSCRIPTION = "down/#"  # AN-6: die Policy erlaubt nur diesen Filter
 UP_TOPICS = (
     "up/hello", "up/snapshot", "up/status", "up/notifications", "up/inventory", "up/result", "up/wish", "up/entfernt",
-    "telemetry",
+    "up/zurueckgesetzt", "telemetry",
 )
 DOWN_TOPICS = ("down/config", "down/operation", "down/display", "down/command", "down/setpoints")
 
@@ -68,7 +69,9 @@ HELLO_FIELDS = (
 #: device_state: fehlt = Uebernahmestand des Geraets unbekannt, kein Abgleich. Nur Host ha: auto_update (Schalter des
 #: Supervisors fuer das Add-on; fehlt oder null = unbekannt) und integration_version (Version der HA-Integration; fehlt oder
 #: null nach 900 s ohne Ereignis der Integration = unbekannt). Ein Geraet sendet beide immer, der Server speichert Wert und Zeit.
-HELLO_OPTIONAL = ("device_state", "auto_update", "integration_version")
+#: seriennummer: Pflicht fuer Host gateway (Seriennummer aus dem Werk, Format `devices.seriennummer_gueltig`), fuer Host ha
+#: verboten; der Server prueft die Regel je Host.
+HELLO_OPTIONAL = ("device_state", "auto_update", "integration_version", "seriennummer")
 STATUS_FIELDS = ("schema", "zustand", "runtime_status", "kreise", "ts")
 STATUS_KREIS_FIELDS = ("kreis", "raum")  # ein Eintrag je Kreis der Konfiguration, Nummern aufsteigend und einmalig
 STATUS_OPTIONAL = ("ursprungswerte",)  # fehlt = keine neuen Ursprungswerte (G-4: Hebel -> Wert vor dem ersten Schreiben)
@@ -109,10 +112,17 @@ ERROR_FIELDS = ("grund", "details")
 WISH_FIELDS = ("schema", "wish_id", "kreis", "basis_version", "ts", "uhr_synchron", "werte")
 WISH_OPTIONAL = ("roh", "herkunft", "durch")  # fehlt = nicht begrenzt bzw. unbekannt
 WISH_WERTE = ("raum_soll",)
+#: Weitere Schluessel in `werte` (Faehigkeit `programm`): Objekt oder null; `leerstand` nimmt der Server vom Geraet nur als null.
+WISH_WERTE_PROGRAMM = ("uebersteuerung", "abwesend", "leerstand")
 #: Das Geraet verlaesst das Konto (nach der lokalen Abmeldung): die Wahl des Nutzers beim Entfernen der Verbindung. `freigeben`
 #: bittet den Server, das Geraet aus dem Konto zu loesen; `behalten` laesst es dort (der Server fuehrt es weiter als abgemeldet).
 ENTFERNT_FIELDS = ("schema", "wahl", "ts")
 ENTFERNT_WAHLEN = ("behalten", "freigeben")
+#: Das Geraet meldet seinen lokalen Werksreset (erst, wenn die Daten geloescht werden). `signatur`: Base64 (URL-sicher, ohne
+#: Auffuellung) der ECDSA-Signatur des Geraeteschluessels ueber `canonical_string(methode, pfad, ts, <Geraete-ID>)` mit
+#: `ZURUECKGESETZT_SIGNATUR`; `ts` Sekunden seit der Epoche als Ziffernfolge. Sie gilt einmal und nur innerhalb der Uhrabweichung.
+ZURUECKGESETZT_FIELDS = ("schema", "ts", "signatur")
+ZURUECKGESETZT_SIGNATUR = ("MQTT", "up/zurueckgesetzt")
 HERKUNFT = ("thermostat", "soll_entity", "ha")
 DURCH = ("nutzer", "automation")
 
@@ -184,6 +194,30 @@ KREIS_ZUSTAENDE = ("in_betrieb", "ausser_betrieb", "testphase_ohne")
 BEDIENUNG_FIELDS = ("schema", "version", "kreise", "quelle", "ts")
 BEDIENUNG_KREIS_FIELDS = ("kreis", "modus", "raum_soll")  # ein Eintrag je Kreis, Nummern aufsteigend und einmalig
 MODI = ("manuell",)
+# Felder der Faehigkeit `programm` (Wochenplan, Away, Leerstand, Uebersteuerung): eigene Konstanten neben den Grundfeldern, weil
+# ein Geraet ohne die Faehigkeit keines davon bekommt und strikt prueft; Fixture `geraet_v1.json` fuehrt dieselben Werte.
+# `abwesend_temp_standard` (die zuletzt gewaehlte Abwesenheitstemperatur, Zahl oder null) steht in der Bedienung, nicht in der
+# Konfiguration: die Konfiguration liest der Betreiber, und jede ihrer Versionen entstuende mit einer Abwesenheit.
+BEDIENUNG_KREIS_PROGRAMM = ("wochenplan", "abwesend", "leerstand", "uebersteuerung",
+                            "abwesend_temp_standard")  # zusaetzlich zu BEDIENUNG_KREIS_FIELDS
+MODI_PROGRAMM = ("abwesend", "leerstand")  # zusaetzlich zu MODI
+KONFIGURATION_PROGRAMM = ("zeitzone",)  # anlagenweit, zusaetzlich zu KONFIGURATION_FIELDS
+KONFIGURATION_KREIS_PROGRAMM = ("aufheizen", "absenkung_k", "aufheizdauer_min")
+AUFHEIZDAUER_MIN_FIELDS = ("plan", "weg")
+#: Obergrenze der Aufheizdauer in Minuten, in der Reihenfolge von `AUFHEIZDAUER_MIN_FIELDS`: `plan` 12 h, `weg` 72 h. Ein
+#: gelernter oder gemeldeter Wert darueber wird gekappt (Entscheidung des Nutzers; eine andere Zahl braucht eine neue).
+AUFHEIZDAUER_MIN_GRENZE = (720, 4320)
+AUFHEIZEN_ARTEN = ("boost", "kurve")
+WOCHENPLAN_EINTRAG_FIELDS = ("tag", "warm_ab", "kuehl_ab")
+WOCHENPLAN_TAGE = (1, 2, 3, 4, 5, 6, 7)  # ISO-Wochentage, jeder genau einmal im Wochenplan
+ABWESEND_FIELDS = ("bis", "temp", "aufheizen_ab")
+LEERSTAND_FIELDS = ("von", "bis", "temp", "aufheizen_ab")
+UEBERSTEUERUNG_FIELDS = ("temp", "bis")
+#: Absenkung der kuehlen Phase (Regel 4, freigegeben): 0 bis 5 K in Schritten von 0,5 K.
+ABSENKUNG_K_MIN = 0.0
+ABSENKUNG_K_MAX = 5.0
+ABSENKUNG_K_STEP = 0.5
+SOLL_ARTEN = ("wunsch", "absenkung", "aufheizen", "abwesend", "leerstand", "uebersteuert")  # soll_art je Kreis in der Telemetrie
 # Anzeige: ein Eintrag je Kreis der Konfiguration, nur Host ha; der Server schreibt, das Geraet zeigt und prueft den
 # vollen Feldsatz (einlernphase_tag, testphase_bis null = nicht aktiv; befunde, aufgaben, raumziele leere Listen;
 # kennzahlen leeres Objekt)
@@ -205,6 +239,7 @@ DOKUMENT_ERRORS = (
 SOFTWARE_ERRORS = (
     "manifest_ungueltig", "signatur_ungueltig", "updater_zu_alt", "version_zu_alt", "start_fehlgeschlagen",
     "ungesund", "server_unerreichbar", "manifest_abgelaufen", "einstellung_aus",
+    "system_download", "system_installation", "system_fehlstart", "system_ungesund", "system_netzprobe",
 )
 MELDUNGEN = ("wunsch_begrenzt", "soll_quelle_aus", "geraet_doppelt", "update_noetig", "gesperrt")
 
@@ -230,7 +265,7 @@ COMMANDS: dict[str, Command] = {
     "zigbee_devices": Command((), ("devices",), 60, ("zigbee_nicht_bereit",)),
     "driver_login": Command(
         ("phase", "driver_id", "client_id", "redirect_uri", "scope", "code"),
-        ("code_challenge", "code_challenge_method"), 120,
+        ("state_hash",), 120,
         ("treiber_unbekannt", "login_nicht_noetig", "login_fehlgeschlagen", "anlage_nicht_erreichbar"),
     ),
     "inventory": Command(("stunden",), (), None,
@@ -238,6 +273,9 @@ COMMANDS: dict[str, Command] = {
                          "stunden*3600+3600", ("filter",)),
     "sign_off": Command((), ("zurueckgesetzt", "werte"), 24 * 3600, ("nicht_eingerichtet", "keine_bestaetigung")),
     "new_claim_code": Command((), (), 300, ("bereits_uebernommen",)),
+    "zertifikat_erneuern": Command((), ("fingerprint",), 900),
+    # Nur an Geraete vom Host ha nach der Freigabe: das Geraet verwirft Schluessel und Zertifikat und registriert sich neu.
+    "neue_identitaet": Command((), (), 24 * 3600),
     # konto_hinweis: Maske der Adresse des uebernehmenden Kontos (`a***@e***.com`), nur an Gateways; fehlt = kein Hinweis.
     "claim_state": Command(("device_state",), (), 24 * 3600, payload_optional=("konto_hinweis",)),
     "diagnostics": Command((), (), 300),
@@ -247,8 +285,10 @@ COMMANDS: dict[str, Command] = {
 }
 DRIVER_LOGIN_PHASES: dict[str, tuple[str, ...]] = {
     "begin": ("phase", "driver_id", "client_id", "redirect_uri", "scope"),
-    "finish": ("phase", "driver_id", "code", "redirect_uri"),
+    "finish": ("phase", "driver_id", "code"),
 }
+#: Form von `state_hash` im Ergebnis von `driver_login begin` (SHA-256 des `state`, den nur das Geraet und der Browser kennen).
+STATE_HASH_MUSTER = r"[0-9a-f]{64}"
 #: Ergebnisse von `weg_pruefen`.
 WEG_ERGEBNISSE = ("gleiche_anlage", "abweichung", "nicht_lesbar")
 #: Laengste Zeichenkette von `claim_state.konto_hinweis` (die Maske ist kuerzer; laenger lehnt der Server ab, das Geraet liest sie nicht).
@@ -265,6 +305,9 @@ PRUEF_REGELN = ("fehlt", "ungueltig", "anzahl", "bereich", "format", "doppelt", 
 #: pruefbar).
 PRUEF_FELDER = tuple(dict.fromkeys((
     *KONFIGURATION_FIELDS, *KONFIGURATION_KREIS_FIELDS, *KONFIGURATION_KREIS_OPTIONAL, *KONFIGURATION_RAUM_FIELDS,
+    *KONFIGURATION_PROGRAMM, *KONFIGURATION_KREIS_PROGRAMM, *AUFHEIZDAUER_MIN_FIELDS,
+    *BEDIENUNG_KREIS_PROGRAMM, *WISH_WERTE_PROGRAMM, *WOCHENPLAN_EINTRAG_FIELDS, *ABWESEND_FIELDS, *LEERSTAND_FIELDS,
+    *UEBERSTEUERUNG_FIELDS,
     *BINDUNGSPARAMETER_FIELDS, *SCHREIBSCHUTZ_FIELDS,
     *BINDUNG_GATEWAY_FIELDS, *TREIBER_FIELDS, *BINDUNG_HA_FIELDS, *BINDUNG_HA_OPTIONAL, *KREIS_FIELDS, *KREIS_OPTIONAL,
     *HA_ROLLEN,

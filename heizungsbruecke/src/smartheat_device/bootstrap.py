@@ -8,6 +8,7 @@ sondern ein Versuch nach Backoff. Zertifikat, Endpunkt und Uebernahmestatus lieg
 nicht zum eigenen TLS-Schluessel passt, wird nie gespeichert. Logs nennen Route und Status, nie Inhalte (Regel 6)."""
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -25,6 +26,7 @@ from smartheat_device.tls import ALPN_443, IOT_PORTS
 logger = logging.getLogger(__name__)
 
 CERTIFICATE_FILE = "certificate.pem"
+NEU_SUFFIX = ".neu"  # Dateien eines laufenden Zertifikatswechsels neben den aktuellen
 ENDPOINT_FILE = "endpoint.json"
 STATE_FILE = "bootstrap.json"
 GESPERRT_SECONDS = 6 * 3600
@@ -109,8 +111,9 @@ class BootstrapClient:
         body = identity_module.register_body(self._ident, version=version, host=host, capabilities=capabilities)
         return _antwort(self._request("register", body))
 
-    def certificate(self) -> Antwort:
-        return _antwort(self._request("certificate", nachrichten.zertifikat(identity_module.csr_pem(self._ident))))
+    def certificate(self, *, erneuerung: bool = False) -> Antwort:
+        return _antwort(self._request("certificate", nachrichten.zertifikat(identity_module.csr_pem(self._ident),
+                                                                            erneuerung=erneuerung)))
 
     def _request(self, route: str, body: dict):
         method, template = wire.ROUTES[route]
@@ -195,6 +198,34 @@ def speichern(device_dir: Path, antwort: Antwort) -> None:
                             "alpn": endpoint.alpn}, modus=dateien.PRIVAT)
     dateien.schreiben_text(device_dir / CERTIFICATE_FILE, antwort.zugang.certificate_pem, modus=dateien.PRIVAT)
     device_state_speichern(device_dir, antwort.device_state)
+
+
+def _neu(name: str) -> str:
+    return name + NEU_SUFFIX
+
+
+def erneuerung_ablegen(device_dir: Path, ident: identity_module.Identity, certificate_pem: str) -> None:
+    """Neuer TLS-Schluessel und neues Zertifikat neben die alten Dateien (mit Endung); die alten bleiben unberuehrt."""
+    dateien.schreiben_text(device_dir / _neu(identity_module.TLS_KEY_FILE), identity_module.tls_key_pem(ident),
+                           modus=dateien.PRIVAT)
+    dateien.schreiben_text(device_dir / _neu(CERTIFICATE_FILE), certificate_pem, modus=dateien.PRIVAT)
+
+
+def erneuerung_uebernehmen(device_dir: Path) -> None:
+    """Das neue Paar ersetzt das alte (je Datei atomar, Zertifikat zuletzt: seine Datei heisst Bootstrap fertig)."""
+    os.replace(device_dir / _neu(identity_module.TLS_KEY_FILE), device_dir / identity_module.TLS_KEY_FILE)
+    os.replace(device_dir / _neu(CERTIFICATE_FILE), device_dir / CERTIFICATE_FILE)
+
+
+def erneuerung_verwerfen(device_dir: Path) -> None:
+    """Die Dateien eines nicht abgeschlossenen Wechsels loeschen; das alte Paar gilt weiter."""
+    for name in (identity_module.TLS_KEY_FILE, CERTIFICATE_FILE):
+        try:
+            (device_dir / _neu(name)).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            logger.warning("Datei eines Zertifikatswechsels nicht geloescht (%s)", type(error).__name__)
 
 
 def laden(device_dir: Path) -> Zugang | None:

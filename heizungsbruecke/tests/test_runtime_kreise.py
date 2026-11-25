@@ -1,6 +1,7 @@
 """Die Laufzeit einer Anlage hat eine Instanz je Kreis: eigener Worker-Thread, Zustandsspeicher und Statusmelder, ein
 Link, eine Meldesenke, ein Statusereignis der Anlage. Ein Kreis mit abgeschlossener Abo-Frist ruht, die anderen regeln
 weiter; ein wieder aktives Abo nimmt nur diesen Kreis wieder auf, ohne Neustart und ohne die Verbindung zu kappen."""
+import dataclasses
 import threading
 from datetime import datetime
 
@@ -11,6 +12,7 @@ from runtime_helpers import OPTIONS
 from heizungsbruecke import config
 from heizungsbruecke.host import HaHost
 from smartheat_core import meldungen
+from smartheat_core.plan import SollErgebnis
 from smartheat_device.laufzeit import RuntimeChannel
 from smartheat_runtime import app, entitlement, kreise
 from smartheat_runtime.app import EV_RECHECK, StartFailure
@@ -832,3 +834,30 @@ def test_die_kennzeichen_der_telemetrie_gelten_je_kreis(env):
     gesendet = {paket["kreis"]: paket for paket in anlage.sent.of("telemetry")}
     assert (gesendet[1]["kaelteschutz"], gesendet[2]["kaelteschutz"]) == ("frost", "aus")
     assert gesendet[1]["testphase_ohne"] is False and gesendet[2]["testphase_ohne"] is False
+
+
+@pytest.mark.parametrize("art, soll", [("wunsch", 21.0), ("absenkung", 18.0), ("aufheizen", 21.0), ("abwesend", 17.0),
+                                       ("leerstand", 16.0), ("uebersteuert", 23.0)])
+def test_die_telemetrie_meldet_mit_plan_das_geltende_soll_und_die_art(env, art, soll):
+    anlage = Anlage(env, nummern=(1,))
+    runtime = _laufzeit(anlage, env).kreise()[1]
+    runtime.store.update(stable_target=21.0)
+    runtime.config = dataclasses.replace(runtime.config, plan_source=lambda: object())
+    runtime.geltendes_soll = SollErgebnis(soll, art, None)
+
+    app._on_telemetry(runtime, Event(EV_TELEMETRY))
+
+    gesendet = anlage.sent.of("telemetry")[-1]
+    assert (gesendet["room_target"], gesendet["soll_art"]) == (soll, art)
+
+
+def test_die_telemetrie_ohne_plan_traegt_den_wunsch_und_kein_neues_feld(env):
+    anlage = Anlage(env, nummern=(1,))
+    runtime = _laufzeit(anlage, env).kreise()[1]
+    runtime.store.update(stable_target=21.0)
+    runtime.geltendes_soll = SollErgebnis(17.0, "abwesend", None)  # ohne Planeingabe nie gemeldet
+
+    app._on_telemetry(runtime, Event(EV_TELEMETRY))
+
+    gesendet = anlage.sent.of("telemetry")[-1]
+    assert gesendet["room_target"] == 21.0 and "soll_art" not in gesendet

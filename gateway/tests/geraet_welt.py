@@ -25,7 +25,10 @@ class FakeDevice:
         self.ergebnis_ok = True
         self.code_ergebnis = "neu"  # Antwort von neuer_uebernahme_code
         self.code_aufrufe = 0
+        self.reset_aufrufe = 0  # Aufrufe von reset_melden (die Meldung vor dem Loeschen)
+        self.reset_zugestellt = False  # der Server hat die Ruecksetzmeldung quittiert
         self.identity = SimpleNamespace(device_id="shg-aaaaaaaaaaaaaaaa", claim_code="ABCDEFGHIJKLMNOP")
+        self.uebernahme_code = "ABCDEFGHIJKLMNOP"
         self.documents = SimpleNamespace(
             aktuell=lambda art: SimpleNamespace(dirty=self.dirty) if self.bed is not None else None)
 
@@ -50,6 +53,9 @@ class FakeDevice:
 
     def meldung(self, key, meldung, *, offen):
         self.meldungen.append((key, meldung, offen))
+
+    def reset_melden(self):
+        self.reset_aufrufe += 1
 
     def neuer_uebernahme_code(self):
         self.code_aufrufe += 1

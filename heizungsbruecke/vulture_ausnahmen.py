@@ -77,6 +77,15 @@ _.leerstand_temperatur_gueltig  # smartheat_core/safety.py: Untergrenze des Leer
 _.leerstand_bis_gueltig  # smartheat_core/safety.py: Hoechstdauer des Leerstands, noch ohne Aufrufer im Takt
 _.phasendauer_gueltig  # smartheat_core/safety.py: Mindestdauer der Phase, noch ohne Aufrufer im Takt
 _.abwesenheit_vorschlag  # smartheat_core/safety.py: Vorschlag je Verteilsystem, noch ohne Aufrufer im Takt
+# --- Vertragskopie Programm (smartheat_device/wire.py, woertlich wie geraete/device_protocol.py des Servers): Leser im Vertragscheck ---
+_.AUFHEIZDAUER_MIN_GRENZE  # Contract-Check (Fixture-Pruefung der Aufheizdauer-Grenze gegen die Freigabe, test_device_wire.py)
+_.WOCHENPLAN_TAGE  # Contract-Check (Fixture geraet_v1: wochenplan_tage), im Geraet nur gepinnt (test_device_wire.py)
+_.ABSENKUNG_K_MIN  # Contract-Check (Fixture-Pruefung der freigegebenen Absenkung), im Geraet gepinnt (test_regel4_werte.py)
+_.ABSENKUNG_K_MAX  # Contract-Check (Fixture-Pruefung der freigegebenen Absenkung), im Geraet gepinnt (test_regel4_werte.py)
+_.ABSENKUNG_K_STEP  # Contract-Check (Fixture-Pruefung der freigegebenen Absenkung), im Geraet gepinnt (test_regel4_werte.py)
+_.SOLL_ARTEN  # Contract-Check (soll_arten der Fixture gegen die SOLL_ART_*-Werte in plan.py), im Geraet gepinnt (test_device_wire.py)
+_.KONFIG_PROGRAMM  # smartheat_core/config_check.py: Kopie von wire.KONFIGURATION_PROGRAMM, test_core_vertrag_pin.py haelt beide gleich
+
 # --- Push-Regeln der Person (V1): die Kopie der Feldliste in wire.py ---
 _.PUSH_REGELN_FIELDS  # smartheat_device/wire.py: Vertragskopie, Leser auf der Server-Seite (geraete/device_protocol.py push_regeln_gueltig) und im Vertragscheck
 # --- Hausmodell-Kopie (smartheat_core/hausmodell.py): byte-gleich der Quelle im Server, daher nicht kuerzbar ---

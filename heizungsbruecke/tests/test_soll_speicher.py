@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+from datetime import datetime
 
 import pytest
 
@@ -10,6 +11,7 @@ from smartheat_runtime.soll_speicher import (
     BEDIENBEREICH_MIN,
     BEDIENBEREICH_STEP,
     ECHO_WINDOW_SECONDS,
+    MAX_NACHSCHREIBEN,
     PENDING_SECONDS,
     SOURCE_LOKAL,
     SOURCE_PORTAL,
@@ -123,9 +125,24 @@ def test_unconfirmed_write_expires(tmp_path, clock, caplog):
     store.apply_portal(22.0)
     store.note_own_write()
     clock.advance(PENDING_SECONDS + 1)
-    assert store.apply_thermostat(20.0)        # nie bestaetigt: Thermostat gilt wieder, mit Warnung
+    assert store.apply_thermostat(19.0)        # nie bestaetigt, weder alt noch geschrieben: Thermostat gilt, mit Warnung
     assert "nicht bestaetigt" in caplog.text
-    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+    assert (store.value, store.source) == (19.0, SOURCE_THERMOSTAT)
+
+
+@pytest.mark.parametrize("inhalt", ["{kaputt", "[]", '{"temp": 99.0}', '{"temp": "warm"}', '{"temp": null}'])
+def test_a_broken_remembered_display_file_means_no_remembered_display(tmp_path, clock, inhalt):
+    store = _store(tmp_path, clock)
+    store.anzeige_merken(19.0)
+    (tmp_path / "runtime" / "room_target.angezeigt.json").write_text(inhalt)
+    neu = _store(tmp_path, clock)  # kein Absturz; 19 ist nun eine Eingabe, nicht die gemerkte Anzeige
+    assert neu.apply_thermostat(19.0) and neu.value == 19.0
+
+
+def test_the_remembered_display_survives_a_restart(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.anzeige_merken(19.0)
+    assert not _store(tmp_path, clock).apply_thermostat(19.0)  # Gegenprobe: heile Datei, die Anzeige ist keine Eingabe
 
 
 def test_report_of_the_written_value_after_expiry_changes_nothing(tmp_path, clock):
@@ -295,9 +312,10 @@ def test_ein_offener_befehl_verfaellt_nach_dreissig_minuten_genau(tmp_path, cloc
     clock.advance(1799)
     assert store.apply_thermostat(20.0) is False  # alter Wert, Befehl noch offen
 
-    clock.advance(1)  # genau 1800 Sekunden: der Befehl ist verfallen, der Wert des Thermostats gilt
-    assert store.apply_thermostat(20.0) is True
-    assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+    clock.advance(1)  # genau 1800 Sekunden: der Befehl ist verfallen, der alte Wert ist kein Wunsch, er wird neu geschrieben
+    assert store.apply_thermostat(20.0) is False
+    assert store.nachschreiben_nehmen() == (22.0, 20.0)
+    assert (store.value, store.source) == (22.0, SOURCE_PORTAL)
 
 
 def test_ein_zweiter_befehl_nach_genau_dreissig_minuten_erbt_die_alten_werte_nicht(tmp_path, clock):
@@ -311,6 +329,68 @@ def test_ein_zweiter_befehl_nach_genau_dreissig_minuten_erbt_die_alten_werte_nic
 
     assert store.apply_thermostat(20.0) is True  # kein alter Wert mehr, sondern eine Eingabe am Thermostat
     assert (store.value, store.source) == (20.0, SOURCE_THERMOSTAT)
+
+
+def _leerstand_schreibung(tmp_path, clock):
+    """Wunsch 22, das Thermostat zeigt 19, im Leerstand wird 16 geschrieben: der Wunsch ist ein altes Soll des Befehls,
+    aber nicht das, was das Thermostat vorher zeigte."""
+    store = _store(tmp_path, clock, start=22.0)
+    store.anzeige_merken(19.0)
+    store.note_own_write(geschrieben=16.0)
+    return store
+
+
+def test_nach_der_frist_ist_ein_drehen_auf_den_wunsch_eine_eingabe_nicht_der_verlorene_befehl(tmp_path, clock):
+    store = _leerstand_schreibung(tmp_path, clock)
+    clock.advance(PENDING_SECONDS + 1)
+    assert store.thermostat_pruefen(22.0, angezeigt=16.0) == 22.0
+    assert store.nachschreiben_nehmen() is None
+
+
+def test_nach_der_frist_bleibt_die_alte_anzeige_ein_verlorener_befehl(tmp_path, clock):
+    store = _leerstand_schreibung(tmp_path, clock)
+    clock.advance(PENDING_SECONDS + 1)
+    assert store.thermostat_pruefen(19.0, angezeigt=16.0) is None
+    assert store.nachschreiben_nehmen() == (16.0, 19.0)
+
+
+def test_eine_abweichende_meldung_in_der_frist_macht_die_alte_anzeige_danach_zur_eingabe(tmp_path, clock):
+    store = _leerstand_schreibung(tmp_path, clock)
+    clock.advance(120)  # Echo-Fenster vorbei
+    assert store.thermostat_pruefen(22.0, angezeigt=16.0) is None  # der Wunsch in der Frist: alter Wert des Befehls
+    clock.advance(PENDING_SECONDS)
+    assert store.thermostat_pruefen(19.0, angezeigt=16.0) == 19.0  # das Thermostat hat sich inzwischen bewegt
+    assert store.nachschreiben_nehmen() is None
+
+
+def _verlorene_befehle(store, clock, wert, n):
+    """n verlorene Befehle in Folge: nach der Frist meldet das Thermostat weiter 20, der Aufrufer schreibt erneut."""
+    for _ in range(n):
+        clock.advance(PENDING_SECONDS + 1)
+        assert store.thermostat_pruefen(20.0) is None
+        assert store.nachschreiben_nehmen() == (wert, 20.0)
+        store.note_own_write(veraltet=20.0, geschrieben=wert, wiederholung=True)
+
+
+def test_nach_der_letzten_wiederholung_gilt_die_meldung_als_eingabe(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+    _verlorene_befehle(store, clock, 22.0, MAX_NACHSCHREIBEN)
+    clock.advance(PENDING_SECONDS + 1)
+    assert store.thermostat_pruefen(20.0) == 20.0
+    assert store.nachschreiben_nehmen() is None
+
+
+def test_ein_neuer_eigener_befehl_bekommt_alle_wiederholungen_wieder(tmp_path, clock):
+    store = _store(tmp_path, clock)  # Thermostat zeigt 20
+    store.apply_portal(22.0)
+    store.note_own_write()
+    _verlorene_befehle(store, clock, 22.0, MAX_NACHSCHREIBEN)
+    clock.advance(PENDING_SECONDS + 1)
+    store.apply_portal(23.0)
+    store.note_own_write(veraltet=20.0)  # ein neuer Befehl, keine Wiederholung
+    _verlorene_befehle(store, clock, 23.0, MAX_NACHSCHREIBEN)
 
 
 def test_die_rueckgaben_der_eingaenge_sind_wahrheitswerte(tmp_path, clock):
@@ -333,3 +413,174 @@ def test_die_rueckgaben_der_eingaenge_sind_wahrheitswerte(tmp_path, clock):
     assert store.apply_thermostat(22.0) is False  # veralteter Wert bei offenem Befehl
     assert store.apply_thermostat(23.0) is False  # bestaetigt
     assert store.apply_thermostat(23.0) is False  # geltendes Soll
+
+
+# --- ganzzahliges Thermostat zeigt den eigenen Schreibwert gerundet zurueck ---
+
+def test_halbes_grad_am_ganzzahligen_thermostat_ist_echo_und_keine_aenderung(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)
+    store.note_own_write()
+    clock.advance(5)
+    assert store.apply_thermostat(21.0) is False  # gerundeter Schreibwert im Echo-Fenster
+    assert (store.value, store.source) == (20.5, SOURCE_PORTAL)
+    clock.advance(ECHO_WINDOW_SECONDS)
+    assert store.apply_thermostat(21.0) is False  # Wiederholung desselben gerundeten Werts
+    assert (store.value, store.source) == (20.5, SOURCE_PORTAL)
+    assert store.apply_thermostat(22.0) is True  # eine echte Drehung gilt
+    assert (store.value, store.source) == (22.0, SOURCE_THERMOSTAT)
+
+
+def test_ein_voller_grad_nach_dem_halben_ist_eine_aenderung_ohne_vorheriges_echo(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)  # nie geschrieben: das Thermostat ist nicht als ganzzahlig bekannt
+    assert store.apply_thermostat(21.0) is True
+    assert store.value == 21.0
+
+
+def test_thermostat_pruefen_gibt_den_wert_ohne_den_speicher_zu_aendern(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.thermostat_pruefen(22.0) == 22.0
+    assert (store.value, store.source) == (20.0, SOURCE_PORTAL)
+    assert store.thermostat_pruefen(20.0) is None  # geltendes Soll
+    assert store.thermostat_pruefen(40.0) is None  # unplausibel
+    store.apply_portal(22.0)
+    store.note_own_write()
+    assert store.thermostat_pruefen(19.0) is None  # Echo-Fenster
+
+
+# --- Uebersteuerung der kuehlen Phase: lokal, ueberlebt den Neustart ---
+
+BIS = "2026-01-15T22:00:00Z"
+
+
+def test_uebersteuerung_uebersteht_den_neustart_und_laesst_den_wunsch_stehen(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.uebersteuerung() is None
+    store.uebersteuerung_setzen(18.5, BIS)
+    assert store.uebersteuerung() == {"temp": 18.5, "bis": BIS}
+    assert (store.value, store.source) == (20.0, SOURCE_PORTAL)
+    neu = _store(tmp_path, clock)
+    assert neu.uebersteuerung() == {"temp": 18.5, "bis": BIS}
+    assert (neu.value, neu.source) == (20.0, SOURCE_PORTAL)
+
+
+def test_abgelaufene_oder_kaputte_uebersteuerung_gilt_nicht(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, "2026-01-15T06:00:00Z")  # jetzt (07:00 UTC) schon vorbei
+    assert store.uebersteuerung() is None
+    store.uebersteuerung_setzen(18.5, BIS)
+    (tmp_path / "runtime" / "room_target.uebersteuerung.json").write_text("{kaputt")
+    assert _store(tmp_path, clock).uebersteuerung() is None
+
+
+def test_uebersteuerung_mit_ende_genau_jetzt_gilt_als_abgelaufen(tmp_path, clock):
+    store = _store(tmp_path, clock)  # jetzt: 2026-01-15T08:00:00+01:00 = 07:00 UTC
+    store.uebersteuerung_setzen(18.5, "2026-01-15T07:00:00Z")
+    assert store.uebersteuerung() is None
+    assert _store(tmp_path, clock).uebersteuerung() is None  # auch aus der Datei entfernt
+    store.uebersteuerung_setzen(18.5, "2026-01-15T07:00:01Z")  # eine Sekunde spaeter noch nicht
+    assert store.uebersteuerung() == {"temp": 18.5, "bis": "2026-01-15T07:00:01Z"}
+
+
+@pytest.mark.parametrize("bis", ["unlesbar", ""], ids=["text", "leer"])
+def test_uebersteuerung_mit_unlesbarem_ende_gilt_als_abgelaufen(tmp_path, clock, bis):
+    """Aus der Datei liest `_ueb_lesen` so etwas gar nicht erst ein; ueber `uebersteuerung_setzen` (ungeprueft) bleibt
+    nur die Abfrage des Endes."""
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, bis)
+    assert store.uebersteuerung() is None
+    assert _store(tmp_path, clock).uebersteuerung() is None
+
+
+# --- _bestaetigt: exakt, gerundet am ganzzahligen Thermostat, sonst nicht ---
+
+def test_ohne_offenen_befehl_ist_keine_rueckmeldung_eine_bestaetigung(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(20.0) is False
+    assert store._bestaetigt(21.0) is False
+    assert store._gerundet is None
+
+
+def test_exakter_rueckwert_eines_ganzzahligen_schreibwerts_bestaetigt(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(21.0, written=21.0) is True
+    assert store._gerundet is None  # exakt, nichts gerundet
+
+
+def test_rundung_um_hoechstens_ein_halbes_kelvin_bestaetigt_und_merkt_die_anzeige(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(21.0, written=20.5) is True  # genau 0,5 K daneben
+    assert store._gerundet == 21.0
+    assert store._bestaetigt(20.0, written=20.5) is True
+    assert store._gerundet == 20.0
+
+
+@pytest.mark.parametrize(("value", "written"), [(21.0, 20.4), (21.0, 20.0), (22.0, 20.5), (21.5, 21.0)],
+                         ids=["0,6 K daneben", "ganzzahliger Schreibwert", "1,5 K daneben", "ganzzahliger Schreibwert, halbe Anzeige"])
+def test_mehr_als_ein_halbes_kelvin_daneben_bestaetigt_nicht(tmp_path, clock, value, written):
+    store = _store(tmp_path, clock)
+    assert store._bestaetigt(value, written=written) is False
+    assert store._gerundet is None
+
+
+def test_bestaetigung_im_echo_fenster_schliesst_den_befehl_auch_bei_gerundeter_anzeige(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)
+    store.note_own_write()  # veraltet: 20.0
+    clock.advance(5)
+    assert store.thermostat_pruefen(21.0) is None  # gerundeter Schreibwert im Echo-Fenster: bestaetigt
+    clock.advance(ECHO_WINDOW_SECONDS)
+    # der Befehl ist geschlossen: 20.0 ist kein "veralteter Wert bei offenem Befehl" mehr, sondern eine Eingabe
+    assert store.thermostat_pruefen(20.0) == 20.0
+    assert store.thermostat_pruefen(21.0) is None  # die gemerkte gerundete Anzeige bleibt keine Eingabe
+
+
+def test_gerundete_anzeige_wiederholt_ist_keine_eingabe(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.apply_portal(20.5)
+    store.note_own_write()
+    clock.advance(5)
+    assert store.thermostat_pruefen(21.0) is None
+    clock.advance(ECHO_WINDOW_SECONDS)
+    assert store.thermostat_pruefen(21.0) is None  # Wiederholung der gerundeten Anzeige
+    assert store.thermostat_pruefen(22.0) == 22.0  # eine echte Drehung gilt
+
+
+def test_uebersteuerung_aufheben_loescht_auch_die_gespeicherte(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, BIS)
+    store.uebersteuerung_aufheben()
+    assert store.uebersteuerung() is None
+    assert _store(tmp_path, clock).uebersteuerung() is None
+    store.uebersteuerung_aufheben()  # ohne Uebersteuerung: nichts zu tun
+
+
+def test_eine_neue_bedienung_vom_portal_beendet_die_lokale_uebersteuerung(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, BIS)
+    assert store.apply_portal(21.0) is True
+    assert store.uebersteuerung() is None
+
+
+def test_die_uebersteuerung_liegt_wie_der_wunsch_lesbar_und_atomar(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    store.uebersteuerung_setzen(18.5, BIS)
+    datei = tmp_path / "runtime" / "room_target.uebersteuerung.json"
+    assert stat.S_IMODE(os.stat(datei).st_mode) == 0o644
+    assert not (tmp_path / "runtime" / "room_target.uebersteuerung.json.tmp").exists()
+
+
+def test_ein_ende_ohne_zeitzone_gilt_als_abgelaufen_statt_abzustuerzen(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store._abgelaufen("2099-01-01T00:00:00") is True
+    assert store._abgelaufen("2099-01-01T00:00:00Z") is False
+    assert store._abgelaufen("gestern") is True
+
+
+def test_der_speicher_haelt_den_zaehler_der_leerstand_aenderungen_neben_dem_wunsch(tmp_path, clock):
+    store = _store(tmp_path, clock)
+    assert store.leerstand_zaehler.eintragen() == 1
+    assert _store(tmp_path, clock).leerstand_zaehler.anzahl() == 1  # dieselbe Datei nach dem Neustart
+    assert (tmp_path / "runtime" / "room_target.leerstand.json").exists()
+    assert store.jetzt() == datetime.fromisoformat("2026-01-15T08:00:00+01:00")

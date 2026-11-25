@@ -22,8 +22,9 @@ import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
-from smartheat_core import kreisansicht
+from smartheat_core import kreisansicht, safety
 from smartheat_core.bindungsparameter import Fehler as BindungsparameterFehler
 from smartheat_core.bindungsparameter import beschreibung
 from smartheat_core.levers import LEVER_SETS
@@ -78,6 +79,16 @@ KREIS_NUMMER_MAX = 2**31 - 1  # Kreis- und Raumnummern (wire.KREIS_MAX)
 RAUM_ROLLEN = ("referenz", "kontroll")
 KONFIG_KREIS_FELDER = ("kreis", "name", "bindung", "raeume", "hebelsatz", "verteilsystem", "abo")
 KONFIG_KREIS_OPTIONAL = ("ursprungswerte", "zustand")
+#: Felder der Faehigkeit `programm` (Kopie aus smartheat_device.wire: KONFIGURATION_PROGRAMM, KONFIGURATION_KREIS_PROGRAMM,
+#: AUFHEIZDAUER_MIN_FIELDS, AUFHEIZDAUER_MIN_GRENZE, AUFHEIZEN_ARTEN; test_core_vertrag_pin.py haelt sie gleich): anlagenweit die
+#: Zeitzone, je Kreis Aufheizart, Absenkung und Aufheizdauer, die ein Kreis ganz oder gar nicht fuehrt. Die Absenkung
+#: (0 bis 5 K in 0,5-K-Schritten) steht in safety.py (Regel 4). Die Aufheizdauer ist je Art hoechstens 12 h (`plan`) bzw.
+#: 72 h (`weg`).
+KONFIG_PROGRAMM = ("zeitzone",)
+KONFIG_KREIS_PROGRAMM = ("aufheizen", "absenkung_k", "aufheizdauer_min")
+AUFHEIZDAUER_ARTEN = ("plan", "weg")
+AUFHEIZDAUER_GRENZE = (720, 4320)
+AUFHEIZEN_ARTEN = ("boost", "kurve")
 RAUM_FELDER = ("raum", "name", "rolle", "fuehler", "soll_quelle", "versatz_k", "ziel_fest")
 #: Anbindungswege, die ein Geraet heute ausfuehrt (`simulation`: Testweg), und ihre Abbildung aus der Bindung.
 WEGE = ("vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus", "simulation")
@@ -216,6 +227,48 @@ def mindest_software_pruefen(neu: Mapping) -> dict | None:
     return None if isinstance(wert, str) and MINDEST_VERSION.fullmatch(wert) else befund("mindest_software", "ungueltig")
 
 
+def zeitzone_pruefen(neu: Mapping) -> dict | None:
+    """details, wenn `zeitzone` (falls vorhanden) kein bekannter IANA-Name ist, sonst None. Eine Konfiguration ohne Anlage
+    darf null fuehren; der Name kommt nie als Pfad in die Zonendatenbank (Zeichen ausserhalb der Namen scheitern)."""
+    if "zeitzone" not in neu:
+        return None
+    zone = neu["zeitzone"]
+    if not _text(zone):
+        return befund("zeitzone", "ungueltig")
+    try:
+        ZoneInfo(zone)
+    except (ValueError, KeyError, OSError):
+        return befund("zeitzone", "unbekannt")
+    return None
+
+
+def _programm_aufbau(eintrag: Mapping) -> dict | None:
+    """details des ersten Verstosses der Programmfelder eines Kreises, sonst None. Sie gelten ganz oder gar nicht."""
+    if not any(key in eintrag for key in KONFIG_KREIS_PROGRAMM):
+        return None
+    fehlend = next((key for key in KONFIG_KREIS_PROGRAMM if key not in eintrag), None)
+    if fehlend is not None:
+        return befund(fehlend, "fehlt")
+    if eintrag["aufheizen"] not in AUFHEIZEN_ARTEN:
+        return befund("aufheizen", "unbekannt")
+    tiefe = eintrag["absenkung_k"]
+    if not _zahl(tiefe):
+        return befund("absenkung_k", "ungueltig")
+    if not safety.ABSENKUNG_MIN_K <= tiefe <= safety.ABSENKUNG_MAX_K:
+        return befund("absenkung_k", "bereich", min=safety.ABSENKUNG_MIN_K, max=safety.ABSENKUNG_MAX_K)
+    if not safety.absenkung_k_gueltig(tiefe):
+        return befund("absenkung_k", "ungueltig")
+    dauern = eintrag["aufheizdauer_min"]
+    if not isinstance(dauern, Mapping) or set(dauern) != set(AUFHEIZDAUER_ARTEN):
+        return befund("aufheizdauer_min", "ungueltig")
+    for art, grenze in zip(AUFHEIZDAUER_ARTEN, AUFHEIZDAUER_GRENZE, strict=True):
+        if not _zahl(dauern[art]):
+            return befund("aufheizdauer_min", "ungueltig")
+        if not 0 <= dauern[art] <= grenze:
+            return befund("aufheizdauer_min", "bereich", min=0, max=grenze)
+    return None
+
+
 def _raum_aufbau(raum, gesehen: set[int]) -> dict | None:
     if not isinstance(raum, Mapping) or set(raum) != set(RAUM_FELDER):
         return befund("raeume", "ungueltig")
@@ -256,7 +309,7 @@ def _raum_aufbau(raum, gesehen: set[int]) -> dict | None:
 def _kreis_aufbau(eintrag, vorige: int) -> dict | None:
     if not isinstance(eintrag, Mapping):
         return befund("kreise", "ungueltig")
-    if set(eintrag) - set(KONFIG_KREIS_FELDER) - set(KONFIG_KREIS_OPTIONAL):
+    if set(eintrag) - set(KONFIG_KREIS_FELDER) - set(KONFIG_KREIS_OPTIONAL) - set(KONFIG_KREIS_PROGRAMM):
         return befund("kreise", "unbekannt")  # der fremde Name geht nicht hoch
     fehlend = next((key for key in KONFIG_KREIS_FELDER if key not in eintrag), None)
     if fehlend is not None:
@@ -278,6 +331,8 @@ def _kreis_aufbau(eintrag, vorige: int) -> dict | None:
         return befund("zustand", "unbekannt")  # fehlt der Wert, gilt in_betrieb (kreisansicht.zustand)
     if "ursprungswerte" in eintrag and not _ursprungswerte_ok(eintrag["ursprungswerte"]):
         return befund("ursprungswerte", "ungueltig")
+    if problem := _programm_aufbau(eintrag):
+        return problem
     abfrage = eintrag["bindung"].get("abfrage_s")
     if abfrage is not None and not (isinstance(abfrage, int) and not isinstance(abfrage, bool)
                                     and ABFRAGE_S[0] <= abfrage <= ABFRAGE_S[1]):
@@ -312,6 +367,8 @@ def _aufbau(neu: Mapping) -> dict | None:
         return problem
     if neu.get("mindest_integration") is not None and not _text(neu["mindest_integration"]):
         return befund("mindest_integration", "ungueltig")
+    if problem := zeitzone_pruefen(neu):
+        return problem
     kreise = neu.get("kreise")
     if not isinstance(kreise, list):
         return befund("kreise", "ungueltig")
@@ -337,6 +394,8 @@ def _leer_aufbau(neu: Mapping) -> dict | None:
     if neu.get("tagestick") is not None and not (isinstance(neu["tagestick"], str) and TAGESTICK.fullmatch(neu["tagestick"])):
         return befund("tagestick", "format")
     if "mindest_software" in neu and (problem := mindest_software_pruefen(neu)):
+        return problem
+    if neu.get("zeitzone") is not None and (problem := zeitzone_pruefen(neu)):  # ohne Anlage darf sie null sein
         return problem
     if "kreise" in neu and neu["kreise"] != []:  # eine Anlage ohne Einrichtung hat keine Kreise
         return befund("kreise", "ungueltig")

@@ -336,3 +336,25 @@ def test_ohne_verbundenes_geraet_geht_nichts_hinaus_und_nichts_wirft(tmp_path):
     host = _Host(tmp_path / "a.json")
     host.update_noetig_melden(_anzeige("update_noetig"))
     host.update_noetig_melden(_anzeige("regelt"))
+
+
+def test_betriebsart_beenden_ohne_geraet_wird_abgelehnt(tmp_path):
+    host = _Host(tmp_path / "a.json")
+    with pytest.raises(ValueError, match="kein Geraet"):
+        host.betriebsart_beenden(0, "leerstand", 21.0, None, None, None)
+
+
+def test_betriebsart_beenden_reicht_an_den_geraetekern_und_nimmt_die_herkunft_des_hosts(tmp_path):
+    aufrufe = []
+
+    class _Kern:
+        def betriebsart_beenden(self, *args):
+            aufrufe.append(args)
+            return 20.5
+
+    host = _Host(tmp_path / "a.json")
+    host.verbinden(_Kern())
+    assert host.betriebsart_beenden(1, "abwesend", 20.5, None, None, "luca") == 20.5
+    assert host.betriebsart_beenden(1, "leerstand", None, {"temp": 17.0}, "portal", None) == 20.5
+    assert aufrufe == [(1, "abwesend", 20.5, None, "test", "luca"),
+                       (1, "leerstand", None, {"temp": 17.0}, "portal", None)]

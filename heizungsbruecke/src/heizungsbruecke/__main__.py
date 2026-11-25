@@ -39,7 +39,7 @@ from typing import BinaryIO
 from heizungsbruecke import config, derived_sensors, geraet_nachweis, stdin_befehl
 from heizungsbruecke.discovery import Discovery
 from heizungsbruecke.geraet_host import HaDeviceHost
-from heizungsbruecke.geraet_status import GeraetStatus, lokale_sicht
+from heizungsbruecke.geraet_status import GeraetStatus, abwesend_aus_bedienung, lokale_sicht
 from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.host import HaAnlagenHost
 from heizungsbruecke.supervisor import SupervisorApi
@@ -237,15 +237,19 @@ def verdrahten(geraet: HaDeviceHost, device, ha_api, supervisor) -> GeraetStatus
         dokument = device.documents.aktuell(ANZEIGE)
         return dokument.inhalt if dokument is not None else None
 
+    def bedienung_inhalt() -> dict | None:
+        return device.bedienung()  # mit dem Away, das HA lokal gesetzt hat und der Server noch nicht bestaetigte
+
     lokal = lokale_sicht(lambda: device.documents.aktuell(KONFIGURATION), _raum_soll, lambda kreis: (geraet.raum(kreis) or {}).get("ist"),
                          anzeige_inhalt, kritisch_ende=geraet.kritisches_ende,
-                         update_noetig_kritisch=geraet.update_noetig_kritisch)
-    status = GeraetStatus(ha_api, device.identity.device_id, lokal,
+                         update_noetig_kritisch=geraet.update_noetig_kritisch,
+                         abwesend=abwesend_aus_bedienung(lambda: bedienung_inhalt()))
+    status = GeraetStatus(ha_api, lambda: device.identity.device_id, lokal,
                           laufzeit_merken=lambda event: setattr(geraet, "runtime_status_event", event))
     geraet.status_sink = status
-    geraet.geraet_id = device.identity.device_id
+    geraet.geraet_id = lambda: device.identity.device_id
     geraet.discovery = Discovery(supervisor, config.DEVICE_DATA_DIR / DEVICE_DIR / "discovery.json")
-    geraet.claim_code = lambda: device.identity.claim_code
+    geraet.claim_code = lambda: device.uebernahme_code
     return status
 
 
@@ -288,14 +292,16 @@ def stdin_quelle() -> BinaryIO | None:
 
 def stdin_anhaengen(geraet: HaDeviceHost, device, quelle: BinaryIO, ha_api,
                     uhr: Callable[[], float] = echte_epoche) -> threading.Thread:
-    """Lokale Befehle `entfernen <eigene Geraete-ID> [freigeben]` und `nachweis <eigene Geraete-ID>` aus quelle lesen;
+    """Lokale Befehle `entfernen <eigene Geraete-ID> [freigeben]`, `nachweis <eigene Geraete-ID>` und `code <eigene
+    Geraete-ID>` aus quelle lesen; `code` legt im Geraete-Thread einen neuen Uebernahme-Code an (HaDeviceHost.code_anfordern);
     `entfernen` meldet das Geraet im Geraete-Thread ab (HaDeviceHost.lokal_abmelden bzw. mit `freigeben`
     lokal_freigeben ueber das Postfach, nie nebenlaeufig zum Befehlsregister), `nachweis` sendet das signierte Ereignis
     smartheat_nachweis ueber ha_api (Zeit aus uhr). Eine fremde Geraete-ID bewirkt nichts."""
-    return stdin_befehl.starten(quelle, device.identity.device_id,
+    return stdin_befehl.starten(quelle, lambda: device.identity.device_id,
                                 lambda: device.im_geraete_thread(geraet.lokal_abmelden),
                                 lambda: geraet_nachweis.senden(ha_api, device.identity, uhr),
-                                lambda: device.im_geraete_thread(geraet.lokal_freigeben))
+                                lambda: device.im_geraete_thread(geraet.lokal_freigeben),
+                                lambda: device.im_geraete_thread(geraet.code_anfordern))
 
 
 def _ruhen() -> None:

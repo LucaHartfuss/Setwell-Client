@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from smartheat_core import dateien
+from smartheat_device import nachrichten, programm, wire
 from smartheat_device.commands import CommandRegister
 from smartheat_runtime import dokument_config
 from smartheat_runtime.ports import SignalUngueltig
@@ -375,6 +378,22 @@ def host_und_version(w: Welt) -> None:
     assert w.host.host in ("ha", "gateway") and isinstance(w.host.version, str) and w.host.version
 
 
+def ohne_konfiguration_kann_der_host_programm(w: Welt) -> None:
+    """Bei der Registrierung ist noch keine Konfiguration bekannt: der Host meldet die Faehigkeit, weil er sie kann."""
+    assert w.host.faehigkeiten().get("programm") is True
+
+
+def ohne_zonendaten_meldet_der_host_programm_nicht(w: Welt) -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(programm, "zonendaten_vorhanden", lambda: False)
+        assert "programm" not in w.host.faehigkeiten()
+
+
+def die_faehigkeiten_bestehen_die_vertragspruefung(w: Welt) -> None:
+    w.verbunden()
+    nachrichten.pruefen("faehigkeiten", w.host.faehigkeiten(), wire.CAPABILITY_FIELDS, wire.CAPABILITY_OPTIONAL)
+
+
 def _laufzeit_host(w: Welt):
     w.verbunden()
     return w.laufzeit_host()
@@ -451,6 +470,8 @@ PRUEFUNGEN = (
     eine_leere_oder_fremde_konfiguration_laesst_die_abmeldung_stehen,
     ohne_eigene_abmeldung_startet_dieselbe_konfiguration_nicht_neu, wunsch_und_soll_quelle_gehen_an_das_geraet,
     ein_ungueltiger_fuehlerwert_wirft_signal_ungueltig, host_und_version,
+    ohne_konfiguration_kann_der_host_programm, ohne_zonendaten_meldet_der_host_programm_nicht,
+    die_faehigkeiten_bestehen_die_vertragspruefung,
     die_uhr_der_laufzeit_ist_synchron_wenn_der_zeitdienst_es_meldet,
     die_uhr_der_laufzeit_traegt_die_zeiten_der_synchronen_antwort,
     die_uhr_der_laufzeit_ist_nicht_synchron_wenn_der_zeitdienst_es_verneint,

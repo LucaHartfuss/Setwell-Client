@@ -3,7 +3,7 @@
 Ausfuehrung, Gruende-Pruefung und Versand macht das Register. Gateway-Befehle: zigbee_permit_join, zigbee_devices,
 driver_login, inventory (stunden 0: Erkennung des Treibers, sonst Messreihe des Treibers aus der Konfiguration;
 Ergebnis jeweils als up/inventory), diagnostics und sign_off (Markierung, dann startet die Laufzeit als "abgemeldet"
-neu und setzt die Anlage zurueck). hinweis und new_claim_code kann jedes Geraet (Geraetekern). Fehler als Grund und
+neu und setzt die Anlage zurueck). hinweis, new_claim_code und zertifikat_erneuern kann jedes Geraet (Geraetekern). Fehler als Grund und
 details, nie Texte oder Geheimnisse; DriverError und QuotaExhausted uebersetzt
 fehler_uebersetzen in Vertragsgruende.
 
@@ -14,6 +14,7 @@ und die Laufzeit liefe nach zwei Ack-Timeouts in den Notbetrieb."""
 import functools
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -235,9 +236,13 @@ def driver_login(ctx: Kontext, payload: dict) -> Outcome:
     if type(driver).login_kind is None:
         raise DriverError("login_nicht_noetig")
 
-    def anmelden() -> Done:
+    def anmelden() -> Done | Failed:
         if phase == "begin":
-            return Done(driver.login_begin(payload))
+            ergebnis = driver.login_begin(payload)
+            state_hash = ergebnis.get("state_hash")
+            if not isinstance(state_hash, str) or not re.fullmatch(wire.STATE_HASH_MUSTER, state_hash):
+                return Failed("login_fehlgeschlagen")  # der Hash geht nicht an den Server, wenn er nicht dem Vertrag gleicht
+            return Done(ergebnis)
         driver.login_finish(payload)
         return Done({})
 
@@ -358,6 +363,13 @@ def _adopt_saved(ctx: Kontext, series: dict) -> bool:
 @_handler("diagnostics")
 def diagnostics(ctx: Kontext, payload: dict) -> Outcome:
     return Done(ctx.diagnostics())
+
+
+@_handler("neue_identitaet")
+def neue_identitaet(ctx: Kontext, payload: dict) -> Outcome:
+    """Der Server stellt den Befehl nur dem Host ha zu. Das Gateway behaelt seine Identitaet; dieser Handler ersetzt
+    den des Geraetekerns."""
+    return Failed("nicht_unterstuetzt")
 
 
 @_handler("sign_off")

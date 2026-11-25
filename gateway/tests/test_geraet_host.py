@@ -12,17 +12,18 @@ import pytest
 from befehle_sicht import registrierte_befehle
 from configs import bedienung, dokumente_schreiben, konfiguration, leer
 from fakes import FakeBus
+from geraet_fakes import werk_ablegen
 from geraet_welt import WALL, FakeDevice, Welt
 from rastung_beispiele import rastung_aus
 from world import GatewayWorld
 
 from smartheat_core import dateien, meldungen, rastung
-from smartheat_device import nachrichten, wire
+from smartheat_device import nachrichten, programm, wire
 from smartheat_device.documents import DocumentStore
 from smartheat_device.geraet_host_basis import EV_RELOAD
 from smartheat_device.host import Anzeige
+from smartheat_gateway import anmeldung, runtime_main
 from smartheat_gateway import geraet_host as gh
-from smartheat_gateway import runtime_main
 from smartheat_gateway.drivers import registry
 from smartheat_gateway.triggers import EV_TARGET_INPUT
 from smartheat_gateway.version import GATEWAY_VERSION
@@ -50,7 +51,27 @@ def _anzeige(zustand="regelt", **changes):
 def test_capabilities_and_version(welt):
     assert (welt.host.host, welt.host.version) == ("gateway", GATEWAY_VERSION)
     assert welt.host.faehigkeiten() == {"drivers": ["simulation", "vicare_cloud"], "zigbee": True, "updater": True,
-                                         "testphase": True, "kaelteschutz": True}
+                                         "testphase": True, "kaelteschutz": True, "programm": True}
+
+
+def test_programm_nur_mit_zonendaten_uhr_port_und_thermostat(welt, monkeypatch):
+    assert welt.host.faehigkeiten()["programm"] is True
+    welt.device.konf = konfiguration()
+    welt.device.konf["kreise"][0]["bindung"]["thermostat"] = None  # kein Soll-Ziel: nichts, was das Soll schreibt
+    assert "programm" not in welt.host.faehigkeiten()
+    welt.device.konf = konfiguration()
+    monkeypatch.setattr(programm, "zonendaten_vorhanden", lambda: False)
+    assert "programm" not in welt.host.faehigkeiten()
+    monkeypatch.undo()
+    monkeypatch.setattr(gh.GatewayDeviceHost, "uhr_synchron", None)
+    assert "programm" not in welt.host.faehigkeiten()
+
+
+def test_programm_ohne_konfiguration_kann_der_host_es(welt):
+    welt.device.konf = None  # Registrierung vor der ersten Konfiguration
+    assert welt.host.faehigkeiten()["programm"] is True
+    welt.device.konf = leer()
+    assert welt.host.faehigkeiten()["programm"] is True
 
 
 def test_capabilities_are_built_against_the_contract(welt, monkeypatch):
@@ -72,7 +93,18 @@ def test_clock_sync_comes_from_the_host_status(welt):
     assert welt.host.uhr_synchron() is None
 
 
-def test_the_gateway_has_no_hello_fields_of_the_ha_host(welt):
+def test_the_gateway_sends_its_serial_number_from_the_factory_file_and_none_of_the_ha_fields(welt):
+    werk_ablegen(welt.host_dir, "SHG-0001")
+    assert welt.host.hello_felder() == {"seriennummer": "SHG-0001"}
+
+
+@pytest.mark.parametrize("zustand", ["fehlt", "ungueltig", "zusatzfeld"])
+def test_without_a_valid_factory_file_the_gateway_has_no_hello_fields(welt, zustand):
+    if zustand == "ungueltig":
+        welt.host_dir.mkdir(parents=True, exist_ok=True)
+        (welt.host_dir / anmeldung.WERK_DATEI).write_text("kein json")
+    elif zustand == "zusatzfeld":
+        werk_ablegen(welt.host_dir, pilot="x")
     assert welt.host.hello_felder() == {}
 
 

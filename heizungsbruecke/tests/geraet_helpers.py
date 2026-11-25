@@ -128,6 +128,8 @@ class FakeGeraet:
         self.start_markierung = start_markierung  # die beim Start gelesene Aufraeum-Markierung (aufraeumen.entscheiden)
         self._supervisor, self._clock, self._uhr = Supervisor(), clock, None  # Zustand fuer uhr_synchron
         self.wuensche, self.aus, self.status = [], [], []
+        self.abwesend: list[tuple] = []  # Away-Aufrufe des Triggers: ("setzen", kreis, bis, temp, durch) usw.
+        self.abwesend_antwort: str | None = None  # der Ablehnungsgrund, den der Host liefern soll
         self.integration_stand = IntegrationStand()  # wie im echten Geraete-Host
         self.push_stand = PushStand()
         self.wunsch_kreise: list[int] = []  # der Kreis jedes Wunschs, parallel zu wuensche
@@ -143,7 +145,7 @@ class FakeGeraet:
         self.host = None
         self._ha = ha
         self.status_sink = self if ha is None else GeraetStatus(
-            ha, GERAET_ID, lokale_sicht(self._konfig_dokument, self._raum_soll, self._raum_ist, lambda: None,
+            ha, lambda: GERAET_ID, lokale_sicht(self._konfig_dokument, self._raum_soll, self._raum_ist, lambda: None,
                          update_noetig_kritisch=lambda: False),
             laufzeit_merken=self.status.append)
 
@@ -192,6 +194,26 @@ class FakeGeraet:
 
     def soll_quelle_aus(self, aus, wirksam):
         self.aus.append((aus, wirksam))
+
+    def abwesend_setzen(self, kreis, bis, temp, durch):
+        self.abwesend.append(("setzen", kreis, bis, temp, durch))
+        return self.abwesend_antwort
+
+    def abwesend_beenden(self, kreis, durch):
+        self.abwesend.append(("beenden", kreis, durch))
+        return self.abwesend_antwort
+
+    def abwesend_abgelehnt(self, grund):
+        self.abwesend.append(("abgelehnt", grund))
+
+    def programm_faehig(self):
+        return False
+
+    def uebersteuerung_senden(self, kreis, temp, bis, herkunft, durch):
+        raise ValueError("keine Faehigkeit programm")
+
+    def betriebsart_beenden(self, kreis, art, raum_soll, uebersteuerung, herkunft, durch):
+        raise ValueError("keine Faehigkeit programm")
 
     def ursprungswerte_merken(self, werte, kreis=1):
         self.gemeldet.append(werte)
@@ -279,6 +301,8 @@ class FakeDevice:
         self.konf, self.bed = konfiguration, bedienung
         self.order = order if order is not None else []
         self.identity = SimpleNamespace(device_id=DEVICE_ID, claim_code=CLAIM_CODE)
+        self.uebernahme_code = CLAIM_CODE
+        self.programm_faehig = lambda: False
         self.documents = SimpleNamespace(aktuell=lambda art: (
             Dokument(art, 1, self.konf) if art == "konfiguration" and self.konf is not None else None))
         self.sent = []
@@ -370,6 +394,12 @@ class Device:
         self.wunsch_kreise = []
         self.meldungen = []
         self.documents = self
+        self.code_ergebnis = "neu"  # Antwort von neuer_uebernahme_code
+        self.code_aufrufe = 0
+
+    def neuer_uebernahme_code(self):
+        self.code_aufrufe += 1
+        return self.code_ergebnis
 
     def update_noetig_kritisch(self):
         return self.kritisch

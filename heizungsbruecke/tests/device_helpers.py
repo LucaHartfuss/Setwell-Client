@@ -102,7 +102,7 @@ class FakeHost:
         self.ursprung: dict = {}
         self.entfernen: str | None = None  # Wahl des Nutzers beim Entfernen ("freigeben" oder keine)
         self.entfernen_zugestellt = 0
-        self.hello_werte: dict = {"auto_update": True, "integration_version": "1.2.0"}
+        self.hello_werte: dict = {"auto_update": True, "integration_version": "1.2.0", "seriennummer": "SHG-0001"}
         self.hello_felder_aufrufe = 0
 
     def hello_felder(self):
@@ -236,19 +236,21 @@ class ScriptedBootstrap:
         self.calls.append(("register", kwargs))
         return self._next("register")
 
-    def certificate(self):
-        self.calls.append(("certificate", None))
+    def certificate(self, *, erneuerung=False):
+        self.calls.append(("certificate", {"erneuerung": erneuerung}))
         return self._next("certificate")
 
     def _next(self, route):
         answer = self.script[route].pop(0)
         if isinstance(answer, Exception):
             raise answer
+        if callable(answer):  # eine Antwort, die vom zuletzt angefragten Geraet (neuer Schluessel) abhaengt
+            return answer(self.idents[-1])
         return answer
 
 
 class World:
-    def __init__(self, tmp_path, host=None, *, access=True) -> None:
+    def __init__(self, tmp_path, host=None, *, access=True, echt=lambda: WALL) -> None:
         self.dir = tmp_path / device.DEVICE_DIR
         self.host = host or FakeHost()
         self.ca = GeraeteCa()
@@ -265,7 +267,7 @@ class World:
             return self.client
 
         self.device = device.Device(self.host, tmp_path, "https://accounts.example.test", clock=self.clock,
-                                    wall=lambda: WALL, bootstrap_client=client_for, link_factory=self._link)
+                                    wall=lambda: WALL, echt=echt, bootstrap_client=client_for, link_factory=self._link)
 
     def neuer_zugang(self, ident=None):
         ident = ident or self.device.identity

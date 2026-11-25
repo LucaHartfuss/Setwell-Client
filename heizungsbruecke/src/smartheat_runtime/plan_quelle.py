@@ -7,10 +7,10 @@ keine Planeingabe, und das Soll ist der Wunsch wie ohne Plan."""
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from smartheat_core import kreisansicht
-from smartheat_core.plan import SOLL_ART_WUNSCH, SollErgebnis, soll_effektiv
+from smartheat_core.plan import SOLL_ART_ABWESEND, SOLL_ART_LEERSTAND, SOLL_ART_WUNSCH, SollErgebnis, soll_effektiv
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,61 @@ def geltendes_soll(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: dat
         return nur_wunsch
 
 
-def eingabe_des_geraets(geraet, kreis: int) -> PlanEingabe | None:
+@dataclass(frozen=True)
+class Betriebsart:
+    """Die laufende Betriebsart des Kreises (`leerstand` oder `abwesend`) und das Soll der Phase, die nach ihrem Ende gilt
+    (Plan ohne Betriebsart und ohne Uebersteuerung). `bis`: das Ende des Leerstands (bei Away None); eine Uebersteuerung
+    im Leerstand reicht nicht darueber hinaus. `soll`: die Temperatur der Betriebsart selbst (ohne Uebersteuerung)."""
+
+    art: str
+    danach: SollErgebnis | None
+    bis: datetime | None = None
+    soll: float | None = None
+
+
+_ZEIT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _leerstand_ende(bedienung: Mapping) -> datetime | None:
+    """Das Ende des Leerstands aus dem Bedienungsdokument (UTC-Text); None, wenn es fehlt oder unbrauchbar ist."""
+    leerstand = bedienung.get("leerstand")
+    text = leerstand.get("bis") if isinstance(leerstand, Mapping) else None
+    try:
+        return datetime.strptime(text, _ZEIT_FORMAT).replace(tzinfo=UTC) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def betriebsart_lage(eingabe: PlanEingabe | None, wunsch: float | None, jetzt: datetime, *,
+                     uhr_vertrauenswuerdig: bool) -> Betriebsart | None:
+    """Laeuft jetzt Leerstand oder Away (auch unter einer Uebersteuerung)? Dann die Art und das Soll danach, sonst None.
+    Ohne Planeingabe, ohne Wunsch, ohne vertrauenswuerdige Uhr oder bei unbrauchbaren Dokumentwerten gibt es keine
+    Betriebsart: die Eingabe laeuft den gewohnten Weg."""
+    if eingabe is None or wunsch is None or uhr_vertrauenswuerdig is not True:
+        return None
+    ohne_ueb = {schluessel: wert for schluessel, wert in eingabe.bedienung.items() if schluessel != "uebersteuerung"}
+    try:
+        laufend = soll_effektiv(jetzt, eingabe.zone, {**ohne_ueb, "raum_soll": wunsch}, eingabe.konfiguration,
+                                uhr_vertrauenswuerdig=True, soll_quelle_aus=False)
+        if laufend.soll_art not in (SOLL_ART_LEERSTAND, SOLL_ART_ABWESEND):
+            return None
+        danach = soll_effektiv(jetzt, eingabe.zone, {**ohne_ueb, "raum_soll": wunsch, "modus": "wunsch"},
+                               eingabe.konfiguration, uhr_vertrauenswuerdig=True, soll_quelle_aus=False)
+    except ValueError:
+        return None
+    ende = _leerstand_ende(eingabe.bedienung) if laufend.soll_art == SOLL_ART_LEERSTAND else None
+    return Betriebsart(art=laufend.soll_art, danach=danach, bis=ende, soll=laufend.soll)
+
+
+def eingabe_des_geraets(geraet, kreis: int, speicher=None) -> PlanEingabe | None:
     """Die Planeingabe des Kreises aus den laufenden Dokumenten des Geraets (`konfiguration()`, `bedienung()`), bei jedem
-    Aufruf frisch gelesen."""
-    return plan_eingabe(geraet.konfiguration(), geraet.bedienung()[0], kreis)
+    Aufruf frisch gelesen. Kennt die Bedienung keine Uebersteuerung, gilt die lokale aus dem Soll-Speicher des Kreises
+    (`speicher.uebersteuerung()`): sie wirkt sofort und uebersteht einen Neustart, ein Eintrag des Servers geht vor."""
+    eingabe = plan_eingabe(geraet.konfiguration(), geraet.bedienung()[0], kreis)
+    if eingabe is None or speicher is None or isinstance(eingabe.bedienung.get("uebersteuerung"), Mapping):
+        return eingabe
+    lokal = speicher.uebersteuerung()
+    if lokal is None:
+        return eingabe
+    return PlanEingabe(zone=eingabe.zone, bedienung={**eingabe.bedienung, "uebersteuerung": lokal},
+                       konfiguration=eingabe.konfiguration)

@@ -45,6 +45,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -105,6 +106,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -181,6 +183,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -241,6 +244,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -344,6 +348,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -472,6 +477,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -614,6 +620,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -757,6 +764,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -812,6 +820,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -906,6 +917,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "komfort",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -969,6 +981,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "komfort",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1038,6 +1051,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 22.0
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -1119,6 +1135,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1183,6 +1200,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 22.0
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -1291,6 +1311,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1369,6 +1390,9 @@
      "trigger": "target_change"
     }
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
@@ -1443,6 +1467,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "notfall",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1530,6 +1555,9 @@
      "trigger": "target_change"
     }
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:01:00+01:00",
@@ -1586,6 +1614,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "notfall",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1727,6 +1756,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1796,6 +1826,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -1871,6 +1904,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -1976,6 +2010,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2045,6 +2080,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.0
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -2137,6 +2175,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2230,6 +2269,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2299,6 +2339,9 @@
     "failsafe_active": false,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 21.0
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
@@ -2400,6 +2443,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2511,6 +2555,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2581,6 +2626,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -2637,6 +2685,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2724,6 +2773,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2811,6 +2861,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2898,6 +2949,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -2985,6 +3037,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3072,6 +3125,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3159,6 +3213,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3246,6 +3301,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3333,6 +3389,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3440,6 +3497,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3511,6 +3569,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3598,6 +3657,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3682,6 +3742,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -3738,6 +3801,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3833,6 +3897,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -3920,6 +3985,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -3978,6 +4046,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4043,6 +4112,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4112,6 +4182,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4201,6 +4272,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4288,6 +4360,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -4346,6 +4421,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4428,6 +4504,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4528,6 +4605,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -4586,6 +4666,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4687,6 +4768,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -4745,6 +4829,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4814,6 +4899,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -4915,6 +5001,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -4973,6 +5062,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -5085,6 +5175,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -5182,6 +5273,9 @@
     "datenfehler": null,
     "pending": null
    },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
+   },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",
     "ts": "2026-01-15T12:07:30+01:00",
@@ -5240,6 +5334,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -5318,6 +5413,7 @@
        "einlernphase_tag": null,
        "testphase_bis": null,
        "befunde": [],
+       "abwesend": null,
        "boost": "keiner",
        "hebelsatz": "vaillant_vrc720",
        "hebel": {
@@ -5405,6 +5501,9 @@
     "failsafe_active": true,
     "datenfehler": null,
     "pending": null
+   },
+   "runtime/kreis-1/room_target.angezeigt.json": {
+    "temp": 20.5
    },
    "runtime/kreis-1/room_target.json": {
     "source": "thermostat",

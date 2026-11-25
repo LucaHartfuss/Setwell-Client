@@ -358,6 +358,108 @@ def test_ein_unbrauchbarer_vermerk_hebt_nichts_auf_und_wird_entfernt(welt, neust
     assert welt.paths.abgemeldet.exists() and _vermerk(welt) is None and neustarts == []
 
 
+# --- Meldung an den Server vor dem Loeschen ---
+
+def test_die_ruecksetzmeldung_geht_erst_in_der_phase_loeschen_und_nur_einmal_hinaus(welt, neustarts):
+    _anfrage(welt)
+    for _ in range(3):
+        _takt(welt.host)
+    assert welt.device.reset_aufrufe == 0  # angefordert: der Reset kann noch verworfen werden
+    _anfrage(welt, phase="loeschen")
+    for _ in range(3):
+        _takt(welt.host)
+    assert welt.device.reset_aufrufe == 1
+
+
+def test_ein_verworfener_reset_meldet_nichts(welt, neustarts):
+    _anfrage(welt)
+    _takt(welt.host)
+    _verworfen(welt)
+    for _ in range(3):
+        _takt(welt.host)
+    assert welt.device.reset_aufrufe == 0
+
+
+def test_ein_reset_nach_einem_verworfenen_meldet_wieder_erst_in_loeschen(welt, neustarts):
+    _anfrage(welt, seq=1)
+    _takt(welt.host)
+    _verworfen(welt)
+    _takt(welt.host)
+    _anfrage(welt, seq=2)
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 0
+    _anfrage(welt, seq=2, phase="loeschen")
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 1
+
+
+def test_nach_einem_abgebrochenen_loeschen_meldet_ein_neuer_reset_erneut(welt, neustarts):
+    _anfrage(welt, seq=1, phase="loeschen")
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 1
+    _verworfen(welt)
+    _takt(welt.host)
+    _anfrage(welt, seq=2)
+    _takt(welt.host)
+    _anfrage(welt, seq=2, phase="loeschen")
+    _takt(welt.host)
+    assert welt.device.reset_aufrufe == 2
+
+
+def test_nach_dem_puback_legt_der_host_adapter_die_bestaetigung_fuer_den_host_ab(welt, neustarts):
+    _anfrage(welt, phase="loeschen")
+    _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()  # gemeldet, aber noch nicht quittiert
+    welt.device.reset_zugestellt = True
+    _takt(welt.host)
+    assert welt.paths.werksreset_gemeldet.exists()
+    assert welt.paths.werksreset_gemeldet.parent == welt.paths.data  # in data/: der Host loescht sie mit
+
+
+def test_ohne_quittung_oder_ohne_phase_loeschen_gibt_es_keine_bestaetigung(welt, neustarts):
+    welt.device.reset_zugestellt = True
+    _anfrage(welt)  # angefordert: noch keine Meldung, also auch keine Bestaetigung
+    for _ in range(3):
+        _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()
+    _verworfen(welt)
+    _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()
+
+
+def test_ein_neuer_reset_legt_seine_bestaetigung_neu_ab(welt, neustarts):
+    _anfrage(welt, seq=1, phase="loeschen")
+    welt.device.reset_zugestellt = True
+    _takt(welt.host)
+    welt.paths.werksreset_gemeldet.unlink()  # der Host raeumt vor dem naechsten Reset
+    _takt(welt.host)
+    assert not welt.paths.werksreset_gemeldet.exists()  # dieselbe Phase: nicht erneut
+    _verworfen(welt)
+    _takt(welt.host)
+    _anfrage(welt, seq=2, phase="loeschen")
+    _takt(welt.host)
+    assert welt.paths.werksreset_gemeldet.exists()
+
+
+def test_ohne_geraetekern_meldet_der_reset_nichts_und_wirft_nie(welt, neustarts):
+    welt.host.device = None
+    _anfrage(welt, phase="loeschen")
+    _takt(welt.host)  # kein Fehler
+
+
+def test_ein_fehler_der_ruecksetzmeldung_stoert_die_anzeige_nicht_und_wird_einmal_gemeldet(welt, neustarts, caplog):
+    def kaputt():
+        raise RuntimeError("GEHEIM")
+
+    welt.device.reset_melden = kaputt
+    _anfrage(welt, phase="loeschen")
+    with caplog.at_level(logging.ERROR):
+        for _ in range(3):
+            _takt(welt.host)
+    assert len([r for r in caplog.records if "Werksreset-Anfrage nicht bearbeitet" in r.message]) == 1
+    assert "GEHEIM" not in caplog.text
+
+
 def test_die_statussenke_haelt_das_flache_laufzeit_ereignis_ohne_kreisliste(welt):
     """Server und Abmelden lesen das flache Laufzeit-Ereignis; die Kreisliste der Zusammenfassung gehoert nur ins
     Ereignis der Integration."""

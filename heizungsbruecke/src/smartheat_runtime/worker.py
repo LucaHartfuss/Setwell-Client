@@ -15,6 +15,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import NoReturn
 
+from smartheat_core.plan import SollErgebnis
+from smartheat_runtime.plan_quelle import Betriebsart
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +52,20 @@ class RegulationWorker:
         self._coalesce_lock = threading.Lock()
         self._coalesced: dict[str, dict[str, bool]] = {}
         self._after_each: Callable[[], None] | None = None
+        #: das geltende Soll des Kreises (SollErgebnis oder None), vom Start der Laufzeit gesetzt; der Soll-Eingang
+        #: prueft damit, ob eine Eingabe eine Uebersteuerung der kuehlen Phase ist. Nur im Worker-Thread lesen.
+        self.geltendes_soll: Callable[[], SollErgebnis | None] = lambda: None
+        #: laeuft Leerstand oder Away (Betriebsart oder None), vom Start der Laufzeit gesetzt; nur im Worker-Thread lesen
+        self.betriebsart: Callable[[], Betriebsart | None] = lambda: None
+        #: wie `betriebsart`, aber auch bei Soll-Quelle aus (das Wiedereinschalten braucht das Soll der Betriebsart, bevor
+        #: die Laufzeit die Quelle wieder als an kennt)
+        self.betriebsart_trotz_aus: Callable[[], Betriebsart | None] = lambda: None
+        #: wird nach jedem lokalen Check aufgerufen (der Soll-Eingang gleicht die Anzeige der Soll-Quelle ab, wenn sich das
+        #: geltende Soll geaendert hat); ohne Soll-Eingang ein No-op. Nur im Worker-Thread.
+        self.anzeige_abgleichen: Callable[[], None] = lambda: None
+        #: Ist die Regelung beendet (Ruhezustand, Abo-Ende oder Kreis ausser Betrieb)? Dann schreibt der Soll-Eingang nichts
+        #: mehr an die Soll-Quelle: sie zeigt den gemerkten Wunsch. Vom Start der Laufzeit gesetzt; nur im Worker-Thread.
+        self.regelung_beendet: Callable[[], bool] = lambda: False
 
     def register(self, kind: str, handler: Handler) -> None:
         self._handlers[kind] = handler

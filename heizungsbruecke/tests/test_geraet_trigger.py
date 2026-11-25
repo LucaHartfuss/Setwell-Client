@@ -14,11 +14,13 @@ from heizungsbruecke.ha_api import HomeAssistantApi
 from heizungsbruecke.integration_stand import IntegrationStand
 from heizungsbruecke.push_stand import FRIST_SECONDS as FRIST_PUSH_SECONDS
 from heizungsbruecke.push_stand import PushStand
+from smartheat_core.plan import SollErgebnis
 from smartheat_runtime.dokument_config import ConfigError
+from smartheat_runtime.plan_quelle import Betriebsart
 from smartheat_runtime.roles import ChannelManifest
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
-from smartheat_runtime.soll_eingang import EV_TARGET_INPUT
-from smartheat_runtime.soll_speicher import TargetStore
+from smartheat_runtime.soll_eingang import EV_TARGET_INPUT, UebersteuerungsWeg
+from smartheat_runtime.soll_speicher import PENDING_SECONDS, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
 CLIMATE = "climate.wohnzimmer_thermostat"
@@ -29,12 +31,12 @@ SOLL = f"{CLIMATE}::temperature"
 
 class Aufbau:
     def __init__(self, tmp_path: Path, soll=SOLL, room_actual="sensor.raum", ha=None, stand=None, push_stand=None,
-                 anlagenkreise=None, quelle=None, kreis=1):
+                 anlagenkreise=None, quelle=None, kreis=1, speicher_uhr=None, **mehr):
         self.clock = FakeClock()
         self.worker = RegulationWorker(self.clock)
         self.ha = ha or FakeHa()
         self.ha.states.update({CLIMATE: "heat", SOLL: 21.0})
-        self.store = TargetStore(tmp_path / "soll.json", 21.0, self.clock, lambda: "t")
+        self.store = TargetStore(tmp_path / "soll.json", 21.0, self.clock, speicher_uhr or (lambda: "t"))
         self.wuensche, self.aus, self.checks = [], [], []
         self.worker.register(EV_LOCAL_CHECK, lambda event: self.checks.append(event.data))
         manifest = ChannelManifest(refs={"room_target": "smartheat:raum_soll", "room_actual": room_actual})
@@ -43,7 +45,7 @@ class Aufbau:
             wunsch=lambda v, h, d: self.wuensche.append((v, h, d)) or min(max(v, 15.0), 25.0),
             soll_quelle_aus=lambda aus, wirksam: self.aus.append((aus, wirksam)),
             integration_stand=stand, push_stand=push_stand, anlagenkreise=anlagenkreise, uhr=self.clock, quelle=quelle,
-            kreis=kreis)
+            kreis=kreis, **mehr)
         self.fire = self.client._on_trigger_event
 
     def run(self):
@@ -702,6 +704,48 @@ def test_a_portal_operation_whose_alignment_failed_survives_the_reconnect(tmp_pa
     assert a.store.value == 22.5 and a.store.source == "portal" and a.wuensche == []
 
 
+def _weg(lage):
+    """Lesewege wie in der Laufzeit: Leerstand oder Away laeuft mit der Temperatur der Lage."""
+    betriebsart = (lambda: Betriebsart(lage.soll_art, None, soll=lage.soll)) if lage.soll_art in ("leerstand", "abwesend") \
+        else None
+    return UebersteuerungsWeg(lage=lambda: lage, senden=lambda temp, bis, herkunft, durch: None, moeglich=lambda: True,
+                              betriebsart=betriebsart, betriebsart_trotz_aus=betriebsart)
+
+
+@pytest.mark.parametrize("beendet", [False, True])
+def test_the_owed_alignment_is_not_written_after_the_regulation_ended(tmp_path, beendet):
+    """Leerstand laeuft (16), die Angleichung scheiterte; das Lesen beim Verbinden holt sie nach: nach dem Ende der
+    Regelung schreibt der Anlass nichts (die Quelle zeigt den gemerkten Wunsch)."""
+    a = Aufbau(tmp_path, uebersteuerung=_weg(SollErgebnis(soll=16.0, soll_art="leerstand", naechster_wechsel=None)))
+    _portal_waehrend_ha_down(a)
+    a.worker.regelung_beendet = lambda: beendet
+    a.ha.write_error = None
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == ([] if beendet else [(SOLL, 16.0)])
+
+
+def test_the_owed_alignment_writes_a_running_override_not_the_wish(tmp_path):
+    a = Aufbau(tmp_path, speicher_uhr=lambda: "2026-01-15T20:00:00+00:00",
+               uebersteuerung=_weg(SollErgebnis(soll=19.0, soll_art="uebersteuert", naechster_wechsel=None)))
+    _portal_waehrend_ha_down(a)
+    a.store.uebersteuerung_setzen(19.0, "2026-01-15T22:00:00Z")
+    a.ha.write_error = None
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, 19.0)] and a.store.value == 22.5 and a.wuensche == []
+
+
+@pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
+def test_the_owed_alignment_writes_the_temperature_of_a_running_vacancy_or_away_not_the_wish(tmp_path, art, soll):
+    a = Aufbau(tmp_path, uebersteuerung=_weg(SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None)))
+    _portal_waehrend_ha_down(a)
+    a.ha.write_error = None
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, soll)] and a.store.value == 22.5 and a.wuensche == []
+
+
 def test_after_the_owed_write_a_stale_report_is_no_wish_but_a_real_user_change_is(tmp_path):
     a = Aufbau(tmp_path)
     _portal_waehrend_ha_down(a)
@@ -924,6 +968,90 @@ def test_a_shown_value_equal_to_the_target_ends_the_owed_alignment_without_a_wri
     assert a.ha.writes == [] and quelle.angleichen_offen is False and a.store.value == 22.5
 
 
+class _HaOhneAnzeige(FakeHa):
+    """HA startet noch: die Soll-Entity ist nicht lesbar, bis `anzeige_da` gesetzt ist."""
+    anzeige_da = False
+
+    def get_state(self, entity_id):
+        if entity_id == SOLL and not self.anzeige_da:
+            raise RuntimeError("HA Core startet")
+        return super().get_state(entity_id)
+
+
+def _start_ohne_anzeige(tmp_path):
+    """Gemerkte Anzeige 18, geltendes Soll 21, Angleichen beim Start, HA noch nicht lesbar."""
+    TargetStore(tmp_path / "soll.json", 21.0, FakeClock(), lambda: "t").anzeige_merken(18.0)
+    ha = _HaOhneAnzeige()
+    quelle = geraet_trigger.HaSollQuelle(ha, SOLL)
+    return Aufbau(tmp_path, ha=ha, quelle=quelle, angleichen=True), quelle
+
+
+def test_the_start_alignment_writes_nothing_while_the_shown_value_is_unknown(tmp_path):
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    assert a.ha.writes == [] and quelle.angleichen_offen is True
+
+
+def test_the_start_alignment_owed_for_an_unknown_value_leaves_the_frost_stance_alone(tmp_path):
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    a.ha.anzeige_da = True
+    a.ha.states[SOLL] = 5.0
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [] and quelle.angleichen_offen is False
+
+
+def test_the_start_alignment_owed_for_an_unknown_value_is_written_once_the_value_is_known(tmp_path):
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    a.ha.anzeige_da = True
+    a.ha.states[SOLL] = 18.0
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, 21.0)] and quelle.angleichen_offen is False
+
+
+def test_the_start_alignment_owed_at_the_end_of_the_regulation_is_dropped_and_a_turn_becomes_the_wish(tmp_path):
+    """Beim Start ist die Regelung schon beendet und HA unlesbar: das Angleichen bleibt als offen vermerkt, schreiben darf
+    es nicht. Die erste Lesung loescht den Vermerk (sonst bliebe er stehen), die Drehung des Kunden wird sein Wunsch, und
+    die Wiederaufnahme ueberschreibt ihn nicht."""
+    a, quelle = _start_ohne_anzeige(tmp_path)
+    assert quelle.angleichen_offen is True
+    a.worker.regelung_beendet = lambda: True
+    a.ha.anzeige_da = True
+    a.ha.states[SOLL] = 19.0
+    a.client._on_connected()
+    a.run()
+    assert quelle.angleichen_offen is False and a.ha.writes == []
+    a.clock.advance(60)
+    a.run()
+    assert a.wuensche == [(19.0, "soll_entity", None)] and a.store.value == 19.0
+    a.worker.regelung_beendet = lambda: False  # die Regelung laeuft wieder
+    a.worker.anzeige_abgleichen()
+    a.run()
+    assert a.ha.writes == [] and a.store.value == 19.0
+
+
+def test_a_failed_resend_after_a_lost_write_does_not_leave_the_alignment_owed_forever(tmp_path):
+    """Leerstand 16, das Thermostat zeigt 21: der Abgleich schreibt 16, der Befehl geht verloren (es zeigt weiter 21). Das
+    Nachschreiben scheitert an HA und vermerkt das Angleichen als offen; das Nachholen mit 21 scheiterte am Merker der
+    ersten Schreibung (16, 21), und der Vermerk haengte."""
+    a, quelle = _mit_quelle(tmp_path)
+    lage = SollErgebnis(soll=16.0, soll_art="leerstand", naechster_wechsel=None)
+    a.ha.states[SOLL] = 21.0
+    eingang = a.worker.anzeige_abgleichen.__self__
+    eingang._uebersteuerung = _weg(lage)
+    assert eingang.anzeige_abgleichen("test") is True
+    assert a.ha.writes == [(SOLL, 16.0)]
+    a.ha.states[SOLL] = 21.0  # der Befehl kam nie an
+    a.ha.write_error = RuntimeError("HA Core startet")
+    assert eingang.anzeige_abgleichen("nachschreiben", bekannt=21.0, nachschreiben=True) is False
+    assert quelle.angleichen_offen is True
+    a.ha.write_error = None
+    a.clock.advance(PENDING_SECONDS + 1)  # der unbestaetigte Befehl ist verfallen
+    a.client._on_connected()
+    a.run()
+    assert a.ha.writes == [(SOLL, 16.0), (SOLL, 16.0)] and quelle.angleichen_offen is False
+
+
 def test_without_a_target_entity_the_reconnect_reads_nothing_even_with_a_given_source(tmp_path):
     ha = FakeHa()
     quelle = geraet_trigger.HaSollQuelle(ha, SOLL)
@@ -983,7 +1111,7 @@ def test_a_new_own_write_moves_the_reread_behind_its_window_plus_one_second(tmp_
     a.soll_aenderung(22.5)  # Nachlesen geplant fuer +61
     a.run()
     a.clock.advance(0.5)
-    _portal_schreiben(a, 23.0)  # neues Fenster bis +61,5
+    a.store.note_own_write(veraltet=22.5, geschrieben=23.0)  # neues Fenster bis +61,5 (der Abgleich schriebe erst danach)
     a.clock.advance(59.5)  # +61: das geplante Nachlesen ist faellig, das Fenster laeuft noch 0,5 s
     a.run()
     assert gelesen == []
@@ -1005,7 +1133,7 @@ def test_a_second_window_is_reread_again_after_the_first_reread(tmp_path):
     a.clock.advance(61)
     a.run()
     assert gelesen == [SOLL]
-    _portal_schreiben(a, 23.0)
+    a.store.note_own_write(veraltet=22.5, geschrieben=23.0)
     a.clock.advance(5)
     a.soll_aenderung(23.0)
     a.run()
