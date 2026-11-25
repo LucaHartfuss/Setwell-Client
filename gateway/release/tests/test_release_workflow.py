@@ -61,8 +61,8 @@ def test_every_pip_install_uses_a_hash_lock():
 def test_kein_job_hat_ein_secret_ausser_github_token():
     text = WORKFLOW.read_text()
     assert "MINISIGN" not in text and "minisign" not in text and "sign_bundle.sh" not in text
-    # Einziges Secret: das Token fuer die Geschwister-Repos (siblings.sh, privates Root-Repo); alles andere ist github.token.
-    assert set(re.findall(r"secrets\.(\w+)", text)) == {"CROSS_REPO_TOKEN"}
+    # Einziges Secret: das Lese-Token fuer das private Kern-Repo (siblings.sh); alles andere ist github.token.
+    assert set(re.findall(r"secrets\.(\w+)", text)) == {"CI_LESE_TOKEN"}
     jobs = _jobs()
     assert jobs["ci"]["secrets"] == "inherit"  # die volle CI braucht das Token der Geschwister-Repos
     assert "secrets." not in yaml.safe_dump(jobs["probe"])  # der Probelauf fuehrt Repo-Code aus: keine Secrets
@@ -72,8 +72,8 @@ def test_kein_job_hat_ein_secret_ausser_github_token():
             if "secrets." in yaml.safe_dump(step):
                 assert name == "gate" and "siblings.sh" in step["run"] and "pip" not in step["run"]
                 assert step["env"] == {
-                    "CROSS_REPO_TOKEN": "${{ secrets.CROSS_REPO_TOKEN }}",
-                    "KERN_REPO": "LucaHartfuss/HomeAssistant_Dev_Root",
+                    "CI_LESE_TOKEN": "${{ secrets.CI_LESE_TOKEN }}",
+                    "KERN_REPO": "setwell-de/entwicklung",
                 }
 
 
