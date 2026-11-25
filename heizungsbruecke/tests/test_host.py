@@ -444,6 +444,34 @@ def test_ein_schreibziel_ohne_registry_eintrag_wird_wiederholt_und_endet_als_sta
     assert sleeps == list(DERIVED_SENSORS_RETRY_DELAYS_SECONDS) and angelegt == []
 
 
+def test_ein_schreibziel_ohne_registry_geraet_wird_wiederholt_und_endet_als_startfehler_ohne_namen(
+        env, angelegt, sleeps, monkeypatch):
+    """Busweg (ohne die lokale Sperre der Zeile): das Registry-Geraet der Schreibziele fehlt in der Geraete-Registry
+    (kein Urteil moeglich): Wiederholung, dann Startfehler rollen_nicht_pruefbar; Text und Grund nennen weder Geraet noch
+    Hersteller noch Modell."""
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
+    konfiguration = konfiguration_aus_optionen(OPTIONS)
+    bindung = konfiguration["kreise"][0]["bindung"]
+    bindung["kreis"] = {"plattform": "mqtt", "config_entry": "e-mqtt", "anlage": "S", "nummer": "0",
+                        "geraet": "dev-geheim"}
+    konfiguration["weg"] = "vaillant_ebus"
+    ziele = {"curve": "number.ebusd_720_hc1heatcurve", "room_setpoint": "number.ebusd_720_z1manualtemp",
+             "min_flow": "number.ebusd_720_hc1heatingflowtempmin", "heat_limit": "number.ebusd_720_hc1summertemplimit",
+             "mode_select": "select.ebusd_720_z1opmode"}
+    bindung["rollen"].update(ziele)
+    env.ha.states.update({ref: 1.0 for ref in ziele.values()})
+    bus = {"platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-geheim"}
+    _registry(env, {**dict.fromkeys(SCHREIBZIELE, bus), **dict.fromkeys(ziele.values(), bus)})
+    env.ha.devices = []
+    with pytest.raises(StartFailure) as fehler:
+        HaHost(FakeGeraet(konfiguration), env.ha).load()
+    assert fehler.value.key == "rollen_nicht_pruefbar"
+    assert fehler.value.grund == ("curve: Registry-Geraet der Schreibziele fehlt in Home Assistant "
+                                  "(lokale Positivliste nicht prüfbar)")
+    assert "geheim" not in fehler.value.grund
+    assert sleeps == list(DERIVED_SENSORS_RETRY_DELAYS_SECONDS) and angelegt == []
+
+
 def test_ein_spaeter_eingetragenes_schreibziel_startet_im_zweiten_versuch(env, angelegt, sleeps, monkeypatch):
     _registry(env, {"number.shift_current": None})
     echte_registry = env.ha.entity_registry

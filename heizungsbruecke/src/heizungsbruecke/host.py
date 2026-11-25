@@ -192,7 +192,7 @@ class HaHost:
             return None
         roles = [role for role in binding_roles(description) if b.rollen.get(role)]
         manifest = ChannelManifest(refs={role: entity_ref(role, b.rollen[role]) for role in roles})
-        return RestoreParts(binding_for(description, self._ha_api, manifest), safety, plant_id)
+        return RestoreParts(binding_for(description, self._ha_api, manifest, b.weg), safety, plant_id)
 
     def load(self) -> Loaded:
         try:
@@ -228,7 +228,7 @@ class HaHost:
             rollen = {rolle: ref for rolle, ref in b.rollen.items() if ref not in ungelesen}
             manifest = build_manifest(
                 {**rollen, "room_target": SOLL_REF}, derived.entity_ids, b.hebelsatz, derived.raeume)
-            binding = binding_for(description, self._ha_api, manifest)
+            binding = binding_for(description, self._ha_api, manifest, b.weg)
             plant_id = dokument.anlagen_kennung(b)
         except StartupError as error:
             raise StartFailure(str(error), error.key) from error
@@ -398,7 +398,7 @@ def _retry_with_budget(ha_api, attempt, describe, *, identify=None):
 def _wait_for_required_entities(ha_api, b: dokument.HaBindung) -> None:
     """Pflicht-Entities muessen existieren; `unavailable` ist kein Startfehler (das behandeln
     Datenfehler und Notbetrieb im Betrieb)."""
-    refs = [b.rollen[rolle] for rolle in dokument.PFLICHT_ROLLEN[b.hebelsatz]] + list(b.raumfuehler)
+    refs = [b.rollen[rolle] for rolle in dokument.pflicht_rollen(b)] + list(b.raumfuehler)
     entity_ids = sorted({ref.partition("::")[0] for ref in refs})
 
     def _check():
@@ -448,6 +448,9 @@ def _rollen_pruefen_mit_wiederholung(ha_api, b: dokument.HaBindung) -> list[tupl
         if isinstance(error, config_check.NichtPruefbar) and error.args[1:] == (dokument.OHNE_REGISTRY,):
             return (f"{error.args[0]}: Entity ohne Eintrag in der Entity-Registry von Home Assistant "
                     "(lokale Positivliste nicht prüfbar)")
+        if isinstance(error, config_check.NichtPruefbar) and error.args[1:] == (dokument.OHNE_GERAET,):
+            return (f"{error.args[0]}: Registry-Geraet der Schreibziele fehlt in Home Assistant "
+                    "(lokale Positivliste nicht prüfbar)")  # ohne Geraet, Hersteller, Modell (S-5)
         if isinstance(error, config_check.NichtPruefbar) and error.args:
             return f"{error.args[0]}: zugeordnete Entity fehlt in Home Assistant – {RECONFIGURE_HINT}"
         return "Home Assistant lieferte Registry oder Zustände nicht"

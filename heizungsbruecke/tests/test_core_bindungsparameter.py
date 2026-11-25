@@ -564,7 +564,12 @@ def test_die_simulation_traegt_jeden_hebelsatz_mit_denselben_werten(hebelsatz):
                                                                                        PARAMETER[hebelsatz])
 
 
-@pytest.mark.parametrize("weg", ["vaillant_ebus", "", "Simulation", None])
+def test_der_busweg_hat_dieselbe_beschreibung_wie_der_cloud_weg():
+    assert beschreibung("vaillant_ebus", "vaillant_vrc720", PARAMETER["vaillant_vrc720"]) == beschreibung(
+        "vaillant_myvaillant", "vaillant_vrc720", PARAMETER["vaillant_vrc720"])
+
+
+@pytest.mark.parametrize("weg", ["vaillant_ebusd", "", "Simulation", None])
 def test_unbekannter_weg_scheitert_vor_dem_hebelsatz(weg):
     with pytest.raises(Fehler) as info:
         beschreibung(weg, "vaillant_vrc720", PARAMETER["vaillant_vrc720"])

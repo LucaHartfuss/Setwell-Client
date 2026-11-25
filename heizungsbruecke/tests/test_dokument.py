@@ -380,11 +380,27 @@ def test_kreis_mit_fremder_plattform_wird_abgelehnt():
 
 
 def test_jeder_hebelsatz_hat_eine_schreibplattform():
-    """Die Tabelle als Literal (Regel 4, E5): je Hebelsatz genau die Plattform seiner Integration."""
+    """Die Tabelle als Literal (Regel 4, E5): je Weg und Hebelsatz genau die Plattform seiner Integration."""
     assert dokument.SCHREIB_PLATTFORM == {
-        "vaillant_vrc720": "mypyllant", "weishaupt_wwp": "weishaupt_modbus", "weishaupt_wwp_basis": "weishaupt_modbus",
-        "viessmann_vicare": "vicare"}
-    assert set(dokument.SCHREIB_PLATTFORM) == set(dokument.PFLICHT_ROLLEN)
+        ("vaillant_myvaillant", "vaillant_vrc720"): "mypyllant",
+        ("weishaupt_modbus", "weishaupt_wwp"): "weishaupt_modbus",
+        ("weishaupt_modbus", "weishaupt_wwp_basis"): "weishaupt_modbus",
+        ("viessmann_vicare", "viessmann_vicare"): "vicare",
+        ("vaillant_ebus", "vaillant_vrc720"): "mqtt"}
+    assert {hebelsatz for _, hebelsatz in dokument.SCHREIB_PLATTFORM} == set(dokument.PFLICHT_ROLLEN)
+
+
+@pytest.mark.parametrize("weg", ["weishaupt_modbus", "unbekannt", "", None])
+def test_ein_weg_ohne_schreibregeln_dieses_hebelsatzes_laesst_nichts_schreiben(weg):
+    """Die Plattform der Schreibziele gilt je Weg und Hebelsatz. Ein Weg, der fuer den Hebelsatz keine Zeile hat (ein
+    Weg ohne Schreibregeln, ein fremder Weg, ein fehlendes Feld), laesst keine Schreibziele zu, auch wenn der Kreis die
+    Plattform nennt, die zu einem anderen Weg gehoert (fail closed, beim Uebernehmen wie beim Start)."""
+    dokument_ohne_regeln = {**_neu(KONFIGURATION), "weg": weg}
+    ha = _ha()
+    assert _zuordnung(dokument_ohne_regeln, ha) == {"feld": "plattform", "regel": "nicht_erlaubt"}
+    assert _rollen(dokument_ohne_regeln, ha) == ("plattform", "nicht_erlaubt")
+    assert _start_rollen(dokument_ohne_regeln, ha) == ("plattform", "nicht_erlaubt")
+    assert _rollen(KONFIGURATION, ha) is None   # Gegenprobe: der Weg des Kreises schreibt
 
 
 def test_ein_schreibziel_ohne_registry_eintrag_wird_uebernommen_abgelehnt_und_ist_beim_start_nicht_pruefbar():
@@ -582,6 +598,264 @@ def _start_rollen(konfiguration, ha):
     return dokument.rollen_befund(_bindung(konfiguration), ha, beim_start=True)[0]
 
 
+_BUS = ("vaillant_ebus", "vaillant_vrc720")
+
+
+#: Die Schreibziele des Buswegs je Rolle des Dokuments (ANNAHME wie in dokument.py; hier die erwarteten exakten Namen).
+_BUS_ZIELE = {"curve": "number.ebusd_720_hc1heatcurve", "room_setpoint": "number.ebusd_720_z1manualtemp",
+              "min_flow": "number.ebusd_720_hc1heatingflowtempmin", "heat_limit": "number.ebusd_720_hc1summertemplimit",
+              "mode_select": "select.ebusd_720_z1opmode"}
+#: Servicewerte des Waermeerzeugers am selben Geraet (Installateurebene): nie ein Schreibziel.
+_SERVICEWERTE = ("number.ebusd_bai_d_00_teillast", "number.ebusd_bai_d_02_taktsperre", "number.ebusd_720_hc1heatcurve_2")
+#: Alles am Geraet, was nicht eines der fuenf Schreibziele ist.
+_ANDERE = (*_SERVICEWERTE, "number.ebusd_720_z1nighttemp", "select.ebusd_720_z2opmode")
+
+
+def _bus_konfiguration(geraet="dev-ebus", ohne_geraet=False, **rollen):
+    """Dokument des Buswegs (Kreis mit Plattform mqtt und Registry-Geraet); `rollen` ersetzen Rollen der Bindung."""
+    dok = _neu(KONFIGURATION)
+    kreis = dok["kreise"][0]
+    neuer_kreis = {"plattform": "mqtt", "config_entry": "e-mqtt", "anlage": "S", "nummer": "0"}
+    if not ohne_geraet:
+        neuer_kreis["geraet"] = geraet
+    bindung = {**kreis["bindung"], "kreis": neuer_kreis, "rollen": {**kreis["bindung"]["rollen"], **_BUS_ZIELE, **rollen}}
+    return {**dok, "weg": "vaillant_ebus", "kreise": [{**kreis, "bindung": bindung}]}
+
+
+def _bus_ha(hersteller="Vaillant", modell="VRC 720"):
+    """HA mit den Entities des Waermeerzeugers am Registry-Geraet dev-ebus der Plattform mqtt (Schreibziele mit den
+    exakten Namen, dazu Servicewerte am selben Geraet)."""
+    ha = _ha()
+    ha.registry = [{**e, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-ebus"}
+                   for e in ha.registry if e["entity_id"] == "sensor.outdoor_temp"]
+    ha.registry += [{"entity_id": ref, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-ebus"}
+                    for ref in (*_BUS_ZIELE.values(), *_ANDERE)]
+    ha.states.update({ref: "auto" if ref.startswith("select.") else 1.0 for ref in (*_BUS_ZIELE.values(), *_ANDERE)})
+    ha.devices = [{"id": "dev-ebus", "manufacturer": hersteller, "model": modell, "name": "Regler"}]
+    return ha
+
+
+@pytest.fixture
+def bus_offen(monkeypatch):
+    """Die Zeile der Schreibplattform des Buswegs steht in der Tabelle und ist nicht gesperrt (die Sperre ist leer);
+    die Tests darunter pruefen die Verankerung am Registry-Geraet."""
+    assert dokument.SCHREIB_PLATTFORM[_BUS] == "mqtt"
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
+
+
+def test_die_gesperrten_schreibzeilen_sind_genau_der_busweg():
+    """Regel 4: der Busweg ist am Geraet gesperrt, bis er am echten Geraet freigegeben ist (zweite Linie neben dem Tor
+    des Servers); die Sperre nennt nur Zeilen der Tabelle. Das Oeffnen ist das Streichen dieser einen Zeile."""
+    assert frozenset({("vaillant_ebus", "vaillant_vrc720")}) == dokument.GESPERRTE_SCHREIBZEILEN
+    assert set(dokument.SCHREIB_PLATTFORM) >= dokument.GESPERRTE_SCHREIBZEILEN
+
+
+def test_ein_gueltiges_busdokument_wird_mit_der_standard_sperre_abgelehnt(monkeypatch):
+    """Ein verankertes Busdokument mit allen Schreibzielen der Positivliste lehnt das Geraet beim Uebernehmen wie beim
+    Start mit plattform/nicht_erlaubt ab, solange die Zeile gesperrt ist; ohne Sperre wird es angenommen."""
+    assert dokument.GESPERRTE_SCHREIBZEILEN
+    konfiguration, ha = _bus_konfiguration(), _bus_ha()
+    assert _bus_urteile(konfiguration, ha) == (("plattform", "nicht_erlaubt"),) * 2
+    assert dokument.schreib_plattform(_bindung(konfiguration)) is None
+    assert _zuordnung(konfiguration, ha) == {"feld": "plattform", "regel": "nicht_erlaubt"}
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
+    assert _bus_urteile(konfiguration, ha) == (None, None)
+    assert dokument.schreib_plattform(_bindung(konfiguration)) == "mqtt"
+    assert _zuordnung(konfiguration, ha) is None
+
+
+def _bus_urteile(konfiguration, ha):
+    """(beim Uebernehmen, beim Start); der Start meldet NichtPruefbar als ('nicht_pruefbar', args)."""
+    uebernehmen = _rollen(konfiguration, ha)
+    try:
+        start = _start_rollen(konfiguration, ha)
+    except config_check.NichtPruefbar as fehler:
+        start = ("nicht_pruefbar", fehler.args)
+    return uebernehmen, start
+
+
+def test_der_busweg_ist_mit_der_tabellenzeile_nur_am_verankerten_geraet_beschreibbar(bus_offen):
+    """Die Zeile gibt den Weg frei, sobald sie nicht gesperrt ist (beim Uebernehmen wie beim Start, auch das
+    Dokument-Gate); ein anderer Hersteller am
+    selben Registry-Geraet oder ein Kreis mit fremder Plattform bleibt abgelehnt."""
+    assert dokument.SCHREIB_PLATTFORM[_BUS] == "mqtt"
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (None, None)
+    assert _zuordnung(_bus_konfiguration(), _bus_ha()) is None
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha("Wolf", "VRC 720")) == (("curve", "nicht_erlaubt"),) * 2
+    fremd = _bus_konfiguration()
+    fremd["kreise"][0]["bindung"]["kreis"]["plattform"] = "mypyllant"
+    assert _bus_urteile(fremd, _bus_ha())[0] == ("plattform", "nicht_erlaubt")
+
+
+def test_das_verankerte_geraet_besteht_beim_uebernehmen_und_beim_start(bus_offen):
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha()) == (None, None)
+
+
+def test_ein_fremdes_geraet_mit_gleichem_entity_namen_wird_nie_schreibziel(bus_offen):
+    """Ein Geraet am selben Broker bietet dieselben Entity-Namen an: die Entity haengt am anderen Registry-Geraet."""
+    ha = _bus_ha()
+    ha.registry = [{**e, "device_id": "dev-fremd"} if e["entity_id"] == _BUS_ZIELE["heat_limit"] else e
+                   for e in ha.registry]
+    ha.devices.append({"id": "dev-fremd", "manufacturer": "Vaillant", "model": "VRC 720"})
+    assert _bus_urteile(_bus_konfiguration(), ha) == (("heat_limit", "nicht_erlaubt"),) * 2
+    assert _zuordnung(_bus_konfiguration(), ha) == {"feld": "heat_limit", "regel": "nicht_erlaubt"}
+
+
+@pytest.mark.parametrize("geraet", [None, ""])
+def test_eine_entity_ohne_registry_geraet_wird_nie_schreibziel(bus_offen, geraet):
+    ha = _bus_ha()
+    ha.registry = [{**e, "device_id": geraet} if e["entity_id"] == _BUS_ZIELE["min_flow"] else e for e in ha.registry]
+    assert _bus_urteile(_bus_konfiguration(), ha) == (("min_flow", "nicht_erlaubt"),) * 2
+
+
+def test_das_dokument_nennt_ein_anderes_geraet_als_die_entities(bus_offen):
+    assert _bus_urteile(_bus_konfiguration(geraet="dev-anders"), _bus_ha()) == (("curve", "nicht_erlaubt"),) * 2
+
+
+def test_ein_busdokument_ohne_geraet_laesst_nichts_schreiben(bus_offen):
+    assert _bus_urteile(_bus_konfiguration(ohne_geraet=True), _bus_ha()) == (("plattform", "nicht_erlaubt"),) * 2
+
+
+@pytest.mark.parametrize("geraet", ["", 7, None])
+def test_ein_busdokument_mit_unbrauchbarem_geraet_nennt_die_plattform(bus_offen, geraet):
+    """Ein leerer oder kein Text als Geraet des Kreises verankert nichts: beim Uebernehmen wie beim Start die Plattform."""
+    assert _bus_urteile(_bus_konfiguration(geraet=geraet), _bus_ha()) == (("plattform", "nicht_erlaubt"),) * 2
+
+
+def test_der_busweg_meldet_eine_ueberzaehlige_schreibrolle_lokal_mit_der_ersten_in_der_pruefreihenfolge(bus_offen):
+    """Eine gebundene Rolle ohne Zeile der Positivliste (hier zwei Servicewerte) lehnt schon der lokale Teil ab, mit
+    der ersten der Pruefreihenfolge; ohne sie bleibt das Dokument lokal ohne Befund."""
+    assert dokument.lokal_befund(_neu(_bus_konfiguration())) is None
+    befund = dokument.lokal_befund(_neu(_bus_konfiguration(setpoint_comfort=_SERVICEWERTE[0], level=_SERVICEWERTE[1])))
+    assert befund is not None
+    assert befund.details == {"feld": "level", "regel": "format"}
+    assert befund.text == "Die Zuordnung level_current gibt es für diese Ansteuerung nicht."
+
+
+def test_ein_cloud_dokument_hat_keine_ueberzaehlige_schreibrolle(bus_offen):
+    """Bei den Cloud-Wegen gibt es die Positivliste des Buswegs nicht: ihre Schreibziele sind kein lokaler Verstoss."""
+    assert dokument.lokal_befund(_neu(KONFIGURATION)) is None
+
+
+@pytest.mark.parametrize("hersteller, modell", [
+    ("Wolf", "VRC 720"), ("Vaillant", "Fremdmodell"), (None, "VRC 720"), ("Vaillant", None), ("", ""), (5, 7)])
+def test_ein_geraet_mit_anderem_hersteller_oder_modell_wird_nie_schreibziel(bus_offen, hersteller, modell):
+    """Auch nach einem Neustart (beim Start) gesperrt: Die Rastung fuehrt nur die Geraete-Id des Kreises; Hersteller und
+    Modell des Registry-Geraets werden gegen Konstanten des Codes geprueft (inventur.geraet_verankert)."""
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha(hersteller, modell)) == (("curve", "nicht_erlaubt"),) * 2
+
+
+def _bus_mit_fremdem_sensor(entity_id, klasse=None):
+    """Der Bus aus _bus_ha, dazu ein Sensor eines fremden MQTT-Geraets (z. B. ESPresense oder Zigbee2MQTT) am selben
+    Broker (gleiche Plattform und Config-Entry), optional mit Geraeteklasse im Zustand."""
+    ha = _bus_ha()
+    ha.registry.append({"entity_id": entity_id, "platform": "mqtt", "config_entry_id": "e-mqtt", "device_id": "dev-fremd"})
+    ha.devices.append({"id": "dev-fremd", "manufacturer": "Espresense", "model": "Node"})
+    ha.states[entity_id] = 1.0
+    if klasse is not None:
+        ha.states[f"{entity_id}::device_class"] = klasse
+    return ha
+
+
+@pytest.mark.parametrize("rolle", ["operating_mode", "generator_state", "efficiency_ratio"])
+def test_eine_freie_leserolle_am_fremden_mqtt_geraet_ist_nicht_erlaubt(bus_offen, rolle):
+    """Die Plattform mqtt gilt ueber das verankerte Geraet als einstellbar; ein klassenloser Sensor eines fremden
+    Geraets am Broker darf trotzdem keine Kennzahl des Reglers vortaeuschen (beim Uebernehmen wie beim Start)."""
+    ha = _bus_mit_fremdem_sensor("sensor.espresense_raum")
+    assert _bus_urteile(_bus_konfiguration(**{rolle: "sensor.espresense_raum"}), ha) == ((rolle, "nicht_erlaubt"),) * 2
+
+
+def test_eine_freie_leserolle_am_verankerten_geraet_ist_erlaubt(bus_offen):
+    ha = _bus_ha()
+    ha.registry.append({"entity_id": "sensor.ebusd_status", "platform": "mqtt", "config_entry_id": "e-mqtt",
+                        "device_id": "dev-ebus"})
+    ha.states["sensor.ebusd_status"] = "ok"
+    assert _bus_urteile(_bus_konfiguration(operating_mode="sensor.ebusd_status"), ha) == (None, None)
+
+
+@pytest.mark.parametrize("rolle", ["outdoor_temp", "operating_mode"])
+def test_ein_klassen_treffer_eines_fremden_mqtt_geraets_bleibt_wie_bisher_erlaubt(bus_offen, rolle):
+    """Haelt das heutige Verhalten fest: eine Geraeteklasse (hier temperature) genuegt der Form, das Geraet zaehlt dann
+    nicht."""
+    ha = _bus_mit_fremdem_sensor("sensor.zigbee_aussen", klasse="temperature")
+    assert _bus_urteile(_bus_konfiguration(**{rolle: "sensor.zigbee_aussen"}), ha) == (None, None)
+
+
+def test_hersteller_und_modell_vergleichen_ohne_gross_und_kleinschreibung(bus_offen):
+    assert _bus_urteile(_bus_konfiguration(), _bus_ha("vaillant", "vrc 720/3f")) == (None, None)
+
+
+def test_ein_fehlendes_registry_geraet_ist_beim_start_nicht_pruefbar(bus_offen):
+    """Die Entities nennen das Geraet, die Geraete-Registry kennt es (noch) nicht: beim Uebernehmen abgelehnt, beim Start
+    Wiederholung (fail closed), nie ein Schreibziel."""
+    ha = _bus_ha()
+    ha.devices = []
+    uebernehmen, start = _bus_urteile(_bus_konfiguration(), ha)
+    assert uebernehmen is not None
+    assert start[0] == "nicht_pruefbar" and start[1][1:] == (dokument.OHNE_GERAET,)
+
+
+def test_hersteller_und_modell_stehen_in_keiner_meldung(bus_offen, caplog):
+    ha = _bus_ha("Geheimfirma", "Geheimmodell")
+    with caplog.at_level("DEBUG"):
+        uebernehmen = _rollen(_bus_konfiguration(), ha)
+        details = _zuordnung(_bus_konfiguration(), ha)
+    text = repr((uebernehmen, details, caplog.text))
+    assert "Geheim" not in text and "dev-ebus" not in text
+
+
+def test_ein_fremdes_geraet_der_geraete_registry_ersetzt_das_verankerte_nicht(bus_offen):
+    """Zwei Registry-Geraete, nur das zweite hat die richtigen Texte: das Dokument nennt das erste."""
+    ha = _bus_ha("Wolf", "Kessel")
+    ha.devices.append({"id": "dev-gut", "manufacturer": "Vaillant", "model": "VRC 720"})
+    assert _bus_urteile(_bus_konfiguration(), ha)[0] is not None
+
+
+def test_die_positivliste_des_buswegs_nennt_genau_die_fuenf_schreibziele():
+    assert set(dokument.SCHREIBREGELN_BUS) == {"curve_current", "shift_current", "min_flow", "heat_limit", "mode_select"}
+    erwartet = {"curve_current": "curve", "shift_current": "room_setpoint", "min_flow": "min_flow",
+                "heat_limit": "heat_limit", "mode_select": "mode_select"}
+    for rolle, (muster, _) in dokument.SCHREIBREGELN_BUS.items():
+        assert [ref for ref in (*_BUS_ZIELE.values(), *_ANDERE) if muster.fullmatch(ref)] == [_BUS_ZIELE[erwartet[rolle]]]
+    assert set(dokument.PFLICHT_ROLLEN_BUS) == {*dokument.PFLICHT_ROLLEN["vaillant_vrc720"], "mode_select"}
+
+
+@pytest.mark.parametrize("rolle", _BUS_ZIELE)
+@pytest.mark.parametrize("ref", [*_ANDERE, "number.ebusd_720_hc1heatcurve::temperature"])
+def test_jede_andere_schreibanfrage_des_buswegs_wird_abgelehnt(bus_offen, rolle, ref):
+    """Jeder Hebel und die Betriebsart haengen an genau einer Entity; Servicewerte (Installateurebene) und jede andere
+    Entity, auch am selben Geraet und mit gleicher Domaene, besteht weder beim Uebernehmen noch beim Start."""
+    konfiguration = _bus_konfiguration(**{rolle: ref})
+    assert _bus_urteile(konfiguration, _bus_ha()) == ((rolle, "nicht_erlaubt"),) * 2
+    assert _zuordnung(konfiguration, _bus_ha())["regel"] in {"format", "nicht_erlaubt"}
+    assert _lokal_pruefen(konfiguration) is not None
+
+
+@pytest.mark.parametrize("rolle", ["level", "setpoint_comfort", "setpoint_setback"])
+@pytest.mark.parametrize("ref", _SERVICEWERTE)
+def test_servicewerte_werden_unter_keiner_weiteren_rolle_ein_schreibziel(bus_offen, rolle, ref):
+    """Rollen, die die Regelung bei anderen Herstellern schreibt, hat der Busweg nicht: gebunden bedeutet abgelehnt."""
+    konfiguration = _bus_konfiguration(**{rolle: ref})
+    assert _bus_urteile(konfiguration, _bus_ha()) == ((rolle, "nicht_erlaubt"),) * 2
+
+
+@pytest.mark.parametrize("rolle", ["curve", "room_setpoint", "min_flow", "heat_limit", "mode_select"])
+def test_der_busweg_verlangt_jedes_schreibziel_samt_betriebsart(bus_offen, rolle):
+    konfiguration = _bus_konfiguration()
+    kreis = konfiguration["kreise"][0]
+    rollen = {k: v for k, v in kreis["bindung"]["rollen"].items() if k != rolle}
+    ohne = {**konfiguration, "kreise": [{**kreis, "bindung": {**kreis["bindung"], "rollen": rollen}}]}
+    befund = dokument.lokal_befund(ohne)
+    assert befund is not None and befund.details == {"feld": rolle, "regel": "fehlt"}
+
+
+def test_ein_anderer_weg_behaelt_seine_schreibregeln(bus_offen):
+    """Die Namen des Buswegs gelten nur dort: ein Cloud-Dokument mit denselben Namen bleibt an seine Regeln gebunden."""
+    assert dokument.pflicht_rollen(dokument.bindung(_neu(KONFIGURATION))) == dokument.PFLICHT_ROLLEN["vaillant_vrc720"]
+    assert dokument.schreibregeln(dokument.bindung(_neu(KONFIGURATION))) == dokument.SCHREIBREGELN["vaillant_vrc720"]
+    assert dokument.schreibregeln(dokument.bindung(_bus_konfiguration())) is dokument.SCHREIBREGELN_BUS
+
+
 def _batterie(ref):
     return {**KONFIGURATION, "bindung": {**KONFIGURATION["bindung"], "batterien": [ref]}}
 
@@ -655,7 +929,7 @@ def test_eine_kennzahl_ohne_klasse_braucht_die_plattform_des_hebelsatzes():
 
 def _mit_kreis_plattform(konfiguration, plattform):
     kreis = {**konfiguration["bindung"]["kreis"], "plattform": plattform}
-    return {**konfiguration, "bindung": {**konfiguration["bindung"], "kreis": kreis}}
+    return {**konfiguration, "weg": "vaillant_myvaillant", "bindung": {**konfiguration["bindung"], "kreis": kreis}}
 
 
 def test_sensor_ohne_klasse_nur_von_der_plattform_des_hebelsatzes():
@@ -1026,5 +1300,6 @@ def test_die_plattform_des_kreises_zaehlt_nur_als_echter_registry_wert():
     _dazu(ha, "sensor.frei", None, wert=1.0)
     konfiguration = _mit_rolle("operating_mode", "sensor.frei")
     kreis = {**konfiguration["bindung"]["kreis"], "plattform": "ohne_registry"}
-    konfiguration = {**konfiguration, "bindung": {**konfiguration["bindung"], "kreis": kreis}}
+    konfiguration = {**konfiguration, "weg": "vaillant_myvaillant",
+                     "bindung": {**konfiguration["bindung"], "kreis": kreis}}
     assert dokument.rollen_pruefen(_bindung(konfiguration), ha) == ("operating_mode", "nicht_erlaubt")

@@ -607,7 +607,7 @@ def test_beschreibung_ohne_passende_bindungsparameter_ist_ein_konfigurationsfehl
         dc.beschreibung(konfiguration)
 
 
-@pytest.mark.parametrize("weg", [None, "", "vaillant_ebus", "Simulation"])
+@pytest.mark.parametrize("weg", [None, "", "vaillant_ebusd", "Simulation"])
 def test_beschreibung_mit_unbekanntem_weg_ist_ein_konfigurationsfehler(weg):
     konfiguration = {"hebelsatz": "vaillant_vrc720", "weg": weg, "bindungsparameter": parameter("vaillant_vrc720")}
     with pytest.raises(ConfigError, match="Weg"):

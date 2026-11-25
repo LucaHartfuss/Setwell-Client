@@ -204,7 +204,7 @@ def test_binding_for_picks_the_class_and_description_of_the_lever_set(lever_set,
     description = dokument_config.beschreibung(
         konfig_form.nach_form({"hebelsatz": hebelsatz, "weg": bindung_beispiele.WEG[hebelsatz],
                                "bindungsparameter": bindung_beispiele.parameter(hebelsatz)}))
-    binding = binding_for(description, FakeHa(), MANIFEST)
+    binding = binding_for(description, FakeHa(), MANIFEST, bindung_beispiele.WEG[hebelsatz])
     assert type(binding).__name__ == cls
     assert binding.description is description
 

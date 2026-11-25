@@ -91,8 +91,8 @@ AUFHEIZDAUER_GRENZE = (720, 4320)
 AUFHEIZEN_ARTEN = ("boost", "kurve")
 RAUM_FELDER = ("raum", "name", "rolle", "fuehler", "soll_quelle", "versatz_k", "ziel_fest")
 #: Anbindungswege, die ein Geraet heute ausfuehrt (`simulation`: Testweg), und ihre Abbildung aus der Bindung.
-WEGE = ("vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus", "simulation")
-WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
+WEGE = ("vaillant_myvaillant", "vaillant_ebus", "viessmann_vicare", "weishaupt_modbus", "simulation")
+WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "mqtt": "vaillant_ebus", "vicare": "viessmann_vicare",
                      "weishaupt_modbus": "weishaupt_modbus"}
 WEG_DES_TREIBERS = {"vicare_cloud": "viessmann_vicare", "simulation": "simulation"}
 #: Gateway: Kopie aus smartheat_device.wire (BINDUNG_GATEWAY_FIELDS, TREIBER_FIELDS); test_core_vertrag_pin.py haelt sie
@@ -104,7 +104,9 @@ TREIBER_FELDER = ("id", "parameter")
 HA_BINDUNG_FELDER = ("kreis", "rollen", "batterien", "benachrichtigung", "hinweise_aus")
 HA_BINDUNG_OPTIONAL = ("abfrage_s", "einheiten")
 KREIS_FELDER = ("plattform", "anlage", "nummer")
-KREIS_OPTIONAL = ("config_entry",)
+KREIS_OPTIONAL = ("config_entry", "geraet")
+#: Plattform des Busweges: dort ist `geraet` (Registry-Geraet des Reglers) Pflicht, bei jeder anderen Plattform verboten.
+PLATTFORM_BUS = "mqtt"
 HA_ROLLEN = (
     "room_target", "curve", "room_setpoint", "level", "heat_limit", "min_flow", "mode_select", "setpoint_comfort",
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",
@@ -453,6 +455,8 @@ def ha_bindung_pruefen(neu: Mapping) -> Ablehnung | None:
     # Pflichtfelder und config_entry (wenn vorhanden) sind nicht leere Texte; ein Kreis ohne config_entry hat keins.
     if not all(isinstance(kreis.get(key), str) and kreis[key] for key in KREIS_FELDER) or any(
             not (isinstance(kreis[key], str) and kreis[key]) for key in KREIS_OPTIONAL if key in kreis):
+        return Ablehnung(ROLLE_UNZULAESSIG, befund("kreis", "ungueltig"))
+    if ("geraet" in kreis) != (kreis["plattform"] == PLATTFORM_BUS):
         return Ablehnung(ROLLE_UNZULAESSIG, befund("kreis", "ungueltig"))
     rollen = bindung["rollen"]
     if not isinstance(rollen, Mapping):

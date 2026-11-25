@@ -165,11 +165,13 @@ def test_kreise_einer_anlage_haben_denselben_hebelsatz():
 # --- Wege --------------------------------------------------------------------------------------------------------
 
 def test_die_wege_des_vertrags():
-    assert cc.WEGE == wire.WEGE and "vaillant_ebus" not in cc.WEGE
+    assert cc.WEGE == wire.WEGE and "vaillant_ebus" in cc.WEGE
     assert cc.WEG_DER_PLATTFORM == wire.WEG_DER_PLATTFORM and cc.WEG_DES_TREIBERS == wire.WEG_DES_TREIBERS
+    assert cc.WEG_DER_PLATTFORM["mqtt"] == "vaillant_ebus"  # der Busweg ist fest an die Plattform mqtt gebunden
+    assert "geraet" in cc.KREIS_OPTIONAL and "geraet" in wire.KREIS_OPTIONAL
 
 
-@pytest.mark.parametrize("weg", ["vaillant_ebus", "frei_erfunden"])
+@pytest.mark.parametrize("weg", ["frei_erfunden", "vaillant_api"])
 def test_ein_unbekannter_weg_wird_abgelehnt(weg):
     ablehnung = _geprueft(gateway_konfiguration(weg=weg), LOCK)
     assert ablehnung == cc.Ablehnung(cc.WEG_UNBEKANNT, cc.befund("weg", "unbekannt"))
@@ -204,8 +206,19 @@ def test_der_weg_der_anlage_stimmt_mit_dem_der_bindung_ueberein():
 
 
 def test_der_weg_wird_vor_den_bindungsparametern_geprueft():
-    ablehnung = _geprueft(gateway_konfiguration(weg="vaillant_ebus", bindungsparameter=None), LOCK)
+    ablehnung = _geprueft(gateway_konfiguration(weg="frei_erfunden", bindungsparameter=None), LOCK)
     assert ablehnung == cc.Ablehnung(cc.WEG_UNBEKANNT, cc.befund("weg", "unbekannt"))
+
+
+def test_der_busweg_gehoert_nicht_zu_einem_gateway_treiber():
+    ablehnung = _geprueft(gateway_konfiguration(weg="vaillant_ebus", hebelsatz="vaillant_vrc720",
+                                                bindungsparameter=parameter("vaillant_vrc720")), None)
+    assert ablehnung == cc.Ablehnung(cc.WEG_MEHRFACH, cc.befund("weg", "doppelt"))
+
+
+def test_der_busweg_mit_fremdem_hebelsatz_hat_keine_sicherheitswerte():
+    ablehnung = _geprueft(gateway_konfiguration(weg="vaillant_ebus"), LOCK)
+    assert ablehnung == cc.Ablehnung(cc.SICHERHEITSWERTE_FEHLEN, cc.befund("hebelsatz", "unbekannt"))
 
 
 @pytest.mark.parametrize("hebelsatz", ["vaillant_vrc720", "weishaupt_wwp", "weishaupt_wwp_basis"])

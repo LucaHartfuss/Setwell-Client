@@ -266,7 +266,7 @@ def test_fussbodenheizung_hat_keine_comfort_zeile(make_store, clock, key):
 #: Die Zeilen der lokalen Verfahrenstabelle je Hebelsatz: auf welchen Wegen er vorkommt. Die Werte einer Zeile sind die
 #: Werte seines Hebelsatzes aus den Tabellen unten, auf jedem Weg gleich (die Simulation traegt jeden Hebelsatz).
 WEGE_JE_HEBELSATZ = {
-    "vaillant_vrc720": ("vaillant_myvaillant", "simulation"),
+    "vaillant_vrc720": ("vaillant_myvaillant", "vaillant_ebus", "simulation"),
     "weishaupt_wwp": ("weishaupt_modbus", "simulation"),
     "weishaupt_wwp_basis": ("weishaupt_modbus", "simulation"),
     "viessmann_vicare": ("viessmann_vicare", "simulation"),
@@ -296,6 +296,30 @@ def test_schreibschutz_obergrenzen():
         k: (v.obergrenze.durchsetzen_tag, v.obergrenze.tag, v.obergrenze.lebensdauer_hinweis)
         for k, v in VERFAHREN.items()
     } == je_kombination(SCHREIBSCHUTZ), R4
+
+
+def _schreibschutz_gleich_oder_strenger(busweg, cloud) -> bool:
+    """Ein fehlendes Budget (None) ist lockerer als jedes gesetzte."""
+    def strenger(a, b):
+        return b is None or (a is not None and a <= b)
+    return (busweg.durchsetzen_tag <= cloud.durchsetzen_tag and strenger(busweg.tag, cloud.tag)
+            and strenger(busweg.lebensdauer_hinweis, cloud.lebensdauer_hinweis))
+
+
+def test_der_busweg_ist_nie_lockerer_als_der_cloud_weg():
+    """Der Busweg schreibt in dieselbe Heizung wie die Cloud-Integration: sechs Schreibvorgaenge je Tag und Schluessel im
+    Abstand von 30 Minuten, kein Wert lockerer. Jedes Feld der Zeile ist gleich dem der Cloud-Zeile; die Wartezeit des
+    Servers (35 Minuten) bleibt ihm ueberlassen."""
+    import dataclasses
+
+    from smartheat_core.verfahren import VERFAHREN
+
+    bus, cloud = VERFAHREN[("vaillant_ebus", "vaillant_vrc720")], VERFAHREN[("vaillant_myvaillant", "vaillant_vrc720")]
+    assert _schreibschutz_gleich_oder_strenger(bus.obergrenze, cloud.obergrenze), R4
+    assert (bus.obergrenze.durchsetzen_tag, bus.obergrenze.tag, bus.obergrenze.lebensdauer_hinweis) == (6, None, None), R4
+    for feld in dataclasses.fields(bus):
+        assert getattr(bus, feld.name) == getattr(cloud, feld.name), (feld.name, R4)
+    assert (write_budget.MAX_PER_DAY, write_budget.INTERVAL_SECONDS) == (6, 1800), R4
 
 
 #: Lokale Positivliste der Weishaupt-Optionsschema-Praefixe (weishaupt_modbus 1.x und 2.0). Der Server darf nur eine

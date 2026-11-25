@@ -405,6 +405,64 @@ class LaggingFakeHa(FakeHa):
         return super().get_attribute(entity_id, attribute)
 
 
+#: Die Schreibziele des Buswegs je Rolle (ANNAHME wie dokument.SCHREIBREGELN_BUS) und die Optionen der Betriebsart.
+BUS_ZIELE = {"curve_current": "number.ebusd_720_hc1heatcurve", "shift_current": "number.ebusd_720_z1manualtemp",
+             "min_flow": "number.ebusd_720_hc1heatingflowtempmin", "heat_limit": "number.ebusd_720_hc1summertemplimit",
+             "mode_select": "select.ebusd_720_z1opmode"}
+BUS_OPTIONEN = ("off", "auto", "day", "night", "manual")
+
+
+class BusHa:
+    """HA mit den Entities des Buswegs: number-Hebel, die Betriebsart als select mit Attribut `options`. Ein Schreiben
+    wirkt sofort (MQTT lokal), ausser `reflects_writes` ist False (die Anlage uebernimmt den Wert nicht). `attempts`
+    haelt jeden Schreibversuch mit der Uhrzeit der Test-Uhr; ein select ausserhalb von `options` wirft wie HA."""
+
+    def __init__(self, *, mode="auto", options=BUS_OPTIONEN, reflects_writes=True) -> None:
+        ziele = BUS_ZIELE
+        self.states: dict = {ziele["curve_current"]: 0.9, ziele["shift_current"]: 21.0, ziele["min_flow"]: 21.0,
+                             ziele["heat_limit"]: 16.0, ziele["mode_select"]: mode}
+        self.options = options
+        self.reflects_writes = reflects_writes
+        self.writes: list[tuple[str, object]] = []
+        self.attempts: list[tuple[str, object, float | None]] = []
+        self.clock = None
+
+    def get_state(self, ref):
+        return self.states[ref]
+
+    def get_raw_state(self, entity_id):
+        value = self.states[entity_id]
+        if value in ("unavailable", "unknown", ""):
+            raise ValueError(value)
+        return str(value)
+
+    def get_attribute(self, entity_id, attribute):
+        raise KeyError(attribute)
+
+    def get_attribute_roh(self, entity_id, attribute):
+        if entity_id == BUS_ZIELE["mode_select"] and attribute == "options":
+            return None if self.options is None else list(self.options)
+        return None
+
+    def _schreiben(self, entity_id, value):
+        self.attempts.append((entity_id, value, self.clock() if self.clock else None))
+        self.writes.append((entity_id, value))
+        if self.reflects_writes:
+            self.states[entity_id] = value
+
+    def set_number_value(self, entity_id, value):
+        self._schreiben(entity_id, value)
+
+    def select_option(self, entity_id, option):
+        if self.options is not None and option not in self.options:
+            raise ValueError(f"Option {option!r} nicht in den Optionen")
+        self._schreiben(entity_id, option)
+
+    @property
+    def modus_aufrufe(self):
+        return [wert for entity_id, wert in self.writes if entity_id == BUS_ZIELE["mode_select"]]
+
+
 class FakeClock:
     """Monotone Test-Uhr fuer RegulationWorker: steht still, bis ein Test sie vorstellt."""
 

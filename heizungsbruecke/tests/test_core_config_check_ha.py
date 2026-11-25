@@ -249,5 +249,27 @@ def test_config_entry_ist_das_einzige_optionale_feld_des_kreises():
         "rolle_unzulaessig", {"feld": "kreis", "regel": "unbekannt"})
 
 
+_BUS_KREIS = {"plattform": "mqtt", "anlage": "S", "nummer": "0", "geraet": "g1"}
+
+
+def test_ein_buskreis_braucht_das_registry_geraet():
+    assert _pruefen(ha_konfiguration(bindung={"kreis": dict(_BUS_KREIS)})) is None
+    ohne = {k: v for k, v in _BUS_KREIS.items() if k != "geraet"}
+    assert _pruefen(ha_konfiguration(bindung={"kreis": ohne})) == cc.Ablehnung(
+        "rolle_unzulaessig", {"feld": "kreis", "regel": "ungueltig"})
+
+
+@pytest.mark.parametrize("geraet", [None, "", 7])
+def test_ein_leeres_oder_falsches_geraet_im_buskreis_wird_abgelehnt(geraet):
+    ablehnung = _pruefen(ha_konfiguration(bindung={"kreis": {**_BUS_KREIS, "geraet": geraet}}))
+    assert ablehnung == cc.Ablehnung("rolle_unzulaessig", {"feld": "kreis", "regel": "ungueltig"})
+
+
+def test_ein_geraet_bei_einer_cloud_plattform_wird_abgelehnt():
+    kreis = {**_KREIS, "geraet": "g1"}
+    ablehnung = _pruefen(ha_konfiguration(bindung={"kreis": kreis}))
+    assert ablehnung == cc.Ablehnung("rolle_unzulaessig", {"feld": "kreis", "regel": "ungueltig"})
+
+
 def test_kreis_ohne_config_entry_wird_angenommen():
     assert _pruefen(ha_konfiguration(bindung={"kreis": dict(_KREIS)})) is None

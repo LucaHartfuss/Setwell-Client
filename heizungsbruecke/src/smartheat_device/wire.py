@@ -96,7 +96,7 @@ INVENTUR_ATTRIBUTE = (
     "temperature", "current_temperature", "temperature_unit", "min", "max", "step", "min_temp", "max_temp",
     "target_temp_step", "options", "hvac_modes",
 )
-INVENTUR_GERAET_FIELDS = ("id", "name", "modell", "config_entries")
+INVENTUR_GERAET_FIELDS = ("id", "name", "modell", "hersteller", "config_entries")
 # Gateway-Inventur `stunden: 0` (Spec Stufe 3 S5 5.1): rohe Features je Anlage, Features auf oberster Ebene (Stueckelung)
 INVENTUR_FILTER_GATEWAY_FIELDS = ("treiber",)
 INVENTUR_GATEWAY_FIELDS = ("treiber", "anlagen", "features")
@@ -153,8 +153,8 @@ KREISE_MAX = 4
 RAEUME_MAX, RAUM_FUEHLER_MAX = 16, 3  # Raeume je Kreis, Fuehler je Raum
 #: Anbindungswege, die ein Geraet heute ausfuehrt, und ihre Abbildung aus der Bindung (HA: Plattform der Integration,
 #: Gateway: Treiber-ID); `simulation` ist der Testweg (nur Labor). Ein anderer Weg ist `weg_unbekannt`.
-WEGE = ("vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus", "simulation")
-WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
+WEGE = ("vaillant_myvaillant", "vaillant_ebus", "viessmann_vicare", "weishaupt_modbus", "simulation")
+WEG_DER_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "mqtt": "vaillant_ebus", "vicare": "viessmann_vicare",
                      "weishaupt_modbus": "weishaupt_modbus"}
 WEG_DES_TREIBERS = {"vicare_cloud": "viessmann_vicare", "simulation": "simulation"}
 # Spec Stufe 3 S4b 4.1: Herstellerwissen der Bindung (G-7). Pflicht fuer eine eingerichtete Konfiguration, null in einer
@@ -170,7 +170,9 @@ BINDUNG_GATEWAY_FIELDS = ("treiber", "thermostat")
 BINDUNG_HA_FIELDS = ("kreis", "rollen", "batterien", "benachrichtigung", "hinweise_aus")
 BINDUNG_HA_OPTIONAL = ("abfrage_s", "einheiten")  # fehlt = Standardwert des Hebelsatzes bzw. keine Energiekanaele
 KREIS_FIELDS = ("plattform", "anlage", "nummer")
-KREIS_OPTIONAL = ("config_entry",)  # fehlt = Kreis ohne Config-Entry (dann kein Schreibziel, ha_pruefung)
+# config_entry: fehlt = Kreis ohne Config-Entry (dann kein Schreibziel, ha_pruefung); geraet: Registry-Geraet des Reglers,
+# Pflicht bei Plattform `mqtt` (der Bus meldet je Teilnehmer ein Geraet), bei jeder anderen Plattform verboten
+KREIS_OPTIONAL = ("config_entry", "geraet")
 HA_ROLLEN = (
     "room_target", "curve", "room_setpoint", "level", "heat_limit", "min_flow", "mode_select", "setpoint_comfort",
     "setpoint_setback", "outdoor_temp", "flow_temperature", "flow_setpoint", "return_temperature", "operating_mode",
