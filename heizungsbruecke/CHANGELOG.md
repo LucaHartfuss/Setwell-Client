@@ -3,6 +3,11 @@
 Wird im Update-Dialog des Supervisors angezeigt. Pro Version ein Abschnitt `## X.Y.Z`; der
 Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Release.
 
+## 2.0.1
+
+Wartungsrelease ohne Änderung am Add-on: nur die CI-Dateien des Repos (Lese-Token für das Kern-Repo) ziehen auf `main`
+nach. Kein Funktionsunterschied zu 2.0.0.
+
 ## 2.0.0
 
 Teil des Releases Setwell 0.0.1. Der Server muss vorher auf 0.0.1 stehen; ältere Add-on-Stände sprechen nicht mit ihm.
