@@ -10,12 +10,12 @@ import pytest
 from bindung_beispiele import parameter
 from rastung_beispiele import rastung_aus
 
-from smartheat_core import rastung
+from smartheat_core import config_check, rastung
 from smartheat_core.config_check import INTERVALLE
 from smartheat_core.safety import LOCAL_SAFETY, resolve_local_safety
 from smartheat_device import wire
 from smartheat_runtime import dokument_config as _dokument_config
-from smartheat_runtime import entitlement
+from smartheat_runtime import entitlement, plan_quelle
 from smartheat_runtime.dokument_config import ConfigError
 
 #: Welche Argumente der Funktionen ein Dokument sind (die Tests beschreiben ihre Anlage flach, die Funktionen lesen
@@ -60,7 +60,8 @@ def _boot(konfiguration, tmp_path, abgemeldet=False):
 
 
 def test_fields_are_contract_fields():
-    assert set(dc.FELDER) <= set(wire.KONFIGURATION_FIELDS)
+    assert set(dc.FELDER) <= set(wire.KONFIGURATION_FIELDS) | set(wire.KONFIGURATION_PROGRAMM)
+    assert "zeitzone" in dc.FELDER
     assert set(dc.LAUFZEIT_FELDER) <= set(dc.FELDER)
 
 
@@ -416,6 +417,67 @@ def test_arriving_originals_do_not_restart_the_runtime():
     assert dc.laufzeit_relevant(KONF, {**KONF, "ursprungswerte": {"heat_limit": 16.0}}) is False
 
 
+def _programm_dokument(zone="Europe/Berlin", **kreisfelder):
+    return {"anlage": "kunde3", "weg": "simulation", "tagestick": "12:12", "bindungsparameter": {"p": 1},
+            "zeitzone": zone, "kreise": [{"kreis": 1, "name": "K1", "bindung": {"x": 1}, "raeume": [],
+                                          "hebelsatz": "vaillant_vrc720", "verteilsystem": "Heizkoerper",
+                                          "abo": "aktiv", **kreisfelder}]}
+
+
+class _Geraet:
+    """Das Geraet, aus dem die Laufzeit bei jedem Check ihre Planeingabe liest."""
+
+    def __init__(self, konfiguration):
+        self.dokument = konfiguration
+
+    def konfiguration(self):
+        return self.dokument
+
+    def bedienung(self):
+        return {"kreise": [{"kreis": 1, "modus": "manuell"}]}, False
+
+
+@pytest.mark.parametrize("feld, alt, neu", [
+    ("aufheizen", "boost", "kurve"), ("absenkung_k", 2.0, 3.5),
+    ("aufheizdauer_min", {"plan": 60, "weg": 120}, {"plan": 90, "weg": 120}),
+])
+def test_programmfelder_eines_kreises_starten_die_laufzeit_nicht_neu(feld, alt, neu):
+    assert feld in config_check.KONFIG_KREIS_PROGRAMM
+    vorher, nachher = _programm_dokument(**{feld: alt}), _programm_dokument(**{feld: neu})
+    assert _dokument_config.laufzeit_relevant(vorher, nachher) is False
+    assert _dokument_config.laufzeit_relevant_anlage(vorher, nachher) is False
+    assert _dokument_config.laufzeit_relevant_kreis(vorher, nachher, 1) is False
+    # Das Feld ist neu hinzugekommen oder entfernt: ebenfalls kein Neustart.
+    assert _dokument_config.laufzeit_relevant_kreis(_programm_dokument(), nachher, 1) is False
+    assert _dokument_config.laufzeit_relevant_kreis(vorher, _programm_dokument(), 1) is False
+    # Die laufende Rechnung liest den Wert bei jedem Check aus dem Dokument des Geraets.
+    geraet = _Geraet(vorher)
+    assert plan_quelle.eingabe_des_geraets(geraet, 1).konfiguration[feld] == alt
+    geraet.dokument = nachher
+    assert plan_quelle.eingabe_des_geraets(geraet, 1).konfiguration[feld] == neu
+
+
+def test_die_zeitzone_startet_die_laufzeit_nicht_neu():
+    assert "zeitzone" not in _dokument_config.LAUFZEIT_FELDER
+    vorher, nachher = _programm_dokument("Europe/Berlin"), _programm_dokument("Europe/Lisbon")
+    assert _dokument_config.laufzeit_relevant(vorher, nachher) is False
+    assert _dokument_config.laufzeit_relevant_kreis(vorher, nachher, 1) is False
+    geraet = _Geraet(vorher)
+    assert plan_quelle.eingabe_des_geraets(geraet, 1).zone == "Europe/Berlin"
+    geraet.dokument = nachher
+    assert plan_quelle.eingabe_des_geraets(geraet, 1).zone == "Europe/Lisbon"
+
+
+@pytest.mark.parametrize("feld, neu", [("bindung", {"x": 2}), ("raeume", [{"raum": 1}]), ("name", "andere"),
+                                       ("hebelsatz", "viessmann_vicare"), ("verteilsystem", "Fussboden")])
+def test_ein_anderes_kreisfeld_startet_weiter_neu(feld, neu):
+    vorher = _programm_dokument(absenkung_k=2.0)
+    nachher = _programm_dokument(absenkung_k=3.5)
+    nachher["kreise"][0][feld] = neu
+    assert _dokument_config.laufzeit_relevant(vorher, nachher) is True
+    assert _dokument_config.laufzeit_relevant_kreis(vorher, nachher, 1) is True
+
+
 def test_beschreibung_aus_hebelsatz_und_bindungsparametern():
     assert dc.beschreibung(KONF_MIT).lever_set.id == KONF_MIT["hebelsatz"]
 
@@ -545,7 +607,7 @@ def test_beschreibung_ohne_passende_bindungsparameter_ist_ein_konfigurationsfehl
         dc.beschreibung(konfiguration)
 
 
-@pytest.mark.parametrize("weg", [None, "", "vaillant_ebus", "Simulation"])
+@pytest.mark.parametrize("weg", [None, "", "vaillant_ebusd", "Simulation"])
 def test_beschreibung_mit_unbekanntem_weg_ist_ein_konfigurationsfehler(weg):
     konfiguration = {"hebelsatz": "vaillant_vrc720", "weg": weg, "bindungsparameter": parameter("vaillant_vrc720")}
     with pytest.raises(ConfigError, match="Weg"):

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from bindung_beispiele import VIESSMANN_VICARE_BINDING as BINDING
+from conftest import ANMELDE_PARAMETER
 from fake_vicare.server import GOOD_CODE, FakeVicare
 from heizungsbruecke.ha_binding import ViessmannHaBinding
 
@@ -69,8 +70,8 @@ class CloudWorld:
         self.driver = ViCareCloudDriver(
             {"installation_id": 2012345, "gateway_serial": "7637415000000001", "device_id": "0", "heizkreis": 0},
             Paths(tmp_path), clock=clock, writer=True, description=BINDING)
-        self.driver.login_begin({"client_id": "c", "redirect_uri": "r"})
-        self.driver.login_finish({"code": GOOD_CODE, "redirect_uri": "r"})
+        self.driver.login_begin(ANMELDE_PARAMETER)
+        self.driver.login_finish({"code": GOOD_CODE})
         for feature in self.server.features["0"]:
             if feature["feature"].endswith("programs.active"):
                 feature["properties"]["value"]["value"] = program

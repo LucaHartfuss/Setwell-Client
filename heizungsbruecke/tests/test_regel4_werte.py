@@ -77,6 +77,16 @@ KONSTANTEN = {
     "Betriebsarten Bedienbereich gleich Wunsch-Eingang": (safety.BEDIENBEREICH_MAX_C, wire.RAUM_SOLL_MAX),
     "Betriebsarten Mindestdauer der Phase": (safety.PHASE_MINDESTDAUER, timedelta(minutes=60)),
     "Betriebsarten Leerstand hoechstens": (safety.LEERSTAND_HOECHSTDAUER, timedelta(days=365)),
+    "Betriebsarten Absenkung hoechstens (K)": (safety.ABSENKUNG_MAX_K, 5.0),
+    "Betriebsarten Absenkung Schritt (K)": (safety.ABSENKUNG_SCHRITT_K, 0.5),
+    "Betriebsarten Absenkung mindestens (K)": (safety.ABSENKUNG_MIN_K, 0.0),
+    "Betriebsarten Absenkung gleich Vertrag": (
+        (safety.ABSENKUNG_MIN_K, safety.ABSENKUNG_MAX_K, safety.ABSENKUNG_SCHRITT_K),
+        (wire.ABSENKUNG_K_MIN, wire.ABSENKUNG_K_MAX, wire.ABSENKUNG_K_STEP)),
+    "Betriebsarten Uebersteuerung der Leerstandsphase hoechstens": (
+        safety.UEBERSTEUERUNG_LEERSTAND_HOECHSTDAUER, timedelta(hours=4)),
+    "Betriebsarten Leerstand: Aenderungen bis zum Beenden": (safety.LEERSTAND_AENDERUNGEN_BEENDEN, 3),
+    "Betriebsarten Leerstand: Fenster dieser Aenderungen": (safety.LEERSTAND_AENDERUNGEN_FENSTER, timedelta(hours=24)),
     "Betriebsarten Abwesenheits-Vorschlag": (
         dict(safety.ABWESENHEIT_VORSCHLAG_C), {"Heizkoerper": 17.0, "Fussbodenheizung": 19.0}),
 }
@@ -110,6 +120,22 @@ def test_temperaturgrenzen_der_betriebsarten(pruefung, grenze, rand):
     """Die Grenze gilt, ein halbes Grad dahinter nicht."""
     assert pruefung(grenze), R4
     assert not pruefung(grenze - 0.5 if rand == "unten" else grenze + 0.5), R4
+
+
+@pytest.mark.parametrize(("tiefe", "gueltig"), [
+    (0, True), (0.0, True), (0.5, True), (4.5, True), (5, True), (5.0, True),
+    (5.5, False), (6, False), (-0.5, False), (-1, False), (0.25, False), (4.75, False),
+    (math.nan, False), (math.inf, False), (-math.inf, False), (True, False), (False, False), ("2", False), (None, False),
+])
+def test_absenkung_von_0_bis_5_k_in_halben_schritten(tiefe, gueltig):
+    assert safety.absenkung_k_gueltig(tiefe) is gueltig, f"{R4}: {tiefe!r}"
+
+
+@pytest.mark.parametrize(("wunsch", "tiefe", "erwartet"), [
+    (22.0, 5.0, 17.0), (22.0, 5.5, 17.0), (22.0, 10.0, 17.0), (25.0, 30.0, 20.0), (25.0, 5.0, 20.0),
+])
+def test_die_absenktemperatur_geht_nie_tiefer_als_5_k_unter_den_wunsch(wunsch, tiefe, erwartet):
+    assert safety.absenktemperatur(wunsch, tiefe) == erwartet, R4
 
 
 def test_abwesend_bis_hoechstens_365_tage_voraus():
@@ -240,7 +266,7 @@ def test_fussbodenheizung_hat_keine_comfort_zeile(make_store, clock, key):
 #: Die Zeilen der lokalen Verfahrenstabelle je Hebelsatz: auf welchen Wegen er vorkommt. Die Werte einer Zeile sind die
 #: Werte seines Hebelsatzes aus den Tabellen unten, auf jedem Weg gleich (die Simulation traegt jeden Hebelsatz).
 WEGE_JE_HEBELSATZ = {
-    "vaillant_vrc720": ("vaillant_myvaillant", "simulation"),
+    "vaillant_vrc720": ("vaillant_myvaillant", "vaillant_ebus", "simulation"),
     "weishaupt_wwp": ("weishaupt_modbus", "simulation"),
     "weishaupt_wwp_basis": ("weishaupt_modbus", "simulation"),
     "viessmann_vicare": ("viessmann_vicare", "simulation"),
@@ -270,6 +296,30 @@ def test_schreibschutz_obergrenzen():
         k: (v.obergrenze.durchsetzen_tag, v.obergrenze.tag, v.obergrenze.lebensdauer_hinweis)
         for k, v in VERFAHREN.items()
     } == je_kombination(SCHREIBSCHUTZ), R4
+
+
+def _schreibschutz_gleich_oder_strenger(busweg, cloud) -> bool:
+    """Ein fehlendes Budget (None) ist lockerer als jedes gesetzte."""
+    def strenger(a, b):
+        return b is None or (a is not None and a <= b)
+    return (busweg.durchsetzen_tag <= cloud.durchsetzen_tag and strenger(busweg.tag, cloud.tag)
+            and strenger(busweg.lebensdauer_hinweis, cloud.lebensdauer_hinweis))
+
+
+def test_der_busweg_ist_nie_lockerer_als_der_cloud_weg():
+    """Der Busweg schreibt in dieselbe Heizung wie die Cloud-Integration: sechs Schreibvorgaenge je Tag und Schluessel im
+    Abstand von 30 Minuten, kein Wert lockerer. Jedes Feld der Zeile ist gleich dem der Cloud-Zeile; die Wartezeit des
+    Servers (35 Minuten) bleibt ihm ueberlassen."""
+    import dataclasses
+
+    from smartheat_core.verfahren import VERFAHREN
+
+    bus, cloud = VERFAHREN[("vaillant_ebus", "vaillant_vrc720")], VERFAHREN[("vaillant_myvaillant", "vaillant_vrc720")]
+    assert _schreibschutz_gleich_oder_strenger(bus.obergrenze, cloud.obergrenze), R4
+    assert (bus.obergrenze.durchsetzen_tag, bus.obergrenze.tag, bus.obergrenze.lebensdauer_hinweis) == (6, None, None), R4
+    for feld in dataclasses.fields(bus):
+        assert getattr(bus, feld.name) == getattr(cloud, feld.name), (feld.name, R4)
+    assert (write_budget.MAX_PER_DAY, write_budget.INTERVAL_SECONDS) == (6, 1800), R4
 
 
 #: Lokale Positivliste der Weishaupt-Optionsschema-Praefixe (weishaupt_modbus 1.x und 2.0). Der Server darf nur eine

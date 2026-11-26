@@ -356,18 +356,17 @@ class ViCareCloudDriver:
         return self._role(self._fresh(), role)
 
     def login_begin(self, params: dict) -> dict:
-        client_id, redirect_uri = params.get("client_id"), params.get("redirect_uri")
-        if not (isinstance(client_id, str) and client_id and isinstance(redirect_uri, str) and redirect_uri):
-            raise DriverError("login_fehlgeschlagen")
-        challenge = self._tokens.begin(client_id, redirect_uri)
-        return {"code_challenge": challenge, "code_challenge_method": "S256"}  # nie Verifier oder Token (Ergebnis)
+        try:
+            return self._tokens.anmeldung_beginnen(params)  # nur der state_hash, nie Verifier, state oder Token
+        except oauth.LoginRejected as error:
+            raise DriverError("login_fehlgeschlagen") from error
 
     def login_finish(self, params: dict) -> None:
-        code, redirect_uri = params.get("code"), params.get("redirect_uri")
-        if not (isinstance(code, str) and code and isinstance(redirect_uri, str) and redirect_uri):
+        code = params.get("code")
+        if not (isinstance(code, str) and code):
             raise DriverError("login_fehlgeschlagen")
         try:
-            self._tokens.finish(code, redirect_uri)
+            self._tokens.anmeldung_abschliessen(code)
         except oauth.LoginRejected as error:
             raise DriverError("login_fehlgeschlagen") from error
         except oauth.NotLoggedIn as error:

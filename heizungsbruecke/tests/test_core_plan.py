@@ -439,6 +439,46 @@ def test_uebersteuerung_im_leerstand_endet_mit_dem_leerstand():
     assert ergebnis(utc("2026-11-05T12:00:00Z"), bedienung).soll_art == "leerstand"
 
 
+def test_uebersteuerung_im_leerstand_gilt_hoechstens_vier_stunden_ab_jetzt():
+    jetzt = utc("2026-11-05T12:00:00Z")
+    ende = utc("2026-11-20T10:00:00Z")
+    genau = doc("leerstand", leerstand=leerstand(), uebersteuerung={"temp": 19.0, "bis": "2026-11-05T16:00:00Z"})
+    erg = ergebnis(jetzt, genau)
+    assert paar(erg) == (19.0, "uebersteuert")
+    assert erg.naechster_wechsel == utc("2026-11-05T16:00:00Z")
+    zu_lang = doc("leerstand", leerstand=leerstand(), uebersteuerung={"temp": 19.0, "bis": "2026-11-05T16:00:01Z"})
+    erg = ergebnis(jetzt, zu_lang)
+    assert paar(erg) == (16.0, "leerstand")
+    assert erg.naechster_wechsel == ende  # kein Scheinwechsel zum Ende der verworfenen Uebersteuerung
+
+
+def test_uebersteuerung_im_leerstand_faellt_nach_ihrem_ende_auf_die_leerstandstemperatur_zurueck():
+    bedienung = doc("leerstand", leerstand=leerstand(), uebersteuerung={"temp": 19.0, "bis": "2026-11-05T16:00:00Z"})
+    assert paar(ergebnis(utc("2026-11-05T15:59:59Z"), bedienung)) == (19.0, "uebersteuert")
+    erg = ergebnis(utc("2026-11-05T16:00:00Z"), bedienung)
+    assert paar(erg) == (16.0, "leerstand")
+    assert erg.naechster_wechsel == utc("2026-11-20T10:00:00Z")
+
+
+def test_uebersteuerung_im_leerstand_hinter_dem_leerstandsende_gilt_nicht():
+    bedienung = doc("leerstand", leerstand=leerstand(bis="2026-11-05T14:00:00Z"),
+                    uebersteuerung={"temp": 19.0, "bis": "2026-11-05T14:00:01Z"})
+    assert ergebnis(utc("2026-11-05T12:00:00Z"), bedienung).soll_art == "leerstand"
+
+
+def test_vier_stunden_gelten_nur_im_laufenden_leerstand_nicht_vor_seinem_beginn():
+    # geplanter Leerstand ab Morgen, Uebersteuerung von 6 h in der kuehlen Phase des Plans: gilt bis zu ihrem Ende
+    bedienung = doc("leerstand", wochenplan=wochenplan(),
+                    leerstand=leerstand(von="2026-11-03T12:00:00Z", bis="2026-11-20T10:00:00Z"),
+                    uebersteuerung={"temp": 20.0, "bis": "2026-11-03T05:00:00Z"})
+    erg = ergebnis(utc("2026-11-02T23:00:00Z"), bedienung)
+    assert paar(erg) == (20.0, "uebersteuert")
+    assert erg.naechster_wechsel == utc("2026-11-03T05:00:00Z")
+    # im Leerstand selbst gilt dieselbe Uebersteuerung nicht
+    bedienung["leerstand"] = leerstand(von="2026-11-02T22:00:00Z", bis="2026-11-20T10:00:00Z")
+    assert paar(ergebnis(utc("2026-11-02T23:00:00Z"), bedienung)) == (16.0, "leerstand")
+
+
 def test_ungueltiger_wochenplan_wird_wie_kein_plan_behandelt():
     ohne = ergebnis(NACHT, doc())
     for kaputt in (wochenplan()[:6], wochenplan("06:30", "06:30"), wochenplan("24:00", "22:30"), "Plan", [], {}, 7):

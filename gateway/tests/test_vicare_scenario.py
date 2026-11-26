@@ -1,6 +1,7 @@
 """Szenario vicare_cloud mit der Gateway-Laufzeit (auf dem Geraetekern): die Anmeldung laeuft ab."""
 import pytest
 from configs import SENSOR, THERMOSTAT, konfiguration
+from conftest import ANMELDE_PARAMETER
 from fake_vicare.server import GOOD_CODE, FakeVicare
 from world import GatewayWorld
 
@@ -21,8 +22,8 @@ def test_an_expired_login_makes_the_runtime_stop_writing(data_dir, monkeypatch, 
             monkeypatch.setenv(key, value)
         world = GatewayWorld(data_dir, monkeypatch, clock)
         login = ViCareCloudDriver(VICARE["parameter"], world.paths, clock=clock)  # meldet an wie driver_login
-        login.login_begin({"client_id": "c", "redirect_uri": "r"})
-        login.login_finish({"code": GOOD_CODE, "redirect_uri": "r"})
+        login.login_begin(ANMELDE_PARAMETER)
+        login.login_finish({"code": GOOD_CODE})
         world.start_runtime()
         world.connect()
         world.konfiguration_senden(konfiguration(bindung={"treiber": VICARE, "thermostat": THERMOSTAT}), 1)

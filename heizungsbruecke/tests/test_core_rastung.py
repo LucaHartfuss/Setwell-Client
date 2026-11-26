@@ -250,6 +250,38 @@ def test_ha_targets_are_the_write_entities_and_the_circuit_with_its_config_entry
     assert rastung.soll_entity(_ha_bindung()) == "climate.wohnzimmer"
 
 
+def _bus_bindung(geraet, **rollen):
+    bindung = _ha_bindung(**rollen)
+    bindung["kreis"] = {**bindung["kreis"], "plattform": "mqtt", "geraet": geraet}
+    return bindung
+
+
+def test_the_registry_device_of_a_bus_circuit_is_part_of_the_targets():
+    """Ein anderes Registry-Geraet mit denselben Entity-Namen waere sonst dasselbe Ziel: der Anschluss waere ohne
+    Neuinstallation auf ein fremdes Geraet umlenkbar."""
+    a, b = rastung.ziele(_bus_bindung("dev-a")), rastung.ziele(_bus_bindung("dev-b"))
+    assert a != b
+    assert a == rastung.ziele(_bus_bindung("dev-a"))
+    assert any(z.startswith("geraet=") for z in a)
+
+
+def test_a_circuit_without_a_registry_device_keeps_its_targets_bit_for_bit():
+    assert not [z for z in rastung.ziele(_ha_bindung()) if z.startswith("geraet=")]
+
+
+@pytest.mark.parametrize("geraet", [3, "", None, ["d"]])
+def test_an_unreadable_registry_device_has_no_targets(geraet):
+    bindung = _bus_bindung("dev-a")
+    bindung["kreis"]["geraet"] = geraet
+    assert rastung.ziele(bindung) is None
+
+
+def test_the_same_document_with_another_registry_device_does_not_fit_the_lock():
+    gerastet = rastung.aus_konfiguration(_konf((1, _bus_bindung("dev-a"))))
+    assert rastung.passt(gerastet, _konf((1, _bus_bindung("dev-a"))))
+    assert not rastung.passt(gerastet, _konf((1, _bus_bindung("dev-b"))))
+
+
 def test_ha_read_roles_are_not_targets_so_a_sensor_swap_stays_possible():
     assert rastung.ziele(_ha_bindung(outdoor_temp="sensor.anderer")) == rastung.ziele(_ha_bindung())
     assert rastung.ziele(_ha_bindung(room_target="climate.anderer")) == rastung.ziele(_ha_bindung())

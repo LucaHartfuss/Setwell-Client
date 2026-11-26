@@ -5,7 +5,8 @@ lokalen Pruefung (config_check ruft ihn ueber DeviceHost.treiber_pruefen): Pflic
 Schreibbarkeit je Hebelsatz, Entities vorhanden, jede gebundene Entity (Soll-Entity, Rollen, Raumfuehler, Batterien)
 besteht die lokale Positivliste der Inventur (rollen_pruefen), dann die Schreibziele (schreibziele_befund).
 Schreibziele (jeder Hebel der Bindung, nicht nur die Schreibregeln des Hebelsatzes) kommen nur von der lokal je
-Hebelsatz festgelegten Plattform (SCHREIB_PLATTFORM) und alle aus einem Config-Entry (dem des Kreises, wenn er
+Weg und Hebelsatz festgelegten Plattform (SCHREIB_PLATTFORM; gesperrte Zeilen, GESPERRTE_SCHREIBZEILEN, hat das Geraet
+nicht: der Busweg ist bis zur Freigabe am echten Geraet gesperrt) und alle aus einem Config-Entry (dem des Kreises, wenn er
 eines nennt); die Soll-Entity ist kein Schreibziel und nicht an dessen Geraet. Dieselben Regeln gelten beim Start
 fuer die uebernommene Konfiguration (rollen_befund mit beim_start=True). Ob outdoor_temp und die
 Kennzahl-Rollen fachlich passen, prueft der Server (ha_pruefung).
@@ -20,7 +21,13 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from heizungsbruecke.inventur import einstellbare_plattformen, entity_erlaubt, entity_klasse
+from heizungsbruecke.inventur import (
+    PLATTFORM_BUS,
+    einstellbare_plattformen,
+    entity_erlaubt,
+    entity_klasse,
+    geraet_verankert,
+)
 from smartheat_core import kennung, kreisansicht
 from smartheat_core.bindungsparameter import ENERGIE_KANAELE
 from smartheat_core.config_check import NichtPruefbar
@@ -44,16 +51,71 @@ PFLICHT_ROLLEN: dict[str, tuple[str, ...]] = {
     "weishaupt_wwp_basis": ("shift_current", "outdoor_temp", "mode_select", "setpoint_comfort", "setpoint_setback"),
     "viessmann_vicare": ("curve_current", "level_current", "shift_current", "outdoor_temp", "mode_select"),
 }
-#: Plattform der Schreibziele je Hebelsatz (Regel 4, Nutzer-Entscheidung 2026-10-22): lokal verankert, der
+#: Plattform der Schreibziele je (Weg, Hebelsatz) (Regel 4, Nutzer-Entscheidung 2026-10-22): lokal verankert, der
 #: Kreis des Dokuments (kreis.plattform) muss sie nennen, sonst lehnt das Geraet ab (plattform/nicht_erlaubt); auch die
-#: Lese-Rollen ohne Klasse haengen an ihr (_form_erlaubt). Schluessel wie PFLICHT_ROLLEN; ein Contract-Check haelt die
-#: Tabelle gegen den Katalog des Servers.
-SCHREIB_PLATTFORM: dict[str, str] = {
-    "vaillant_vrc720": "mypyllant",
-    "weishaupt_wwp": "weishaupt_modbus",
-    "weishaupt_wwp_basis": "weishaupt_modbus",
-    "viessmann_vicare": "vicare",
+#: Lese-Rollen ohne Klasse haengen an ihr (_form_erlaubt). Der Weg ist der des Dokuments; ein Weg ohne Zeile fuer den
+#: Hebelsatz (auch ein Weg ohne Schreibregeln) laesst nichts schreiben. Die Hebelsaetze sind die von PFLICHT_ROLLEN; ein
+#: Contract-Check haelt die Tabelle gegen den Katalog des Servers.
+SCHREIB_PLATTFORM: dict[tuple[str, str], str] = {
+    ("vaillant_myvaillant", "vaillant_vrc720"): "mypyllant",
+    ("weishaupt_modbus", "weishaupt_wwp"): "weishaupt_modbus",
+    ("weishaupt_modbus", "weishaupt_wwp_basis"): "weishaupt_modbus",
+    ("viessmann_vicare", "viessmann_vicare"): "vicare",
+    ("vaillant_ebus", "vaillant_vrc720"): "mqtt",  # Bus: Schreibziele nur am verankerten Registry-Geraet (SCHREIBREGELN_BUS)
 }
+#: Zeilen von SCHREIB_PLATTFORM, die das Geraet nicht zulaesst (Regel 4, Nutzer-Entscheidung 2026-11-24): der Busweg ist
+#: am echten Geraet noch nicht freigegeben, das Tor des Servers allein genuegt nicht (zweite Linie am Geraet). Eine
+#: gesperrte Zeile hat keine Schreibplattform: das Dokument wird beim Uebernehmen wie beim Start mit
+#: plattform/nicht_erlaubt abgelehnt; Lesen und Inventur der Entities bleiben unberuehrt, die Logik des Wegs
+#: (Positivliste, Verankerung) bleibt im Code und getestet. Oeffnen = die Zeile hier streichen, nur mit Freigabe des
+#: Nutzers fuer Regel 4.
+GESPERRTE_SCHREIBZEILEN: frozenset[tuple[str, str]] = frozenset({("vaillant_ebus", "vaillant_vrc720")})
+
+
+#: Die Verankerung der Schreibziele des Buswegs ist das Registry-Geraet (kreis.geraet), nicht die Plattform mqtt
+#: (inventur.PLATTFORM_BUS, inventur.geraet_verankert).
+#: Zweites Argument von NichtPruefbar, wenn das Registry-Geraet der Schreibziele beim Start fehlt.
+OHNE_GERAET = "geraet"
+
+#: ANNAHME (Namen der ebusd-Nachrichten der Reglerfamilie, Zuordnung zu den Hebeln und Entity-IDs der MQTT-Erkennung;
+#: Bestaetigung am echten Geraet): je Schreibziel genau eine Entity. Heizkurve = Hc1HeatCurve, Raum-Soll = Z1ManualTemp,
+#: Mindestvorlauf = Hc1HeatingFlowTempMin, Heizgrenze = Hc1SummerTempLimit, Betriebsart der Zone = Z1OpMode. Alles
+#: andere, auch die Servicewerte (Installateurebene) und jeder andere Name am selben Geraet, ist kein Schreibziel.
+SCHREIBREGELN_BUS: dict[str, tuple[re.Pattern, str]] = {
+    "curve_current": (re.compile(r"number\.ebusd_720_hc1heatcurve"), "die Heizkurven-Entity des Reglers"),
+    "shift_current": (re.compile(r"number\.ebusd_720_z1manualtemp"), "die Raum-Soll-Entity des Reglers"),
+    "min_flow": (re.compile(r"number\.ebusd_720_hc1heatingflowtempmin"), "die Mindestvorlauf-Entity des Reglers"),
+    "heat_limit": (re.compile(r"number\.ebusd_720_hc1summertemplimit"), "die Heizgrenzen-Entity des Reglers"),
+    "mode_select": (re.compile(r"select\.ebusd_720_z1opmode"), "die Betriebsart-Entity des Reglers"),
+}
+#: Pflichtrollen des Buswegs: die des Vaillant-Hebelsatzes und die Betriebsart (Vorbereitung auf manuell).
+PFLICHT_ROLLEN_BUS: tuple[str, ...] = (*PFLICHT_ROLLEN["vaillant_vrc720"], "mode_select")
+
+
+def _busweg(b: "HaBindung") -> bool:
+    """Gilt fuer die Bindung die Positivliste des Buswegs? Ja, wenn der Kreis die Plattform mqtt nennt, gleich welcher Weg
+    im Dokument steht (config_check haelt beide zusammen; ein Weg ohne Schreibzeile laesst ohnehin nichts schreiben)."""
+    return b.kreis.get("plattform") == PLATTFORM_BUS
+
+
+def pflicht_rollen(b: "HaBindung") -> tuple[str, ...]:
+    """Pflichtrollen der Bindung: je Hebelsatz, beim Busweg die eigene Liste."""
+    return PFLICHT_ROLLEN_BUS if _busweg(b) else PFLICHT_ROLLEN[b.hebelsatz]
+
+
+def schreibregeln(b: "HaBindung") -> dict[str, tuple[re.Pattern, str]]:
+    """Schreibregeln der Bindung (Rolle -> Muster der Entity und Text): je Hebelsatz, beim Busweg die exakten Namen."""
+    return SCHREIBREGELN_BUS if _busweg(b) else SCHREIBREGELN[b.hebelsatz]
+
+
+def schreib_plattform(b: "HaBindung") -> str | None:
+    """Die Plattform der Schreibziele fuer Weg und Hebelsatz der Bindung; None: der Weg hat dafuer keine Zeile oder die
+    Zeile ist gesperrt (GESPERRTE_SCHREIBZEILEN); beides lehnt das Geraet als plattform/nicht_erlaubt ab."""
+    if b.weg is None or (b.weg, b.hebelsatz) in GESPERRTE_SCHREIBZEILEN:
+        return None
+    return SCHREIB_PLATTFORM.get((b.weg, b.hebelsatz))
+
+
 _NUMBER = (re.compile(r"number\.[a-z0-9_]+"), "eine number.*-Entity")
 #: Schreibbarkeit je Hebelsatz ("schreibbar"): HaPlantBinding.write kennt nur climate.set_temperature und
 #: number.set_value; Weishaupt-Betriebsart ist ein select, das Viessmann-Heizprogramm eine climate-Entity.
@@ -95,6 +157,8 @@ class HaBindung:
     kreis: dict
     #: (Raumnummer, Fuehler) aller Raeume des Kreises mit Fuehlern, Referenz- und Kontrollraeume
     raeume: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    #: Weg der Anlage laut Dokument; ohne gueltigen Weg gibt es keine Schreibplattform (schreib_plattform)
+    weg: str | None = None
 
 
 def _mapping(value) -> Mapping:
@@ -121,7 +185,8 @@ def bindung(konfiguration, kreis: int | None = None) -> HaBindung:
         hebelsatz=hebelsatz, rollen=rollen, soll_entity=soll if isinstance(soll, str) and soll else None,
         raumfuehler=_texte(konfiguration.get("raumfuehler")), batterien=_texte(raw.get("batterien")),
         benachrichtigung=_texte(raw.get("benachrichtigung")), hinweise_aus=_texte(raw.get("hinweise_aus")),
-        kreis=dict(_mapping(raw.get("kreis"))), raeume=raeume)
+        kreis=dict(_mapping(raw.get("kreis"))), raeume=raeume,
+        weg=konfiguration.get("weg") if isinstance(konfiguration.get("weg"), str) else None)
 
 
 def anlagen_kennung(b: HaBindung) -> str:
@@ -161,20 +226,29 @@ class Befund:
 def _schreibziel_rollen(b: HaBindung) -> list[tuple[str, str]]:
     """Rollen der Bindung, die die Regelung schreibt: Schreibregeln des Hebelsatzes, alle Hebelrollen (auch die
     Heizkurve, die bei vaillant_vrc720 keine Schreibregel hat) und Betriebsart/Hilfs-Sollwerte."""
-    rollen = dict.fromkeys([*SCHREIBREGELN[b.hebelsatz], *LEVER_ROLES.values(), *WEITERE_SCHREIBZIELE])
+    rollen = dict.fromkeys([*schreibregeln(b), *LEVER_ROLES.values(), *WEITERE_SCHREIBZIELE])
     return [(rolle, b.rollen[rolle]) for rolle in rollen if b.rollen.get(rolle)]
+
+
+def _ohne_schreibregel(b: HaBindung) -> list[tuple[str, str]]:
+    """Gebundene Schreibziele, fuer die der Busweg keine Schreibregel hat (Stufe, Komfort- und Absenk-Sollwert): beim
+    Busweg schreibt die Regelung nur die Rollen seiner Positivliste; bei den anderen Wegen gibt es das nicht."""
+    return [(rolle, ref) for rolle, ref in _schreibziel_rollen(b) if _busweg(b) and rolle not in SCHREIBREGELN_BUS]
 
 
 def _lokal(b: HaBindung) -> Befund | None:
     """Der Teil ohne HA: Pflichtrollen und Entity-Art der Schreibziele."""
-    missing = [rolle for rolle in PFLICHT_ROLLEN[b.hebelsatz] if not b.rollen.get(rolle)]
+    missing = [rolle for rolle in pflicht_rollen(b) if not b.rollen.get(rolle)]
     if missing:
         return Befund(fehler.details(v1_rolle(missing[0]), "fehlt"),
                       f"Für die Ansteuerung {b.hebelsatz} fehlt die Zuordnung {missing[0]}.")
-    for rolle, (pattern, expected) in SCHREIBREGELN[b.hebelsatz].items():
+    for rolle, (pattern, expected) in schreibregeln(b).items():
         value = b.rollen.get(rolle)
         if value is not None and not pattern.fullmatch(value):
             return Befund(fehler.details(v1_rolle(rolle), "format"), f"{value} muss {expected} sein.")
+    if ueberzaehlig := _ohne_schreibregel(b):
+        return Befund(fehler.details(v1_rolle(ueberzaehlig[0][0]), "format"),
+                      f"Die Zuordnung {ueberzaehlig[0][0]} gibt es für diese Ansteuerung nicht.")
     if b.soll_entity is None:
         return Befund(fehler.details("room_target", "fehlt"), "Die Wunschtemperatur-Entity fehlt.")
     return None
@@ -209,7 +283,7 @@ def _pflicht_refs(b: HaBindung) -> set[str]:
     (roles.lever_refs_identity, app.start), ohne sie verwuerfe bind_to_tenant einen Bestand von 1.1.0. Fallen duerfen
     nur optionale Lese-Rollen und Batterien."""
     return {*([b.soll_entity] if b.soll_entity is not None else []),
-            *(b.rollen[rolle] for rolle in PFLICHT_ROLLEN[b.hebelsatz] if rolle in b.rollen), *b.raumfuehler,
+            *(b.rollen[rolle] for rolle in pflicht_rollen(b) if rolle in b.rollen), *b.raumfuehler,
             *(ref for _, ref in _schreibziel_rollen(b))}
 
 
@@ -252,21 +326,25 @@ def _form_domaene(feld: str, ref: str) -> bool:
     return any(domain == erlaubt for erlaubt, _ in ROLLEN_FORM.get(feld, ()))
 
 
-def _form_erlaubt(feld: str, ref: str, registry_entry: Mapping, state: Mapping, schreib_plattform: str) -> bool:
-    """Mit Zustand: Domaene, Geraeteklasse und bei freier Klasse ohne Klasse die Plattform des Hebelsatzes
-    (SCHREIB_PLATTFORM, nicht kreis.plattform des Servers)."""
+def _form_erlaubt(feld: str, ref: str, registry_entry: Mapping, state: Mapping, schreib_plattform: str,
+                  anker: object = None) -> bool:
+    """Mit Zustand: Domaene, Geraeteklasse und bei freier Klasse ohne Klasse die Plattform der Schreibziele von Weg und
+    Hebelsatz (SCHREIB_PLATTFORM, nicht kreis.plattform des Servers). Beim Busweg (Plattform mqtt) haengt am Broker jedes
+    Geraet: dort zaehlt die Plattform nur fuer Entities des verankerten Geraets des Kreises (`anker`, kreis.geraet)."""
     if not _form_domaene(feld, ref):
         return False
     domain = _entity(ref).partition(".")[0]
     klasse = entity_klasse(registry_entry, state)
     plattform = registry_entry.get("platform")
+    am_anker = schreib_plattform != PLATTFORM_BUS or (
+        isinstance(anker, str) and bool(anker) and registry_entry.get("device_id") == anker)
     for erlaubt, verlangt in ROLLEN_FORM[feld]:
         if erlaubt != domain:
             continue
         if verlangt is None or klasse == verlangt:
             return True
         if verlangt == FREIE_KLASSE and (
-            klasse is not None or (plattform is not None and plattform == schreib_plattform)
+            klasse is not None or (plattform is not None and plattform == schreib_plattform and am_anker)
         ):
             return True
     return False
@@ -276,22 +354,37 @@ def _form_erlaubt(feld: str, ref: str, registry_entry: Mapping, state: Mapping, 
 OHNE_REGISTRY = "registry"
 
 
-def schreibziele_befund(b: HaBindung, registry: Mapping[str, Mapping], *, beim_start: bool) -> tuple[str, str] | None:
+def schreibziele_befund(b: HaBindung, registry: Mapping[str, Mapping], *, beim_start: bool,
+                        geraete: Mapping[str, Mapping] | None = None) -> tuple[str, str] | None:
     """Die Regeln der Schreibziele (Regel 4): (feld, "nicht_erlaubt") des ersten
-    Verstosses oder None. Der Kreis nennt die Plattform des Hebelsatzes (SCHREIB_PLATTFORM, sonst Feld plattform); jedes
+    Verstosses oder None. Der Kreis nennt die Plattform von Weg und Hebelsatz (SCHREIB_PLATTFORM, sonst Feld plattform;
+    ohne Zeile fuer den Weg ist nichts erlaubt); jedes
     Schreibziel (_schreibziel_rollen) kommt von dieser Plattform, alle aus einem Config-Entry (dem des Kreises, wenn er
     eines nennt, sonst dem des ersten Schreibziels; ohne Config-Entry nicht erlaubt); die Soll-Entity ist kein
     Schreibziel und nicht an dessen Geraet. `registry` ist die Entity-Registry je entity_id. Ein Schreibziel ohne
     Registry-Eintrag: beim Uebernehmen (beim_start=False) nicht_erlaubt wie bisher, beim Start kein Urteil, sondern
-    NichtPruefbar(feld, OHNE_REGISTRY) (Wiederholung, fail closed). Keyword ohne Standard: jeder Aufrufer
-    entscheidet."""
-    plattform = SCHREIB_PLATTFORM[b.hebelsatz]
-    if b.kreis.get("plattform") != plattform:
+    NichtPruefbar(feld, OHNE_REGISTRY) (Wiederholung, fail closed). `beim_start` hat keinen Standard: jeder Aufrufer
+    entscheidet.
+    Beim Busweg (Plattform mqtt) gilt zusaetzlich die Verankerung am Registry-Geraet (`geraete`, Geraete-Registry je id):
+    jedes Schreibziel haengt an dem Geraet, das der Kreis nennt, und dessen Hersteller und Modell passen
+    (inventur.geraet_verankert); jede Rolle hat genau die Entity der Positivliste SCHREIBREGELN_BUS (eine Rolle ohne Zeile
+    dort, auch ein Hebel anderer Hersteller, ist nicht erlaubt);
+    sonst nicht_erlaubt. Fehlt das Geraet in der Geraete-Registry, ist das beim Start NichtPruefbar(feld, OHNE_GERAET),
+    beim Uebernehmen nicht_erlaubt wie bei fehlendem Registry-Eintrag."""
+    plattform = schreib_plattform(b)
+    if plattform is None or b.kreis.get("plattform") != plattform:
         return "plattform", "nicht_erlaubt"
+    anker = None
+    if plattform == PLATTFORM_BUS:
+        anker = b.kreis.get("geraet")
+        if not (isinstance(anker, str) and anker):
+            return "plattform", "nicht_erlaubt"  # ohne Geraet des Kreises ist nichts verankert
     config_entry = b.kreis.get("config_entry")
     ziele = _schreibziel_rollen(b)
-    geraete: set[str | None] = set()
+    geraete_der_ziele: set[str | None] = set()
     for rolle, ref in ziele:
+        if anker is not None and (rolle not in SCHREIBREGELN_BUS or not SCHREIBREGELN_BUS[rolle][0].fullmatch(ref)):
+            return v1_rolle(rolle), "nicht_erlaubt"  # Positivliste des Buswegs: genau die benannte Entity je Rolle
         eintrag = registry.get(_entity(ref))
         if eintrag is None:
             if beim_start:
@@ -301,12 +394,23 @@ def schreibziele_befund(b: HaBindung, registry: Mapping[str, Mapping], *, beim_s
         if eintrag.get("platform") != plattform or not isinstance(eigenes, str) or not eigenes or (
                 config_entry is not None and eigenes != config_entry):
             return v1_rolle(rolle), "nicht_erlaubt"
+        if anker is not None and eintrag.get("device_id") != anker:
+            return v1_rolle(rolle), "nicht_erlaubt"  # fremdes Geraet, auch mit gleichem Entity-Namen
         config_entry = eigenes  # ohne Config-Entry im Kreis bindet das erste Schreibziel alle weiteren
-        geraete.add(eintrag.get("device_id"))
+        geraete_der_ziele.add(eintrag.get("device_id"))
+    if anker is not None:
+        feld = v1_rolle(ziele[0][0]) if ziele else "plattform"
+        geraet = (geraete or {}).get(anker)
+        if geraet is None:
+            if beim_start:
+                raise NichtPruefbar(feld, OHNE_GERAET)
+            return feld, "nicht_erlaubt"
+        if not geraet_verankert(geraet):
+            return feld, "nicht_erlaubt"
     if b.soll_entity is not None:
         soll_geraet = (registry.get(_entity(b.soll_entity)) or {}).get("device_id")
         if _entity(b.soll_entity) in {_entity(ref) for _, ref in ziele} or (
-                soll_geraet is not None and soll_geraet in geraete):
+                soll_geraet is not None and soll_geraet in geraete_der_ziele):
             return "room_target", "nicht_erlaubt"
     return None
 
@@ -323,10 +427,18 @@ def rollen_befund(b: HaBindung, ha_api, *, beim_start: bool) -> tuple[tuple[str,
     optionale Lese-Rolle oder Batterie ohne Zustand (geloescht, umbenannt, deaktiviert) heilt nicht von selbst: ihre
     Domaene wird aus der ID geprueft, sie steht in der zweiten Liste und wird nicht gelesen. Ohne Soll-Entity entfaellt
     room_target (lokal_befund meldet das). Die Schreibziel-Regeln folgen nach der Positivliste aller Felder."""
+    schreib = schreib_plattform(b)
+    if schreib is None:  # der Weg hat fuer den Hebelsatz keine Schreibregeln: nichts ist schreibbar, HA muss nicht antworten
+        return ("plattform", "nicht_erlaubt"), []
     registry = {e["entity_id"]: e for e in ha_api.entity_registry() if isinstance(e, Mapping) and "entity_id" in e}
     states = {s["entity_id"]: s for s in ha_api.get_states() if isinstance(s, Mapping) and "entity_id" in s}
+    braucht_geraete = schreib == PLATTFORM_BUS or any(
+        entry.get("platform") == PLATTFORM_BUS for entity_id, entry in registry.items() if entity_id in states)
+    geraete = ({g["id"]: g for g in ha_api.device_registry() if isinstance(g, Mapping) and isinstance(g.get("id"), str)}
+               if braucht_geraete else {})  # die Geraete-Registry nur, wo die Verankerung am Geraet zaehlt
     einstellbar = einstellbare_plattformen({entity_id: entry for entity_id, entry in registry.items()
-                                            if entity_id in states})
+                                            if entity_id in states},
+                                           {geraet_id for geraet_id, g in geraete.items() if geraet_verankert(g)})
     pflicht = _pflicht_refs(b)
     ziele = {v1_rolle(rolle) for rolle, _ in _schreibziel_rollen(b)}
     ohne_zustand: list[tuple[str, str]] = []
@@ -342,9 +454,10 @@ def rollen_befund(b: HaBindung, ha_api, *, beim_start: bool) -> tuple[tuple[str,
             continue
         eintrag = registry.get(entity_id) or {}
         if not entity_erlaubt(entity_id, eintrag, state, einstellbar) or not (
-                schreibziel or _form_erlaubt(feld, ref, eintrag, state, SCHREIB_PLATTFORM[b.hebelsatz])):
+                schreibziel or _form_erlaubt(feld, ref, eintrag, state, schreib, b.kreis.get("geraet"))):
             return (feld, "nicht_erlaubt"), ohne_zustand
-    return schreibziele_befund(b, registry, beim_start=beim_start), ohne_zustand
+    return schreibziele_befund(b, registry, beim_start=beim_start,
+                               geraete=geraete if schreib == PLATTFORM_BUS else None), ohne_zustand  # nur der Busweg
 
 
 def rollen_pruefen(b: HaBindung, ha_api) -> tuple[str, str] | None:

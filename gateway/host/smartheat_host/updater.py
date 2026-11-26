@@ -53,7 +53,8 @@ Umgebung ist kein Fehler des Bundles:
   kommt der Router oft erst nach dem Pi. Hoechstens HEALTH_CAP_SECONDS insgesamt; ist der Server dann noch immer nicht
   erreichbar, geht es zurueck auf das vorige Bundle,
   ohne die Version abzulehnen (sie wird erneut versucht, solange der Server sie will), gemeldet als
-  rollback/server_unerreichbar (RETRY_REASON; rollback/ungesund heisst dagegen immer abgelehnt).
+  rollback/server_unerreichbar (RETRY_REASON; rollback/ungesund heisst dagegen immer abgelehnt). Der Systemwechsel
+  meldet eigene Gruende (SYSTEM_*): system_netzprobe ersetzt dort server_unerreichbar, die anderen vier lehnen ab.
 - Fehlt ein Geraetepfad aus `devices:` des Ziel-Bundles (Zigbee-Stick abgezogen), wird nicht umgeschaltet
   ("vorlaeufig"); ein unterbrochenes Update wartet in recover() ebenso, statt zurueckzurollen.
 - update_result geht ueber die Warteschlange pending_reports: erst mit dem Zustand gespeichert, dann gesendet; was nicht
@@ -105,8 +106,16 @@ VERSION_ZU_ALT = "version_zu_alt"
 START_FEHLGESCHLAGEN = "start_fehlgeschlagen"
 UNGESUND = "ungesund"
 EINSTELLUNG_AUS = "einstellung_aus"  # die Einstellung des Kunden zu Updates erlaubt die Art des Angebots nicht
+#: Gruende nur des Systemwechsels (Gateway-Systembundle mit RAUC); das Container-Update meldet weiter die obigen.
+#: Die ersten vier lehnen die Version ab, SYSTEM_NETZPROBE nicht (Rueckfall, die Version wird erneut versucht).
+SYSTEM_DOWNLOAD = "system_download"  # Bundle nicht abrufbar, falsche Groesse oder Pruefsumme, falsches `compatible`
+SYSTEM_INSTALLATION = "system_installation"  # `rauc install` scheiterte oder wurde wiederholt unterbrochen
+SYSTEM_FEHLSTART = "system_fehlstart"  # das neue System kam nie bis zum Updater, Geraet fehlt, Container starten nicht
+SYSTEM_UNGESUND = "system_ungesund"  # das neue System wurde lokal nicht gesund
+SYSTEM_NETZPROBE = "system_netzprobe"  # nicht bestaetigt oder ohne Serverkontakt; jeder Rueckfall ohne Ablehnung
 REASONS = (MANIFEST_UNGUELTIG, SIGNATUR_UNGUELTIG, UPDATER_ZU_ALT, VERSION_ZU_ALT, START_FEHLGESCHLAGEN, UNGESUND,
-           RETRY_REASON, EINSTELLUNG_AUS)
+           RETRY_REASON, EINSTELLUNG_AUS, SYSTEM_DOWNLOAD, SYSTEM_INSTALLATION, SYSTEM_FEHLSTART, SYSTEM_UNGESUND,
+           SYSTEM_NETZPROBE)
 #: Frische der installierten Software: eine Warnung (Meldung updates_veraltet), wenn das Manifest der laufenden Version
 #: in weniger als FRISCHE_ABLAUF_TAGE Tagen ablaeuft (oder schon abgelaufen ist) oder seit FRISCHE_KEIN_ANGEBOT_TAGE Tagen
 #: kein hoeheres Angebot kam; nie ohne verlaessliche Uhr und nie bei ausgeschalteten Sicherheitsupdates.
@@ -1193,12 +1202,13 @@ class Updater:
         pfad.unlink()
 
     def _hole_archiv(self, url: str, archiv: bundles.Archiv, pfad: Path) -> None:
-        self._hole_datei(url, archiv.bytes, archiv.sha256, pfad, "Archiv", "des Archivs")
+        self._hole_datei(url, archiv.bytes, archiv.sha256, pfad, "Archiv", "des Archivs",
+                         MANIFEST_UNGUELTIG)
 
-    def _hole_datei(self, url: str, groesse: int, sha256: str, pfad: Path, was: str, des: str) -> None:
+    def _hole_datei(self, url: str, groesse: int, sha256: str, pfad: Path, was: str, des: str, grund: str) -> None:
         """Holt eine grosse Datei des Manifests (Archiv, System-Bundle) nach `pfad` mit der Frist nach Groesse; Fortsetzen
-        nach Abbruch, Groesse und SHA-256 gegen das signierte Manifest (zu gross oder falsch: MANIFEST_UNGUELTIG, nichts
-        bleibt liegen)."""
+        nach Abbruch, Groesse und SHA-256 gegen das signierte Manifest (zu gross oder falsch: Ablehnung mit `grund`,
+        nichts bleibt liegen)."""
         teil = pfad.with_name(pfad.name + ".part")
         fortgesetzt = teil.exists()
         try:
@@ -1206,7 +1216,7 @@ class Updater:
         except TooLarge:
             teil.unlink(missing_ok=True)
             pfad.unlink(missing_ok=True)
-            raise _Refused(MANIFEST_UNGUELTIG, f"{was} ist groesser als im Manifest ({groesse} Byte)") from None
+            raise _Refused(grund, f"{was} ist groesser als im Manifest ({groesse} Byte)") from None
         size = pfad.stat().st_size
         if size < groesse:  # Strom ohne Laengenangabe endete vor der Zeit: das Stueck ist der Anfang fuer den Rest
             os.replace(pfad, teil)
@@ -1215,7 +1225,7 @@ class Updater:
             pfad.unlink(missing_ok=True)
             if fortgesetzt:  # der Anfang stammte vielleicht aus einem anderen Angebot: neu laden statt ablehnen
                 raise FetchError(f"{url}: Pruefsumme nach dem Fortsetzen falsch, der Abruf beginnt neu")
-            raise _Refused(MANIFEST_UNGUELTIG, f"SHA-256 oder Groesse {des} passt nicht")
+            raise _Refused(grund, f"SHA-256 oder Groesse {des} passt nicht")
 
     # --- Systemwechsel (GW 6.3) ---
 
@@ -1250,10 +1260,10 @@ class Updater:
         return True
 
     def _system_pruefen(self, system: bundles.SystemBundle) -> None:
-        """`compatible` gegen das der system.conf des Geraets, vor jedem Abruf (sonst MANIFEST_UNGUELTIG)."""
+        """`compatible` gegen das der system.conf des Geraets, vor jedem Abruf (sonst SYSTEM_DOWNLOAD)."""
         geraet = self._startauswahl.compatible()
         if system.compatible != geraet:
-            raise _Refused(MANIFEST_UNGUELTIG, f"System-Bundle fuer {system.compatible}, dieses Geraet verlangt {geraet}")
+            raise _Refused(SYSTEM_DOWNLOAD, f"System-Bundle fuer {system.compatible}, dieses Geraet verlangt {geraet}")
 
     def _system_bereitstellen(self, system: bundles.SystemBundle, basis_url: str, version: str) -> Path:
         """Das System-Bundle holen, pruefen (Groesse, SHA-256 gegen das signierte Manifest) und fuer RAUC ablegen (root
@@ -1265,7 +1275,7 @@ class Updater:
             pfad.unlink()  # ein Rest, der nicht zum jetzigen Angebot gehoert
         if not pfad.is_file():
             self._hole_datei(urllib.parse.urljoin(basis_url, system.datei), system.groesse, system.sha256, pfad,
-                             "System-Bundle", "des System-Bundles")
+                             "System-Bundle", "des System-Bundles", SYSTEM_DOWNLOAD)
         os.chmod(pfad, 0o600)
         return pfad
 
@@ -1305,13 +1315,13 @@ class Updater:
             if state.system_installfehler < MAX_INSTALLFEHLER:
                 state.save(self._state_path)
                 return "vorlaeufig"
-            logger.error("system_grund=%s: rauc install fuer %s scheiterte zweimal in Folge", MANIFEST_UNGUELTIG, version)
+            logger.error("system_grund=%s: rauc install fuer %s scheiterte zweimal in Folge", SYSTEM_INSTALLATION, version)
             state.system_installfehler = 0
-            self._reject(state, version, MANIFEST_UNGUELTIG, manifest_sha, signatur)
+            self._reject(state, version, SYSTEM_INSTALLATION, manifest_sha, signatur)
             self._system_aufraeumen()
             return "abgelehnt"
         # Bekannte Grenze: ein Absturz oder Stromausfall zwischen diesem Speichern und dem Neustart gilt im alten Slot als
-        # Fehlstart (`start_fehlgeschlagen`, abgelehnt): eine sichere, aber unter Umstaenden unnoetige Ablehnung.
+        # Fehlstart (`system_fehlstart`, abgelehnt): eine sichere, aber unter Umstaenden unnoetige Ablehnung.
         auftrag["phase"] = "installiert"
         state.system_installfehler = 0
         state.in_progress = {"version": version, "previous": state.current, "since": time.time(),
@@ -1381,7 +1391,7 @@ class Updater:
         if state.in_progress is None:
             state.save(self._state_path)
             return True
-        return self._rollback(state, state.in_progress["version"], RETRY_REASON, reject=False)
+        return self._rollback(state, state.in_progress["version"], SYSTEM_NETZPROBE, reject=False)
 
     def _recover_system(self, state: State, start: float) -> bool:
         """Nach einem Start: gehoert er einem Systemwechsel? Entscheidend ist die Lage der Startauswahl. True = der
@@ -1432,7 +1442,7 @@ class Updater:
     def _probestart(self, state: State, system: dict, start: float) -> None:
         """Im neuen Slot, gestartet per tryboot: Phase `probestart`, Container der Version starten, lokale Gesundheit (fest
         LOKAL_GESUND_SECONDS ab dem Start des Updaters, ohne Verlaengerung, ohne server_ok), Phase `bestaetigt`, mark-good,
-        dann die Netzprobe. Ungesund: Phase `zurueck` (`ungesund`, ablehnen), zurueckschalten."""
+        dann die Netzprobe. Ungesund: Phase `zurueck` (`system_ungesund`, ablehnen), zurueckschalten."""
         version = system["version"]
         if system["phase"] == "installiert":
             system["phase"] = "probestart"
@@ -1446,27 +1456,27 @@ class Updater:
             return
         missing = self._missing_devices((self._store.dir(version) / "docker-compose.yml").read_text())
         if missing:  # der alte Slot sah das Geraet im selben Lauf: ein Fehler des neuen Systems (Treiber, udev)
-            logger.error("system_grund=%s: Probestart %s: Geraet fehlt (%s)", START_FEHLGESCHLAGEN, version,
+            logger.error("system_grund=%s: Probestart %s: Geraet fehlt (%s)", SYSTEM_FEHLSTART, version,
                          ", ".join(missing))
-            self._zurueck_melden(state, system, START_FEHLGESCHLAGEN, ablehnen=True, probe=True)
+            self._zurueck_melden(state, system, SYSTEM_FEHLSTART, ablehnen=True, probe=True)
             return
         try:
             self._compose.up(version)
         except bundles.ComposeError as error:
-            logger.error("system_grund=%s: Start von %s gescheitert: %s", START_FEHLGESCHLAGEN, version, error)
-            self._zurueck_melden(state, system, START_FEHLGESCHLAGEN, ablehnen=True, probe=True)
+            logger.error("system_grund=%s: Start von %s gescheitert: %s", SYSTEM_FEHLSTART, version, error)
+            self._zurueck_melden(state, system, SYSTEM_FEHLSTART, ablehnen=True, probe=True)
             return
         if not self._lokal_gesund(version, start):
-            logger.error("system_grund=%s: %s nach %d s lokal nicht gesund", UNGESUND, version, LOKAL_GESUND_SECONDS)
-            self._zurueck_melden(state, system, UNGESUND, ablehnen=True, probe=True)
+            logger.error("system_grund=%s: %s nach %d s lokal nicht gesund", SYSTEM_UNGESUND, version, LOKAL_GESUND_SECONDS)
+            self._zurueck_melden(state, system, SYSTEM_UNGESUND, ablehnen=True, probe=True)
             return
         system["phase"] = "bestaetigt"
         state.save(self._state_path)  # vor mark-good: ein Stromausfall dazwischen ist ein Rueckfall ohne Ablehnung
         try:
             self._startauswahl.bestaetigen()
         except StartauswahlFehler as fehler:
-            logger.error("system_grund=%s: mark-good fuer %s gescheitert (%s)", RETRY_REASON, version, fehler)
-            self._zurueck_melden(state, system, RETRY_REASON, ablehnen=False, probe=True)
+            logger.error("system_grund=%s: mark-good fuer %s gescheitert (%s)", SYSTEM_NETZPROBE, version, fehler)
+            self._zurueck_melden(state, system, SYSTEM_NETZPROBE, ablehnen=False, probe=True)
             return
         self._netzprobe_und_abschluss(state, system)
 
@@ -1476,8 +1486,8 @@ class Updater:
         zurueckschalten setzt [all] auf den alten Slot). Bestanden: current/previous wechseln."""
         version = system["version"]
         if not self._netzprobe(version):
-            logger.error("system_grund=%s: %s erreicht den Server nicht, schalte zurueck", RETRY_REASON, version)
-            self._zurueck_melden(state, system, RETRY_REASON, ablehnen=False, probe=False)
+            logger.error("system_grund=%s: %s erreicht den Server nicht, schalte zurueck", SYSTEM_NETZPROBE, version)
+            self._zurueck_melden(state, system, SYSTEM_NETZPROBE, ablehnen=False, probe=False)
             return
         self._finish(state, version)
 
@@ -1512,8 +1522,8 @@ class Updater:
         """Im alten Slot gestartet, Auftrag offen: was ist passiert?
         - installiere: das System-Bundle wurde nicht fertig installiert; vorlaeufig, neuer Versuch (keine Meldung); die
           MAX_UNTERBRECHUNGEN-te Unterbrechung in Folge (mit den Fehlern von `rauc install` gezaehlt) lehnt die Version ab.
-        - installiert: das neue System kam nie bis zum Updater: Fehlstart, `start_fehlgeschlagen`, abgelehnt.
-        - probestart/bestaetigt: Strom weg oder Frist-Timer; Rueckfall ohne Ablehnung, `server_unerreichbar`.
+        - installiert: das neue System kam nie bis zum Updater: Fehlstart, `system_fehlstart`, abgelehnt.
+        - probestart/bestaetigt: Strom weg oder Frist-Timer; Rueckfall ohne Ablehnung, `system_netzprobe`.
         - zurueck: nach `grund` und `ablehnen`.
         Ein Rueckfall ohne Ablehnung zaehlt (system_abstand.rueckfaelle) und setzt den Abstand bis zum naechsten Versuch;
         der MAX_RUECKFAELLE-te in Folge lehnt die Version ab. Danach laufen die Container des alten Bundles (`_rollback`)."""
@@ -1528,26 +1538,26 @@ class Updater:
                 return
             # Reisst `rauc install` selbst das System herunter, kaeme sonst alle 15 bis 20 min ein Neustart (T1-10)
             logger.error("system_grund=%s: Installation von %s zum %d. Mal in Folge unterbrochen, abgelehnt",
-                         MANIFEST_UNGUELTIG, version, state.system_installfehler)
+                         SYSTEM_INSTALLATION, version, state.system_installfehler)
             state.system_installfehler = 0
-            self._reject(state, version, MANIFEST_UNGUELTIG, *self._installed_angebot(version))
+            self._reject(state, version, SYSTEM_INSTALLATION, *self._installed_angebot(version))
             self._system_aufraeumen()
             return
         if phase == "installiert":
-            grund, ablehnen = START_FEHLGESCHLAGEN, True
+            grund, ablehnen = SYSTEM_FEHLSTART, True
         elif phase == "zurueck":
-            grund, ablehnen = system["grund"] or RETRY_REASON, system["ablehnen"] is not False
+            grund, ablehnen = system["grund"] or SYSTEM_NETZPROBE, system["ablehnen"] is not False
         else:
-            grund, ablehnen = RETRY_REASON, False
+            grund, ablehnen = SYSTEM_NETZPROBE, False
         abstand = state.system_abstand
         bisher = abstand["rueckfaelle"] if abstand is not None and abstand["version"] == version else 0
         if ablehnen:
             abstand = None
         elif bisher + 1 >= MAX_RUECKFAELLE:
-            # abgelehnt wird als Fehlstart gemeldet: `server_unerreichbar` hiesse beim Server "wird erneut versucht"
-            logger.error("system_grund=%s: dritter Rueckfall von %s in Folge (zuletzt %s), abgelehnt", START_FEHLGESCHLAGEN,
+            # abgelehnt wird als Fehlstart gemeldet: `system_netzprobe` hiesse beim Server "wird erneut versucht"
+            logger.error("system_grund=%s: dritter Rueckfall von %s in Folge (zuletzt %s), abgelehnt", SYSTEM_FEHLSTART,
                          version, grund)
-            grund, ablehnen, abstand = START_FEHLGESCHLAGEN, True, None
+            grund, ablehnen, abstand = SYSTEM_FEHLSTART, True, None
         else:
             abstand = {"version": version, "rueckfaelle": bisher + 1, "naechster_versuch": None}
         logger.error("Rueckfall auf das alte System: %s, Phase %s, system_grund=%s, abgelehnt=%s", version, phase, grund,

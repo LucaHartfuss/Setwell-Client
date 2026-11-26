@@ -5,6 +5,24 @@ Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Re
 
 ## Unveröffentlicht
 
+- Das Gerät kann auf Anforderung des Betreibers sein Zertifikat wechseln (Befehl `zertifikat_erneuern`): neuer
+  Schlüssel, neues Zertifikat neben dem alten, Anmeldung am Broker damit; erst danach ersetzt es das alte Paar und meldet
+  den Fingerabdruck. Scheitert die Anmeldung oder startet das Gerät mitten im Wechsel neu, gilt das alte Paar weiter.
+
+- Der Übernahme-Code erscheint erst, wenn die Einrichtung ihn anfordert, und gilt eine Stunde; nach einem Neustart gibt
+  es einen neuen Code.
+
+## 2.0.1
+
+Wartungsrelease ohne Änderung am Add-on: nur die CI-Dateien des Repos (Lese-Token für das Kern-Repo) ziehen auf `main`
+nach. Kein Funktionsunterschied zu 2.0.0.
+
+## 2.0.0
+
+Teil des Releases Setwell 0.0.1. Der Server muss vorher auf 0.0.1 stehen; ältere Add-on-Stände sprechen nicht mit ihm.
+
+- Ein Kreis darf bis zu 16 Räume und bis zu 16 Referenzfühler haben, je Raum höchstens 3 Fühler (bisher 8 Räume,
+  8 Fühler je Raum); ein Auftrag mit mehr wird mit der Grenze im Befund abgelehnt.
 - Das Gerät nimmt eine Antwort des Servers beim Anmelden nur an, wenn sie mit dem eingebauten Vertrauensanker
   (`smartheat_device/anker.pem`, aktiver Schlüssel und Reserve) signiert ist; sonst wartet es mit wachsendem Abstand und
   loggt nur `anker_ungueltig`, ohne etwas zu speichern. Die lokale Regelung und der Kälteschutz laufen unverändert

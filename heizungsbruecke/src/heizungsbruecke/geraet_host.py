@@ -25,21 +25,19 @@ from heizungsbruecke.integration_stand import IntegrationStand
 from heizungsbruecke.push_stand import PushStand
 from heizungsbruecke.version import ADDON_VERSION
 from smartheat_core import meldungen
-from smartheat_device import fehler, nachrichten, wire
+from smartheat_device import fehler, nachrichten, programm, wire
 from smartheat_device.commands import CommandRegister, Done, Failed, Outcome, Waiting
 from smartheat_device.geraet_host_basis import SIGN_OFF_WAIT_SECONDS, GeraetHostBasis, abmeldung_abwarten
 from smartheat_device.host import Anzeige
 from smartheat_runtime import dokument_config
+from smartheat_runtime.dokument_config import ConfigError
 
 logger = logging.getLogger(__name__)
 
-#: Weg-ID des Server-Katalogs je Schreib-Plattform der Home-Assistant-Integration; eine neue Plattform ohne Eintrag
-#: faellt im Test auf.
-WEG_JE_PLATTFORM = {"mypyllant": "vaillant_myvaillant", "vicare": "viessmann_vicare",
-                    "weishaupt_modbus": "weishaupt_modbus"}
 UHR_CACHE_SECONDS = 60
 AUTO_UPDATE_CACHE_SECONDS = 60
 INVENTUR_SECONDS = 120
+CODE_FRIST_SECONDS = 3600  # so lange nach der Annahme des Hashs steht der Uebernahme-Code in der Discovery
 _FREMD = ("zigbee_permit_join", "zigbee_devices", "driver_login")
 #: Schluessel der Meldung zur veralteten Integration (Kennung der Persistent Notification in HA).
 INTEGRATION_VERALTET = "integration_veraltet"
@@ -67,10 +65,12 @@ class HaDeviceHost(GeraetHostBasis):
     def __init__(self, ha_api, supervisor, *, clock: Callable[[], float] = time.monotonic) -> None:
         super().__init__()
         self._ha, self._supervisor, self._clock = ha_api, supervisor, clock
-        self.geraet_id: str | None = None  # ID des Geraets fuer das Ereignis smartheat_meldung (__main__.verdrahten)
+        # aktuelle ID des Geraets fuer das Ereignis smartheat_meldung (__main__.verdrahten); die Identitaet wechselt im Prozess
+        self.geraet_id: Callable[[], str | None] = lambda: None
         self.status_sink: GeraetStatus | None = None  # StatusSink der Laufzeit und Anzeige (__main__.verdrahten)
         self.discovery: Discovery | None = None  # Supervisor-Meldung (__main__.verdrahten)
         self.claim_code: Callable[[], str | None] = lambda: None  # Uebernahme-Code des Geraets (__main__.verdrahten)
+        self._code_ab: float | None = None  # monotone Zeit, zu der der Server den angeforderten Code-Hash annahm
         self.runtime_status_event: dict | None = None  # letztes Status-Ereignis der Laufzeit (laufzeit_merken)
         self.integration_stand = IntegrationStand()  # Lebenszeichen der Integration (geraet_trigger.build)
         self._integration_veraltet_offen = False  # Meldung zur veralteten Integration in HA offen (_integration_pruefen)
@@ -95,23 +95,53 @@ class HaDeviceHost(GeraetHostBasis):
     def notify_sink_fuer(self, services: list[str]) -> GeraetUndHaSink:
         """Meldungen der Laufzeit an den Geraetekern (Portal, Betreiber-Alarm geraetemeldung; HA-Geraete wie
         Gateways) und an HA (Notify-Dienste, persistent_notification)."""
-        return GeraetUndHaSink(self.notify_sink, HaNotifySink(self._ha, services), lambda: self.geraet_id)
+        return GeraetUndHaSink(self.notify_sink, HaNotifySink(self._ha, services), lambda: self.geraet_id())
 
     def raum_merken(self, kreis: int, raum: dict | None) -> None:
         """Worker-Thread des Kreises (raum.RaumPublisher): {ist, soll, soll_quelle, ts} fuer up/status."""
         self._raeume[kreis] = raum
 
+    # --- Away aus Home Assistant (geraet_trigger): der Geraetekern fuehrt aus, ohne Geraet gibt es nichts anzunehmen ---
+
+    def abwesend_setzen(self, kreis: int, bis, temp: float | None, durch: str | None) -> str | None:
+        """Worker-Thread des Kreises: None (angenommen) oder der feste Ablehnungsgrund des Geraetekerns."""
+        return self.device.abwesend_setzen(kreis, bis, temp, durch) if self.device is not None else "kreis"
+
+    def abwesend_beenden(self, kreis: int, durch: str | None) -> str | None:
+        return self.device.abwesend_beenden(kreis, durch) if self.device is not None else "kreis"
+
+    def abwesend_abgelehnt(self, grund: str) -> None:
+        if self.device is not None:
+            self.device.abwesend_abgelehnt(grund)
+
     # --- DeviceHost ---
 
     def faehigkeiten(self) -> dict:
-        return nachrichten.pruefen("faehigkeiten", {"drivers": [], "zigbee": False, "testphase": True,
-                                                    "kaelteschutz": True},
-                                   wire.CAPABILITY_FIELDS,
-                                   wire.CAPABILITY_OPTIONAL)
+        """Bei jedem hello und jeder Registrierung neu gerechnet; `programm` nur mit Zonendaten, Uhr-Port und je Kreis
+        einer schreibbaren Soll-Entity (nur eine Climate-Entity ist schreibbar, HaSollQuelle)."""
+        wert = {"drivers": [], "zigbee": False, "testphase": True, "kaelteschutz": True}
+        if programm.angeboten(uhr_port=callable(getattr(self, "uhr_synchron", None)),
+                              soll_quellen=self._soll_quellen_schreibbar()):
+            wert["programm"] = True
+        return nachrichten.pruefen("faehigkeiten", wert, wire.CAPABILITY_FIELDS, wire.CAPABILITY_OPTIONAL)
+
+    def _soll_quellen_schreibbar(self) -> list[bool]:
+        """Je Kreis der Konfiguration: die Soll-Entity ist eine Climate-Entity (leer ohne Konfiguration)."""
+        konfiguration = self.konfiguration()
+        schreibbar = []
+        for nummer in self.kreis_nummern():
+            try:
+                soll = dokument.bindung(konfiguration, nummer).soll_entity
+            except ConfigError:
+                soll = None
+            schreibbar.append(soll is not None and soll.partition("::")[0].startswith("climate."))
+        return schreibbar
 
     def wege(self) -> list[str]:
-        """Wege des Katalogs, die dieser Host ueber seine Schreib-Plattformen bedient (Plattform -> Weg-ID)."""
-        return sorted({WEG_JE_PLATTFORM[plattform] for plattform in dokument.SCHREIB_PLATTFORM.values()})
+        """Wege des Katalogs, fuer die dieser Host Schreibziele zulaesst (Wege der Tabelle SCHREIB_PLATTFORM ohne die
+        gesperrten Zeilen, GESPERRTE_SCHREIBZEILEN)."""
+        return sorted({weg for weg, hebelsatz in dokument.SCHREIB_PLATTFORM
+                       if (weg, hebelsatz) not in dokument.GESPERRTE_SCHREIBZEILEN})
 
     def uhr_synchron(self) -> bool | None:
         """dt_synchronized aus GET /host/info; kein bool oder Fehler = unbekannt (gilt als nicht synchron). Der Aufruf
@@ -190,7 +220,7 @@ class HaDeviceHost(GeraetHostBasis):
             zustand = "gesperrt" if anzeige.zustand == "gesperrt" else anzeige.device_state
             try:
                 self.discovery.aktualisieren(self.device.identity.device_id, zustand,
-                                             self.claim_code() if anzeige.code_zeigen else None)
+                                             self.claim_code() if anzeige.code_zeigen and self._code_gilt() else None)
             except Exception as error:
                 logger.warning("Discovery nicht aktualisiert (%s)", type(error).__name__)
         try:
@@ -201,6 +231,26 @@ class HaDeviceHost(GeraetHostBasis):
             self._push_pruefen()
         except Exception as error:
             logger.warning("Meldung zum Push nicht gesetzt (%s)", type(error).__name__)
+
+    def _code_gilt(self) -> bool:
+        """Der angeforderte Uebernahme-Code darf in die Discovery: hoechstens CODE_FRIST_SECONDS nach der Annahme."""
+        return self._code_ab is not None and self._clock() - self._code_ab <= CODE_FRIST_SECONDS
+
+    def code_anfordern(self) -> None:
+        """Die Integration verlangt den Uebernahme-Code (stdin-Befehl `code`): ein neuer Code wird beim Server
+        angemeldet, und erst nach dessen Annahme steht er fuer CODE_FRIST_SECONDS in der Discovery (der naechste Takt
+        meldet ihn, nach Ablauf meldet der Takt wieder ohne). Nur fuer ein nicht uebernommenes Geraet; sonst und bei
+        Ablehnung bleibt die Discovery ohne Code. Geraete-Thread (Device.im_geraete_thread); blockiert fuer die Dauer
+        der Anfrage. Nie den Code ins Log."""
+        anzeige = self.letzte_anzeige
+        if self.device is None or anzeige is None or anzeige.device_state != "nicht_uebernommen":
+            logger.info("Uebernahme-Code angefordert: das Geraet ist nicht im Zustand nicht_uebernommen, ignoriert")
+            return
+        ergebnis = self.device.neuer_uebernahme_code()
+        if ergebnis != "neu":
+            logger.info("Uebernahme-Code angefordert: nicht angelegt (%s)", ergebnis)
+            return
+        self._code_ab = self._clock()
 
     def _push_pruefen(self) -> None:
         """Je (Stufe, Kreis) eine Geraete-Meldung: offen, solange die Integration binnen der Frist einen Push-Eintrag

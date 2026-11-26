@@ -10,7 +10,8 @@ Ein Dokument passt, wenn jeder seiner Kreise einen noch nicht verbrauchten Eintr
 Verteilsystem, denselben Schreibzielen und derselben Soll-Entity findet. Die Kreisnummer gehoert nicht dazu: der Server
 vergibt sie, das Geraet haelt die Anlage fest. Weniger Kreise als Eintraege gehen (ein Kreis darf entfallen), mehr Kreise
 oder ein Kreis ohne Eintrag nicht. Schreibziele sind beim Gateway der Treiber samt Parametern (auch dem Heizkreis) und
-das Thermostat, bei Home Assistant der Kreis samt Config-Entry und die Entities der Schreibrollen. Lesende Rollen
+das Thermostat, bei Home Assistant der Kreis samt Config-Entry (beim Busweg auch dem Registry-Geraet) und die
+Entities der Schreibrollen. Lesende Rollen
 (Aussentemperatur, Fuehler) gehoeren nicht dazu: ein Sensortausch soll keine Neueinrichtung des Geraets brauchen. Rein:
 Standardbibliothek und smartheat_core."""
 import json
@@ -163,6 +164,12 @@ def _ziele_ha(kreis: Mapping, rollen: Mapping) -> tuple[str, ...] | None:
             and (eintrag is None or isinstance(eintrag, str))):
         return None
     ziele = {"kreis=" + json.dumps([plattform, anlage, nummer, eintrag])}
+    if "geraet" in kreis:
+        # Registry-Geraet des Buswegs: ohne es hiesse ein anderes Geraet mit denselben Entity-Namen dasselbe Ziel
+        geraet = kreis["geraet"]
+        if not (isinstance(geraet, str) and geraet):
+            return None
+        ziele.add(f"geraet={geraet}")
     for rolle in (*SCHREIBROLLEN_HA, _SOLL_ROLLE):
         if rolle not in rollen:
             continue

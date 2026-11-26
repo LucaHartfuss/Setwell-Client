@@ -85,6 +85,10 @@ _JE_HEBELSATZ: dict[str, Verfahren] = {v.lever_set.id: v for v in (
 #: (Regel 4, Tabelle in tests/test_regel4_werte.py).
 _HEBELSAETZE_JE_WEG: dict[str, tuple[str, ...]] = {
     "vaillant_myvaillant": (VAILLANT_VRC720.id,),
+    # Busweg (ebusd ueber MQTT) in dieselbe Vaillant-Heizung: dieselbe Zeile wie die Cloud-Integration, also dieselben
+    # Obergrenzen (sechs Schreibvorgaenge je Tag und Schluessel, Abstand 30 Minuten); kein Wert lockerer. Die Zeile
+    # macht den Weg nicht beschreibbar: Schreibziele erlaubt erst eine Schreibplattform (heizungsbruecke.dokument).
+    "vaillant_ebus": (VAILLANT_VRC720.id,),
     "viessmann_vicare": (VIESSMANN_VICARE.id,),
     "weishaupt_modbus": (WEISHAUPT_WWP.id, WEISHAUPT_WWP_BASIS.id),
     "simulation": tuple(_JE_HEBELSATZ),

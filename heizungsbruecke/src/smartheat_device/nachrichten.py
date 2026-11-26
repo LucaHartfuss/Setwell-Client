@@ -34,6 +34,9 @@ def _host(name: str, body: dict, feld: str = "host") -> None:
 #: Felder des hello, die nur der Host ha sendet (Vertrag: wire.HELLO_OPTIONAL).
 HELLO_NUR_HA = ("auto_update", "integration_version")
 _INTEGRATION_VERSION = re.compile(r"[0-9A-Za-z.+-]{1,32}")  # die Form, die der Server annimmt
+_SERIENNUMMER = re.compile(r"[A-Z0-9-]{4,32}")  # die Form, die der Server annimmt
+_SIGNATUR = re.compile(r"[A-Za-z0-9_-]{1,512}")  # base64url ohne Auffuellung (wire.SIGNATURE_ENCODING)
+_ZEITSTEMPEL = re.compile(r"[0-9]{1,12}")  # Sekunden seit der Epoche als Ziffernfolge, wie sie signiert wird
 
 
 def integration_version_gueltig(wert) -> bool:
@@ -78,6 +81,11 @@ def hello(*, device_state: str | None = None, **felder) -> dict:
         raise Vertragsfehler("hello.auto_update: kein Wahrheitswert")
     if body.get("integration_version") is not None and not integration_version_gueltig(body["integration_version"]):
         raise Vertragsfehler("hello.integration_version: kein Versionstext")
+    if body["host"] == "ha":
+        if "seriennummer" in body:
+            raise Vertragsfehler("hello.seriennummer: nur der Host gateway sendet das Feld")
+    elif not isinstance(body.get("seriennummer"), str) or _SERIENNUMMER.fullmatch(body["seriennummer"]) is None:
+        raise Vertragsfehler("hello.seriennummer: der Host gateway sendet eine Seriennummer in der Form des Werks")
     _faehigkeiten("hello.faehigkeiten", body["faehigkeiten"])
     wege = body["wege"]
     if not isinstance(wege, list) or not all(isinstance(weg, str) for weg in wege) or len(set(wege)) != len(wege):
@@ -147,6 +155,18 @@ def entfernt(*, wahl: str, ts: str) -> dict:
     return body
 
 
+def zurueckgesetzt(*, ts: str, signatur: str) -> dict:
+    """up/zurueckgesetzt: das Geraet wurde auf Werkszustand zurueckgesetzt und meldet es mit dem alten Schluessel.
+    `signatur` deckt Methode, Pfad, `ts` und die Geraete-ID ab (wire.ZURUECKGESETZT_SIGNATUR); `ts` sind die Sekunden seit
+    der Epoche als Ziffernfolge."""
+    body = pruefen("zurueckgesetzt", {"schema": wire.SCHEMA, "ts": ts, "signatur": signatur}, wire.ZURUECKGESETZT_FIELDS)
+    if not isinstance(ts, str) or _ZEITSTEMPEL.fullmatch(ts) is None:
+        raise Vertragsfehler("zurueckgesetzt: ts ist keine Ziffernfolge")
+    if not isinstance(signatur, str) or _SIGNATUR.fullmatch(signatur) is None:
+        raise Vertragsfehler("zurueckgesetzt: signatur ist kein base64url-Text")
+    return body
+
+
 def notifications(items: list[dict]) -> dict:
     return pruefen("notifications", {"schema": wire.SCHEMA, "items": items}, wire.NOTIFICATIONS_FIELDS)
 
@@ -179,7 +199,9 @@ def register(*, werks_nachweis=None, **felder) -> dict:
     return body
 
 
-def zertifikat(csr: str) -> dict:
-    body = pruefen("zertifikat", {"csr": csr}, wire.CERTIFICATE_FIELDS)
+def zertifikat(csr: str, *, erneuerung: bool = False) -> dict:
+    """erneuerung: Wechsel auf Anforderung (Befehl zertifikat_erneuern); ohne das Feld gilt der Rettungsweg."""
+    body = pruefen("zertifikat", {"csr": csr, **({"erneuerung": True} if erneuerung else {})},
+                   wire.CERTIFICATE_FIELDS, wire.CERTIFICATE_OPTIONAL)
     _csr("zertifikat", csr)
     return body

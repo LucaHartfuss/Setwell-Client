@@ -32,7 +32,7 @@ from smartheat_runtime.ports import NotifySink, SignalSource, StatusSink, Trigge
 from smartheat_runtime.raum import RaumPublisher
 from smartheat_runtime.roles import ChannelManifest, ManifestError
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT, BatteryRef, BootInfo, RuntimeConfig
-from smartheat_runtime.soll_eingang import FROSTSCHUTZ_BIS
+from smartheat_runtime.soll_eingang import UebersteuerungsWeg, portal_beim_start
 from smartheat_runtime.soll_ende import SollEnde
 from smartheat_runtime.soll_speicher import (
     BEDIENBEREICH_MAX,
@@ -108,6 +108,7 @@ class HaHost:
         self.soll_entity: str | None = None
         self.raum: RaumPublisher | None = None
         self._angleichen = False  # Start aus einer Bedienung: Soll-Entity einmal angleichen (trigger_source)
+        self._bedienung_start: float | None = None  # die Bedienung des Servers beim Start, als Wunsch nach den Lesewegen
         # Als Port-Typen deklariert: Attribute eines Protocols sind invariant (pyright).
         self.signals: SignalSource = GeraetSignale(HaSignalSource(ha_api), lambda: self.store)
         self.status_sink: StatusSink = geraet.status_sink
@@ -191,7 +192,7 @@ class HaHost:
             return None
         roles = [role for role in binding_roles(description) if b.rollen.get(role)]
         manifest = ChannelManifest(refs={role: entity_ref(role, b.rollen[role]) for role in roles})
-        return RestoreParts(binding_for(description, self._ha_api, manifest), safety, plant_id)
+        return RestoreParts(binding_for(description, self._ha_api, manifest, b.weg), safety, plant_id)
 
     def load(self) -> Loaded:
         try:
@@ -212,7 +213,7 @@ class HaHost:
                 abo_source=lambda: self._geraet.abo_status(self.kreis),
                 update_noetig_source=lambda: self._geraet.update_noetig_kritisch(),
                 zustand_source=lambda: kreisansicht.zustand(self._geraet.konfiguration(), self.kreis),
-                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis))
+                plan_source=lambda: plan_quelle.eingabe_des_geraets(self._geraet, self.kreis, self.store))
             # Ohne gueltige Bindungsparameter kein Start
             description = dokument_config.beschreibung(self._konfiguration, self.kreis)
             _wait_for_required_entities(self._ha_api, b)
@@ -227,7 +228,7 @@ class HaHost:
             rollen = {rolle: ref for rolle, ref in b.rollen.items() if ref not in ungelesen}
             manifest = build_manifest(
                 {**rollen, "room_target": SOLL_REF}, derived.entity_ids, b.hebelsatz, derived.raeume)
-            binding = binding_for(description, self._ha_api, manifest)
+            binding = binding_for(description, self._ha_api, manifest, b.weg)
             plant_id = dokument.anlagen_kennung(b)
         except StartupError as error:
             raise StartFailure(str(error), error.key) from error
@@ -251,7 +252,7 @@ class HaHost:
                                  lambda: wallclock.now().isoformat(), on_change=self._raum_changed)
         self._angleichen = bedient is not None and not dirty
         if self._angleichen and self.store.value != start_value:
-            self.store.apply_portal(start_value)  # Bedienung kam waehrend eines Neustarts
+            self._bedienung_start = start_value  # kam waehrend eines Neustarts; gilt in trigger_source (portal_beim_start)
         self.raum = RaumPublisher(lambda raum: self._geraet.raum_merken(self.kreis, raum), self.signals, self.store, manifest.refs.get("room_actual"),
                                   lambda: wallclock.now().isoformat())
         runtime = dataclasses.replace(
@@ -281,18 +282,31 @@ class HaHost:
         # eine Soll-Quelle fuer Start und Betrieb: scheitert das Angleichen beim Start, holt der Trigger es nach
         quelle = HaSollQuelle(self._ha_api, self.soll_entity) if self.soll_entity else None
         anlagenkreise = frozenset(self._anlagenkreise())
+        weg = UebersteuerungsWeg(
+            # die Lesewege setzt die Laufzeit am Worker; gelesen wird erst beim Aufruf, nicht beim Bau
+            lage=lambda: worker.geltendes_soll(), moeglich=geraet.programm_faehig,
+            senden=lambda temp, bis, herkunft, durch: geraet.uebersteuerung_senden(
+                self.kreis, temp, bis, herkunft, durch),
+            betriebsart=lambda: worker.betriebsart(), betriebsart_trotz_aus=lambda: worker.betriebsart_trotz_aus(),
+            beenden=lambda art, raum_soll, uebersteuerung, herkunft, durch: geraet.betriebsart_beenden(
+                self.kreis, art, raum_soll, uebersteuerung, herkunft, durch))
+        if self._bedienung_start is not None:  # erst hier: ob Leerstand oder Away laeuft, sagen die Lesewege des Workers
+            portal_beim_start(self.store, weg, self._bedienung_start)
+            self._bedienung_start = None
         client = geraet_trigger.build(
             manifest, self._ha_api, worker, self.store, self.soll_entity,
             tagestick=self._runtime.daily_trigger_time, wache_s=self._runtime.local_check_interval,
             wunsch=lambda wert, herkunft, durch: geraet.wunsch(wert, herkunft=herkunft, durch=durch, kreis=self.kreis),
             soll_quelle_aus=geraet.soll_quelle_aus, quelle=quelle, kreis=self.kreis,
+            abwesend_setzen=lambda bis, temp, durch: geraet.abwesend_setzen(self.kreis, bis, temp, durch),
+            abwesend_beenden=lambda durch: geraet.abwesend_beenden(self.kreis, durch),
+            abwesend_abgelehnt=geraet.abwesend_abgelehnt,
+            uebersteuerung=weg, angleichen=self._angleichen,
             anlagenkreise=anlagenkreise,
             # das Lebenszeichen der Integration gilt der Anlage: nur der Client des kleinsten Kreises abonniert es
             integration_stand=geraet.integration_stand if self.kreis == min(anlagenkreise) else None,
             push_stand=geraet.push_stand if self.kreis == min(anlagenkreise) else None,
             uhr=self._clock)
-        if self._angleichen and quelle is not None:
-            self._soll_entity_angleichen(quelle)
         raum = self.raum
         assert raum is not None
 
@@ -303,31 +317,6 @@ class HaHost:
         worker.register(EV_RAUM, _raum)
         worker.schedule(0, Event(EV_RAUM))
         return client
-
-    def _soll_entity_angleichen(self, quelle: HaSollQuelle) -> None:
-        """"Bedienung angleichen" beim Start (Gateway: _angleichen): Thermostat, HA und Portal zeigen
-        denselben Wert. Nur wenn die Entity etwas anderes zeigt und nicht aus ist (HVAC off oder Frostschutz-Stellung
-        bis FROSTSCHUTZ_BIS = Soll-Quelle aus: keine Bedienung an die Quelle; beim Wiedereinschalten
-        gleicht der Soll-Eingang an). Danach gilt das Echo-Fenster; der
-        zuletzt gezeigte Wert zaehlt als veraltet. Scheitert das Schreiben, holt der Trigger es beim Verbinden nach
-        (quelle.angleichen_offen, geraet_trigger.build). Laeuft im Hauptthread vor dem Worker und vor dem
-        Trigger-Client."""
-        assert self.store is not None and self.soll_entity is not None
-        entity_id = self.soll_entity.partition("::")[0]
-        if not entity_id.startswith("climate."):
-            return  # nur eine Climate-Entity ist schreibbar (HaSollQuelle)
-        try:
-            if self._ha_api.get_raw_state(entity_id) == "off":
-                return
-        except Exception as error:
-            logger.warning("HVAC-Modus der Soll-Entity nicht gelesen (%s)", type(error).__name__)
-        angezeigt = quelle.angezeigt()
-        if angezeigt == self.store.value:
-            return
-        if angezeigt is not None and angezeigt <= FROSTSCHUTZ_BIS:
-            return  # Frostschutz-Stellung ist ebenfalls "Soll-Quelle aus" (SollEingang)
-        if quelle.schreiben(self.store.value):
-            self.store.note_own_write(veraltet=angezeigt)
 
     def _raum_changed(self) -> None:
         if self.raum is not None:
@@ -409,7 +398,7 @@ def _retry_with_budget(ha_api, attempt, describe, *, identify=None):
 def _wait_for_required_entities(ha_api, b: dokument.HaBindung) -> None:
     """Pflicht-Entities muessen existieren; `unavailable` ist kein Startfehler (das behandeln
     Datenfehler und Notbetrieb im Betrieb)."""
-    refs = [b.rollen[rolle] for rolle in dokument.PFLICHT_ROLLEN[b.hebelsatz]] + list(b.raumfuehler)
+    refs = [b.rollen[rolle] for rolle in dokument.pflicht_rollen(b)] + list(b.raumfuehler)
     entity_ids = sorted({ref.partition("::")[0] for ref in refs})
 
     def _check():
@@ -459,6 +448,9 @@ def _rollen_pruefen_mit_wiederholung(ha_api, b: dokument.HaBindung) -> list[tupl
         if isinstance(error, config_check.NichtPruefbar) and error.args[1:] == (dokument.OHNE_REGISTRY,):
             return (f"{error.args[0]}: Entity ohne Eintrag in der Entity-Registry von Home Assistant "
                     "(lokale Positivliste nicht prüfbar)")
+        if isinstance(error, config_check.NichtPruefbar) and error.args[1:] == (dokument.OHNE_GERAET,):
+            return (f"{error.args[0]}: Registry-Geraet der Schreibziele fehlt in Home Assistant "
+                    "(lokale Positivliste nicht prüfbar)")  # ohne Geraet, Hersteller, Modell (S-5)
         if isinstance(error, config_check.NichtPruefbar) and error.args:
             return f"{error.args[0]}: zugeordnete Entity fehlt in Home Assistant – {RECONFIGURE_HINT}"
         return "Home Assistant lieferte Registry oder Zustände nicht"

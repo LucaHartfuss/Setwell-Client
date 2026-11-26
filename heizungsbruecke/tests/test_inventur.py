@@ -207,7 +207,7 @@ def _s_geraet(raw):
     entries = raw.get("config_entries")
     entries = [e for e in map(_s_text, entries[:32]) if e] if isinstance(entries, list) else []
     return {"id": geraet_id, "name": _s_text(raw.get("name")), "modell": _s_text(raw.get("modell")),
-            "config_entries": entries}
+            "hersteller": _s_text(raw.get("hersteller")), "config_entries": entries}
 
 
 def _s_lesen(daten):
@@ -377,6 +377,14 @@ def test_deaktivierte_entity_mit_zustand_faellt_raus():
     assert "number.aus" not in ids and "number.curve" in ids
 
 
+def test_der_hersteller_des_registry_geraets_wird_uebertragen_und_fehlt_er_ist_er_null():
+    ha = _ha()
+    ha.devices[0]["manufacturer"] = "Vaillant"
+    geraete = {g["id"]: g for g in inventur.inventur(ha, FILTER)["geraete"]}
+    assert geraete["d1"]["hersteller"] == "Vaillant"
+    assert geraete["d2"]["hersteller"] is None
+
+
 def test_config_entries_des_geraets_sind_eine_liste():
     ha = _ha()
     ha.devices[0] = {**ha.devices[0], "config_entries": None}
@@ -418,6 +426,79 @@ class _GrosseHa(FakeHa):
 
     def get_states(self):
         return [dict(zustand) for zustand in self._zustaende]
+
+
+_BUS_FILTER = {"plattformen": ["mqtt"], "domaenen": [], "geraeteklassen": [], "dienste": []}
+
+
+def _bus_ha():
+    """Broker mit dem Regler (verankert), einem fremden Geraet und einer Entity ohne Geraet; alle Plattform mqtt."""
+    ha = FakeHa()
+    ha.states = {"number.regler_kurve": 1.0, "sensor.regler_status": "ok", "number.fremd_kurve": 1.0,
+                 "sensor.fremd_status": "ok", "number.ohne_geraet": 1.0, "number.ohne_eintrag": 1.0}
+    ha.registry = [
+        {"entity_id": "number.regler_kurve", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-regler"},
+        {"entity_id": "sensor.regler_status", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-regler"},
+        {"entity_id": "number.fremd_kurve", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "sensor.fremd_status", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "number.ohne_geraet", "platform": "mqtt", "config_entry_id": "m", "device_id": None},
+        {"entity_id": "number.ohne_eintrag", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-weg"},
+    ]
+    ha.devices = [{"id": "d-regler", "manufacturer": "Vaillant", "model": "VRC 720", "name": "Regler"},
+                  {"id": "d-fremd", "manufacturer": "Wolf", "model": "Kessel", "name": "Fremd"}]
+    return ha
+
+
+def test_der_busweg_meldet_nur_entities_verankerter_geraete():
+    """Am Broker haengen beliebige Geraete mit beliebigen Namen: nur was am Geraet des Anker haengt (Hersteller und
+    Modell des Reglers), geht in die Inventur; das Geraet erscheint nur mit seinen Entities."""
+    daten = inventur.inventur(_bus_ha(), _BUS_FILTER)
+    assert {e["entity_id"] for e in daten["entities"]} == {"number.regler_kurve", "sensor.regler_status"}
+    assert {g["id"] for g in daten["geraete"]} == {"d-regler"}
+
+
+def test_der_busweg_bietet_fremde_sensoren_mit_klasse_und_climate_an_aber_kein_number_und_keine_klassenlosen():
+    """Zigbee2MQTT-Raum- und Batteriesensoren haengen am selben Broker: mit Geraeteklasse (Treffer) und climate bleiben
+    sie waehlbar, ein fremdes number oder select und ein klassenloser Sensor nicht."""
+    ha = _bus_ha()
+    ha.registry += [
+        {"entity_id": "sensor.z2m_raum", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "sensor.z2m_batterie", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "climate.z2m_trv", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"},
+        {"entity_id": "select.fremd_modus", "platform": "mqtt", "config_entry_id": "m", "device_id": "d-fremd"}]
+    ha.states.update({"sensor.z2m_raum": 20.5, "sensor.z2m_raum::device_class": "temperature",
+                      "sensor.z2m_batterie": 80, "sensor.z2m_batterie::device_class": "battery",
+                      "climate.z2m_trv": "heat", "select.fremd_modus": "auto"})
+    angeboten = {e["entity_id"] for e in inventur.inventur(ha, _BUS_FILTER)["entities"]}
+    assert angeboten == {"number.regler_kurve", "sensor.regler_status", "sensor.z2m_raum", "sensor.z2m_batterie",
+                         "climate.z2m_trv"}
+
+
+def test_ein_fremdes_busgeraet_macht_die_plattform_nicht_einstellbar():
+    """Der Sensor des Reglers (ohne Geraeteklasse) bleibt nur ueber die einstellbare Entity desselben verankerten
+    Geraets; die number-Entity eines Fremdgeraets schaltet nichts frei."""
+    ha = _bus_ha()
+    ha.registry = [e for e in ha.registry if e["entity_id"] != "number.regler_kurve"]
+    daten = inventur.inventur(ha, _BUS_FILTER)
+    assert daten["entities"] == [] and daten["geraete"] == []
+
+
+def test_mqtt_zaehlt_nur_mit_einer_einstellbaren_entity_des_verankerten_geraets():
+    """Die Plattform des Buswegs ist einstellbar, wenn ihre einstellbare Entity am verankerten Registry-Geraet haengt;
+    ohne Angabe verankerter Geraete (fail closed) und bei einer Entity eines fremden Geraets zaehlt sie nicht. Andere
+    Plattformen zaehlen wie bisher."""
+    eintraege = {"number.kurve": {"platform": "mqtt", "device_id": "d-regler"},
+                 "number.fremd": {"platform": "mqtt", "device_id": "d-fremd"},
+                 "number.zigbee": {"platform": "zha", "device_id": "d-zha"}}
+    assert inventur.einstellbare_plattformen(eintraege, verankert={"d-regler"}) == {"mqtt", "zha"}
+    assert inventur.einstellbare_plattformen({"number.fremd": eintraege["number.fremd"]},
+                                             verankert={"d-regler"}) == set()
+    assert inventur.einstellbare_plattformen(eintraege) == {"zha"}
+
+
+def test_andere_plattformen_bleiben_von_der_verankerung_unberuehrt():
+    daten = inventur.inventur(_ha(), FILTER)
+    assert {e["entity_id"] for e in daten["entities"]} == {"number.curve", "climate.wz", "sensor.t"}
 
 
 def test_a_large_installation_stays_under_the_message_limit():

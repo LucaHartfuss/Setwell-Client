@@ -7,9 +7,10 @@ FAEHIGKEITEN = {"drivers": [], "zigbee": False}
 RAUM = {"ist": 20.5, "soll": 21.0, "soll_quelle": "portal", "ts": "t"}
 
 
-def _hello_felder() -> dict:
+def _hello_felder(host: str = "gateway") -> dict:
     felder = {name: None for name in wire.HELLO_FIELDS if name not in ("schema", "schemata")}
-    return felder | {"host": "gateway", "faehigkeiten": dict(FAEHIGKEITEN), "wege": ["simulation"]}
+    felder |= {"host": host, "faehigkeiten": dict(FAEHIGKEITEN), "wege": ["simulation"]}
+    return felder | ({"seriennummer": "SHG-0001"} if host == "gateway" else {})
 
 
 def _kreise(raum, nummer=1) -> list[dict]:
@@ -36,19 +37,54 @@ def test_pruefen_nennt_nie_werte():
 
 def test_hello_hat_genau_die_vertragsfelder():
     body = nachrichten.hello(**_hello_felder())
-    assert set(body) == set(wire.HELLO_FIELDS)
+    assert set(body) == set(wire.HELLO_FIELDS) | {"seriennummer"}
     assert body["schema"] == wire.SCHEMA and body["schemata"] == list(wire.SCHEMATA)
 
 
+def test_hello_des_gateways_traegt_die_seriennummer_und_verlangt_sie():
+    assert nachrichten.hello(**_hello_felder())["seriennummer"] == "SHG-0001"
+    felder = _hello_felder()
+    del felder["seriennummer"]
+    with pytest.raises(nachrichten.Vertragsfehler, match="hello.seriennummer"):
+        nachrichten.hello(**felder)
+
+
+@pytest.mark.parametrize("wert", [None, 1, "", "abc", "kleinbuchstaben-1", "GEHEIM/1", "A" * 33, ["GEHEIM-1"]])
+def test_hello_prueft_die_seriennummer_ohne_werte(wert):
+    with pytest.raises(nachrichten.Vertragsfehler, match="hello.seriennummer") as fehler:
+        nachrichten.hello(**(_hello_felder() | {"seriennummer": wert}))
+    assert "GEHEIM" not in str(fehler.value)
+
+
+def test_hello_des_ha_hosts_traegt_keine_seriennummer():
+    assert "seriennummer" not in nachrichten.hello(**_hello_felder("ha"))
+    with pytest.raises(nachrichten.Vertragsfehler, match="hello.seriennummer"):
+        nachrichten.hello(**(_hello_felder("ha") | {"seriennummer": "SHG-0001"}))
+
+
+def test_zurueckgesetzt_hat_genau_die_vertragsfelder():
+    body = nachrichten.zurueckgesetzt(ts="1800000000", signatur="c2ln")
+    assert set(body) == set(wire.ZURUECKGESETZT_FIELDS)
+    assert body == {"schema": wire.SCHEMA, "ts": "1800000000", "signatur": "c2ln"}
+
+
+@pytest.mark.parametrize(("ts", "signatur"), [("2026-11-23T20:00:00Z", "c2ln"), ("", "c2ln"), (1800000000, "c2ln"),
+                                              ("1800000000", ""), ("1800000000", None), ("1800000000", 5)])
+def test_zurueckgesetzt_prueft_ts_und_signatur_ohne_werte(ts, signatur):
+    with pytest.raises(nachrichten.Vertragsfehler, match="zurueckgesetzt") as fehler:
+        nachrichten.zurueckgesetzt(ts=ts, signatur=signatur)
+    assert "2026" not in str(fehler.value)
+
+
 def test_hello_mit_device_state():
-    assert set(nachrichten.hello(**_hello_felder(), device_state="x")) == set(wire.HELLO_FIELDS) | {"device_state"}
+    assert set(nachrichten.hello(**_hello_felder(), device_state="x")) == (
+        set(wire.HELLO_FIELDS) | {"device_state", "seriennummer"})
 
 
 @pytest.mark.parametrize(("auto_update", "integration_version"), [
     (True, "1.2.0"), (False, None), (None, "1.2.0"), (None, None)])
 def test_hello_traegt_auto_update_und_integration_version_beim_host_ha(auto_update, integration_version):
-    body = nachrichten.hello(**(_hello_felder() | {"host": "ha"}), auto_update=auto_update,
-                             integration_version=integration_version)
+    body = nachrichten.hello(**_hello_felder("ha"), auto_update=auto_update, integration_version=integration_version)
     assert set(body) == set(wire.HELLO_FIELDS) | {"auto_update", "integration_version"}
     assert (body["auto_update"], body["integration_version"]) == (auto_update, integration_version)
 
@@ -66,7 +102,7 @@ def test_hello_des_gateways_traegt_keines_der_beiden_felder(feld):
     ("integration_version", ["GEHEIM"])])
 def test_hello_prueft_die_neuen_felder_ohne_werte(feld, wert):
     with pytest.raises(nachrichten.Vertragsfehler, match=f"hello.*{feld}") as fehler:
-        nachrichten.hello(**(_hello_felder() | {"host": "ha"}), **{feld: wert})
+        nachrichten.hello(**_hello_felder("ha"), **{feld: wert})
     assert "GEHEIM" not in str(fehler.value)
 
 

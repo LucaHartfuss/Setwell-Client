@@ -1,5 +1,6 @@
 """Das Geraet - Bootstrap, hello, Dokumente, Befehle, Bedienwunsch, Status, Meldungen, Rettungsweg,
 Laufzeit-Kanal. Link und Bootstrap-Server sind Fakes; die Wire-Formate sind die des Vertrags."""
+import base64
 import json
 import math
 import queue
@@ -8,6 +9,8 @@ import time
 
 import konfig_form
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 from device_helpers import WALL, FakeHost, FakeLink, World, _anzeige, _konfiguration, _leer
 
 from smartheat_core import config_check, dateien, meldungen
@@ -110,11 +113,12 @@ def test_first_start_registers_then_connects_and_says_hello(tmp_path):
     world.link.verbinden()
     world.device.schritt()
     (hello,) = world.link.of("up/hello")
-    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state", "seriennummer"}
     assert hello == {"schema": 2, "schemata": [2], "konfiguration_version": 0, "bedienung_version": 0,
                      "anzeige_version": 0, "wege": ["simulation"],
                      "software_version": "0.6.0", "host": "gateway", "faehigkeiten": world.host.faehigkeiten(),
-                     "boot_id": world.device.boot_id, "uhr_synchron": True, "device_state": "nicht_uebernommen"}
+                     "boot_id": world.device.boot_id, "uhr_synchron": True, "device_state": "nicht_uebernommen",
+                     "seriennummer": "SHG-0001"}
     assert world.device.zustand() == "nicht_uebernommen"
 
 
@@ -160,13 +164,138 @@ def test_hello_des_ha_hosts_traegt_auto_update_und_integration_version(tmp_path)
     assert (hello["auto_update"], hello["integration_version"]) == (True, "1.2.0")
 
 
-def test_hello_des_gateways_traegt_beide_felder_nie_und_der_host_wird_nicht_gefragt(tmp_path):
+def test_hello_des_gateways_traegt_die_seriennummer_und_keines_der_ha_felder(tmp_path):
     world = World(tmp_path)
     world.verbinden()
     for _ in range(3):
         world.device.schritt()
-    assert all("auto_update" not in hello and "integration_version" not in hello for hello in world.link.of("up/hello"))
-    assert world.host.hello_felder_aufrufe == 0
+    (hello,) = world.link.of("up/hello")
+    assert hello["seriennummer"] == "SHG-0001"
+    assert "auto_update" not in hello and "integration_version" not in hello
+    assert len(world.link.of("up/hello")) == 1  # die Seriennummer loest kein Nachsenden aus
+
+
+def test_hello_des_ha_hosts_traegt_nie_eine_seriennummer(tmp_path):
+    world = _ha_welt(tmp_path, auto_update=True, integration_version="1.2.0", seriennummer="SHG-0001")
+    world.verbinden()
+    assert all("seriennummer" not in hello for hello in world.link.of("up/hello"))
+
+
+@pytest.mark.parametrize("werte", [{}, {"seriennummer": None}, {"seriennummer": "geheim-klein"}])
+def test_ein_gateway_ohne_brauchbare_seriennummer_sendet_kein_hello_und_loggt_keinen_wert(tmp_path, caplog, werte):
+    world = World(tmp_path)
+    world.host.hello_werte = werte
+    with caplog.at_level("ERROR"):
+        world.verbinden()
+        world.device.schritt()
+    assert "up/hello" not in world.link.topics()
+    assert "geheim-klein" not in caplog.text
+
+
+# --- Rücksetzmeldung (Werksreset) ---
+
+def _zurueckgesetzt_pruefen(world, body):
+    """Die Signatur gehoert dem Signierschluessel des Geraets und deckt Methode, Pfad, Zeit und Geraete-ID ab."""
+    assert set(body) == set(wire.ZURUECKGESETZT_FIELDS) and body["schema"] == wire.SCHEMA
+    assert body["ts"] == str(int(WALL))
+    der = base64.urlsafe_b64decode(body["signatur"] + "=" * (-len(body["signatur"]) % 4))
+    gesamt = wire.canonical_string(*wire.ZURUECKGESETZT_SIGNATUR, int(body["ts"]), world.device.identity.device_id.encode())
+    world.device.identity.signing_key.public_key().verify(der, gesamt, ec.ECDSA(hashes.SHA256()))
+
+
+def test_ohne_aufruf_geht_keine_ruecksetzmeldung_hinaus(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.clock.now += 3600
+    world.device.schritt()
+    assert "up/zurueckgesetzt" not in world.link.topics()
+
+
+def test_die_ruecksetzmeldung_geht_nach_dem_hello_hinaus_und_ist_mit_dem_geraeteschluessel_signiert(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.schritt()
+    assert world.link.topics().index("up/hello") < world.link.topics().index("up/zurueckgesetzt")
+    (body,) = world.link.of("up/zurueckgesetzt")
+    _zurueckgesetzt_pruefen(world, body)
+
+
+def test_die_ruecksetzmeldung_ist_mit_der_echten_zeit_signiert_nicht_mit_der_fachlichen(tmp_path):
+    echt = WALL - 5 * 86400  # fachliche Zeit mit Versatz: die echte Uhr, gegen die der Server prueft, liegt davor
+    world = World(tmp_path, echt=lambda: echt)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.schritt()
+    (body,) = world.link.of("up/zurueckgesetzt")
+    assert body["ts"] == str(int(echt)) != str(int(WALL))
+    der = base64.urlsafe_b64decode(body["signatur"] + "=" * (-len(body["signatur"]) % 4))
+    gesamt = wire.canonical_string(*wire.ZURUECKGESETZT_SIGNATUR, int(echt), world.device.identity.device_id.encode())
+    world.device.identity.signing_key.public_key().verify(der, gesamt, ec.ECDSA(hashes.SHA256()))
+
+
+def test_die_ruecksetzmeldung_wartet_auf_die_verbindung_und_das_hello(tmp_path):
+    world = World(tmp_path)
+    world.device.reset_melden()
+    world.device.schritt()
+    world.clock.now += 2
+    world.verbinden()
+    assert world.link.topics()[0] == "up/hello" and world.link.topics().count("up/zurueckgesetzt") == 1
+
+
+def test_die_ruecksetzmeldung_wird_ohne_puback_wiederholt_und_mit_dem_puback_beendet(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.reset_melden()  # ein zweiter Aufruf aendert nichts
+    world.device.schritt()
+    (erste,) = world.link.of("up/zurueckgesetzt")
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS - 1
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 1  # kein Sekundentakt
+    world.clock.now += 1
+    world.device.schritt()
+    assert world.link.of("up/zurueckgesetzt") == [erste, erste]  # dieselbe Zeichenfolge, kein neues Signieren
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS  # noch innerhalb der Frist: nur das PUBACK hat sie beendet
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 2
+
+
+def test_ein_fehler_puback_beendet_die_ruecksetzmeldung_nicht(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    world.device.reset_melden()
+    world.device.schritt()
+    world.link.gesendet(len(world.link.sent), ok=False)
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 2
+
+
+def test_die_ruecksetzmeldung_wird_nach_der_frist_aufgegeben_und_einmal_geloggt(tmp_path, caplog):
+    world = World(tmp_path)
+    world.device.reset_melden()
+    world.device.schritt()  # nicht verbunden: nichts geht hinaus
+    world.clock.now += device.RESET_FRIST_SECONDS  # genau am Fristende gilt sie als abgelaufen
+    with caplog.at_level("WARNING"):
+        world.verbinden()
+        world.clock.now += 3600
+        world.device.schritt()
+    assert "up/zurueckgesetzt" not in world.link.topics()
+    assert caplog.text.count("Frist abgelaufen") == 1
+
+
+def test_die_ruecksetzmeldung_geht_aus_jedem_thread_und_bleibt_innerhalb_der_frist(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    faden = threading.Thread(target=world.device.reset_melden)
+    faden.start()
+    faden.join()
+    world.device.schritt()
+    assert world.link.topics().count("up/zurueckgesetzt") == 1
+    assert device.RESET_FRIST_SECONDS <= 10
 
 
 def test_ein_gescheiterter_hostrueckruf_meldet_beide_felder_unbekannt_und_loggt_nichts_geheimes(tmp_path, caplog):
@@ -803,7 +932,7 @@ def test_new_claim_code_only_while_not_claimed(tmp_path):
     world.empfangen("down/command", _command("new_claim_code", "c1"))
     new = world.device.identity.claim_code
     assert new != old and world.client.idents[-1].claim_code == new
-    assert identity.load_or_create(world.dir).claim_code == new
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     world.empfangen("down/command", _command("new_claim_code", "c2"))
     results = world.link.of("up/result")
     assert results[0]["ok"] is True and results[1]["error"]["grund"] == "bereits_uebernommen"
@@ -811,28 +940,31 @@ def test_new_claim_code_only_while_not_claimed(tmp_path):
 
 
 def test_neuer_uebernahme_code_meldet_neu_uebernommen_und_keine_verbindung(tmp_path):
-    """Die Methode, die auch der Knopfdruck des Gateways ruft: gespeichert wird nur bei "neu"."""
+    """Die Methode, die auch der Knopfdruck des Gateways ruft: der neue Code gilt nur bei "neu"."""
     world = World(tmp_path)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang),
                                        bootstrap.Unavailable("register: HTTP 503"),
                                        bootstrap.Antwort("uebernommen", world.zugang)]
     world.verbinden()
     alt = world.device.identity.claim_code
+    assert world.device.uebernahme_code is None
     assert world.device.neuer_uebernahme_code() == "neu"
     neu = world.device.identity.claim_code
-    assert neu != alt and identity.load_or_create(world.dir).claim_code == neu
+    assert neu != alt and world.device.uebernahme_code == neu
     assert world.device.neuer_uebernahme_code() == "keine_verbindung"
-    assert world.device.identity.claim_code == neu and identity.load_or_create(world.dir).claim_code == neu
+    assert world.device.identity.claim_code == neu
     assert world.device.neuer_uebernahme_code() == "uebernommen"
-    assert world.device.identity.claim_code == neu and identity.load_or_create(world.dir).claim_code == neu
+    assert world.device.identity.claim_code == neu
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     assert bootstrap.device_state(world.dir) == "uebernommen"
 
 
-ALTER_CODE = "ABCDEFGHIJKL"  # Form aelterer Staende: zu kurz
+ALTER_CODE = "ABCDEFGHIJKLMNOP"  # Inhalt einer Code-Datei aelterer Staende; der Server kennt dessen Hash
 
 
-def _welt_mit_altem_code(tmp_path, *, state=None, **kwargs):
-    """Eine Welt, deren Code-Datei die alte Form hat; state: gespeicherter Uebernahmestand (nur mit Zugang)."""
+def _welt_nach_neustart(tmp_path, *, state=None, **kwargs):
+    """Eine Welt, deren Ordner noch eine Code-Datei aelterer Staende hat (der Start loescht sie); state: gespeicherter
+    Uebernahmestand (nur mit Zugang)."""
     geraete_dir = tmp_path / device.DEVICE_DIR
     identity.load_or_create(geraete_dir)
     (geraete_dir / identity.CLAIM_CODE_FILE).write_text(ALTER_CODE)
@@ -843,93 +975,116 @@ def _welt_mit_altem_code(tmp_path, *, state=None, **kwargs):
 
 
 def _hash_stimmt(world, ident):
-    return (identity.code_gueltig(ident.claim_code) and ident.claim_code != ALTER_CODE
+    """Der gemeldete Code ist der im Speicher, und er ist ein anderer als der der alten Datei."""
+    return (ident.claim_code != ALTER_CODE
             and wire.claim_code_hash(ident.device_id, ident.claim_code)
             == wire.claim_code_hash(world.device.identity.device_id, world.device.identity.claim_code))
 
 
-def test_ein_registriertes_geraet_meldet_den_neuen_code_statt_ihn_nur_zu_speichern(tmp_path):
-    """Code alter Form, Zugang vorhanden, nicht uebernommen: register mit dem Hash des neuen Codes, erst danach
-    gespeichert; der Zugang bleibt, der Link steht."""
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
-    assert world.device.identity.claim_code == ALTER_CODE  # beim Laden nicht ueberschrieben
+def test_der_start_loescht_die_alte_code_datei_und_der_code_ist_ein_anderer(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="uebernommen")
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
+    assert world.device.identity.claim_code != ALTER_CODE
+    world.device.schritt()
+    assert sorted(p.name for p in world.dir.iterdir() if "claim" in p.name) == []
+
+
+def test_ein_registriertes_geraet_meldet_nach_dem_start_den_neuen_code_und_zeigt_ihn_erst_danach(tmp_path):
+    """Der Server kennt nach dem Start den Hash des alten Codes: ein nicht uebernommenes, registriertes Geraet meldet
+    den Code im Speicher ueber register; bis der Server ihn angenommen hat, gibt das Geraet keinen Code heraus."""
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
+    assert world.device.uebernahme_code is None
     world.device.schritt()
     assert [call[0] for call in world.client.calls] == ["register"]
-    gemeldet = world.client.idents[-1]
-    assert _hash_stimmt(world, gemeldet)
-    assert world.device.identity.claim_code == gemeldet.claim_code
-    assert identity.load_or_create(world.dir).claim_code == gemeldet.claim_code
+    assert _hash_stimmt(world, world.client.idents[-1])
+    assert world.device.uebernahme_code == world.device.identity.claim_code
     assert bootstrap.laden(world.dir) == world.zugang and world.link.started
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     world.device.schritt()
     assert len(world.client.calls) == 1  # fertig, kein zweites register
 
 
-def test_ein_gescheitertes_melden_laesst_den_alten_code_und_wird_mit_pause_wiederholt(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+def test_ein_gescheitertes_melden_zeigt_keinen_code_und_wird_mit_pause_wiederholt(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Unavailable("register: HTTP 503"),
                                        bootstrap.Antwort("nicht_uebernommen", world.zugang)]
     world.device.schritt()
     assert len(world.client.calls) == 1
-    assert world.device.identity.claim_code == ALTER_CODE
-    assert identity.load_or_create(world.dir).claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
     world.device.schritt()
     assert len(world.client.calls) == 1  # Pause: nicht jeder Takt
     world.clock.now += bootstrap.RETRY_MAX_SECONDS
     world.device.schritt()
     assert len(world.client.calls) == 2
-    neu = world.client.idents[-1].claim_code
-    assert identity.code_gueltig(neu) and neu != ALTER_CODE
-    assert world.device.identity.claim_code == neu == identity.load_or_create(world.dir).claim_code
+    assert _hash_stimmt(world, world.client.idents[-1])
+    assert world.device.uebernahme_code == world.device.identity.claim_code
 
 
-def test_ein_uebernommenes_geraet_mit_altem_code_meldet_nichts(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, state="uebernommen")
+def test_ein_uebernommenes_geraet_meldet_nach_dem_start_nichts(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="uebernommen")
     for _ in range(3):
         world.device.schritt()
         world.clock.now += bootstrap.RETRY_MAX_SECONDS
     assert world.client.calls == []
-    assert world.device.identity.claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
 
 
-def test_die_antwort_uebernommen_beendet_das_melden_ohne_den_code_zu_speichern(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+def test_die_antwort_uebernommen_beendet_das_melden_und_gibt_keinen_code_frei(tmp_path):
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Antwort("uebernommen", world.zugang)]
     for _ in range(3):
         world.device.schritt()
         world.clock.now += bootstrap.RETRY_MAX_SECONDS
     assert len(world.client.calls) == 1
     assert bootstrap.device_state(world.dir) == "uebernommen"
-    assert world.device.identity.claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
 
 
 def test_ein_gesperrtes_geraet_fragt_den_server_nicht_in_jedem_takt(tmp_path):
-    """Antwortet der Server mit einem Stand ausser nicht_uebernommen und uebernommen (gesperrt), bleibt der alte Code
+    """Antwortet der Server mit einem Stand ausser nicht_uebernommen und uebernommen (gesperrt), gibt es keinen Code
     und das Geraet fragt erst nach der langen Pause wieder, nicht in jedem Takt."""
-    world = _welt_mit_altem_code(tmp_path, state="nicht_uebernommen")
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
     world.client.script["register"] = [bootstrap.Antwort("gesperrt", world.zugang),
                                        bootstrap.Antwort("gesperrt", world.zugang)]
     for _ in range(5):
         world.device.schritt()
         world.clock.now += bootstrap.RETRY_MIN_SECONDS
     assert len(world.client.calls) == 1
-    assert world.device.identity.claim_code == ALTER_CODE
+    assert world.device.uebernahme_code is None
     world.clock.now += bootstrap.RETRY_MAX_SECONDS
     world.device.schritt()
     assert len(world.client.calls) == 2
 
 
-def test_ein_geraet_ohne_zugang_und_mit_altem_code_registriert_sich_gleich_mit_einem_neuen(tmp_path):
-    world = _welt_mit_altem_code(tmp_path, access=False)
+def test_ein_geraet_ohne_zugang_meldet_den_code_mit_der_ersten_registrierung(tmp_path):
+    world = _welt_nach_neustart(tmp_path, access=False)
     world.client.script["register"] = [bootstrap.Antwort("nicht_uebernommen", world.zugang)]
     world.device.schritt()
     assert [call[0] for call in world.client.calls] == ["register"]
-    gemeldet = world.client.idents[-1]
-    assert identity.code_gueltig(gemeldet.claim_code) and gemeldet.claim_code != ALTER_CODE
-    assert world.device.identity.claim_code == gemeldet.claim_code
-    assert identity.load_or_create(world.dir).claim_code == gemeldet.claim_code
+    assert _hash_stimmt(world, world.client.idents[-1])
+    assert world.device.uebernahme_code == world.device.identity.claim_code
+    assert not (world.dir / identity.CLAIM_CODE_FILE).exists()
     world.device.schritt()
     assert len(world.client.calls) == 1
+
+
+def test_eine_gescheiterte_erste_registrierung_gibt_keinen_code_frei(tmp_path):
+    world = _welt_nach_neustart(tmp_path, access=False)
+    world.client.script["register"] = [bootstrap.Unavailable("register: HTTP 503")]
+    world.device.schritt()
+    assert world.device.uebernahme_code is None
+
+
+def test_der_code_gelangt_in_kein_log(tmp_path, caplog):
+    world = _welt_nach_neustart(tmp_path, state="nicht_uebernommen")
+    world.client.script["register"] = [bootstrap.Unavailable("register: HTTP 503"),
+                                       bootstrap.Antwort("nicht_uebernommen", world.zugang)]
+    with caplog.at_level("DEBUG"):
+        world.device.schritt()
+        world.clock.now += bootstrap.RETRY_MAX_SECONDS
+        world.device.schritt()
+    assert world.device.identity.claim_code not in caplog.text and ALTER_CODE not in caplog.text
 
 
 @pytest.mark.parametrize(("ergebnis", "antwort"), [
@@ -977,7 +1132,7 @@ def test_hello_reports_the_claim_state_the_device_knows(tmp_path):
     world.verbinden()
     (hello,) = world.link.of("up/hello")
     assert hello["device_state"] == bootstrap.device_state(world.dir) == "nicht_uebernommen"
-    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state"}
+    assert set(hello) == set(wire.HELLO_FIELDS) | {"device_state", "seriennummer"}
 
 
 def test_weg_pruefen_is_refused_as_not_supported(tmp_path):
@@ -2404,7 +2559,7 @@ def test_a_new_claim_code_the_server_cannot_be_told_about_fails_intern(tmp_path)
     world.verbinden()
     world.empfangen("down/command", _command("new_claim_code", "c1"))
     assert world.link.of("up/result")[-1]["error"] == {"grund": "intern"}
-    assert world.device.identity.claim_code == alt and identity.load_or_create(world.dir).claim_code == alt
+    assert world.device.identity.claim_code == alt and world.device.uebernahme_code is None
 
 
 def test_a_wish_with_a_synchronised_clock_says_so(tmp_path):
@@ -2480,3 +2635,20 @@ def test_a_wish_for_a_wrong_circuit_never_reaches_the_inbox(tmp_path, kreis):
         world.device.wunsch(22.0, herkunft="thermostat", kreis=kreis)
     world.device.schritt()
     assert world.link.of("up/wish") == [] and world.device.wunsch_puffer.wunsch(1) is None
+
+
+def test_die_zustellung_der_ruecksetzmeldung_steht_erst_nach_dem_puback_fest(tmp_path):
+    world = World(tmp_path)
+    world.verbinden()
+    assert world.device.reset_zugestellt is False
+    world.device.reset_melden()
+    world.device.schritt()
+    assert world.device.reset_zugestellt is False  # gesendet, aber noch nicht quittiert
+    world.link.gesendet(len(world.link.sent), ok=False)
+    world.device.schritt()
+    assert world.device.reset_zugestellt is False  # ein Fehler-PUBACK zaehlt nicht
+    world.clock.now += device.RESET_WIEDERHOLUNG_SECONDS
+    world.device.schritt()
+    world.link.gesendet(len(world.link.sent))
+    world.device.schritt()
+    assert world.device.reset_zugestellt is True

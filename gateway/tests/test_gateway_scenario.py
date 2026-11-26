@@ -65,7 +65,7 @@ def test_gateway_scenario(world):
     assert hello["host"] == "gateway" and hello["konfiguration_version"] == 0
     assert hello["faehigkeiten"]["zigbee"] is True and "simulation" in hello["faehigkeiten"]["drivers"]
     assert _led(world) == "wartet_auf_einrichtung"
-    code_vorher = world.device.identity.claim_code
+    geraet_vorher = world.device.identity.device_id
 
     # 2. Konfiguration -> Ergebnis ok -> Neustart mit sauberem Trennen -> regelt
     world.konfiguration_senden(konfiguration(), 1)
@@ -147,7 +147,7 @@ def test_gateway_scenario(world):
     world.connect()
     assert world.status() is None and world.geraet.raum() is None
     assert _led(world) == "wartet_auf_einrichtung"
-    assert world.device.identity.claim_code == code_vorher  # Identitaet bleibt (der Server gibt frei)
+    assert world.device.identity.device_id == geraet_vorher  # Identitaet bleibt (der Server gibt frei)
 
     # 9. neu einrichten: eine Treiber-Anmeldung im Assistenten vor der Einrichtung ueberlebt deren Neustart
     dateien.schreiben_json(world.paths.driver_secrets_dir / "vicare.json", {"refresh_token": "test-token"}, modus=dateien.LESBAR)

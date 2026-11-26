@@ -284,6 +284,27 @@ class GeraetHostBasis:
             return wert
         return self.device.wunsch(wert, herkunft=herkunft or self.wunsch_herkunft, durch=durch, kreis=kreis)
 
+    def programm_faehig(self) -> bool:
+        return self.device is not None and self.device.programm_faehig()
+
+    def uebersteuerung_senden(self, kreis: int, temp: float, bis: str, herkunft: str | None,
+                              durch: str | None) -> None:
+        """Worker-Thread des Kreises: die Uebersteuerung der kuehlen Phase als Wunsch mit programm; ValueError, wenn
+        der Geraetekern sie nicht annimmt (ohne Geraet, ohne Faehigkeit, ungueltiger Wert)."""
+        if self.device is None:
+            raise ValueError("kein Geraet")
+        self.device.uebersteuerung_senden(kreis, temp, bis, herkunft or self.wunsch_herkunft, durch)
+
+    def betriebsart_beenden(self, kreis: int, art: str, raum_soll: float | None, uebersteuerung: dict | None,
+                            herkunft: str | None, durch: str | None) -> float | None:
+        """Worker-Thread des Kreises: eine Eingabe des Kunden beendet Leerstand oder Away (ein Wunsch mit programm);
+        Rueckgabe: der begrenzte Wunsch. ValueError, wenn der Geraetekern sie nicht annimmt (ohne Geraet, ohne Faehigkeit,
+        ungueltiger Wert)."""
+        if self.device is None:
+            raise ValueError("kein Geraet")
+        return self.device.betriebsart_beenden(kreis, art, raum_soll, uebersteuerung,
+                                               herkunft or self.wunsch_herkunft, durch)
+
     def soll_quelle_aus(self, aus: bool, wirksam: float | None) -> None:
         if self.device is not None:
             self.device.soll_quelle_aus(aus, wirksam)

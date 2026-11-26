@@ -11,7 +11,7 @@ NUMMER_MAX = 9999
 TEXT_MAX = 200
 
 # Plattform der HA-Integration -> Hersteller
-HERSTELLER_DER_PLATTFORM = {"mypyllant": "vaillant", "vicare": "viessmann", "weishaupt_modbus": "weishaupt"}
+HERSTELLER_DER_PLATTFORM = {"mypyllant": "vaillant", "mqtt": "vaillant", "vicare": "viessmann", "weishaupt_modbus": "weishaupt"}
 
 # Gateway-Treiber -> (Hersteller, Parameter, die die Anlage benennen; der Heizkreis kommt aus `heizkreis`)
 TREIBER = {

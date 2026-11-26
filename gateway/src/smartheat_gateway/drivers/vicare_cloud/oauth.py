@@ -8,11 +8,14 @@ import fcntl
 import hashlib
 import logging
 import os
+import re
 import secrets
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TypeGuard
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -24,6 +27,10 @@ logger = logging.getLogger(__name__)
 IAM_BASE = "https://iam.viessmann-climatesolutions.com"
 API_BASE = "https://api.viessmann-climatesolutions.com"
 TOKEN_PATH = "/idp/v3/token"
+AUTHORIZE_PATH = "/idp/v3/authorize"
+CALLBACK_PATH = "/oauth/callback"
+ERLAUBTE_SCOPES = ("IoT User offline_access",)  # fest im Geraet: ein kompromittierter Server kann keine Rechte ausweiten
+CLIENT_ID_FORM = re.compile(r"[A-Za-z0-9_.-]{8,128}")
 PENDING_SECONDS = 600
 RENEW_BEFORE_SECONDS = 60
 HTTP_TIMEOUT = 20
@@ -43,6 +50,18 @@ def iam_base() -> str:
 
 def api_base() -> str:
     return _base("SHG_VICARE_API_BASE", API_BASE)
+
+
+def portal_redirect_uri() -> str | None:
+    """Die einzige `redirect_uri`, die das Geraet annimmt: das Portal aus dem signierten Bau (`install.sh` legt
+    SHG_PORTAL_BASE_URL in gateway.env ab, Compose reicht sie durch) samt Pfad; der Server kann sie nicht setzen.
+    Ohne gueltiges Portal (https, nur Host) gibt es keine; http nur fuer die Testumgebung."""
+    base = os.environ.get("SHG_PORTAL_BASE_URL", "").rstrip("/")
+    teile = urlsplit(base)
+    schemata = ("https", "http") if os.environ.get("SHG_TEST_ENDPOINTS") == "1" else ("https",)
+    if teile.scheme not in schemata or not teile.hostname or teile.path or teile.query or teile.fragment:
+        return None
+    return base + CALLBACK_PATH
 
 
 class NotLoggedIn(Exception):
@@ -115,29 +134,61 @@ class TokenStore:
 
     # --- Anmeldung ---
 
-    def begin(self, client_id: str, redirect_uri: str) -> str:
-        verifier, challenge = new_pair()
-        with self._locked():
-            data = self._load()
-            data["pending"] = {"verifier": verifier, "client_id": client_id, "redirect_uri": redirect_uri,
-                               "created": self._wall()}
-            self._save(data)
-        return challenge
+    # --- Anmeldung im Geraet: Verifier und state entstehen hier und verlassen das Geraet nie ---
 
-    def finish(self, code: str, redirect_uri: str) -> None:
+    def anmeldung_beginnen(self, params: dict) -> dict:
+        """Prueft die Vorgaben des Servers (`client_id` nach der Form, `redirect_uri` genau Portal-Host plus Pfad, `scope`
+        gegen die feste Liste), legt Verifier und state als offene Anmeldung an und gibt nur den Hash des state zurueck.
+        Eine neue Anmeldung ersetzt die offene."""
+        client_id, redirect_uri, scope = params.get("client_id"), params.get("redirect_uri"), params.get("scope")
+        ziel = portal_redirect_uri()
+        if not (isinstance(client_id, str) and CLIENT_ID_FORM.fullmatch(client_id)
+                and ziel is not None and redirect_uri == ziel and scope in ERLAUBTE_SCOPES):
+            logger.warning("Anmeldevorgaben des Servers abgelehnt")
+            raise LoginRejected()
+        verifier, _ = new_pair()
+        state = secrets.token_urlsafe(32)
         with self._locked():
             data = self._load()
-            pending = data.get("pending")
-            if (not isinstance(pending, dict) or pending.get("redirect_uri") != redirect_uri
-                    or not ist_endliche_zahl(pending.get("created"))
-                    or self._wall() - pending["created"] > PENDING_SECONDS):
+            data["pending"] = {"verifier": verifier, "state": state, "client_id": client_id,
+                               "redirect_uri": redirect_uri, "scope": scope, "created": self._wall()}
+            self._save(data)
+        return {"state_hash": hashlib.sha256(state.encode()).hexdigest()}
+
+    def anmeldung_abschliessen(self, code: str) -> None:
+        """Tauscht den Code gegen Tokens; `client_id` und `redirect_uri` stammen aus der offenen Anmeldung, die in jedem
+        Fall verbraucht ist (auch bei Ablehnung oder unerreichbarem IAM). Eine bestehende Anmeldung bleibt dabei erhalten."""
+        with self._locked():
+            data = self._load()
+            pending = data.pop("pending", None)
+            if pending is not None:
+                self._save(data)
+            if not self._offen(pending):
                 raise NotLoggedIn("Es wurde keine Anmeldung vorbereitet (oder sie ist abgelaufen).")
             body = self._token_request({
                 "grant_type": "authorization_code", "client_id": pending["client_id"], "code": code,
-                "redirect_uri": redirect_uri, "code_verifier": pending["verifier"]})
+                "redirect_uri": pending["redirect_uri"], "code_verifier": pending["verifier"]})
             if body is None:
                 raise LoginRejected()
             self._save(self._with_tokens({"client_id": pending["client_id"]}, body))
+
+    def offene_anmeldung(self) -> str | None:
+        """Die Adresse des Herstellers zur offenen Anmeldung (mit Challenge und state), nur innerhalb von PENDING_SECONDS.
+        Enthaelt das Geheimnis des state: nur an die LAN-Seite hinter der Anmeldung geben, nie loggen oder melden."""
+        pending = self._load().get("pending")
+        if not self._offen(pending) or not isinstance(pending.get("state"), str) or not isinstance(pending.get("scope"), str):
+            return None
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(pending["verifier"].encode()).digest()).rstrip(b"=").decode()
+        query = urlencode({
+            "response_type": "code", "client_id": pending["client_id"], "redirect_uri": pending["redirect_uri"],
+            "scope": pending["scope"], "state": pending["state"],
+            "code_challenge": challenge, "code_challenge_method": "S256"})
+        return f"{iam_base()}{AUTHORIZE_PATH}?{query}"
+
+    def _offen(self, pending: object) -> TypeGuard[dict]:
+        return (isinstance(pending, dict) and all(isinstance(pending.get(k), str)
+                                                  for k in ("verifier", "client_id", "redirect_uri"))
+                and ist_endliche_zahl(pending.get("created")) and self._wall() - pending["created"] <= PENDING_SECONDS)
 
     # --- Zugriff ---
 

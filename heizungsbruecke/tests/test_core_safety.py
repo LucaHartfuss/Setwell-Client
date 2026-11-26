@@ -166,6 +166,17 @@ def test_absenktemperatur_nie_unter_der_untergrenze_und_nie_ueber_dem_wunsch(wun
     assert absenktemperatur(wunsch, tiefe) == erwartet
 
 
+@pytest.mark.parametrize(("wunsch", "tiefe", "erwartet"), [
+    (22.0, 5.0, 17.0),
+    (22.0, 5.5, 17.0),  # tiefer als 5 K geht nie, auch wenn die Untergrenze es erlaubte
+    (22.0, 30.0, 17.0),
+    (25.0, 5.0, 20.0),
+    (17.0, 9.0, 16.0),  # die Untergrenze greift weiter, wenn sie enger ist
+])
+def test_die_absenkung_ist_hoechstens_5_k_tief(wunsch, tiefe, erwartet):
+    assert absenktemperatur(wunsch, tiefe) == erwartet
+
+
 @pytest.mark.parametrize(("wunsch", "tiefe"), [
     (21.0, -0.5), (21.0, NAN), (21.0, INF), (21.0, -INF), (NAN, 3.0), (INF, 3.0), (21.0, True), ("21", 3.0), (21.0, None),
 ])

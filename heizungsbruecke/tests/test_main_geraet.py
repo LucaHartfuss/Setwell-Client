@@ -213,7 +213,7 @@ def test_start_without_document_waits_unconfigured_and_reports_through_the_devic
     assert typ == "smartheat_status" and event["schema"] == 4
     assert event["geraet_id"] == DEVICE_ID and event["geraet_zustand"] == "nicht_uebernommen"
     assert CLAIM_CODE not in json.dumps(event)
-    assert supervisor.gemeldet == [{"geraet_id": DEVICE_ID, "zustand": "nicht_uebernommen", "claim_code": CLAIM_CODE}]
+    assert supervisor.gemeldet == [{"geraet_id": DEVICE_ID, "zustand": "nicht_uebernommen"}]  # Code nur auf Anforderung
 
 
 def test_an_operation_while_idle_is_not_posted_to_the_worker(geraet_env, caplog):
@@ -426,6 +426,38 @@ def test_stdin_anhaengen_reicht_entfernen_mit_freigeben_als_lokal_freigeben_an(g
     assert device.aufgaben == [geraet.lokal_freigeben]
 
 
+def test_stdin_anhaengen_reicht_code_als_code_anfordern_im_geraete_thread_an(geraet_env):
+    device = FakeDevice()
+    geraet, _ = _verdrahtet(geraet_env, device)
+    quelle = io.BytesIO(f"code {DEVICE_ID}\ncode shg-bbbbbbbbbbbbbbbb\n".encode())
+    main_module.stdin_anhaengen(geraet, device, quelle, geraet_env.ha).join(timeout=2)
+    assert device.aufgaben == [geraet.code_anfordern]
+
+
+NEUE_ID = "shg-cccccccccccccccc"
+
+
+def test_nach_dem_identitaetswechsel_gilt_die_neue_id_fuer_stdin_status_meldung_und_discovery(geraet_env):
+    """Der Geraetekern tauscht die Identitaet im laufenden Prozess (kein exec): Befehle der Integration mit der neuen
+    ID gelten, die alte wird verworfen; Status-Ereignis, Meldungs-Ereignis und Discovery tragen die neue ID."""
+    supervisor = FakeSupervisor()
+    device = FakeDevice()
+    geraet, status = _verdrahtet(geraet_env, device, supervisor)
+    device.identity = SimpleNamespace(device_id=NEUE_ID, claim_code=CLAIM_CODE)
+    quelle = io.BytesIO(f"code {DEVICE_ID}\n".encode())
+    main_module.stdin_anhaengen(geraet, device, quelle, geraet_env.ha).join(timeout=2)
+    assert device.aufgaben == []  # die alte ID ist verworfen
+    quelle = io.BytesIO(f"code {NEUE_ID}\n".encode())
+    main_module.stdin_anhaengen(geraet, device, quelle, geraet_env.ha).join(timeout=2)
+    assert device.aufgaben == [geraet.code_anfordern]
+
+    geraet.anzeigen(_anzeige())
+    ((typ, event),) = geraet_env.ha.events
+    assert typ == "smartheat_status" and event["geraet_id"] == NEUE_ID
+    assert supervisor.gemeldet[-1]["geraet_id"] == NEUE_ID
+    assert geraet.geraet_id() == NEUE_ID
+
+
 def test_main_haengt_stdin_vor_laufen_an(geraet_env, monkeypatch):
     order = []
     _main_ohne_supervisor(geraet_env, monkeypatch, order)
@@ -475,6 +507,8 @@ def test_vorbereiten_wires_device_and_host_without_starting_the_device(geraet_en
     """_vorbereiten: aufraeumen, Geraete-Host, Geraetekern, verdrahten; der Geraete-Thread startet erst in laufen."""
     geraet, device, status = main_module._vorbereiten(geraet_env.ha, FakeSupervisor(), "https://labor.example.test")
     assert geraet.device is device and device.host is geraet and geraet.status_sink is status
+    assert geraet.claim_code() is None  # beim Server noch nicht angenommen
+    device._code_angenommen = True
     assert geraet.claim_code() == device.identity.claim_code
     assert geraet.start_markierung is None  # keine Markierung: nichts zurueckzusetzen
 

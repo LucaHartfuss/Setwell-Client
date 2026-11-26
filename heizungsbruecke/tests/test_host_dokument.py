@@ -1,5 +1,6 @@
 """HaHost liest das Konfigurationsdokument; der Raum-Soll kommt aus dem Soll-Speicher."""
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fakes import FakeHa
@@ -11,9 +12,11 @@ from heizungsbruecke import config
 from heizungsbruecke.ha_signals import SOLL_REF
 from heizungsbruecke.host import HaHost
 from smartheat_core import meldungen
+from smartheat_core.plan import SollErgebnis
 from smartheat_runtime import app, aufraeumen
 from smartheat_runtime.app import StartFailure
 from smartheat_runtime.notifier import Notifier
+from smartheat_runtime.plan_quelle import Betriebsart
 from smartheat_runtime.ports import SourceUnavailable
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.runtime_config import BATTERY_LOW_FLAG, BATTERY_PERCENT
@@ -129,7 +132,7 @@ CLIMATE = "climate.wz"
 CLIMATE_SOLL = f"{CLIMATE}::temperature"
 
 
-def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gespeichert=None):
+def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gespeichert=None, lage=None):
     env.ha.states.update({CLIMATE: modus, CLIMATE_SOLL: angezeigt})
     if gespeichert is not None:
         config.room_target_path(1).parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +142,9 @@ def _climate_start(env, *, angezeigt, bedienung, dirty=False, modus="heat", gesp
     host = HaHost(geraet, env.ha, clock=env.clock)
     loaded = host.load()
     worker = RegulationWorker(env.clock)
+    if lage is not None:  # die Lesewege der Laufzeit: Leerstand oder Away laeuft mit dieser Temperatur
+        worker.geltendes_soll = lambda: lage
+        worker.betriebsart = worker.betriebsart_trotz_aus = lambda: Betriebsart(lage.soll_art, None, soll=lage.soll)
     client = host.trigger_source(loaded.manifest, worker)
     return host, geraet, worker, client
 
@@ -166,6 +172,32 @@ def test_a_thermostat_change_during_the_addon_pause_is_overwritten_at_start(env)
     assert env.ha.writes == [(CLIMATE_SOLL, 21.5)]
     _erstes_lesen(env, worker, client, angezeigt=23.0)
     assert geraet.wuensche == [] and host.store.value == 21.5
+
+
+def test_a_running_override_is_written_at_start_not_the_wish(env):
+    """Eine Uebersteuerung, die den Neustart ueberlebt hat, zeigt das Thermostat: der Start schreibt sie, nicht den
+    Wunsch (sonst zaehlte die naechste Meldung als Aenderung des Kunden)."""
+    pfad = config.room_target_path(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    pfad.with_name(pfad.stem + ".uebersteuerung.json").write_text(json.dumps({"temp": 19.0, "bis": "2099-01-01T00:00:00Z"}))
+    host, geraet, worker, client = _climate_start(env, angezeigt=7.5 + 12.0, bedienung=bedienung_inhalt(21.5),
+                                                  gespeichert={"value": 21.5, "source": "portal", "ts": "x"})
+    assert env.ha.writes == [(CLIMATE_SOLL, 19.0)] and host.store.value == 21.5
+    _erstes_lesen(env, worker, client, angezeigt=19.5)
+    assert geraet.wuensche == [] and host.store.value == 21.5
+
+
+def test_an_operation_that_arrived_during_a_restart_keeps_a_running_override_in_a_vacancy(env):
+    """Im Leerstand merkt die Bedienung des Servers nur den Wunsch fuer danach: die Uebersteuerung bleibt, das Thermostat
+    zeigt sie weiter (die Lesewege des Workers gelten erst bei trigger_source, nicht beim Laden)."""
+    pfad = config.room_target_path(1)
+    pfad.parent.mkdir(parents=True, exist_ok=True)
+    ueb = {"temp": 19.0, "bis": "2099-01-01T00:00:00Z"}
+    pfad.with_name(pfad.stem + ".uebersteuerung.json").write_text(json.dumps(ueb))
+    lage = SollErgebnis(soll=16.0, soll_art="leerstand", naechster_wechsel=None)
+    host, _, _, _ = _climate_start(env, angezeigt=19.0, bedienung=bedienung_inhalt(22.0), lage=lage,
+                                   gespeichert={"value": 19.5, "source": "portal", "ts": "x"})
+    assert host.store.value == 22.0 and host.store.uebersteuerung() == ueb and env.ha.writes == []
 
 
 def test_a_failed_start_alignment_is_done_again_on_connect(env):
@@ -216,6 +248,15 @@ def test_a_thermostat_in_frost_protection_is_not_written(env):
     assert env.ha.writes == [] and host.store.echo_rest() == 0
     _erstes_lesen(env, worker, client, angezeigt=5.0)
     assert geraet.wuensche == [] and host.store.value == 21.5 and geraet.aus[-1] == (True, 21.5)
+
+
+@pytest.mark.parametrize("art,soll", [("leerstand", 16.0), ("abwesend", 17.0)])
+def test_the_start_writes_the_temperature_of_a_running_vacancy_or_away_not_the_wish(env, art, soll):
+    """Nach dem Zurueckschreiben der Leerstandstemperatur zeigt die Entity sie; der Neustart darf sie nicht auf den
+    Wunsch fuer danach zuruecksetzen."""
+    lage = SollErgebnis(soll=soll, soll_art=art, naechster_wechsel=None)
+    host, geraet, worker, client = _climate_start(env, angezeigt=23.0, bedienung=bedienung_inhalt(21.5), lage=lage)
+    assert env.ha.writes == [(CLIMATE_SOLL, soll)] and host.store.value == 21.5
 
 
 def test_a_sensor_target_is_never_written(env):
@@ -292,6 +333,45 @@ def test_trigger_source_is_built_on_the_real_entity_and_wishes_reach_the_device(
         "event_type": "smartheat_wunsch", "data": {"raum_soll": 22.0, "kreis": 1}, "context": {"parent_id": "p"}}})
     worker.run_pending()
     assert geraet.wuensche == [(22.0, "ha", "automation")]
+
+
+def _abwesend_ereignis(client, worker, name, daten):
+    client.kwargs["on_trigger_event"]({"platform": "event", "event": {
+        "event_type": name, "data": {"schema": 1, **daten}, "context": {"user_id": "u"}}})
+    worker.run_pending()
+
+
+def test_away_events_reach_the_device_with_the_circuit_of_the_host(env):
+    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS))
+    host = HaHost(geraet, env.ha, clock=env.clock)
+    worker = RegulationWorker(env.clock)
+    client = host.trigger_source(host.load().manifest, worker)
+    bis = (datetime.now(UTC) + timedelta(days=2)).replace(microsecond=0)
+    _abwesend_ereignis(client, worker, "smartheat_abwesend", {"kreis": 1, "bis": bis.isoformat(), "temp": 17.5})
+    _abwesend_ereignis(client, worker, "smartheat_abwesend_ende", {"kreis": 1})
+    assert geraet.abwesend == [("setzen", 1, bis, 17.5, "nutzer"), ("beenden", 1, "nutzer")]
+
+
+def test_a_refused_away_becomes_a_notice_with_the_fixed_reason(env):
+    geraet = FakeGeraet(konfiguration_aus_optionen(OPTIONS))
+    geraet.abwesend_antwort = "leerstand"
+    host = HaHost(geraet, env.ha, clock=env.clock)
+    worker = RegulationWorker(env.clock)
+    client = host.trigger_source(host.load().manifest, worker)
+    bis = (datetime.now(UTC) + timedelta(days=2)).replace(microsecond=0)
+    _abwesend_ereignis(client, worker, "smartheat_abwesend", {"kreis": 1, "bis": bis.isoformat(), "temp": 17.5})
+    _abwesend_ereignis(client, worker, "smartheat_abwesend", {"kreis": 1, "bis": bis.isoformat(), "temp": 99.0})
+    assert [eintrag for eintrag in geraet.abwesend if eintrag[0] == "abgelehnt"] == [
+        ("abgelehnt", "leerstand"), ("abgelehnt", "temp")]
+
+
+def test_a_refused_away_of_the_device_host_without_device_is_a_fixed_reason(env):
+    from heizungsbruecke.geraet_host import HaDeviceHost
+    host = HaDeviceHost(env.ha, None)
+    bis = datetime.now(UTC) + timedelta(days=2)
+    assert host.abwesend_setzen(1, bis, 17.5, None) == "kreis"
+    assert host.abwesend_beenden(1, None) == "kreis"
+    host.abwesend_abgelehnt("temp")  # ohne Geraet kein Hinweis, kein Fehler
 
 
 def test_a_climate_target_without_attribute_is_a_start_failure(env):

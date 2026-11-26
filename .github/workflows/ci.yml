@@ -27,7 +27,7 @@ on:
         required: false
         default: standard
     secrets:
-      CROSS_REPO_TOKEN:
+      CI_LESE_TOKEN:
         required: true
 permissions:
   contents: read
@@ -36,7 +36,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 env:
   CHECKOUT_REF: ${{ github.event_name == 'schedule' && 'develop' || '' }}
-  # HA-Version von client1 (HomeAssistantPapa/.HA_VERSION, tools/ha_version_check.py liest die Zeile); stable nur bei
+  # HA-Version von client1 (ha_version in tools/client1-umgebung.txt des Kern-Repos, tools/ha_version_check.py liest die Zeile); stable nur bei
   # schedule, wo die Real-HA-Container-Tests nicht laufen (nur in der vollen Stufe).
   HA_IMAGE: ${{ github.event_name == 'schedule' && 'ghcr.io/home-assistant/home-assistant:stable' || 'ghcr.io/home-assistant/home-assistant:2026.9.4' }}
 jobs:
@@ -168,10 +168,11 @@ jobs:
           python-version: "3.12"
       - name: Dev-Root aufbauen
         env:
-          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+          CI_LESE_TOKEN: ${{ secrets.CI_LESE_TOKEN }}
+          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
           SIBLINGS_REF: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
         run: >-
-          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" SmartHeat-for-HomeAssistant "$GITHUB_WORKSPACE"
+          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE"
           "$SIBLINGS_REF"
           SmartHeat-Integration
       - run: pip install --require-hashes -r "$DEV_ROOT/tools/requirements-dev.txt"
@@ -182,8 +183,8 @@ jobs:
           echo "SMARTHEAT_TEST_PG_DSN=$(bash "$DEV_ROOT/HeizungssteuerungServer/scripts/test_pg.sh" dsn)" >> "$GITHUB_ENV"
       - run: PYTHON=python bash scripts/check.sh --only contract
   # Scan der Lock-Dateien aller Repos auf bekannte Schwachstellen: nur im geplanten Lauf, hier im
-  # oeffentlichen Repo (keine Minuten). Der Server-Lock kommt ueber den Dev-Root (der Server ist Ordner des Root-Repos); Ausnahmen mit Grund in
-  # tools/pip_audit_ausnahmen.txt des Root-Repos.
+  # oeffentlichen Repo (keine Minuten). Der Server-Lock kommt ueber den Dev-Root (der Server ist Ordner des Kern-Repos); Ausnahmen mit Grund in
+  # tools/pip_audit_ausnahmen.txt des Kern-Repos.
   audit:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
@@ -197,9 +198,10 @@ jobs:
           python-version: "3.12"
       - name: Dev-Root aufbauen
         env:
-          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+          CI_LESE_TOKEN: ${{ secrets.CI_LESE_TOKEN }}
+          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
         run: >-
-          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" SmartHeat-for-HomeAssistant "$GITHUB_WORKSPACE"
+          bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE"
           develop
       - run: pip install --require-hashes -r "$DEV_ROOT/tools/requirements-audit.txt"
       - run: bash "$DEV_ROOT/tools/pip_audit.sh" "$DEV_ROOT"

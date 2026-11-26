@@ -26,11 +26,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from smartheat_core import wallclock
 from smartheat_core.zahlen import ist_endliche_zahl
 from smartheat_gateway.bus import Bus
-from smartheat_gateway.thermostat_profil import ThermostatProfil, modus_setzen, profil, soll_und_heizen
+from smartheat_gateway.thermostat_profil import ThermostatProfil, modus_setzen, profil
 from smartheat_gateway.zigbee import ZigbeeMirror
 from smartheat_runtime.debounce import ROOM_TARGET_DEBOUNCE_SECONDS
 from smartheat_runtime.runtime import EV_LOCAL_CHECK, EV_SOURCE_CONNECTED
-from smartheat_runtime.soll_eingang import EV_SOLL_MODUS, EV_TARGET_INPUT, FROSTSCHUTZ_BIS, MODUS_AUS, SollEingang
+from smartheat_runtime.soll_eingang import (
+    EV_SOLL_MODUS,
+    EV_TARGET_INPUT,
+    FROSTSCHUTZ_BIS,
+    MODUS_AUS,
+    SollEingang,
+    UebersteuerungsWeg,
+)
 from smartheat_runtime.soll_speicher import SOURCE_THERMOSTAT, TargetStore
 from smartheat_runtime.worker import Event, RegulationWorker
 
@@ -81,6 +88,8 @@ class _ZigbeeQuelle:
 
     def __init__(self, mirror: ZigbeeMirror, ieee: str, store: TargetStore) -> None:
         self._mirror, self._ieee, self._store = mirror, ieee, store
+        #: nur waehrend des Einrichtens eines neu gekoppelten Thermostats: sein "aus" ist noch der Zustand der Kopplung
+        self.einrichten = False
 
     def profil(self) -> ThermostatProfil | None:
         device = self._mirror.device(self._ieee)
@@ -94,7 +103,7 @@ class _ZigbeeQuelle:
         return payload.get("system_mode") == MODUS_AUS or (ist_endliche_zahl(soll) and soll <= FROSTSCHUTZ_BIS)
 
     def schreiben(self, value: float) -> bool:
-        if self.aus():  # Pruefung vor jedem Schreiben, auch wenn der Soll-Eingang "aus" noch nicht kennt
+        if not self.einrichten and self.aus():  # Pruefung vor jedem Schreiben, auch wenn der Soll-Eingang "aus" noch nicht kennt
             logger.info("Thermostat %s zeigt aus oder Frostschutz: Soll nicht geschrieben", self._ieee)
             return False
         p = self.profil()
@@ -117,7 +126,8 @@ class BusTriggerSource:
                  thermostat: str | None, sensor_ieees: tuple[str, ...], daily_trigger_time: str | None,
                  now=wallclock.now, wunsch: Callable[[float], float] = lambda value: value,
                  soll_quelle_aus: Callable[[bool, float | None], None] = lambda aus, wirksam: None,
-                 angleichen: bool = False, clock: Callable[[], float] = monotonic) -> None:
+                 angleichen: bool = False, clock: Callable[[], float] = monotonic,
+                 uebersteuerung: UebersteuerungsWeg | None = None) -> None:
         """angleichen: beim Start das geltende Soll ans Thermostat, nach Thermostatmodus und Anzeige, sobald
         der Zustand bekannt und nicht aus ist, ein Thermostat mit Profil nach gemeldetem ON."""
         self._bus, self._worker, self._mirror, self._store = bus, worker, mirror, store
@@ -133,7 +143,8 @@ class BusTriggerSource:
         self._quelle = _ZigbeeQuelle(mirror, thermostat, store) if thermostat is not None else None
         self._eingang = SollEingang(worker, store, self._quelle,
                                     wunsch=lambda value, herkunft, durch: wunsch(value),
-                                    soll_quelle_aus=soll_quelle_aus, entprellen_s=ROOM_TARGET_DEBOUNCE_SECONDS)
+                                    soll_quelle_aus=soll_quelle_aus, entprellen_s=ROOM_TARGET_DEBOUNCE_SECONDS,
+                                    uebersteuerung=uebersteuerung)
         worker.register(EV_DAILY, self._on_daily)
         worker.register(EV_ZIGBEE_SOLL, self._on_zigbee_soll)
         worker.register(EV_THERMOSTAT_EINRICHTEN, self._on_einrichten)
@@ -246,17 +257,21 @@ class BusTriggerSource:
         if self._eingang.aus:
             logger.info("Thermostat %s aus oder in Frostschutz-Stellung: kein Angleichen beim Start", self._thermostat)
             return
-        angezeigt = self._quelle.angezeigt()
-        if self._quelle.schreiben(self._store.value):
-            self._store.note_own_write(veraltet=angezeigt)
+        # Uebersteuerung, Leerstand und Abwesenheit gelten vor dem Wunsch; geschrieben wird nur bei Abweichung
+        self._eingang.anzeige_abgleichen("start")
 
     def _on_thermostat_soll(self, event: Event) -> None:
         assert self._quelle is not None and self._thermostat is not None
         p = self._quelle.profil()
         if p is None:
             return
-        soll_und_heizen(self._mirror, self._thermostat, p, self._store.value)
-        self._store.note_own_write()
+        # neu gekoppelt: das geltende Soll ohne Rueckblick, dann heizen (je eine Nachricht)
+        self._quelle.einrichten = True
+        try:
+            self._eingang.anzeige_abgleichen("einrichten", einrichten=True)
+        finally:
+            self._quelle.einrichten = False
+        self._mirror.set(self._thermostat, p.heizen)
 
     def _on_daily(self, event: Event) -> None:
         self._worker.post_coalesced(EV_LOCAL_CHECK, room_target_fired=False)

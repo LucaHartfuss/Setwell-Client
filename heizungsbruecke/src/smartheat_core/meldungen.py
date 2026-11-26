@@ -181,6 +181,9 @@ TABELLE: dict[str, Vorlage] = _ERZEUGER | {
             "orange", ("stufe",),
             "Eine Push-Meldung der Stufe {stufe} konnte seit 24 Stunden nicht zugestellt werden. Bitte die "
             "Benachrichtigungen in Home Assistant prüfen."),
+        "abwesend_abgelehnt": _vorlage(
+            "orange", ("grund",),
+            "Die Abwesenheit wurde nicht übernommen (Code {grund}). Bitte Zeitpunkt und Temperatur prüfen."),
         "gesperrt": _vorlage(
             "rot", (), "Dieses Gerät ist beim SmartHeat-Dienst gesperrt. Bitte den Support kontaktieren."),
         "konfiguration_abgelehnt": _vorlage(

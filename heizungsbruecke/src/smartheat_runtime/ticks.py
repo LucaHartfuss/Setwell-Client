@@ -9,7 +9,7 @@ from smartheat_core import wallclock
 from smartheat_core.logtext import lesbar
 from smartheat_core.pipeline import DeviceWriteError
 from smartheat_core.zahlen import ist_endliche_zahl
-from smartheat_runtime import abo, delivery, entitlement, kreiszustand, testphase
+from smartheat_runtime import abo, delivery, entitlement, kreiszustand, soll_meldung, testphase
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.runtime import EV_ACK_TIMEOUT, EV_RETRY_DUE, Runtime
 from smartheat_runtime.snapshot import SNAPSHOT_SCHEMA_VERSION, publish_snapshot, read_snapshot
@@ -167,9 +167,11 @@ def _attempt(rt: Runtime, seq: str, trigger: str):
         pending_override = rt.manual_override_sent
     else:
         pending_override = rt.store.state.manual_override_pending
+    gemeldet = soll_meldung.gemeldet(rt)  # mit Plan das geltende Soll, sonst der gelesene Wert wie bisher
+    room_target = read.room_target if gemeldet is None or gemeldet.soll is None else gemeldet.soll
     try:
         publish_snapshot(
-            rt.mqtt_client, seq=seq, trigger=trigger, room_target=read.room_target, levers=read.levers,
+            rt.mqtt_client, seq=seq, trigger=trigger, room_target=room_target, levers=read.levers,
             manual_override=pending_override, readonly=read.readonly, kreis=rt.config.kreis,
         )
         rt.manual_override_sent = pending_override

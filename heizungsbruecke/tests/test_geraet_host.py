@@ -51,8 +51,8 @@ def test_host_identity():
 
 def test_capabilities_and_clock(tmp_path, monkeypatch):
     host, _, clock = _host(tmp_path, monkeypatch)
-    assert host.faehigkeiten() == {"drivers": [], "zigbee": False, "testphase": True,
-                                  "kaelteschutz": True}  # kein updater: Updates macht der Supervisor
+    assert host.faehigkeiten() == {"drivers": [], "zigbee": False, "testphase": True, "kaelteschutz": True,
+                                  "programm": True}  # kein updater: Updates macht der Supervisor
     assert host.uhr_synchron() is True
     host, _, _ = _host(tmp_path, monkeypatch, Supervisor(error=OSError("weg")))
     assert host.uhr_synchron() is None
@@ -63,12 +63,14 @@ def test_capabilities_and_clock(tmp_path, monkeypatch):
 
 
 def test_the_ha_host_reports_the_ways_of_its_write_platforms(tmp_path, monkeypatch):
-    """Jede Schreib-Plattform hat einen Weg; die Liste ist sortiert und ohne Doppelte (zwei Hebelsaetze teilen sich eine
-    Plattform)."""
+    """Die Wege des Hosts sind die der Tabelle der Schreibplattformen ohne die gesperrten Zeilen; die Liste ist sortiert
+    und ohne Doppelte (zwei Hebelsaetze teilen sich einen Weg). Der gesperrte Busweg fehlt, mit leerer Sperre steht er da."""
     from heizungsbruecke import dokument
     host, _, _ = _host(tmp_path, monkeypatch)
-    assert set(dokument.SCHREIB_PLATTFORM.values()) <= set(geraet_host.WEG_JE_PLATTFORM)
+    assert {weg for weg, _ in dokument.SCHREIB_PLATTFORM} - {"vaillant_ebus"} == set(host.wege())
     assert host.wege() == ["vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
+    monkeypatch.setattr(dokument, "GESPERRTE_SCHREIBZEILEN", frozenset())
+    assert host.wege() == ["vaillant_ebus", "vaillant_myvaillant", "viessmann_vicare", "weishaupt_modbus"]
     assert nachrichten.hello(konfiguration_version=1, bedienung_version=1, anzeige_version=0, software_version="1.0.0",
                              host="ha", faehigkeiten=host.faehigkeiten(), wege=host.wege(), boot_id="b" * 16,
                              uhr_synchron=True)["wege"] == host.wege()
@@ -534,7 +536,7 @@ def test_die_stdin_zeile_meldet_ab_und_startet_einmal_neu(tmp_path, monkeypatch)
     worker.register(EV_RELOAD, lambda event: reloads.append(event.kind))
     host.worker_binden(worker)
     zeile = f"entfernen {EIGEN}\n".encode()
-    stdin_befehl.lesen(io.BytesIO(zeile + zeile), EIGEN, host.lokal_abmelden, lambda: None, lambda: None)
+    stdin_befehl.lesen(io.BytesIO(zeile + zeile), lambda: EIGEN, host.lokal_abmelden, lambda: None, lambda: None, lambda: None)
     assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"]}
     assert stat.S_IMODE(config.ABGEMELDET_PATH.stat().st_mode) == 0o600
     worker.run_pending()
@@ -549,7 +551,7 @@ def test_die_stdin_zeile_mit_freigeben_traegt_die_wahl_in_die_markierung(tmp_pat
     worker.register(EV_RELOAD, lambda event: reloads.append(event.kind))
     host.worker_binden(worker)
     zeile = f"entfernen {EIGEN} freigeben\n".encode()
-    stdin_befehl.lesen(io.BytesIO(zeile), EIGEN, host.lokal_abmelden, lambda: None, host.lokal_freigeben)
+    stdin_befehl.lesen(io.BytesIO(zeile), lambda: EIGEN, host.lokal_abmelden, lambda: None, host.lokal_freigeben, lambda: None)
     assert json.loads(config.ABGEMELDET_PATH.read_text()) == {"anlage": konf["anlage"], "freigeben": True}
     assert stat.S_IMODE(config.ABGEMELDET_PATH.stat().st_mode) == 0o600
     worker.run_pending()
@@ -676,9 +678,86 @@ class _KaputteDiscovery:
         raise RuntimeError("geheim")
 
 
+CODE = "ABCDEFGHIJKLMNOP"
+NICHT_UEBERNOMMEN = Anzeige("nicht_uebernommen", True, "nicht_uebernommen", False, (), (), None)
+UEBERNOMMEN = Anzeige("wartet_auf_einrichtung", True, "uebernommen", False, (), (), None)
+
+
+def _code_host(tmp_path, monkeypatch, supervisor, ergebnis="neu"):
+    """Host mit echter Discovery und einem Geraet, dessen neuer_uebernahme_code `ergebnis` antwortet."""
+    host, device, clock = _host(tmp_path, monkeypatch, supervisor)
+    device.identity = type("I", (), {"device_id": "shg-a"})()
+    device.code_ergebnis = ergebnis
+    host.discovery = discovery.Discovery(supervisor, tmp_path / "discovery.json", clock=clock)
+    host.claim_code = lambda: CODE
+    return host, device, clock
+
+
+def test_without_a_request_the_discovery_never_carries_the_code(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, device, _ = _code_host(tmp_path, monkeypatch, supervisor)
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    assert supervisor.gemeldet == [{"geraet_id": "shg-a", "zustand": "nicht_uebernommen"}]
+    assert device.code_aufrufe == 0
+
+
+def test_an_accepted_request_shows_the_code_for_an_hour_and_then_null(tmp_path, monkeypatch, caplog):
+    supervisor = Supervisor()
+    host, device, clock = _code_host(tmp_path, monkeypatch, supervisor)
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    with caplog.at_level(logging.DEBUG):
+        host.code_anfordern()
+        host.anzeigen(NICHT_UEBERNOMMEN)
+        assert supervisor.gemeldet[-1] == {"geraet_id": "shg-a", "zustand": "nicht_uebernommen", "claim_code": CODE}
+        assert device.code_aufrufe == 1
+        clock.advance(geraet_host.CODE_FRIST_SECONDS)  # genau die Frist: noch da
+        host.anzeigen(NICHT_UEBERNOMMEN)
+        assert "claim_code" in supervisor.gemeldet[-1]
+        clock.advance(1)
+        host.anzeigen(NICHT_UEBERNOMMEN)
+    assert supervisor.gemeldet[-1] == {"geraet_id": "shg-a", "zustand": "nicht_uebernommen"}
+    assert geraet_host.CODE_FRIST_SECONDS == 3600
+    assert CODE not in caplog.text
+
+
+def test_a_request_for_an_adopted_device_does_nothing(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, device, _ = _code_host(tmp_path, monkeypatch, supervisor)
+    host.code_anfordern()  # noch keine Anzeige
+    host.anzeigen(UEBERNOMMEN)
+    host.code_anfordern()
+    assert device.code_aufrufe == 0
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    assert all("claim_code" not in meldung for meldung in supervisor.gemeldet)
+
+
+@pytest.mark.parametrize("ergebnis", ["keine_verbindung", "uebernommen"])
+def test_a_refused_request_shows_no_code(tmp_path, monkeypatch, ergebnis):
+    supervisor = Supervisor()
+    host, device, _ = _code_host(tmp_path, monkeypatch, supervisor, ergebnis)
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    host.code_anfordern()
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    assert device.code_aufrufe == 1
+    assert all("claim_code" not in meldung for meldung in supervisor.gemeldet)
+
+
+def test_a_restart_drops_the_request(tmp_path, monkeypatch):
+    supervisor = Supervisor()
+    host, _, _ = _code_host(tmp_path, monkeypatch, supervisor)
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    host.code_anfordern()
+    host.anzeigen(NICHT_UEBERNOMMEN)
+    assert "claim_code" in supervisor.gemeldet[-1]
+    neu, _, _ = _code_host(tmp_path, monkeypatch, supervisor)  # neuer Prozess: neue Instanz
+    neu.anzeigen(NICHT_UEBERNOMMEN)
+    assert "claim_code" not in supervisor.gemeldet[-1]
+
+
 def test_display_reports_to_the_discovery_with_the_code_only_while_it_may_be_shown(tmp_path, monkeypatch):
-    """Code nur, solange das Geraet nicht uebernommen ist (Anzeige.code_zeigen); die echte Discovery
-    meldet an den Supervisor (Grenze)."""
+    """Code nur auf Anforderung und solange das Geraet nicht uebernommen ist (Anzeige.code_zeigen); die echte
+    Discovery meldet an den Supervisor (Grenze)."""
     supervisor = Supervisor()
     host, device, clock = _host(tmp_path, monkeypatch, supervisor)
     device.identity = type("I", (), {"device_id": "shg-a"})()
@@ -687,6 +766,8 @@ def test_display_reports_to_the_discovery_with_the_code_only_while_it_may_be_sho
     host.discovery = discovery.Discovery(supervisor, tmp_path / "discovery.json", clock=clock)
     host.claim_code = lambda: "ABCDEFGHIJKLMNOP"
     host.anzeigen(Anzeige("startet", True, "nicht_uebernommen", False, (), (), None))  # startet: noch kein Code
+    host.anzeigen(Anzeige("nicht_uebernommen", True, "nicht_uebernommen", False, (), (), None))
+    host.code_anfordern()
     host.anzeigen(Anzeige("nicht_uebernommen", True, "nicht_uebernommen", False, (), (), None))
     host.anzeigen(Anzeige("wartet_auf_einrichtung", True, "uebernommen", False, (), (), None))
     host.anzeigen(Anzeige("regelt", True, None, True, (), (), None))

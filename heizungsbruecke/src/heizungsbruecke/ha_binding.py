@@ -357,6 +357,75 @@ class ViessmannHaBinding(HaPlantBinding):
                        lesbar(str(preset)))
 
 
+# Vaillant ueber den Bus (ebusd per MQTT): ANNAHME, die Optionstexte der Betriebsart (select, Rolle mode_select) sind
+# unbelegt und werden erst mit der Gleichheitspruefung am echten Geraet bestaetigt. "manual" ist die Betriebsart, in der
+# der Raum-Sollwert (number) wirkt, "auto" das Zeitprogramm des Reglers, dorthin geht die Zone beim Zurueckstellen.
+# Geschrieben wird nur ein Text, den die Entity im Attribut `options` selbst anbietet (sonst kein Schreiben).
+BUS_MANUELL = "manual"
+BUS_ZEITPROGRAMM = "auto"
+BUS_BETRIEBSARTEN = ("off", BUS_ZEITPROGRAMM, "day", "night", BUS_MANUELL)
+OPTIONEN_ATTRIBUT = "options"
+
+
+class VaillantBusHaBinding(HaPlantBinding):
+    """Vaillant-Regler ueber den Bus: alle Hebel sind number-Entities (auch der Raum-Sollwert, kein climate), die
+    Betriebsart der Zone ist ein select (Rolle mode_select). Vorbereitung: Betriebsart auf Manuell; ohne diese
+    Umstellung ueberschreibt das Zeitprogramm den Sollwert. Rueckstellung: ein vorheriges Zeitprogramm wird wieder
+    eingestellt, jeder andere Ursprungswert bleibt, wie beim Cloud-Weg. Fehlt die Option in `options` (oder ist
+    `options` nicht lesbar), wird nichts geschrieben (ValueError)."""
+
+    def needs_preparation(self) -> bool:
+        return "mode_select" in self._manifest.refs
+
+    def _modus(self) -> str:
+        entity_id = entity_of(self._manifest.refs["mode_select"])
+        return self._ha_api.get_raw_state(entity_id)
+
+    def _modus_schreiben(self, option: str) -> None:
+        """Stellt die Betriebsart ein, wenn die Entity verfuegbar ist und die Option anbietet (fail closed)."""
+        entity_id = entity_of(self._manifest.refs["mode_select"])
+        self._ha_api.get_raw_state(entity_id)
+        angebot = self._ha_api.get_attribute_roh(entity_id, OPTIONEN_ATTRIBUT)
+        if not isinstance(angebot, (list, tuple)) or not all(isinstance(text, str) for text in angebot):
+            raise ValueError("Optionen der Betriebsart nicht lesbar")
+        if option not in angebot or option not in BUS_BETRIEBSARTEN:
+            raise ValueError(f"Betriebsart {lesbar(option)} wird nicht angeboten")
+        self._ha_api.select_option(entity_id, option)
+        self.physical_writes += 1
+
+    def is_prepared(self) -> bool:
+        return self._modus() == BUS_MANUELL
+
+    def prepare(self) -> bool:
+        """Zone auf Manuell; True, wenn umgestellt wurde. Wirft bei Fehlern, ohne zu schreiben."""
+        if not self.needs_preparation() or self.is_prepared():
+            return False
+        self._modus_schreiben(BUS_MANUELL)
+        logger.warning("Zone auf Manuell (%s) gestellt", BUS_MANUELL)
+        return True
+
+    def read_aux(self) -> dict[str, str | float]:
+        if "mode_select" not in self.description.aux_originals:
+            return {}
+        return {"mode_select": self._modus()}
+
+    def aux_zulaessig(self, name: str, wert: str) -> bool:
+        return name == "mode_select" and name in self.description.aux_originals and wert in BUS_BETRIEBSARTEN
+
+    def restore_aux(self, values: Mapping[str, str | float], levers: Mapping[str, float] | None = None) -> None:
+        """Wie beim Cloud-Weg: nur das Zeitprogramm wird zurueckgestellt, ohne vorher zu lesen (die Anzeige kann
+        veraltet sein; Schreiben ist idempotent). Jeder andere Ursprungswert bleibt, auch ein unbekannter."""
+        original = values.get("mode_select")
+        if original is None or not self.needs_preparation():
+            return
+        if original != BUS_ZEITPROGRAMM:
+            logger.warning("Betriebsart der Zone war %s: bleibt, wird nicht zurueckgestellt", lesbar(str(original)))
+            return
+        self._modus_schreiben(BUS_ZEITPROGRAMM)
+        logger.warning("Betriebsart der Zone auf den Ursprungswert %s (Zeitprogramm) zurueckgestellt",
+                       BUS_ZEITPROGRAMM)
+
+
 # HA-Umsetzung je Hebelsatz und die Rollen, die das Binding zum Lesen/Schreiben/Zurueckstellen braucht.
 _BINDING_CLASSES: dict[str, type[HaPlantBinding]] = {
     "vaillant_vrc720": HaPlantBinding,
@@ -364,11 +433,16 @@ _BINDING_CLASSES: dict[str, type[HaPlantBinding]] = {
     "weishaupt_wwp_basis": WeishauptHaBinding,
     "viessmann_vicare": ViessmannHaBinding,
 }
+# Wege, deren Umsetzung von der des Hebelsatzes abweicht (derselbe Hebelsatz, anderer Zugang).
+_WEG_BINDING_CLASSES: dict[str, type[HaPlantBinding]] = {
+    "vaillant_ebus": VaillantBusHaBinding,
+}
 
 
-def binding_for(description: BindingDescription, ha_api, manifest: ChannelManifest) -> HaPlantBinding:
-    """Binding des Hebelsatzes der Beschreibung (dokument_config.beschreibung)."""
-    return _BINDING_CLASSES[description.lever_set.id](ha_api, manifest, description)
+def binding_for(description: BindingDescription, ha_api, manifest: ChannelManifest, weg: str | None) -> HaPlantBinding:
+    """Binding des Wegs und Hebelsatzes der Beschreibung (dokument_config.beschreibung)."""
+    klasse = (_WEG_BINDING_CLASSES.get(weg) if weg is not None else None) or _BINDING_CLASSES[description.lever_set.id]
+    return klasse(ha_api, manifest, description)
 
 
 def binding_roles(description: BindingDescription) -> tuple[str, ...]:

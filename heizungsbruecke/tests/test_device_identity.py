@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import secrets
 import stat
+from pathlib import Path
 
 import pytest
 from cryptography import x509
@@ -16,20 +17,21 @@ from device_helpers import GeraeteCa, csr_passt, zertifikat_fuer
 from smartheat_device import identity, wire
 
 
-def test_keys_and_code_are_created_once_and_private(tmp_path):
+def test_keys_are_created_once_and_private_but_the_code_is_new_each_time_and_never_a_file(tmp_path):
     first = identity.load_or_create(tmp_path)
     second = identity.load_or_create(tmp_path)
-    assert (first.device_id, first.claim_code) == (second.device_id, second.claim_code)
-    for name in (identity.KEY_FILE, identity.TLS_KEY_FILE, identity.CLAIM_CODE_FILE):
+    assert first.device_id == second.device_id
+    assert first.claim_code != second.claim_code
+    for name in (identity.KEY_FILE, identity.TLS_KEY_FILE):
         assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600, name
+    assert not (tmp_path / identity.CLAIM_CODE_FILE).exists()
 
 
 def test_load_or_create_legt_genau_diese_dateien_an_und_laesst_eine_alte_enc_key_datei_liegen(tmp_path):
     """Das Geraet erzeugt enc_key.pem nicht mehr; eine vorhandene Datei bleibt liegen und wird nicht
-    gelesen (Geraete der Version 1.0.0 haben sie noch)."""
+    gelesen (Geraete der Version 1.0.0 haben sie noch). Der Uebernahme-Code steht in keiner Datei."""
     identity.load_or_create(tmp_path / "neu")
-    assert sorted(p.name for p in (tmp_path / "neu").iterdir()) == sorted(
-        (identity.KEY_FILE, identity.TLS_KEY_FILE, identity.CLAIM_CODE_FILE))
+    assert sorted(p.name for p in (tmp_path / "neu").iterdir()) == sorted((identity.KEY_FILE, identity.TLS_KEY_FILE))
     alt = tmp_path / "alt"
     alt.mkdir()
     (alt / "enc_key.pem").write_text("kein PEM")  # gelesen wuerde das scheitern
@@ -69,29 +71,39 @@ def test_claim_code_uses_80_bits_of_randomness():
     assert angefragt == [10]
 
 
-@pytest.mark.parametrize("alt", ["ABCDEFGHIJKL", "ABCDEFGHIJKLMNOP1", "abcdefghijklmnop", "ABCD-EFGH-IJKL-MNOP", ""])
-def test_a_stored_code_of_the_wrong_shape_is_kept_and_logged_without_the_code(tmp_path, caplog, alt):
-    """Der Server kennt nur den Hash des alten Codes: ihn zu ersetzen, ohne den neuen zu melden, machte ein nicht
-    uebernommenes Geraet unuebernehmbar. Das Geraet (Device) meldet den neuen Code und speichert ihn danach."""
+@pytest.mark.parametrize("alt", ["ABCDEFGHIJKL", "ABCDEFGHIJKLMNOP", "abcdefghijklmnop", ""])
+def test_an_old_code_file_is_deleted_without_being_read_and_the_code_is_new(tmp_path, caplog, monkeypatch, alt):
+    """Der Code steht nie in einer Datei: eine alte Datei wird beim Laden geloescht, ohne sie zu lesen (kein Leserecht,
+    jeder Lesezugriff ueber pathlib scheitert), das Log nennt sie ohne Inhalt."""
     identity.load_or_create(tmp_path)
     pfad = tmp_path / identity.CLAIM_CODE_FILE
-    pfad.write_text(alt)
-    pfad.chmod(0o644)
+    pfad.write_text(alt or "LEER")
+    pfad.chmod(0)
 
-    with caplog.at_level("WARNING"):
+    echt_text, echt_open = Path.read_text, Path.open
+
+    def kein_lesen(echt):
+        def gelesen(self, *args, **kwargs):
+            if self.name == identity.CLAIM_CODE_FILE:
+                raise AssertionError("die alte Code-Datei darf nicht gelesen werden")
+            return echt(self, *args, **kwargs)
+        return gelesen
+
+    monkeypatch.setattr(Path, "read_text", kein_lesen(echt_text))
+    monkeypatch.setattr(Path, "open", kein_lesen(echt_open))
+    with caplog.at_level("INFO"):
         ident = identity.load_or_create(tmp_path, lambda n: bytes(range(n)))
 
-    assert ident.claim_code == alt == pfad.read_text()
-    assert not identity.code_gueltig(ident.claim_code)
-    assert any(r.levelname == "WARNING" for r in caplog.records)
-    assert not alt or alt not in caplog.text
+    assert not pfad.exists()
+    assert ident.claim_code == "AAAQEAYEAUDAOCAJ"
+    assert any("claim_code" in r.getMessage() for r in caplog.records)
+    assert ident.claim_code not in caplog.text and not (alt and alt in caplog.text)
 
 
-def test_a_stored_code_of_the_right_shape_stays(tmp_path):
-    identity.load_or_create(tmp_path)
-    (tmp_path / identity.CLAIM_CODE_FILE).write_text("ABCDEFGHIJKLMNOP\n")
-
-    assert identity.load_or_create(tmp_path).claim_code == "ABCDEFGHIJKLMNOP"
+def test_without_an_old_code_file_nothing_is_logged_about_it(tmp_path, caplog):
+    with caplog.at_level("INFO"):
+        identity.load_or_create(tmp_path)
+    assert "claim_code" not in caplog.text
 
 
 def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_path):
@@ -106,13 +118,6 @@ def test_the_claim_code_comes_from_the_randomness_of_the_operating_system(tmp_pa
     codes = {identity.new_claim_code() for _ in range(2)}
     assert len(codes) == 2
     assert identity.load_or_create(tmp_path / "a").claim_code != identity.load_or_create(tmp_path / "b").claim_code
-
-
-def test_a_new_claim_code_is_saved_only_on_request(tmp_path):
-    ident = identity.load_or_create(tmp_path)
-    neu = identity.save_claim_code(tmp_path, ident, "ABCDEFGHIJKLMNOP")
-    assert neu.claim_code == "ABCDEFGHIJKLMNOP" == identity.load_or_create(tmp_path).claim_code
-    assert neu.device_id == ident.device_id
 
 
 def test_csr_names_the_device_and_uses_the_tls_key(tmp_path):

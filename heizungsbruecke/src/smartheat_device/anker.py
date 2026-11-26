@@ -9,8 +9,8 @@ Antwort ohne `anker_id` und `anker_signatur`, Route (`<Methode> <Pfad>`), Geraet
 Antwort gilt nur fuer genau diese Anfrage. Die `anker_id` (Anfang des SHA-256 ueber den oeffentlichen Schluessel, DER)
 waehlt den Schluessel.
 
-Fail closed: eine Datei ohne gueltigen oeffentlichen Schluessel (der Platzhalter im Repo, eine fehlende oder beschaedigte
-Datei) macht jede Antwort ungueltig. Die Datei des Pakets ist die einzige Quelle; `SMARTHEAT_ANKER_DATEI` gilt nur zusammen
+Fail closed: eine Datei ohne gueltigen oeffentlichen Schluessel (ein Platzhalter, eine fehlende oder beschaedigte Datei)
+macht jede Antwort ungueltig. Die Datei des Pakets ist die einzige Quelle; `SMARTHEAT_ANKER_DATEI` gilt nur zusammen
 mit einer nicht leeren `SMARTHEAT_TESTKENNUNG` (Testlaeufe), sonst wird sie ignoriert und das im Log vermerkt."""
 import base64
 import binascii

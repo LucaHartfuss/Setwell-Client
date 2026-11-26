@@ -50,8 +50,10 @@ def test_the_update_fields_are_part_of_the_contract():
     assert wire.UPDATES_FUNKTIONEN == ("automatisch", "aufschub", "aus")
     assert wire.UPDATES_SICHERHEIT == ("automatisch", "aus")
     assert wire.SOFTWARE_FIELDS[-1] == "einmalig"
-    assert wire.HELLO_OPTIONAL == ("device_state", "auto_update", "integration_version")
+    assert wire.HELLO_OPTIONAL == ("device_state", "auto_update", "integration_version", "seriennummer")
     assert {"manifest_abgelaufen", "einstellung_aus"} <= set(wire.SOFTWARE_ERRORS)
+    assert {"system_download", "system_installation", "system_fehlstart", "system_ungesund",
+            "system_netzprobe"} <= set(wire.SOFTWARE_ERRORS)
     assert wire.FELD_MINDESTVERSION == {}
 
 
@@ -96,6 +98,7 @@ NUR_SERVER: set[str] = {
     "MAX_CLOCK_SKEW_SECONDS",  # nur der Server prueft das Zeitfenster der Signatur
     "UNAUTHENTICATED_ERROR",  # Text der 401-Antwort; das Geraet wertet nur den Status 401 (immer gleich)
     "WEG_ERGEBNISSE",  # Ergebnisse von weg_pruefen; der Server prueft sie, das Geraet lehnt den Befehl noch ab
+    "WOCHENPLAN_TAGE",  # Tage 1-7; das Geraet prueft den Wochenplan ueber plan.wochenplan_fehler, das den Bereich selbst fuehrt
 }
 NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts importieren), nur gepinnt (P4)
     "ABO",  # config_check.ABO_WERTE
@@ -110,6 +113,15 @@ NUR_GEPINNT_GERAET: set[str] = {  # Kopien im Kern (smartheat_core darf nichts i
     "KONFIGURATION_KREIS_FIELDS",  # config_check.KONFIG_KREIS_FELDER
     "KONFIGURATION_KREIS_OPTIONAL",  # config_check.KONFIG_KREIS_OPTIONAL
     "KONFIGURATION_RAUM_FIELDS",  # config_check.RAUM_FELDER
+    "KONFIGURATION_KREIS_PROGRAMM",  # config_check.KONFIG_KREIS_PROGRAMM
+    "AUFHEIZDAUER_MIN_FIELDS",  # config_check.AUFHEIZDAUER_ARTEN
+    "AUFHEIZDAUER_MIN_GRENZE",  # config_check.AUFHEIZDAUER_GRENZE
+    "AUFHEIZEN_ARTEN",  # config_check.AUFHEIZEN_ARTEN
+    "ABSENKUNG_K_MIN",  # safety.ABSENKUNG_MIN_K
+    "ABSENKUNG_K_MAX",  # safety.ABSENKUNG_MAX_K
+    "ABSENKUNG_K_STEP",  # safety.ABSENKUNG_SCHRITT_K
+    "SOLL_ARTEN",  # plan.SOLL_ART_*
+    "WOCHENPLAN_EINTRAG_FIELDS",  # plan._EINTRAG_FELDER
     "KREISE_MAX",  # config_check.KREISE_MAX
     "KREIS_FIELDS",  # config_check.KREIS_FELDER
     "KREIS_OPTIONAL",  # config_check.KREIS_OPTIONAL

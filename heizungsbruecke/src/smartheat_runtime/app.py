@@ -29,10 +29,12 @@ from smartheat_runtime import (
     erzeugerstoerung,
     kontingent,
     kreiszustand,
+    plan_quelle,
     regulation,
     roles,
     room_sensors,
     soll_ende,
+    soll_meldung,
     telemetry,
     testphase,
     ticks,
@@ -470,6 +472,10 @@ def _run_local_check(rt: Runtime, fehler_text: str) -> None:
         logger.exception(fehler_text)
     else:
         rt.local_check_data_fault_logged = False
+    try:
+        rt.worker.anzeige_abgleichen()  # Beginn und Ende von Leerstand und Away melden nur der Check
+    except Exception:
+        logger.exception("Anzeige-Abgleich nach dem lokalen Check fehlgeschlagen")
 
 
 def _on_local_check(rt: Runtime, event: Event) -> None:
@@ -588,10 +594,12 @@ def _on_telemetry(rt: Runtime, event: Event) -> None:
     datenfehler = state.delivery.datenfehler
     if datenfehler is None and rt.store.storage_failed:
         datenfehler = DataFault(SOURCE_LOCAL, (ROLE_DATENTRAEGER,))
+    gemeldet = soll_meldung.gemeldet(rt)  # mit Plan das geltende Soll samt Art, sonst der Wunsch wie bisher
     telemetry.run_telemetry_tick(
         rt.manifest, rt.signals, rt.mqtt_client,
         boost_active=state.boost_active, failsafe_active=state.delivery.notbetrieb,
-        datenfehler=datenfehler, room_target=state.stable_target,
+        datenfehler=datenfehler, room_target=state.stable_target if gemeldet is None else gemeldet.soll,
+        soll_art=None if gemeldet is None else gemeldet.soll_art,
         energy=telemetry.energy_normalizer(rt.store, rt.override.binding.description.energy_counters),
         einheiten=rt.override.binding.description.energie, kreis=rt.config.kreis,
         testphase_ohne=testphase.aktiv(rt), kaelteschutz=state.kaelteschutz_art or telemetry.KAELTESCHUTZ_AUS,
@@ -739,6 +747,35 @@ def _ursprung_melder(rt: Runtime, host: Host) -> Callable[[], None]:
             logger.exception("Ursprungswerte nicht an den Host gegeben")
 
     return melden
+
+
+def _worker_lesewege(rt: Runtime) -> None:
+    """Die Lesewege des Soll-Eingangs am Worker: geltendes Soll (kuehle Phase) und Betriebsart (Leerstand oder Away)."""
+    rt.worker.geltendes_soll = lambda: rt.geltendes_soll
+    rt.worker.betriebsart = lambda: _betriebsart(rt)
+    rt.worker.betriebsart_trotz_aus = lambda: _betriebsart(rt, auch_aus=True)
+    rt.worker.regelung_beendet = lambda: _regelung_beendet(rt)
+
+
+def _regelung_beendet(rt: Runtime) -> bool:
+    """Ist die Regelung beendet: Ruhezustand, Abo-Ende oder Kreis ausser Betrieb? Frisch gelesen. Danach zeigt die
+    Soll-Quelle den gemerkten Wunsch (nie weniger); weder eine Betriebsart noch ein Ablauf schreibt dort weiter."""
+    return rt.idle or rt.store.state.abo_finished or kreiszustand.ausser_betrieb(rt)
+
+
+def _betriebsart(rt: Runtime, *, auch_aus: bool = False) -> plan_quelle.Betriebsart | None:
+    """Laeuft Leerstand oder Away am Kreis? Jeder Fehler der Eingabe oder der Rechnung heisst: keine Betriebsart (die
+    Eingabe am Thermostat laeuft dann den gewohnten Weg). Bei Soll-Quelle aus gibt es keine, ausser mit `auch_aus`;
+    nach dem Ende der Regelung auch nicht."""
+    if testphase.aktiv(rt) or (rt.soll_quelle_aus and not auch_aus) or _regelung_beendet(rt):
+        return None
+    try:
+        return plan_quelle.betriebsart_lage(
+            rt.config.plan_source(), rt.store.state.stable_target, wallclock.now(),
+            uhr_vertrauenswuerdig=rt.uhr_vertrauen())
+    except Exception as fehler:
+        logger.warning("Betriebsart nicht berechenbar (%s)", type(fehler).__name__)
+        return None
 
 
 # --- Boot ---
@@ -966,6 +1003,7 @@ def start(host: Host, clock: Callable[[], float] = time.monotonic, *,
     if rt.mqtt_client is not None:
         rt.mqtt_client.loop_start()
 
+    _worker_lesewege(rt)  # der Soll-Eingang erkennt daran die kuehle Phase, Leerstand und Away
     rt.trigger_client = host.trigger_source(loaded.manifest, rt.worker)
     rt.trigger_client.start()
     if ausser and rt.store.state.soll_ende_offen:
