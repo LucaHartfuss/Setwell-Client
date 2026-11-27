@@ -1,5 +1,5 @@
 name: "Heizungsbruecke"
-version: "2.0.1"
+version: "2.1.0"
 slug: "heizungsbruecke"
 description: "SmartHeat-Gerät für Home Assistant: verbindet die Heizung über die Setwell-HA-Integration mit dem SmartHeat-Dienst; Sicherheit, Boost und Notbetrieb bleiben lokal."
 url: "https://github.com/LucaHartfuss/Setwell-Client"

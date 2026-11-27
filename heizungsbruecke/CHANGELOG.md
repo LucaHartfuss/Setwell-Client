@@ -3,7 +3,7 @@
 Wird im Update-Dialog des Supervisors angezeigt. Pro Version ein Abschnitt `## X.Y.Z`; der
 Release-Workflow übernimmt den Abschnitt der releasten Version in das GitHub-Release.
 
-## Unveröffentlicht
+## 2.1.0
 
 - Das Gerät kann auf Anforderung des Betreibers sein Zertifikat wechseln (Befehl `zertifikat_erneuern`): neuer
   Schlüssel, neues Zertifikat neben dem alten, Anmeldung am Broker damit; erst danach ersetzt es das alte Paar und meldet

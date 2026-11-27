@@ -1,6 +1,6 @@
 # Changelog SmartHeat-Gateway
 
-## Unveroeffentlicht
+## 0.9.1
 
 - Das Gateway kann auf Anforderung des Betreibers sein Geraetezertifikat wechseln (Befehl `zertifikat_erneuern`, wie
   im Geraetekern): neues Paar neben dem alten, erst nach erfolgreicher Anmeldung ersetzt es das alte; sonst gilt das alte
