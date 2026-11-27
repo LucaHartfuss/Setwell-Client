@@ -14,6 +14,8 @@ Alle Versionen und Update-Hinweise stehen in [CHANGELOG.md](CHANGELOG.md) (auch 
 1. Entweder die **SmartHeat**-Integration (HACS) hinzufügen: sie trägt das Repository im Add-on-Store ein, installiert
    und startet **Heizungsbruecke** und führt weiter durch die Einrichtung. Oder das Repository selbst im Add-on-Store
    hinzufügen und **Heizungsbruecke** installieren und starten. Optionen sind nicht nötig.
+   (Neuere Home-Assistant-Versionen nennen Add-ons „Apps“ und den Add-on-Store „App-Store“, auch unter Einstellungen;
+   gemeint ist dasselbe.)
 2. Beim ersten Start erzeugt das Add-on seine Geräte-Identität (Schlüssel und Zertifikat), meldet sich beim
    SmartHeat-Dienst an und verbindet sich direkt per MQTT mit ihm.
 3. Home Assistant meldet daraufhin „SmartHeat gefunden“ (Supervisor-Discovery; beim Weg über die Integration wartet
