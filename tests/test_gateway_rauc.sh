@@ -217,8 +217,10 @@ r = info(b, ROOTS)
 fall("abgelehnt:bootstrap-anker", abgelehnt(r, "unable to get local issuer certificate"), r.stdout + r.stderr)
 lehnt_ab("bootstrap-anker", cert_b, key_b, ROOTS)
 
-PLATZHALTER = Path("/src/gateway/host/release-roots.pem")
-fall("platzhalter-ist-der-aus-dem-repo", "SMARTHEAT-PLATZHALTER" in PLATZHALTER.read_text())
+# Form des frueheren Platzhalters im Repo (vor der echten Root, Gateway 0.9.1): nur eine Kommentarzeile mit dem Marker.
+PLATZHALTER = W / "platzhalter.pem"
+PLATZHALTER.write_text("# SMARTHEAT-PLATZHALTER - die echten Root-Zertifikate kommen vor dem ersten Release\n")
+fall("platzhalter-traegt-den-marker", "SMARTHEAT-PLATZHALTER" in PLATZHALTER.read_text())
 r = info(GUT, PLATZHALTER)
 fall("abgelehnt:platzhalter-schluesselbund", abgelehnt(r, "failed to load CA file"), r.stdout + r.stderr)
 lehnt_ab("platzhalter", REAL / "release.crt", REAL / "release.key", PLATZHALTER)
@@ -258,7 +260,7 @@ ERWARTET = {"angenommen:richtige-root", "kontrolle:handgebaut-mit-richtiger-kett
             "signieren-lehnt-ab:fremde-root", "kontrolle:ohne-codesigning-ohne-conf-angenommen",
             "abgelehnt:ohne-codesigning", "signieren-lehnt-ab:ohne-codesigning", "abgelehnt:abgelaufen",
             "signieren-lehnt-ab:abgelaufen", "abgelehnt:bootstrap-anker", "signieren-lehnt-ab:bootstrap-anker",
-            "platzhalter-ist-der-aus-dem-repo", "abgelehnt:platzhalter-schluesselbund",
+            "platzhalter-traegt-den-marker", "abgelehnt:platzhalter-schluesselbund",
             "signieren-lehnt-ab:platzhalter", "abgelehnt:ohne-root-datei", "abgelehnt:abgeschnittene-signatur",
             "abgelehnt:veraenderte-signatur", "rauc-nimmt-blatt-mit-ca-true-an",
             "kette-verify-lehnt-blatt-mit-ca-true-ab", "kette-verify-nimmt-das-echte-blatt-an"}
