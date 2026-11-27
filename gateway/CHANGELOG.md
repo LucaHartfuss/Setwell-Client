@@ -2,6 +2,9 @@
 
 ## 0.9.1
 
+- Erstes Release mit der echten Release-Root im Schluesselbund (statt des Platzhalters): das Geraet nimmt Updates an,
+  die mit einem Release-Zertifikat dieser Root signiert sind.
+
 - Das Gateway kann auf Anforderung des Betreibers sein Geraetezertifikat wechseln (Befehl `zertifikat_erneuern`, wie
   im Geraetekern): neues Paar neben dem alten, erst nach erfolgreicher Anmeldung ersetzt es das alte; sonst gilt das alte
   Paar weiter, auch nach einem Neustart mitten im Wechsel.
