@@ -362,7 +362,7 @@ class HomeAssistantApi:
 
     def fire_event(self, event_type: str, data: dict) -> None:
         """Feuert ein Ereignis auf dem HA-Event-Bus (POST /api/events/<typ>): Status-Kanal zur
-        SmartHeat-Integration. Wirft wie send_notification; abfangen ist Sache des
+        Setwell-HA-Integration. Wirft wie send_notification; abfangen ist Sache des
         Aufrufers."""
         response = requests.post(
             f"{self._base_url}{self._api_prefix}/events/{event_type}",

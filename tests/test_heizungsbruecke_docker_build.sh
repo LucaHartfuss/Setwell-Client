@@ -60,9 +60,9 @@ else
 fi
 
 if docker logs "$CONTAINER_NAME" 2>&1 | grep -q "Add-on ist noch nicht eingerichtet"; then
-  echo "PASS: Hinweis auf die SmartHeat-Integration im Log vorhanden"
+  echo "PASS: Hinweis auf die Setwell-HA-Integration im Log vorhanden"
 else
-  echo "FAIL: erwarteter Hinweis auf die SmartHeat-Integration fehlt im Log"
+  echo "FAIL: erwarteter Hinweis auf die Setwell-HA-Integration fehlt im Log"
   FAIL=1
 fi
 
