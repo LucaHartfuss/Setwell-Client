@@ -1,8 +1,9 @@
 # Security Policy
 
-This repository is part of SmartHeat (future product name: Setwell), a heating control service for Home Assistant and
-for the SmartHeat gateway. It contains the Home Assistant add-on and the gateway software. The project is run by a
-single person; the targets below are best-effort commitments, not a service level.
+This public repository is part of SmartHeat (future product name: Setwell), a heating control service for Home Assistant
+and for the SmartHeat gateway. It contains the Home Assistant add-on and the gateway software; the private
+development repository of the project carries a short policy that points here. The project is run by a single person; the targets below are
+best-effort commitments, not a service level.
 
 ## Supported versions
 
@@ -15,9 +16,9 @@ Please do **not** open a public issue, pull request or discussion for a vulnerab
 
 Report it privately by one of these ways:
 
-1. GitHub: open the **Security** tab of this repository and choose **Report a vulnerability** (private vulnerability
+1. E-mail: `security@setwell.de` (plain text; we do not offer PGP at the moment).
+2. GitHub: open the **Security** tab of this repository and choose **Report a vulnerability** (private vulnerability
    reporting).
-2. E-mail: `security@setwell.de` (plain text; we do not offer PGP at the moment).
 
 Useful content: affected component and version, what an attacker gains, steps to reproduce or a proof of concept, and
 whether you think the issue is already being exploited (if so, say so in the first line). Please do not send
