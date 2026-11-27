@@ -2,6 +2,7 @@
 Neu schreiben nur mit GOLDEN_UPDATE=1 und nur, wenn sich die Aufzeichnung gewollt aendert (neue backup.json-Felder, eine
 andere Reihenfolge in der Telemetrie, die Kennung des Heizkreises u. a.); der Master gilt fuer den Geraete-Pfad (1.0.0)."""
 import os
+import re
 import time
 from datetime import date
 from pathlib import Path
@@ -29,6 +30,12 @@ def test_scenario_matches_the_golden_master_byte_for_byte(tmp_path, monkeypatch)
     actual = tmp_path / "addon_scenario.actual.json"
     actual.write_text(text, encoding="utf-8")
     assert text == GOLDEN.read_text(encoding="utf-8"), f"Abweichung, aktueller Lauf: {actual}"
+
+
+def test_master_contains_no_version_number_so_a_release_keeps_it_valid():
+    text = GOLDEN.read_text(encoding="utf-8")
+    assert '"<version>"' in text
+    assert re.search(r'"(addon_)?version": "\d', text) is None
 
 
 def test_scenario_is_deterministic_and_never_reads_the_real_clock(tmp_path, monkeypatch):
