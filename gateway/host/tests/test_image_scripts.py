@@ -1006,7 +1006,8 @@ def _bad_release_roots(tmp_path: Path) -> dict[str, Path]:
         "verzeichnis": tmp_path,
         "leer": "",
         "nur-leerzeilen": "\n\n",
-        "platzhalter": (GW / "host" / "release-roots.pem"),
+        # Form des frueheren Platzhalters im Repo (vor der echten Root)
+        "platzhalter": "# SMARTHEAT-PLATZHALTER - die echten Root-Zertifikate kommen vor dem ersten Release\n",
         "minisign-schluessel": "untrusted comment: minisign public key\nRWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
         "privater-schluessel": good.replace("CERTIFICATE", "PRIVATE " + "KEY"),  # Armor eines Schluessels statt Zertifikat
         "begin-ohne-end": good.replace("-----END CERTIFICATE-----\n", ""),

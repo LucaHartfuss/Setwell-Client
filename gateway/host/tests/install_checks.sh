@@ -164,14 +164,11 @@ if bash "$SRC/install.sh" --no-docker --no-activate --device-api-url https://api
      --bundle "$BAD_BUNDLE" >/tmp/bad.log 2>&1; then fail "Signatur ohne Zertifikat: Installer lief durch"; fi
 grep -q "kein lesbares Zertifikat" /tmp/bad.log || { cat /tmp/bad.log; fail "Signatur ohne Zertifikat: keine klare Meldung"; }
 [ ! -e /var/lib/smartheat-bad/updater/state.json ] || fail "Signatur ohne Zertifikat: state.json angelegt"
+# Der installierte Schluesselbund ist der des Repos und laedt als echte Root (der Platzhalter: tests/test_kette.py).
+cmp -s "$SRC/release-roots.pem" /opt/smartheat/host/release-roots.pem || fail "release-roots.pem nicht die des Repos"
 PYTHONPATH=/opt/smartheat/host python3 -c "
 from smartheat_host import kette
-try:
-    kette.load_roots(open('/opt/smartheat/host/release-roots.pem').read())
-except kette.SignatureError as error:
-    assert 'Platzhalter' in str(error)
-else:
-    raise SystemExit('Platzhalter nicht erkannt')" || fail "release-roots.pem-Platzhalter"
+assert kette.load_roots(open('/opt/smartheat/host/release-roots.pem').read())" || fail "release-roots.pem laedt nicht"
 # Ohne --pilot-ssh: Drop-in weg, kein Port 22 in der Firewall; danach ist ein weiterer Lauf wieder ein No-op.
 ARGS_NOPILOT=(--no-docker --no-activate --device-api-url https://api.example.test --root /var/lib/smartheat
               --bundle "$SRC/tests/fixtures/bundle")
