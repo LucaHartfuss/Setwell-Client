@@ -73,7 +73,7 @@ def test_kein_job_hat_ein_secret_ausser_github_token():
                 assert name == "gate" and "siblings.sh" in step["run"] and "pip" not in step["run"]
                 assert step["env"] == {
                     "CI_LESE_TOKEN": "${{ secrets.CI_LESE_TOKEN }}",
-                    "KERN_REPO": "LucaHartfuss/HomeAssistant_Dev_Root",
+                    "KERN_REPO": "LucaHartfuss/Setwell-Dev-Root",
                 }
 
 
