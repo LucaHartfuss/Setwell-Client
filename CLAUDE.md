@@ -93,18 +93,9 @@ ist ein Release an alle Kunden-Pis, deren Supervisor den Default-Branch verfolgt
 - **Soll-Entity (HA):** Ablauf in `ha-host.md` („Soll-Entity und Wunschtemperatur“). Änderungen dort immer mit den Tests
   `test_geraet_trigger.py`/`test_host_dokument.py` (Echo/Wunsch-Schleife ist das Hauptrisiko).
 - **Lock-Datei** `heizungsbruecke/requirements.txt`: das Image installiert nur daraus (`--require-hashes`). Erneuern nur
-  bei geänderten `dependencies` in `pyproject.toml` oder bewusstem Bump (dann `--upgrade` vor `--generate-hashes`, Diff
-  lesen), im Ordner `heizungsbruecke/`:
-
-  ```
-  tar cf - pyproject.toml requirements.txt | docker run --rm -i \
-    python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f \
-    sh -c "mkdir /w && cd /w && tar xf - && pip install --quiet pip-tools >/dev/null 2>&1 \
-           && pip-compile --quiet --generate-hashes --strip-extras --output-file requirements.txt pyproject.toml \
-           && tar cf - requirements.txt" | tar xf -
-  ```
-
-  Danach `scripts/check.sh --only docker --full`; den Drift-Check übernimmt `scripts/ci/pin_check.py`.
+  bei geänderten `dependencies` in `pyproject.toml` oder bewusstem Bump; Rezept: `../docs/ci-cd-runbook.md` §12, Zeile
+  „Lock-Dateien des Add-on-Repos“. Danach `scripts/check.sh --only docker --full`; den Drift-Check übernimmt
+  `scripts/ci/pin_check.py`.
 - **Weitere Locks:** `gateway/requirements.txt` (Gateway-Image), `gateway/release/requirements.txt` (Werkzeuge des
   Betreiberrechners und Job `probe`; gleiche Versionen wie die Gateway-Lock-Datei) und die Dev- und Audit-Locks des Roots
   (`../tools/requirements-dev.txt`, `requirements-audit.txt`, Job `lint` und `audit`) – alle mit Hashes, installiert nur mit
