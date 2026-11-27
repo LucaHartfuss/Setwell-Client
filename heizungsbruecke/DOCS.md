@@ -1,7 +1,7 @@
 # Heizungsbruecke
 
 Das Add-on ist ein **SmartHeat-Gerät** für Home Assistant: Es verbindet die Heizung über die
-SmartHeat-Integration mit dem SmartHeat-Dienst. Der Dienst lernt die Heizkurve und schickt die Sollwerte; das Add-on
+Setwell-HA-Integration mit dem SmartHeat-Dienst. Der Dienst lernt die Heizkurve und schickt die Sollwerte; das Add-on
 liest die zugeordneten Entities, schreibt die Sollwerte gegen die lokalen Sicherheitsgrenzen begrenzt zurück und sorgt
 lokal für Boost und Notbetrieb.
 

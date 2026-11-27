@@ -169,12 +169,12 @@ jobs:
       - name: Dev-Root aufbauen
         env:
           CI_LESE_TOKEN: ${{ secrets.CI_LESE_TOKEN }}
-          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
+          KERN_REPO: LucaHartfuss/Setwell-Dev-Root
           SIBLINGS_REF: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
         run: >-
           bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE"
           "$SIBLINGS_REF"
-          SmartHeat-Integration
+          Setwell-HA-Integration
       - run: pip install --require-hashes -r "$DEV_ROOT/tools/requirements-dev.txt"
       # Check 31 (Telemetrie-Round-Trip zum Server) braucht seit der Datenbankschicht eine Test-PostgreSQL
       - name: Test-PostgreSQL
@@ -199,7 +199,7 @@ jobs:
       - name: Dev-Root aufbauen
         env:
           CI_LESE_TOKEN: ${{ secrets.CI_LESE_TOKEN }}
-          KERN_REPO: LucaHartfuss/HomeAssistant_Dev_Root
+          KERN_REPO: LucaHartfuss/Setwell-Dev-Root
         run: >-
           bash scripts/ci/siblings.sh "$RUNNER_TEMP/dev" "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE"
           develop

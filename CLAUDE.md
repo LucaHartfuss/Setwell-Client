@@ -1,4 +1,4 @@
-# SmartHeat-for-HomeAssistant — Repo-Kontext
+# Setwell-Client — Repo-Kontext
 
 Add-on-Repository: `heizungsbruecke` (ein **SmartHeat-Gerät** für Home Assistant, wie das Gateway auf dem Gerätekern:
 Snapshot und Telemetrie, Boost, Notbetrieb, lokale Sicherheitswerte) und `gateway/` (SmartHeat-Gateway ohne Home

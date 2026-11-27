@@ -1,5 +1,5 @@
 """Status-Modell Schema 2; der Host sendet es ueber seinen StatusSink, beim HA-Host als
-Ereignis `smartheat_status` an die SmartHeat-Integration. Gesendet wird der volle Status: nach jedem
+Ereignis `smartheat_status` an die Setwell-HA-Integration. Gesendet wird der volle Status: nach jedem
 Worker-Ereignis, wenn sich der Inhalt geaendert hat, bei jedem (Wieder-)Verbinden des WS-Trigger-Clients und
 als Lebenszeichen alle HEARTBEAT_SECONDS. Die Integration haelt daraus ihre Entities; bleibt das Lebenszeichen
 aus, meldet sie das selbst. Felder und Wertemengen sind Cross-Repo-Vertrag mit const.py der Integration
