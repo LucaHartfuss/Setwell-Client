@@ -5,7 +5,7 @@ from datetime import datetime
 
 from smartheat_core import meldungen, wallclock
 from smartheat_core.meldungen import Meldung
-from smartheat_runtime import entitlement
+from smartheat_runtime import entitlement, testphase
 from smartheat_runtime.notifier import STATE_OK
 from smartheat_runtime.runtime import Runtime
 from smartheat_runtime.soll_eingang import EV_SOLL_ENDE
@@ -24,8 +24,9 @@ def inactive_meldung(inactive_since: datetime) -> Meldung:
 
 
 def enter_inactive(rt: Runtime, now: datetime) -> None:
-    """Notbetrieb an (persistiert), Kanal des Geraetekerns gestoppt, keine Snapshots/Telemetrie mehr. Gemeldet
-    wird nur beim erstmaligen Setzen von inactive_since, nicht bei jedem Neustart.
+    """Notbetrieb an (persistiert), keine Snapshots mehr. Kanal des Geraetekerns gestoppt, ausser in der Testphase ohne
+    Setwell: dort bleibt er offen und sendet weiter Raumwerte (app._on_telemetry), Zustellung und Schreibweg ruhen.
+    Gemeldet wird nur beim erstmaligen Setzen von inactive_since, nicht bei jedem Neustart.
     `mqtt_client.stop()` schaltet den Kanal der Laufzeit ab (smartheat_device.laufzeit.RuntimeChannel nimmt keine
     Ereignisse mehr an); den Link betreibt weiter das Geraet."""
     state = rt.store.state
@@ -50,7 +51,7 @@ def enter_inactive(rt: Runtime, now: datetime) -> None:
         since, newly_set = now, True
     rt.store.update(abo_inactive_since=since)
     rt.store.set_delivery(replace(state.delivery, pending=None, notbetrieb=True))
-    if rt.mqtt_client is not None:
+    if rt.mqtt_client is not None and not testphase.aktiv(rt):  # die Testphase sendet weiter Raumwerte (app._on_telemetry)
         try:
             rt.mqtt_client.stop()
         except Exception:
