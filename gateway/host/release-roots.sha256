@@ -4,4 +4,4 @@
 # Kommentare. Eine echte Release-Bauung nimmt nur Roots aus dieser Liste (gateway/release/roots_pruefen.py).
 # Aenderung nur zusammen mit release-roots.pem, wenn die echte Root angelegt wird oder die Root wechselt
 # (docs/ci-cd-runbook.md, Abschnitte 13.2 und 13.6). Das Geraet bekommt diese Datei nicht.
-# SMARTHEAT-PLATZHALTER - die Fingerabdruecke der echten Roots kommen vor dem ersten Release
+c2c3a6bcaf57bf531b766c55476adc9fc7ef8fb24250e5d6d33d560c43ec3937  Setwell Gateway Release Root 2026-11-27

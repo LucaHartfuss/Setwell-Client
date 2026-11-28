@@ -385,9 +385,12 @@ def render(record: list[dict]) -> str:
 
 
 _VERSION_RE = re.compile(r'"addon_version": "[^"]+"')
+# Der Softwarestand im Laufzeitordner traegt dieselbe Nummer (zwischen Schluessel und Wert liegt ein Zeilenumbruch).
+_STAND_RE = re.compile(r'(/software_stand\.json": \{\s*"version": )"[^"]+"')
 
 
 def render_ohne_version(record: list[dict]) -> str:
     """Die Versionsnummer ist kein Verhalten; ohne sie muss der Master nicht bei jedem Release neu geschrieben
     werden."""
-    return _VERSION_RE.sub('"addon_version": "<version>"', render(record))
+    text = _VERSION_RE.sub('"addon_version": "<version>"', render(record))
+    return _STAND_RE.sub(r'\1"<version>"', text)

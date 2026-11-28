@@ -143,6 +143,14 @@ mkdir -p "$DATA/data" "$DATA/zigbee2mqtt" "$DATA/host" "$DATA/bus/mosquitto" "$D
          "$DATA/bus/credentials/runtime" "$DATA/bus/credentials/zigbee2mqtt" "$DATA/bundles" "$DATA/updater"
 printf 'SHG_ROOT=%s\nSHG_DEVICE_API_URL=http://%s:8090\nSHG_DIAG_HOSTNAMES=runtime\nTZ=Europe/Berlin\nSHG_FAKE_PKI=%s\n' \
   "$DATA" "$BOOT" "$PKI" >"$DATA/host/gateway.env"
+# Kopie von werk.json wie vom Bespieler (Form wie gateway/tests/geraet_fakes.py); ohne sie baut das Gateway kein hello
+# und meldet kein Update-Ergebnis.
+py 'import base64, json, sys
+null = lambda n: base64.b64encode(bytes(n)).decode()
+passwort = {"verfahren": "scrypt", "n": 131072, "r": 8, "p": 1, "salz": null(16), "hash": null(32)}
+json.dump({"format": "smartheat-werk-1", "seriennummer": "SHG-0001", "hostname": "smartheat-0001", "passwort": passwort,
+           "bespielt": "2026-10-27", "hardware": "Raspberry Pi 5"}, open(sys.argv[1], "w"))' "$DATA/host/werk.json" \
+  || die "werk.json"
 # Die Test-PKI bleibt 0700/0600 (gateway_lib.sh): ihre Leser laufen als PKI_USER.
 find "$DATA" -path "$PKI" -prune -o -path "$DATA/archives" -prune -o -exec chmod 777 {} +
 
