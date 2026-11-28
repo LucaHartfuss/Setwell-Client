@@ -127,9 +127,15 @@ hello="$(cat "$DATA/hello")"
 printf '%s' "$hello" | grep -q '"host": *"gateway"' || fail "hello ohne host gateway"
 python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("konfiguration_version") == 0 else 1)' "$hello" \
   2>/dev/null || fail "hello: Konfigurationsversion nicht 0 ($hello)"
-# Fremder Host-Name (DNS-Rebinding): 403, die Seite antwortet nur unter IP, localhost und SHG_DIAG_HOSTNAMES.
-[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" -H 'Host: rebind.example.test' http://127.0.0.1:8080/)" = "403" ] \
-  || fail "Diagnoseseite antwortet unter fremdem Host-Namen"
+# Fremder Host-Name (DNS-Rebinding): 403, die Seite antwortet nur unter IP, localhost und SHG_DIAG_HOSTNAMES. Die neu
+# gestartete Laufzeit sendet hello, bevor ihr Diagnoseserver lauscht: erst auf eine Antwort warten (000 = noch nicht da).
+code=000
+for _ in $(seq 30); do
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" -H 'Host: rebind.example.test' http://127.0.0.1:8080/)"
+  [ "$code" = 000 ] || break
+  sleep 1
+done
+[ "$code" = "403" ] || fail "Diagnoseseite antwortet unter fremdem Host-Namen (HTTP $code)"
 run_in_image --user "$GATEWAY_UID" -v "$DATA/zigbee2mqtt:/app/data" "$IMAGE" \
   sh -c 'test -r /app/data/configuration.yaml && test -w /app/data/configuration.yaml && test -w /app/data' \
   || fail "Zigbee2MQTT (uid $GATEWAY_UID) kann configuration.yaml des Init-Schritts nicht lesen/ersetzen"
